@@ -1,0 +1,12 @@
+[package]
+name = "tari-cc-private-ballot-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
+[lints]
+workspace = true
