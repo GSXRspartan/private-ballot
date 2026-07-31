@@ -114,3 +114,7 @@ pub mod test_only {
         }
     }
 }
+
+pub mod test_only_verifier;
+mod verification;
+pub use verification::{ProofVerifierV1, VerifiedNullifier, VerifiedProofV1};

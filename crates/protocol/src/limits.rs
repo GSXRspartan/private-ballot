@@ -37,3 +37,11 @@ pub const MAX_BALLOT_KIND_ID_BYTES: usize = 64;
 
 /// Maximum UTF-8 byte length of a ballot-confidentiality identifier.
 pub const MAX_BALLOT_CONFIDENTIALITY_ID_BYTES: usize = 64;
+
+/// Maximum encoded proof size accepted by the verifier boundary.
+pub const MAX_PROOF_BYTES: usize = 65_536;
+
+/// Maximum authenticated nullifier or key-image size.
+///
+/// A selected production proof suite may impose a smaller exact size.
+pub const MAX_NULLIFIER_BYTES: usize = 128;

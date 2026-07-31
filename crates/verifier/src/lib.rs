@@ -226,3 +226,6 @@ mod tests {
 
 mod proof_statement;
 pub use proof_statement::reconstruct_approval_proof_statement;
+
+mod proof_verification;
+pub use proof_verification::verify_approval_proof;
