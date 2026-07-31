@@ -1,48 +1,86 @@
 # Phase Status
 
-## Overall
+- Last updated: 2026-07-31
+- Current branch: `phase1/spec-finalization`
+- Current project state: Phase 1 specification foundation reviewed
+- Next authorized work: Phase 2 test-only protocol and archive plumbing
 
-Current phase: Phase 1<br>
-Current objective: Finalize a review-ready Phase 1 protocol package aligned
-with the Tari forum discussion and RFC PR #185.
+## Phase 1 assessment
 
-Phase 1 is not complete.
+Phase 1 has established a coherent specification foundation for beginning
+non-production implementation work.
 
-## Phase 1 checklist
+Phase 1 is not complete for production cryptography, binding governance,
+or a real Core Contributor or Council election.
 
-### A. Decisions locked for the MVP
+## Completed Phase 1 foundation
 
-- [x] Offline archive is authoritative during testnet development
-- [x] Ootle is an append-only commitment and lifecycle anchor
-- [x] Governance keys are separate from wallet keys
-- [x] Testnet reset recovery uses transparent re-anchoring
-- [x] First real-world pilot is harmless and non-binding
-- [x] MVP pilot ballot type is a non-binding approval poll
-- [x] MVP duplicate policy is "first valid ballot counts"
-- [x] Candidate choices use stable machine identifiers rather than display names
-- [x] Duplicate or unknown candidate identifiers are rejected
-- [x] An unresolved tie is reported as a tie rather than resolved alphabetically
-- [x] Each election manifest records the governance source revision used
-- [x] Production cryptography is not copied directly from the Python proof of concept
+- Initial repository and specification baseline committed at `dbeeabd`.
+- Tari governance source snapshot pinned at `05eb7a9`.
+- MVP ballot validation and tally policy recorded at `5e6943c`.
+- Anonymous-membership research direction recorded at `ab5daf3`.
+- Canonical data-format and test-vector plan recorded at `3f2b7d3`.
+- Phase 1 consistency review recorded at `bb6d324`.
+- Pilot-scope clarification and review correction recorded at `928e08d`.
 
-### B. Unresolved governance or review questions
+## Decisions currently established
 
-- [ ] Exact anonymous-membership construction
-- [ ] Exact sealed-ballot construction
-- [ ] Registry-authorizing body and required signatures
-- [ ] Governance-key compromise procedure
-- [ ] Anonymous negative-feedback handling
-- [ ] Exact binding-election tie rules
-- [ ] Exact single-seat IRV rules
-- [ ] Multi-seat Council election method
-- [ ] Ootle anchor authorization model
-- [ ] Binding-election dispute period
-- [ ] Independent reviewer or second implementation requirements
+- The offline election archive is independently authoritative and verifiable.
+- Ootle is an append-only lifecycle and commitment anchor, not the sole archive.
+- Election authority uses dedicated governance keys, never wallet keys.
+- The first pilot is a harmless non-binding approval poll.
+- Stable machine candidate identifiers are separate from display names.
+- The first valid ballot for an election-scoped nullifier counts.
+- Unknown, duplicate, malformed, and noncanonical ballots are rejected.
+- Unresolved ties are reported as ties.
+- Protocol objects use deterministic CBOR and published byte vectors.
+- Test-only proof plumbing must be visibly non-production.
 
-### C. Work that must not start yet
+## Phase 2 work now authorized
 
-- production cryptographic code
-- voter GUI
-- walletd integration
-- Ootle template
-- binding election
+Phase 2 may implement:
+
+- the Rust workspace and crate boundaries;
+- versioned protocol data types;
+- deterministic CBOR encoding and canonicality checks;
+- stable validation and rejection codes;
+- registry, candidate, ballot, receipt, tally, result, and archive models;
+- deterministic hashes and domain-separation labels;
+- valid and invalid test-vector scaffolding;
+- a release-disabled test-only proof provider;
+- offline verification and archive plumbing.
+
+Phase 2 must remain independent of walletd, an indexer, and Ootle.
+
+## Still blocked
+
+The following remain unresolved and must not be represented as complete:
+
+1. Exact production anonymous-membership construction and suite version.
+2. Security rationale for election-scoped linkability or nullifiers.
+3. Registry enrollment, replacement, and compromised-key procedures.
+4. Binding-election sealed-ballot design.
+5. Exact single-seat ranked-choice rules.
+6. Exact multi-seat Council election method.
+7. Binding-election tie resolution.
+8. Election administration authorization and dispute procedures.
+9. Independent cryptographic and implementation review.
+10. Independently implemented verifier or equivalent cross-check.
+
+## Explicit prohibitions
+
+Until later phases expressly authorize them:
+
+- do not conduct a binding election;
+- do not describe the system as production secure;
+- do not use the Python LSAG proof of concept as production code;
+- do not enable the test-only proof provider in release builds;
+- do not integrate walletd, an indexer, or Ootle;
+- do not publish or rely on real voter private keys;
+- do not treat the current RFC pull request as merged governance policy.
+
+## Next milestone
+
+Create the Phase 2 Rust workspace baseline with protocol types, canonical
+serialization boundaries, deterministic validation errors, and a clearly
+marked test-only proof interface.
