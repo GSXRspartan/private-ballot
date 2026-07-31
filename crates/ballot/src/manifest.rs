@@ -53,6 +53,17 @@ impl BallotKindV1 {
             Self::NonBindingApprovalPilot => "NON_BINDING_APPROVAL_PILOT",
         }
     }
+
+    /// Parses one supported stable ballot-kind identifier.
+    pub fn from_identifier(value: &str) -> Result<Self, ProtocolError> {
+        match value {
+            "NON_BINDING_APPROVAL_PILOT" => Ok(Self::NonBindingApprovalPilot),
+            _ => Err(ProtocolError::new(
+                ValidationCode::InvalidData,
+                "unsupported ballot-kind identifier",
+            )),
+        }
+    }
 }
 
 /// Ballot confidentiality mode supported by the first manifest version.
@@ -68,6 +79,17 @@ impl BallotConfidentialityV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Public => "PUBLIC",
+        }
+    }
+
+    /// Parses one supported stable confidentiality identifier.
+    pub fn from_identifier(value: &str) -> Result<Self, ProtocolError> {
+        match value {
+            "PUBLIC" => Ok(Self::Public),
+            _ => Err(ProtocolError::new(
+                ValidationCode::InvalidData,
+                "unsupported ballot confidentiality identifier",
+            )),
         }
     }
 }
