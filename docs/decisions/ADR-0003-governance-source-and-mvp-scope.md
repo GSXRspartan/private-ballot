@@ -53,3 +53,17 @@ Accepted for the Phase 1 draft.
 
 - https://community.tari.com/t/the-core-contributor-program/204/47
 - https://github.com/tari-project/rfcs/pull/185
+
+## MVP pilot scope clarification
+
+The first implemented pilot is a harmless non-binding approval poll
+using a volunteer or synthetic electorate.
+
+The pilot exists to test protocol, archive, verification, tally, receipt,
+and anchoring behavior. It does not decide Core Contributor admission,
+removal, Council membership, protocol amendments, treasury actions, or
+another binding governance matter.
+
+A binding election remains prohibited until its exact governance rules,
+production cryptographic suite, ballot-secrecy design, operational
+procedures, and independent review requirements are satisfied.

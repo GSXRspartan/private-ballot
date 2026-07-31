@@ -23,7 +23,7 @@ approval, or authorization for a binding election.
 |---|---|---|---|
 | C01 | PASS | docs\decisions\ADR-0001-offline-authority-ootle-anchor.md | Offline archive authority is recorded. |
 | C02 | PASS | docs\decisions\ADR-0002-governance-keys.md | Dedicated governance keys are recorded. |
-| C03 | FAIL | docs\decisions\ADR-0003-governance-source-and-mvp-scope.md | The first pilot is harmless and non-binding. |
+| C03 | PASS | docs\decisions\ADR-0003-governance-source-and-mvp-scope.md | The first pilot is harmless and non-binding. |
 | C04 | PASS | docs\sources\GOVERNANCE_SOURCE_SNAPSHOT.md | The observed RFC PR revision is pinned. |
 | C05 | PASS | docs\decisions\ADR-0004-ballot-and-tally-policy.md | The MVP pilot schema has a stable identifier. |
 | C06 | PASS | docs\decisions\ADR-0004-ballot-and-tally-policy.md | Duplicate-ballot handling is deterministic. |
@@ -36,6 +36,18 @@ approval, or authorization for a binding election.
 | C13 | PASS | docs\DATA_FORMAT_TEST_VECTOR_PLAN.md | The test-only proof suite is visibly non-production. |
 | C14 | PASS | docs\PHASE1_PROTOCOL_SPEC_v0.1.md | The election lifecycle includes a frozen state. |
 | C15 | PASS | docs\PHASE1_PROTOCOL_SPEC_v0.1.md | Binding-election ballot secrecy remains separately gated. |
+
+## Review correction
+
+- Correction date: 2026-07-31
+- Original review commit: `bb6d324`
+- The original C03 result correctly identified that ADR-0003 did not
+  explicitly state that the first pilot was non-binding.
+- ADR-0003 was amended in this corrective change to define the first pilot
+  as a harmless non-binding approval poll.
+- C03 was rerun against the amended ADR and passed.
+- No production cryptographic construction or binding-election design was
+  approved by this correction.
 
 ## Aligned decisions
 
