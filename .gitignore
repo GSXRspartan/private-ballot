@@ -1,0 +1,12 @@
+/target/
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+*.tmp
+*.key
+*.secret
+/private-test-data/
