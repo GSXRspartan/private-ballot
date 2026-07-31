@@ -4,6 +4,10 @@
 
 use core::fmt;
 
+mod commitment;
+
+pub use commitment::{CandidateSetCommitment, ManifestHash, RegistryCommitment};
+
 /// First protocol version implemented by the workspace.
 pub const PROTOCOL_VERSION_V1: u16 = 1;
 
@@ -20,6 +24,9 @@ pub enum ValidationCode {
     EmptyNullifier,
     DuplicateNullifier,
     InvalidData,
+    EmptyElectionId,
+    EmptyProofSuiteId,
+    EmptyGovernanceSourceRevision,
     EmptyRegistry,
     EmptyGovernanceKey,
     DuplicateGovernanceKey,
@@ -45,6 +52,9 @@ impl ValidationCode {
             Self::EmptyNullifier => "EMPTY_NULLIFIER",
             Self::DuplicateNullifier => "DUPLICATE_NULLIFIER",
             Self::InvalidData => "INVALID_DATA",
+            Self::EmptyElectionId => "EMPTY_ELECTION_ID",
+            Self::EmptyProofSuiteId => "EMPTY_PROOF_SUITE_ID",
+            Self::EmptyGovernanceSourceRevision => "EMPTY_GOVERNANCE_SOURCE_REVISION",
             Self::EmptyRegistry => "EMPTY_REGISTRY",
             Self::EmptyGovernanceKey => "EMPTY_GOVERNANCE_KEY",
             Self::DuplicateGovernanceKey => "DUPLICATE_GOVERNANCE_KEY",
@@ -105,6 +115,12 @@ mod tests {
             (ValidationCode::MalformedProof, "MALFORMED_PROOF"),
             (ValidationCode::EmptyNullifier, "EMPTY_NULLIFIER"),
             (ValidationCode::DuplicateNullifier, "DUPLICATE_NULLIFIER"),
+            (ValidationCode::EmptyElectionId, "EMPTY_ELECTION_ID"),
+            (ValidationCode::EmptyProofSuiteId, "EMPTY_PROOF_SUITE_ID"),
+            (
+                ValidationCode::EmptyGovernanceSourceRevision,
+                "EMPTY_GOVERNANCE_SOURCE_REVISION",
+            ),
             (ValidationCode::EmptyRegistry, "EMPTY_REGISTRY"),
             (
                 ValidationCode::DuplicateGovernanceKey,

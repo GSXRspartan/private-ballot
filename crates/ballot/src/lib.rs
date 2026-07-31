@@ -2,6 +2,12 @@
 
 //! Candidate and non-binding approval-ballot models.
 
+mod manifest;
+mod package;
+
+pub use manifest::{BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input};
+pub use package::{BallotPackageV1, BallotPackageV1Input};
+
 use tari_cc_private_ballot_protocol::{ProtocolError, ValidationCode};
 
 /// Stable machine candidate identifier.
