@@ -4,8 +4,10 @@
 
 use core::fmt;
 
+mod cbor;
 mod commitment;
 mod hashing;
+pub use cbor::{CanonicalCborReader, CanonicalCborWriter};
 pub use commitment::{CandidateSetCommitment, ManifestHash, RegistryCommitment};
 #[cfg(any(test, debug_assertions))]
 pub use hashing::test_only;
@@ -29,6 +31,10 @@ pub enum ValidationCode {
     EmptyNullifier,
     DuplicateNullifier,
     InvalidData,
+    InvalidCbor,
+    NonCanonicalCbor,
+    UnexpectedCborType,
+    TrailingCborData,
     EmptyElectionId,
     EmptyProofSuiteId,
     EmptyGovernanceSourceRevision,
@@ -57,6 +63,10 @@ impl ValidationCode {
             Self::EmptyNullifier => "EMPTY_NULLIFIER",
             Self::DuplicateNullifier => "DUPLICATE_NULLIFIER",
             Self::InvalidData => "INVALID_DATA",
+            Self::InvalidCbor => "INVALID_CBOR",
+            Self::NonCanonicalCbor => "NON_CANONICAL_CBOR",
+            Self::UnexpectedCborType => "UNEXPECTED_CBOR_TYPE",
+            Self::TrailingCborData => "TRAILING_CBOR_DATA",
             Self::EmptyElectionId => "EMPTY_ELECTION_ID",
             Self::EmptyProofSuiteId => "EMPTY_PROOF_SUITE_ID",
             Self::EmptyGovernanceSourceRevision => "EMPTY_GOVERNANCE_SOURCE_REVISION",
@@ -120,6 +130,10 @@ mod tests {
             (ValidationCode::MalformedProof, "MALFORMED_PROOF"),
             (ValidationCode::EmptyNullifier, "EMPTY_NULLIFIER"),
             (ValidationCode::DuplicateNullifier, "DUPLICATE_NULLIFIER"),
+            (ValidationCode::InvalidCbor, "INVALID_CBOR"),
+            (ValidationCode::NonCanonicalCbor, "NON_CANONICAL_CBOR"),
+            (ValidationCode::UnexpectedCborType, "UNEXPECTED_CBOR_TYPE"),
+            (ValidationCode::TrailingCborData, "TRAILING_CBOR_DATA"),
             (ValidationCode::EmptyElectionId, "EMPTY_ELECTION_ID"),
             (ValidationCode::EmptyProofSuiteId, "EMPTY_PROOF_SUITE_ID"),
             (
