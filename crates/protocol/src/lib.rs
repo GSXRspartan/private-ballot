@@ -7,6 +7,7 @@ use core::fmt;
 mod cbor;
 mod commitment;
 mod hashing;
+mod limits;
 pub use cbor::{CanonicalCborReader, CanonicalCborWriter};
 pub use commitment::{CandidateSetCommitment, ManifestHash, RegistryCommitment};
 #[cfg(any(test, debug_assertions))]
@@ -14,6 +15,7 @@ pub use hashing::test_only;
 pub use hashing::{
     HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
 };
+pub use limits::{MAX_CANONICAL_OBJECT_BYTES, MAX_GOVERNANCE_KEY_BYTES, MAX_REGISTRY_MEMBERS};
 
 /// First protocol version implemented by the workspace.
 pub const PROTOCOL_VERSION_V1: u16 = 1;
@@ -31,6 +33,7 @@ pub enum ValidationCode {
     EmptyNullifier,
     DuplicateNullifier,
     InvalidData,
+    ProtocolLimitExceeded,
     InvalidCbor,
     NonCanonicalCbor,
     UnexpectedCborType,
@@ -63,6 +66,7 @@ impl ValidationCode {
             Self::EmptyNullifier => "EMPTY_NULLIFIER",
             Self::DuplicateNullifier => "DUPLICATE_NULLIFIER",
             Self::InvalidData => "INVALID_DATA",
+            Self::ProtocolLimitExceeded => "PROTOCOL_LIMIT_EXCEEDED",
             Self::InvalidCbor => "INVALID_CBOR",
             Self::NonCanonicalCbor => "NON_CANONICAL_CBOR",
             Self::UnexpectedCborType => "UNEXPECTED_CBOR_TYPE",
@@ -130,6 +134,10 @@ mod tests {
             (ValidationCode::MalformedProof, "MALFORMED_PROOF"),
             (ValidationCode::EmptyNullifier, "EMPTY_NULLIFIER"),
             (ValidationCode::DuplicateNullifier, "DUPLICATE_NULLIFIER"),
+            (
+                ValidationCode::ProtocolLimitExceeded,
+                "PROTOCOL_LIMIT_EXCEEDED",
+            ),
             (ValidationCode::InvalidCbor, "INVALID_CBOR"),
             (ValidationCode::NonCanonicalCbor, "NON_CANONICAL_CBOR"),
             (ValidationCode::UnexpectedCborType, "UNEXPECTED_CBOR_TYPE"),

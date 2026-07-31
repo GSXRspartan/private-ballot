@@ -2,19 +2,30 @@
 
 //! Frozen electorate registry models.
 
-use tari_cc_private_ballot_protocol::{ProtocolError, ValidationCode};
+use tari_cc_private_ballot_protocol::{
+    MAX_GOVERNANCE_KEY_BYTES, MAX_REGISTRY_MEMBERS, ProtocolError, ValidationCode,
+};
+
+mod canonical;
 
 /// Canonical encoding of one dedicated governance public key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GovernancePublicKey(Vec<u8>);
 
 impl GovernancePublicKey {
-    /// Creates a governance public key from a non-empty canonical encoding.
+    /// Creates a governance public key from a bounded non-empty encoding.
     pub fn new(bytes: Vec<u8>) -> Result<Self, ProtocolError> {
         if bytes.is_empty() {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyGovernanceKey,
                 "governance public key must not be empty",
+            ));
+        }
+
+        if bytes.len() > MAX_GOVERNANCE_KEY_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "governance public key exceeds the protocol size limit",
             ));
         }
 
@@ -55,12 +66,19 @@ pub struct RegistrySnapshot {
 }
 
 impl RegistrySnapshot {
-    /// Sorts entries and rejects an empty registry or duplicate keys.
+    /// Sorts entries and rejects empty, oversized, or duplicate registries.
     pub fn new(mut entries: Vec<RegistryEntry>) -> Result<Self, ProtocolError> {
         if entries.is_empty() {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyRegistry,
                 "registry must contain at least one governance key",
+            ));
+        }
+
+        if entries.len() > MAX_REGISTRY_MEMBERS {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "registry member count exceeds the protocol limit",
             ));
         }
 
@@ -98,7 +116,9 @@ impl RegistrySnapshot {
 #[cfg(test)]
 mod tests {
     use super::{GovernancePublicKey, RegistryEntry, RegistrySnapshot};
-    use tari_cc_private_ballot_protocol::ValidationCode;
+    use tari_cc_private_ballot_protocol::{
+        MAX_GOVERNANCE_KEY_BYTES, MAX_REGISTRY_MEMBERS, ValidationCode,
+    };
 
     fn entry(bytes: &[u8]) -> RegistryEntry {
         let Ok(key) = GovernancePublicKey::new(bytes.to_vec()) else {
@@ -154,6 +174,38 @@ mod tests {
             error,
             Err(error)
                 if error.code() == ValidationCode::EmptyGovernanceKey
+        ));
+    }
+
+    #[test]
+    fn oversized_governance_key_is_rejected() {
+        let error = GovernancePublicKey::new(vec![7_u8; MAX_GOVERNANCE_KEY_BYTES + 1]);
+
+        assert!(matches!(
+            error,
+            Err(error)
+                if error.code() == ValidationCode::ProtocolLimitExceeded
+        ));
+    }
+
+    #[test]
+    fn oversized_registry_is_rejected() {
+        let mut entries = Vec::with_capacity(MAX_REGISTRY_MEMBERS + 1);
+
+        for index in 0..=MAX_REGISTRY_MEMBERS {
+            let Ok(value) = u32::try_from(index) else {
+                panic!("test registry index must fit in u32");
+            };
+
+            entries.push(entry(&value.to_be_bytes()));
+        }
+
+        let error = RegistrySnapshot::new(entries);
+
+        assert!(matches!(
+            error,
+            Err(error)
+                if error.code() == ValidationCode::ProtocolLimitExceeded
         ));
     }
 }
