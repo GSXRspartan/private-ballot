@@ -5,5 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[dependencies]
+tari-cc-private-ballot-ballot = { path = "../ballot" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
 [lints]
 workspace = true

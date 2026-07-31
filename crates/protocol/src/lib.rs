@@ -17,6 +17,7 @@ pub enum ValidationCode {
     WrongManifestHash,
     UnsupportedProofSuite,
     MalformedProof,
+    EmptyNullifier,
     DuplicateNullifier,
     InvalidData,
     EmptyRegistry,
@@ -41,6 +42,7 @@ impl ValidationCode {
             Self::WrongManifestHash => "WRONG_MANIFEST_HASH",
             Self::UnsupportedProofSuite => "UNSUPPORTED_PROOF_SUITE",
             Self::MalformedProof => "MALFORMED_PROOF",
+            Self::EmptyNullifier => "EMPTY_NULLIFIER",
             Self::DuplicateNullifier => "DUPLICATE_NULLIFIER",
             Self::InvalidData => "INVALID_DATA",
             Self::EmptyRegistry => "EMPTY_REGISTRY",
@@ -101,6 +103,8 @@ mod tests {
     fn validation_codes_are_stable() {
         let cases = [
             (ValidationCode::MalformedProof, "MALFORMED_PROOF"),
+            (ValidationCode::EmptyNullifier, "EMPTY_NULLIFIER"),
+            (ValidationCode::DuplicateNullifier, "DUPLICATE_NULLIFIER"),
             (ValidationCode::EmptyRegistry, "EMPTY_REGISTRY"),
             (
                 ValidationCode::DuplicateGovernanceKey,
