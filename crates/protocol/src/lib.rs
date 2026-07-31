@@ -5,8 +5,13 @@
 use core::fmt;
 
 mod commitment;
-
+mod hashing;
 pub use commitment::{CandidateSetCommitment, ManifestHash, RegistryCommitment};
+#[cfg(any(test, debug_assertions))]
+pub use hashing::test_only;
+pub use hashing::{
+    HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
+};
 
 /// First protocol version implemented by the workspace.
 pub const PROTOCOL_VERSION_V1: u16 = 1;
