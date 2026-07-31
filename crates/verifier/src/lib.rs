@@ -223,3 +223,6 @@ mod tests {
         assert!(ledger.is_empty());
     }
 }
+
+mod proof_statement;
+pub use proof_statement::reconstruct_approval_proof_statement;

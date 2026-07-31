@@ -28,3 +28,12 @@ pub const MAX_PROOF_SUITE_ID_BYTES: usize = 128;
 
 /// Maximum UTF-8 byte length of a governance source revision.
 pub const MAX_GOVERNANCE_REVISION_BYTES: usize = 256;
+
+/// Maximum canonical size of a version-one proof statement.
+pub const MAX_PROOF_STATEMENT_BYTES: usize = 4_096;
+
+/// Maximum UTF-8 byte length of a ballot-kind identifier.
+pub const MAX_BALLOT_KIND_ID_BYTES: usize = 64;
+
+/// Maximum UTF-8 byte length of a ballot-confidentiality identifier.
+pub const MAX_BALLOT_CONFIDENTIALITY_ID_BYTES: usize = 64;

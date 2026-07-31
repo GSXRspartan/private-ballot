@@ -19,9 +19,11 @@ pub use hashing::{
     HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
 };
 pub use limits::{
+    MAX_BALLOT_CONFIDENTIALITY_ID_BYTES, MAX_BALLOT_KIND_ID_BYTES,
     MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
     MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
-    MAX_GOVERNANCE_REVISION_BYTES, MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
+    MAX_GOVERNANCE_REVISION_BYTES, MAX_PROOF_STATEMENT_BYTES, MAX_PROOF_SUITE_ID_BYTES,
+    MAX_REGISTRY_MEMBERS,
 };
 pub use scope::derive_election_scope;
 
@@ -181,3 +183,6 @@ mod tests {
         assert_eq!(error.message(), "test message");
     }
 }
+
+mod proof_statement;
+pub use proof_statement::{PROOF_STATEMENT_VERSION_V1, ProofStatementV1, ProofStatementV1Input};
