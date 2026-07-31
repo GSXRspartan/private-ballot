@@ -8,8 +8,11 @@ mod cbor;
 mod commitment;
 mod hashing;
 mod limits;
+mod scope;
 pub use cbor::{CanonicalCborReader, CanonicalCborWriter};
-pub use commitment::{BallotPayloadHash, CandidateSetCommitment, ManifestHash, RegistryCommitment};
+pub use commitment::{
+    BallotPayloadHash, CandidateSetCommitment, ElectionScope, ManifestHash, RegistryCommitment,
+};
 #[cfg(any(test, debug_assertions))]
 pub use hashing::test_only;
 pub use hashing::{
@@ -20,6 +23,7 @@ pub use limits::{
     MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
     MAX_GOVERNANCE_REVISION_BYTES, MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
 };
+pub use scope::derive_election_scope;
 
 /// First protocol version implemented by the workspace.
 pub const PROTOCOL_VERSION_V1: u16 = 1;

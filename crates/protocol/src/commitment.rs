@@ -34,6 +34,11 @@ fixed_commitment_type!(
 );
 
 fixed_commitment_type!(
+    ElectionScope,
+    "Election-specific scope used for anonymous duplicate detection."
+);
+
+fixed_commitment_type!(
     RegistryCommitment,
     "Fixed-size commitment to one frozen electorate registry."
 );
@@ -50,7 +55,9 @@ fixed_commitment_type!(
 
 #[cfg(test)]
 mod tests {
-    use super::{BallotPayloadHash, CandidateSetCommitment, ManifestHash, RegistryCommitment};
+    use super::{
+        BallotPayloadHash, CandidateSetCommitment, ElectionScope, ManifestHash, RegistryCommitment,
+    };
 
     #[test]
     fn commitment_bytes_round_trip() {
@@ -62,10 +69,12 @@ mod tests {
 
     #[test]
     fn commitment_wrappers_preserve_exact_bytes() {
+        let scope = ElectionScope::new([5_u8; 32]);
         let registry = RegistryCommitment::new([3_u8; 32]);
         let candidates = CandidateSetCommitment::new([9_u8; 32]);
         let payload = BallotPayloadHash::new([11_u8; 32]);
 
+        assert_eq!(scope.into_bytes(), [5_u8; 32]);
         assert_eq!(registry.into_bytes(), [3_u8; 32]);
         assert_eq!(candidates.into_bytes(), [9_u8; 32]);
         assert_eq!(payload.into_bytes(), [11_u8; 32]);

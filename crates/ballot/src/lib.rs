@@ -5,6 +5,7 @@
 mod canonical;
 mod manifest;
 mod manifest_canonical;
+mod manifest_scope;
 mod package;
 
 pub use manifest::{
