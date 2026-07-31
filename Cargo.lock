@@ -9,6 +9,9 @@ version = "0.1.0"
 [[package]]
 name = "tari-cc-private-ballot-ballot"
 version = "0.1.0"
+dependencies = [
+ "tari-cc-private-ballot-protocol",
+]
 
 [[package]]
 name = "tari-cc-private-ballot-cli"
@@ -31,6 +34,9 @@ version = "0.1.0"
 [[package]]
 name = "tari-cc-private-ballot-registry"
 version = "0.1.0"
+dependencies = [
+ "tari-cc-private-ballot-protocol",
+]
 
 [[package]]
 name = "tari-cc-private-ballot-tally"

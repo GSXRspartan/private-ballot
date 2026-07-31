@@ -19,6 +19,17 @@ pub enum ValidationCode {
     MalformedProof,
     DuplicateNullifier,
     InvalidData,
+    EmptyRegistry,
+    EmptyGovernanceKey,
+    DuplicateGovernanceKey,
+    EmptyCandidateSet,
+    EmptyCandidateId,
+    EmptyCandidateDisplayName,
+    DuplicateCandidateId,
+    InvalidSelectionLimits,
+    SelectionCountOutOfRange,
+    DuplicateSelection,
+    UnknownCandidateId,
 }
 
 impl ValidationCode {
@@ -32,6 +43,17 @@ impl ValidationCode {
             Self::MalformedProof => "MALFORMED_PROOF",
             Self::DuplicateNullifier => "DUPLICATE_NULLIFIER",
             Self::InvalidData => "INVALID_DATA",
+            Self::EmptyRegistry => "EMPTY_REGISTRY",
+            Self::EmptyGovernanceKey => "EMPTY_GOVERNANCE_KEY",
+            Self::DuplicateGovernanceKey => "DUPLICATE_GOVERNANCE_KEY",
+            Self::EmptyCandidateSet => "EMPTY_CANDIDATE_SET",
+            Self::EmptyCandidateId => "EMPTY_CANDIDATE_ID",
+            Self::EmptyCandidateDisplayName => "EMPTY_CANDIDATE_DISPLAY_NAME",
+            Self::DuplicateCandidateId => "DUPLICATE_CANDIDATE_ID",
+            Self::InvalidSelectionLimits => "INVALID_SELECTION_LIMITS",
+            Self::SelectionCountOutOfRange => "SELECTION_COUNT_OUT_OF_RANGE",
+            Self::DuplicateSelection => "DUPLICATE_SELECTION",
+            Self::UnknownCandidateId => "UNKNOWN_CANDIDATE_ID",
         }
     }
 }
@@ -76,10 +98,31 @@ mod tests {
     use super::{ProtocolError, ValidationCode};
 
     #[test]
-    fn validation_code_is_stable() {
+    fn validation_codes_are_stable() {
+        let cases = [
+            (ValidationCode::MalformedProof, "MALFORMED_PROOF"),
+            (ValidationCode::EmptyRegistry, "EMPTY_REGISTRY"),
+            (
+                ValidationCode::DuplicateGovernanceKey,
+                "DUPLICATE_GOVERNANCE_KEY",
+            ),
+            (
+                ValidationCode::DuplicateCandidateId,
+                "DUPLICATE_CANDIDATE_ID",
+            ),
+            (ValidationCode::UnknownCandidateId, "UNKNOWN_CANDIDATE_ID"),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(code.as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn protocol_error_preserves_code_and_message() {
         let error = ProtocolError::new(ValidationCode::MalformedProof, "test message");
 
-        assert_eq!(error.code().as_str(), "MALFORMED_PROOF");
+        assert_eq!(error.code(), ValidationCode::MalformedProof);
         assert_eq!(error.message(), "test message");
     }
 }
