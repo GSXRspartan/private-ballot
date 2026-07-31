@@ -2,13 +2,19 @@
 
 //! Candidate and non-binding approval-ballot models.
 
+mod canonical;
 mod manifest;
 mod package;
 
-pub use manifest::{BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input};
+pub use manifest::{
+    BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
+};
 pub use package::{BallotPackageV1, BallotPackageV1Input};
 
-use tari_cc_private_ballot_protocol::{ProtocolError, ValidationCode};
+use tari_cc_private_ballot_protocol::{
+    MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES, ProtocolError,
+    ValidationCode,
+};
 
 /// Stable machine candidate identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -21,6 +27,13 @@ impl CandidateId {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyCandidateId,
                 "candidate identifier must not be empty",
+            ));
+        }
+
+        if bytes.len() > MAX_CANDIDATE_ID_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "candidate identifier exceeds the protocol size limit",
             ));
         }
 
@@ -48,6 +61,13 @@ impl CandidateDefinition {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyCandidateDisplayName,
                 "candidate display name must not be empty",
+            ));
+        }
+
+        if display_name.len() > MAX_CANDIDATE_DISPLAY_NAME_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "candidate display name exceeds the protocol size limit",
             ));
         }
 
@@ -80,6 +100,13 @@ impl CandidateSet {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyCandidateSet,
                 "candidate set must not be empty",
+            ));
+        }
+
+        if candidates.len() > MAX_CANDIDATES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "candidate count exceeds the protocol limit",
             ));
         }
 

@@ -43,9 +43,14 @@ fixed_commitment_type!(
     "Fixed-size commitment to one canonical candidate set."
 );
 
+fixed_commitment_type!(
+    BallotPayloadHash,
+    "Fixed-size hash binding a proof statement to one ballot payload."
+);
+
 #[cfg(test)]
 mod tests {
-    use super::{CandidateSetCommitment, ManifestHash, RegistryCommitment};
+    use super::{BallotPayloadHash, CandidateSetCommitment, ManifestHash, RegistryCommitment};
 
     #[test]
     fn commitment_bytes_round_trip() {
@@ -59,8 +64,10 @@ mod tests {
     fn commitment_wrappers_preserve_exact_bytes() {
         let registry = RegistryCommitment::new([3_u8; 32]);
         let candidates = CandidateSetCommitment::new([9_u8; 32]);
+        let payload = BallotPayloadHash::new([11_u8; 32]);
 
         assert_eq!(registry.into_bytes(), [3_u8; 32]);
         assert_eq!(candidates.into_bytes(), [9_u8; 32]);
+        assert_eq!(payload.into_bytes(), [11_u8; 32]);
     }
 }

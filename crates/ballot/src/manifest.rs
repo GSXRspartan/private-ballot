@@ -1,7 +1,9 @@
 //! Versioned election-manifest model.
 
 use tari_cc_private_ballot_protocol::{
-    CandidateSetCommitment, PROTOCOL_VERSION_V1, ProtocolError, RegistryCommitment, ValidationCode,
+    CandidateSetCommitment, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_REVISION_BYTES,
+    MAX_PROOF_SUITE_ID_BYTES, PROTOCOL_VERSION_V1, ProtocolError, RegistryCommitment,
+    ValidationCode,
 };
 
 use crate::ApprovalLimits;
@@ -11,12 +13,19 @@ use crate::ApprovalLimits;
 pub struct ElectionId(Vec<u8>);
 
 impl ElectionId {
-    /// Creates a non-empty election identifier.
+    /// Creates a bounded non-empty election identifier.
     pub fn new(bytes: Vec<u8>) -> Result<Self, ProtocolError> {
         if bytes.is_empty() {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyElectionId,
                 "election identifier must not be empty",
+            ));
+        }
+
+        if bytes.len() > MAX_ELECTION_ID_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "election identifier exceeds the protocol size limit",
             ));
         }
 
@@ -46,12 +55,30 @@ impl BallotKindV1 {
     }
 }
 
+/// Ballot confidentiality mode supported by the first manifest version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BallotConfidentialityV1 {
+    /// Ballot selections are present in the authoritative ballot payload.
+    Public,
+}
+
+impl BallotConfidentialityV1 {
+    /// Returns the stable machine-readable confidentiality identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "PUBLIC",
+        }
+    }
+}
+
 /// Unvalidated fields used to construct a version-one manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElectionManifestV1Input {
     pub protocol_version: u16,
     pub election_id: ElectionId,
     pub ballot_kind: BallotKindV1,
+    pub ballot_confidentiality: BallotConfidentialityV1,
     pub registry_commitment: RegistryCommitment,
     pub candidate_set_commitment: CandidateSetCommitment,
     pub proof_suite_id: String,
@@ -65,6 +92,7 @@ pub struct ElectionManifestV1 {
     protocol_version: u16,
     election_id: ElectionId,
     ballot_kind: BallotKindV1,
+    ballot_confidentiality: BallotConfidentialityV1,
     registry_commitment: RegistryCommitment,
     candidate_set_commitment: CandidateSetCommitment,
     proof_suite_id: String,
@@ -89,6 +117,13 @@ impl ElectionManifestV1 {
             ));
         }
 
+        if input.proof_suite_id.len() > MAX_PROOF_SUITE_ID_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "proof suite identifier exceeds the protocol size limit",
+            ));
+        }
+
         if input.governance_source_revision.trim().is_empty() {
             return Err(ProtocolError::new(
                 ValidationCode::EmptyGovernanceSourceRevision,
@@ -96,10 +131,18 @@ impl ElectionManifestV1 {
             ));
         }
 
+        if input.governance_source_revision.len() > MAX_GOVERNANCE_REVISION_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "governance revision exceeds the protocol size limit",
+            ));
+        }
+
         Ok(Self {
             protocol_version: input.protocol_version,
             election_id: input.election_id,
             ballot_kind: input.ballot_kind,
+            ballot_confidentiality: input.ballot_confidentiality,
             registry_commitment: input.registry_commitment,
             candidate_set_commitment: input.candidate_set_commitment,
             proof_suite_id: input.proof_suite_id,
@@ -121,6 +164,11 @@ impl ElectionManifestV1 {
     #[must_use]
     pub const fn ballot_kind(&self) -> BallotKindV1 {
         self.ballot_kind
+    }
+
+    #[must_use]
+    pub const fn ballot_confidentiality(&self) -> BallotConfidentialityV1 {
+        self.ballot_confidentiality
     }
 
     #[must_use]
@@ -151,10 +199,14 @@ impl ElectionManifestV1 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input};
+    use super::{
+        BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifestV1,
+        ElectionManifestV1Input,
+    };
     use crate::ApprovalLimits;
     use tari_cc_private_ballot_protocol::{
-        CandidateSetCommitment, PROTOCOL_VERSION_V1, RegistryCommitment, TEST_ONLY_SUITE_ID,
+        CandidateSetCommitment, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_REVISION_BYTES,
+        MAX_PROOF_SUITE_ID_BYTES, PROTOCOL_VERSION_V1, RegistryCommitment, TEST_ONLY_SUITE_ID,
         ValidationCode,
     };
 
@@ -179,6 +231,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION_V1,
             election_id: election_id(),
             ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+            ballot_confidentiality: BallotConfidentialityV1::Public,
             registry_commitment: RegistryCommitment::new([1_u8; 32]),
             candidate_set_commitment: CandidateSetCommitment::new([2_u8; 32]),
             proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
@@ -199,6 +252,7 @@ mod tests {
             manifest.ballot_kind().as_str(),
             "NON_BINDING_APPROVAL_PILOT"
         );
+        assert_eq!(manifest.ballot_confidentiality().as_str(), "PUBLIC");
         assert_eq!(manifest.proof_suite_id(), TEST_ONLY_SUITE_ID);
     }
 
@@ -252,6 +306,45 @@ mod tests {
             Err(error)
                 if error.code()
                     == ValidationCode::EmptyGovernanceSourceRevision
+        ));
+    }
+
+    #[test]
+    fn oversized_election_id_is_rejected() {
+        let result = ElectionId::new(vec![7_u8; MAX_ELECTION_ID_BYTES + 1]);
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code() == ValidationCode::ProtocolLimitExceeded
+        ));
+    }
+
+    #[test]
+    fn oversized_proof_suite_is_rejected() {
+        let mut input = valid_input();
+        input.proof_suite_id = "p".repeat(MAX_PROOF_SUITE_ID_BYTES + 1);
+
+        let result = ElectionManifestV1::new(input);
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code() == ValidationCode::ProtocolLimitExceeded
+        ));
+    }
+
+    #[test]
+    fn oversized_governance_revision_is_rejected() {
+        let mut input = valid_input();
+        input.governance_source_revision = "r".repeat(MAX_GOVERNANCE_REVISION_BYTES + 1);
+
+        let result = ElectionManifestV1::new(input);
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code() == ValidationCode::ProtocolLimitExceeded
         ));
     }
 }
