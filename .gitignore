@@ -10,3 +10,9 @@ Thumbs.db
 *.key
 *.secret
 /private-test-data/
+# Local cargo-fuzz state
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+/fuzz/target/
+!/fuzz/Cargo.lock

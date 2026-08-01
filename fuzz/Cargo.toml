@@ -1,0 +1,68 @@
+[package]
+name = "tari-cc-private-ballot-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+tari-cc-private-ballot-archive = { path = "../crates/archive" }
+tari-cc-private-ballot-ballot = { path = "../crates/ballot" }
+tari-cc-private-ballot-protocol = { path = "../crates/protocol" }
+tari-cc-private-ballot-registry = { path = "../crates/registry" }
+
+[[bin]]
+name = "canonical_cbor_reader"
+path = "fuzz_targets/canonical_cbor_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registry_snapshot"
+path = "fuzz_targets/registry_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "candidate_set"
+path = "fuzz_targets/candidate_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "approval_ballot_payload"
+path = "fuzz_targets/approval_ballot_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "election_manifest"
+path = "fuzz_targets/election_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ballot_package"
+path = "fuzz_targets/ballot_package.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archive_manifest"
+path = "fuzz_targets/archive_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

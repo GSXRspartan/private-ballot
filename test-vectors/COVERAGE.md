@@ -73,6 +73,23 @@ A dependency-free Python standard-library verifier now independently:
 - verifies both candidate-election and ballot-measure examples;
 - emits the deterministic `independent-verification-v1.json` report.
 
+## Implemented in Slice 12D
+
+The standalone cargo-fuzz workspace now publishes seven real libFuzzer
+targets covering:
+
+- deterministic CBOR primitives;
+- registry snapshots;
+- selectable-option candidate sets;
+- approval ballot payloads;
+- election manifests;
+- proof-bearing ballot packages;
+- archive manifests.
+
+Successful object decodes must re-encode byte-for-byte identically and retain
+deterministic canonical hashes or commitments. Checked-in valid and hostile
+CBOR vectors provide deterministic local seed corpora.
+
 ## Not yet representable
 
 The following required families do not yet have version-one schemas in the Rust
@@ -95,7 +112,7 @@ identifiers forbid the all-zero value.
 
 Still required:
 
-- real fuzz targets;
+- sustained fuzz campaigns and preserved minimized regressions;
 - canonical schemas and vectors for the remaining unimplemented object families;
 - Phase 2 closeout documentation;
 - a production anonymous-membership construction selected by a later phase.
