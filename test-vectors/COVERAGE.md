@@ -47,13 +47,38 @@ The semantic rejection corpus covers:
 These are constructed public-API scenarios rather than canonical CBOR vectors
 when the affected object family has no canonical encoding yet.
 
+## Implemented in Slice 12C2A
+
+The valid canonical corpus now publishes and checks:
+
+- registry snapshots;
+- selectable-option candidate sets;
+- approval ballot payloads;
+- election manifests;
+- proof-bearing ballot packages;
+- archive manifests.
+
+Decision vectors explicitly cover both candidate elections and ballot measures.
+Every valid case includes authoritative canonical CBOR, lowercase hexadecimal,
+decode metadata, and exact domain-separated test-hash metadata.
+
+## Implemented in Slice 12C2B
+
+A dependency-free Python standard-library verifier now independently:
+
+- parses every checked-in valid vector without importing project Rust APIs;
+- validates the supported deterministic CBOR subset and object schema shapes;
+- re-encodes every parsed object byte-for-byte;
+- reproduces every published domain-separated test hash;
+- verifies both candidate-election and ballot-measure examples;
+- emits the deterministic `independent-verification-v1.json` report.
+
 ## Not yet representable
 
 The following required families do not yet have version-one schemas in the Rust
 workspace and therefore cannot honestly have canonical vectors:
 
 - governance-source records;
-- ballot-package canonical encoding;
 - relay receipts;
 - submission batch manifests;
 - approval tally transcripts;
@@ -68,14 +93,12 @@ identifiers forbid the all-zero value.
 
 ## Later gates
 
-Still required after the Rust corpora exist:
+Still required:
 
-- independent parsing and re-encoding;
-- property and structured mutation tests;
 - real fuzz targets;
-- synthetic election cohorts;
-- complete offline archive replay;
-- cross-implementation hash agreement.
+- canonical schemas and vectors for the remaining unimplemented object families;
+- Phase 2 closeout documentation;
+- a production anonymous-membership construction selected by a later phase.
 
 The reserved proof suite
 `TEST_ONLY_NOT_ANONYMOUS_NOT_FOR_BINDING_ELECTIONS` remains test-only and does

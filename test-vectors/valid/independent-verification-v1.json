@@ -1,0 +1,104 @@
+{
+  "schema": "tari-cc-private-ballot-independent-verification-v1",
+  "verifier_id": "python-stdlib-independent-v1",
+  "implementation_language": "python-standard-library",
+  "project_canonical_api_imports": false,
+  "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
+  "case_count": 9,
+  "object_families": [
+    "approval-ballot-payload-v1",
+    "archive-manifest-v1",
+    "ballot-package-v1",
+    "candidate-set-v1",
+    "election-manifest-v1",
+    "registry-snapshot-v1"
+  ],
+  "decision_types": [
+    "ballot-measure",
+    "candidate-election"
+  ],
+  "all_canonical_hex_equal": true,
+  "all_decode_reencode_equal": true,
+  "all_domain_hashes_equal": true,
+  "cases": [
+    {
+      "vector_id": "approval-ballot-single-selection",
+      "object_family": "approval-ballot-payload-v1",
+      "canonical_byte_length": 9,
+      "domain_label": "tari-cc-private-ballot/approval-ballot-payload/v1",
+      "digest_hex": "051690dae1ecede1f0298a97da66337a5f93de5a1c35c9ed741296312f85b05d",
+      "round_trip_equal": true
+    },
+    {
+      "vector_id": "archive-manifest-ballot-measure",
+      "object_family": "archive-manifest-v1",
+      "canonical_byte_length": 307,
+      "domain_label": "tari-cc-private-ballot/archive-manifest/v1",
+      "digest_hex": "4640e8948a7003ccd19873f55fffcf29cc8bd514d8a2014f33c0579239ee4b32",
+      "round_trip_equal": true,
+      "decision_type": "ballot-measure"
+    },
+    {
+      "vector_id": "archive-manifest-candidate-election",
+      "object_family": "archive-manifest-v1",
+      "canonical_byte_length": 307,
+      "domain_label": "tari-cc-private-ballot/archive-manifest/v1",
+      "digest_hex": "7907dfbee523bf26a6c8614a0c824c2134c68b13f769aadb4e784b946398b537",
+      "round_trip_equal": true,
+      "decision_type": "candidate-election"
+    },
+    {
+      "vector_id": "ballot-package-ballot-measure",
+      "object_family": "ballot-package-v1",
+      "canonical_byte_length": 484,
+      "domain_label": "tari-cc-private-ballot/ballot-package/v1",
+      "digest_hex": "f28b3c3246d6a0d8606946e4e8439a802b5690231f57e25658fc736686b412cf",
+      "round_trip_equal": true,
+      "decision_type": "ballot-measure"
+    },
+    {
+      "vector_id": "ballot-package-candidate-election",
+      "object_family": "ballot-package-v1",
+      "canonical_byte_length": 515,
+      "domain_label": "tari-cc-private-ballot/ballot-package/v1",
+      "digest_hex": "348e2e0590c9edbad4121617d136e99452559730326b5db0551b08d9d137faa9",
+      "round_trip_equal": true,
+      "decision_type": "candidate-election"
+    },
+    {
+      "vector_id": "candidate-set-governance-options",
+      "object_family": "candidate-set-v1",
+      "canonical_byte_length": 46,
+      "domain_label": "tari-cc-private-ballot/candidate-set/v1",
+      "digest_hex": "65bd6b771be2ab7e0b55dc4c8334724ffc594271b7da0ef995e5661eedcf8339",
+      "round_trip_equal": true
+    },
+    {
+      "vector_id": "election-manifest-ballot-measure",
+      "object_family": "election-manifest-v1",
+      "canonical_byte_length": 231,
+      "domain_label": "tari-cc-private-ballot/election-manifest/v1",
+      "digest_hex": "ee7ec227171c7b8898787aebc47cbbdd2c4b4088517542ad1ab080132e479ded",
+      "round_trip_equal": true,
+      "decision_type": "ballot-measure"
+    },
+    {
+      "vector_id": "election-manifest-candidate-election",
+      "object_family": "election-manifest-v1",
+      "canonical_byte_length": 237,
+      "domain_label": "tari-cc-private-ballot/election-manifest/v1",
+      "digest_hex": "e9493732fb5285e9b6a94badbc8de8f260f024f5323fd7e00d0dbf6e8d346308",
+      "round_trip_equal": true,
+      "decision_type": "candidate-election"
+    },
+    {
+      "vector_id": "registry-snapshot-multi-member",
+      "object_family": "registry-snapshot-v1",
+      "canonical_byte_length": 66,
+      "domain_label": "tari-cc-private-ballot/registry-snapshot/v1",
+      "digest_hex": "eb34067eb2cbe8e126b990b1583c477dacaaa4aaef68c7ad2de6455ea857154c",
+      "round_trip_equal": true
+    }
+  ],
+  "warning": "The proof and hash providers are deterministic, forgeable, non-anonymous test plumbing and are not suitable for binding elections."
+}
