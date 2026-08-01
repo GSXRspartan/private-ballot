@@ -25,6 +25,7 @@ dependencies = [
  "tari-cc-private-ballot-crypto",
  "tari-cc-private-ballot-protocol",
  "tari-cc-private-ballot-registry",
+ "tari-cc-private-ballot-tally",
  "tari-cc-private-ballot-verifier",
 ]
 
