@@ -1,47 +1,71 @@
-# START HERE
+# Start Here
 
-This repository is the starting point for the Tari CC Private Ballot project.
+This repository contains the non-production protocol foundation for a private
+Tari governance ballot system.
 
-## Current status
+## Current position
 
-- Phase 0: repository bootstrap — complete
-- Phase 1: protocol/threat-model draft — active, not yet approved
-- Phase 2: offline Rust reference implementation — not started
-- Phase 3: harmless non-binding pilot — not started
-- Phase 4: Tari Ootle testnet anchor — not started
-- Phase 5: independent review and MVP release — not started
+- Phase 1 specification foundation: complete.
+- Phase 2 offline Rust foundation: complete at `d9e46e1`.
+- Phase 3 anonymous-membership prototype and cross-platform CI: next.
+- Harmless non-binding pilot: not started.
+- Ootle anchoring: not implemented.
+- Binding election use: prohibited.
 
-The repository bootstrap is complete and Phase 1 is active. The current
-documents are a draft. Nothing here has been approved by Tari governance, and
-Phase 1 is not complete.
+The current test proof and hash providers are deterministic, forgeable, and
+non-anonymous. The repository does not yet provide production anonymous
+eligibility.
 
-## First session checklist
+## Read in this order
 
-1. Copy this folder to your normal Codex/project location.
-2. Rename it to `tari-cc-private-ballot`.
-3. Initialize Git locally.
-4. Read the Phase 1 documents:
-   - `PHASE_STATUS.md`
-   - `ROADMAP.md`
-   - `docs/PHASE1_PROTOCOL_SPEC_v0.1.md`
-   - `docs/OPEN_QUESTIONS.md`
-   - `docs/decisions/ADR-0001-offline-authority-ootle-anchor.md`
-   - `docs/decisions/ADR-0002-governance-keys.md`
-   - `docs/decisions/ADR-0003-governance-source-and-mvp-scope.md`
-5. Update or resolve the Phase 1 decisions and record any remaining
-   governance and cryptography questions in `docs/OPEN_QUESTIONS.md`.
-6. Inspect the diff to confirm only the intended documentation changed.
-7. Only then create the initial preservation commit.
+1. `README.md`
+2. `PHASE_STATUS.md`
+3. `ROADMAP.md`
+4. `docs/reviews/PHASE2_CLOSEOUT_2026-08-01.md`
+5. `docs/PHASE1_PROTOCOL_SPEC_v0.1.md`
+6. `docs/OPEN_QUESTIONS.md`
+7. `docs/decisions/ADR-0001-offline-authority-ootle-anchor.md`
+8. `docs/decisions/ADR-0002-governance-keys.md`
+9. `docs/decisions/ADR-0003-governance-source-and-mvp-scope.md`
+10. `docs/decisions/ADR-0004-ballot-and-tally-policy.md`
+11. `docs/decisions/ADR-0005-anonymous-membership-construction.md`
+12. `docs/DATA_FORMAT_TEST_VECTOR_PLAN.md`
+13. `docs/INDEPENDENT_VECTOR_VERIFIER.md`
+14. `docs/FUZZING.md`
+15. `test-vectors/COVERAGE.md`
 
-Do not create a baseline commit until the governance-source alignment patch
-has been reviewed. Do not start any cryptographic implementation or Ootle
-integration yet:
+## Reproduce the Phase 2 workspace gates
 
-- Do not implement ring signatures yet.
-- Do not connect walletd, an indexer, or Ootle yet.
+From the repository root with Rust 1.97:
 
-## Initial deliverable
+```text
+cargo fmt --all -- --check
+cargo check --locked --offline --workspace --all-targets
+cargo check --locked --offline --release --workspace --lib --bins
+cargo clippy --locked --offline --workspace --all-targets -- -D warnings
+cargo test --locked --offline --workspace
+python -B tools/independent_vector_verifier.py --root . --check-report test-vectors/valid/independent-verification-v1.json
+```
 
-The first deliverable is a reviewable protocol package, not working election
-software. Phase 2 begins only after the manifest, registry, ballot schemas,
-archive format, and threat model are internally consistent.
+The root workspace currently registers 220 Rust tests.
+
+Parser fuzzing uses the separate `fuzz/` workspace and requires a supported
+Unix-like host, nightly Rust, cargo-fuzz, LLVM sanitizer support, and a C++
+compiler. See `docs/FUZZING.md`.
+
+## Platform status
+
+- Windows: validated.
+- Linux x86_64: validated, including bounded cargo-fuzz execution.
+- macOS: intended but not yet natively validated.
+
+A future CI matrix must exercise Windows, Linux, and macOS before release
+claims are made.
+
+## Safety boundary
+
+Nothing in this repository is approved Tari governance policy.
+
+Do not use it for a binding Core Contributor, Council, treasury, charter, or
+other consequential election. Do not place real voter secrets in test
+fixtures, logs, archives, issues, or commits.

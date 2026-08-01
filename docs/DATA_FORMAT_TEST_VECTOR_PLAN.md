@@ -2,10 +2,15 @@
 
 ## Status
 
-Phase 1 draft.
+Phase 2 implementation baseline completed at `d9e46e1`.
 
 This document defines the deterministic serialization and cross-implementation
-test evidence required before Phase 2 protocol objects may be considered stable.
+test evidence used to stabilize the Phase 2 protocol objects.
+
+The implemented baseline includes strict canonical CBOR, valid and invalid
+vectors, deterministic mutation tests, an independent Python verifier, and
+seven real parser fuzz targets. Production anonymous-membership cryptography
+remains outside this plan's completed scope.
 
 It does not select a production anonymous-membership construction.
 
