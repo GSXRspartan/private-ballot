@@ -1,0 +1,7 @@
+{
+  "schema": "tari-cc-private-ballot-valid-hash-v1",
+  "vector_id": "approval-ballot-single-selection",
+  "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
+  "domain_label": "tari-cc-private-ballot/approval-ballot-payload/v1",
+  "digest_hex": "051690dae1ecede1f0298a97da66337a5f93de5a1c35c9ed741296312f85b05d"
+}

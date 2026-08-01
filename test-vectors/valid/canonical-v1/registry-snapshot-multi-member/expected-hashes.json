@@ -1,0 +1,7 @@
+{
+  "schema": "tari-cc-private-ballot-valid-hash-v1",
+  "vector_id": "registry-snapshot-multi-member",
+  "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
+  "domain_label": "tari-cc-private-ballot/registry-snapshot/v1",
+  "digest_hex": "eb34067eb2cbe8e126b990b1583c477dacaaa4aaef68c7ad2de6455ea857154c"
+}

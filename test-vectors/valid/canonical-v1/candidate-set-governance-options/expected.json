@@ -1,0 +1,8 @@
+{
+  "schema": "tari-cc-private-ballot-valid-result-v1",
+  "vector_id": "candidate-set-governance-options",
+  "accepted": true,
+  "decoder_target": "CandidateSet::from_canonical_cbor",
+  "canonical_byte_length": 46,
+  "canonical_encoding": "deterministic-cbor-rfc8949-4.2.1"
+}

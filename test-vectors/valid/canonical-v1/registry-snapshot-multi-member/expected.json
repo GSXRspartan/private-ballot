@@ -1,0 +1,8 @@
+{
+  "schema": "tari-cc-private-ballot-valid-result-v1",
+  "vector_id": "registry-snapshot-multi-member",
+  "accepted": true,
+  "decoder_target": "RegistrySnapshot::from_canonical_cbor",
+  "canonical_byte_length": 66,
+  "canonical_encoding": "deterministic-cbor-rfc8949-4.2.1"
+}

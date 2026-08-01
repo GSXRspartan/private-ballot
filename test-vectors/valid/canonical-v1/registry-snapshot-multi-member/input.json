@@ -1,0 +1,6 @@
+{
+  "schema": "tari-cc-private-ballot-valid-input-v1",
+  "vector_id": "registry-snapshot-multi-member",
+  "object_family": "registry-snapshot-v1",
+  "input_order_note": "charlie, alpha, bravo; canonical encoding sorts by governance-key bytes"
+}

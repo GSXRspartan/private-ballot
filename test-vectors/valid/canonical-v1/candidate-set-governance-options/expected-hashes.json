@@ -1,0 +1,7 @@
+{
+  "schema": "tari-cc-private-ballot-valid-hash-v1",
+  "vector_id": "candidate-set-governance-options",
+  "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
+  "domain_label": "tari-cc-private-ballot/candidate-set/v1",
+  "digest_hex": "65bd6b771be2ab7e0b55dc4c8334724ffc594271b7da0ef995e5661eedcf8339"
+}

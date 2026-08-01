@@ -1,0 +1,6 @@
+{
+  "schema": "tari-cc-private-ballot-valid-input-v1",
+  "vector_id": "approval-ballot-single-selection",
+  "object_family": "approval-ballot-payload-v1",
+  "input_order_note": "single selection approve; canonical order is unchanged"
+}

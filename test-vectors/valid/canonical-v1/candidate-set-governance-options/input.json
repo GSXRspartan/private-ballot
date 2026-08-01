@@ -1,0 +1,6 @@
+{
+  "schema": "tari-cc-private-ballot-valid-input-v1",
+  "vector_id": "candidate-set-governance-options",
+  "object_family": "candidate-set-v1",
+  "input_order_note": "reject, approve, defer; canonical encoding sorts by stable option identifier bytes"
+}
