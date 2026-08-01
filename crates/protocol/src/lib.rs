@@ -65,6 +65,10 @@ pub enum ValidationCode {
     InvalidLifecycleTransition,
     ElectionNotOpen,
     LifecycleCommitmentMismatch,
+    InvalidIngestSequence,
+    DuplicateBallotDecision,
+    BallotDecisionDigestMismatch,
+    IncompleteVerificationTranscript,
 }
 
 impl ValidationCode {
@@ -101,6 +105,10 @@ impl ValidationCode {
             Self::InvalidLifecycleTransition => "INVALID_LIFECYCLE_TRANSITION",
             Self::ElectionNotOpen => "ELECTION_NOT_OPEN",
             Self::LifecycleCommitmentMismatch => "LIFECYCLE_COMMITMENT_MISMATCH",
+            Self::InvalidIngestSequence => "INVALID_INGEST_SEQUENCE",
+            Self::DuplicateBallotDecision => "DUPLICATE_BALLOT_DECISION",
+            Self::BallotDecisionDigestMismatch => "BALLOT_DECISION_DIGEST_MISMATCH",
+            Self::IncompleteVerificationTranscript => "INCOMPLETE_VERIFICATION_TRANSCRIPT",
         }
     }
 }
@@ -182,6 +190,22 @@ mod tests {
             (
                 ValidationCode::LifecycleCommitmentMismatch,
                 "LIFECYCLE_COMMITMENT_MISMATCH",
+            ),
+            (
+                ValidationCode::InvalidIngestSequence,
+                "INVALID_INGEST_SEQUENCE",
+            ),
+            (
+                ValidationCode::DuplicateBallotDecision,
+                "DUPLICATE_BALLOT_DECISION",
+            ),
+            (
+                ValidationCode::BallotDecisionDigestMismatch,
+                "BALLOT_DECISION_DIGEST_MISMATCH",
+            ),
+            (
+                ValidationCode::IncompleteVerificationTranscript,
+                "INCOMPLETE_VERIFICATION_TRANSCRIPT",
             ),
         ];
 
