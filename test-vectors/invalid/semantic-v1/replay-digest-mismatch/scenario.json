@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "replay-digest-mismatch",
+  "scenario": "replay-digest-mismatch",
+  "execution": "constructed-public-api-scenario"
+}

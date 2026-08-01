@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "duplicate-nullifier",
+  "accepted": false,
+  "expected_rejection_code": "DUPLICATE_NULLIFIER"
+}

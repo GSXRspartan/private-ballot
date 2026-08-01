@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "archive-provider-mismatch",
+  "accepted": false,
+  "expected_rejection_code": "UNSUPPORTED_HASH_ALGORITHM"
+}

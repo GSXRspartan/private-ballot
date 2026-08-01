@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "unsupported-manifest-version",
+  "scenario": "unsupported-manifest-version",
+  "execution": "constructed-public-api-scenario"
+}

@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "archive-manifest-hash-mismatch",
+  "scenario": "archive-manifest-hash-mismatch",
+  "execution": "constructed-public-api-scenario"
+}

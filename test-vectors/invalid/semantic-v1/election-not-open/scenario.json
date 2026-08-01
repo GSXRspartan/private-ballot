@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "election-not-open",
+  "scenario": "election-not-open",
+  "execution": "constructed-public-api-scenario"
+}

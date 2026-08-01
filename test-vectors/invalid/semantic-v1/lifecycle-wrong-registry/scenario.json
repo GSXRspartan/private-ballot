@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "lifecycle-wrong-registry",
+  "scenario": "lifecycle-wrong-registry",
+  "execution": "constructed-public-api-scenario"
+}

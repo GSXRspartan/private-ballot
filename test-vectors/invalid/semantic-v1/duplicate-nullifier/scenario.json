@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "duplicate-nullifier",
+  "scenario": "duplicate-nullifier",
+  "execution": "constructed-public-api-scenario"
+}

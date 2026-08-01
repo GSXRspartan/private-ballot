@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "archive-file-digest-mismatch",
+  "accepted": false,
+  "expected_rejection_code": "ARCHIVE_FILE_DIGEST_MISMATCH"
+}

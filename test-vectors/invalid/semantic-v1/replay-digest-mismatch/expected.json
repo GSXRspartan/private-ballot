@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "replay-digest-mismatch",
+  "accepted": false,
+  "expected_rejection_code": "BALLOT_DECISION_DIGEST_MISMATCH"
+}

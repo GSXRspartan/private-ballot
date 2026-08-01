@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "incomplete-replay-transcript",
+  "accepted": false,
+  "expected_rejection_code": "INCOMPLETE_VERIFICATION_TRANSCRIPT"
+}

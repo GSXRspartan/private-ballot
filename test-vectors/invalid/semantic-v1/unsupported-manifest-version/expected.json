@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "unsupported-manifest-version",
+  "accepted": false,
+  "expected_rejection_code": "UNSUPPORTED_PROTOCOL_VERSION"
+}

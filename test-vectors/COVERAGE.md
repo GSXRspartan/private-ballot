@@ -23,19 +23,29 @@ The dependency-free hostile CBOR corpus covers:
 
 Every case records and tests an exact stable rejection code.
 
-## Planned for Slice 12A2
+## Implemented in Slice 12A2
 
-Semantic hostile vectors will cover:
+The semantic rejection corpus covers:
 
-- unsupported protocol versions;
-- wrong manifest hashes;
-- wrong registry commitments;
-- unsupported proof suites;
-- malformed test-only proofs;
+- unsupported manifest and ballot-package versions;
+- wrong manifest binding;
+- unsupported proof-suite binding;
+- empty and malformed test-only proofs;
+- proofs replayed against another ballot payload;
 - duplicate election-scoped nullifiers;
-- replay transcript omissions and digest mismatches;
-- archive file and archive-manifest digest mismatches;
-- lifecycle-state rejection.
+- election-not-open rejection;
+- lifecycle manifest and registry mismatches;
+- replay decisions without submissions;
+- skipped and duplicate replay decisions;
+- replay package-digest mismatches;
+- incomplete replay transcripts;
+- archive file-digest mismatches;
+- archive-manifest hash mismatches;
+- archive hash-provider mismatches;
+- archive-manifest self-reference rejection.
+
+These are constructed public-API scenarios rather than canonical CBOR vectors
+when the affected object family has no canonical encoding yet.
 
 ## Not yet representable
 
@@ -58,7 +68,7 @@ identifiers forbid the all-zero value.
 
 ## Later gates
 
-Still required after the Rust corpus exists:
+Still required after the Rust corpora exist:
 
 - independent parsing and re-encoding;
 - property and structured mutation tests;

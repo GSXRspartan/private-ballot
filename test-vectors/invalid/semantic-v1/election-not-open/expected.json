@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "election-not-open",
+  "accepted": false,
+  "expected_rejection_code": "ELECTION_NOT_OPEN"
+}

@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "archive-self-reference",
+  "scenario": "archive-self-reference",
+  "execution": "constructed-public-api-scenario"
+}

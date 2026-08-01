@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "wrong-manifest-hash",
+  "accepted": false,
+  "expected_rejection_code": "WRONG_MANIFEST_HASH"
+}

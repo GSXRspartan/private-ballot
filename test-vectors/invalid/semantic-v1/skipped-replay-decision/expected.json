@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "skipped-replay-decision",
+  "accepted": false,
+  "expected_rejection_code": "INVALID_INGEST_SEQUENCE"
+}

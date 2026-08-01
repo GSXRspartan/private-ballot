@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "empty-proof",
+  "accepted": false,
+  "expected_rejection_code": "INVALID_DATA"
+}

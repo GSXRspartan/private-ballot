@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "skipped-replay-decision",
+  "scenario": "skipped-replay-decision",
+  "execution": "constructed-public-api-scenario"
+}

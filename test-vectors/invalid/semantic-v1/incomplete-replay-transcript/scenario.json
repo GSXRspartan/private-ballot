@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "incomplete-replay-transcript",
+  "scenario": "incomplete-replay-transcript",
+  "execution": "constructed-public-api-scenario"
+}

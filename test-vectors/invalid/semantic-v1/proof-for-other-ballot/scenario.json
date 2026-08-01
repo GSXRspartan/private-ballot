@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "proof-for-other-ballot",
+  "scenario": "proof-for-other-ballot",
+  "execution": "constructed-public-api-scenario"
+}

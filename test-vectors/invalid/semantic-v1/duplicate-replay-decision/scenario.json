@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "duplicate-replay-decision",
+  "scenario": "duplicate-replay-decision",
+  "execution": "constructed-public-api-scenario"
+}

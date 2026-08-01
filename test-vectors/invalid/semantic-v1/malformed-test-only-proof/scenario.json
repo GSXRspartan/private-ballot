@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "malformed-test-only-proof",
+  "scenario": "malformed-test-only-proof",
+  "execution": "constructed-public-api-scenario"
+}

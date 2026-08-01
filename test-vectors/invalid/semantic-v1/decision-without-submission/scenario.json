@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-case-v1",
+  "vector_id": "decision-without-submission",
+  "scenario": "decision-without-submission",
+  "execution": "constructed-public-api-scenario"
+}

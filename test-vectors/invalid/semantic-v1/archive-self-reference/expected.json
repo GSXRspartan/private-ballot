@@ -1,0 +1,6 @@
+{
+  "schema": "phase2-semantic-rejection-expected-v1",
+  "vector_id": "archive-self-reference",
+  "accepted": false,
+  "expected_rejection_code": "INVALID_ARCHIVE_MANIFEST"
+}
