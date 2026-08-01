@@ -7,8 +7,12 @@
 //! details, network metadata, client fingerprints, retry history, or
 //! high-resolution timestamps.
 
+mod file_entry;
 mod replay;
 
+pub use file_entry::{
+    ArchiveFileCatalogV1, ArchiveFileDigestV1, ArchiveFileEntryV1, ArchivePathV1,
+};
 pub use replay::{
     BallotDecisionOutcomeV1, BallotDecisionV1, BallotPackageDigestV1, IngestSequenceV1,
     SubmissionRecordV1, VerificationTranscriptV1,

@@ -13,6 +13,7 @@ pub enum HashDomain {
     BallotPackageV1,
     ElectionScopeV1,
     ProofStatementV1,
+    ArchiveFileV1,
     ArchiveManifestV1,
 }
 
@@ -28,6 +29,7 @@ impl HashDomain {
             Self::BallotPackageV1 => "tari-cc-private-ballot/ballot-package/v1",
             Self::ElectionScopeV1 => "tari-cc-private-ballot/election-scope/v1",
             Self::ProofStatementV1 => "tari-cc-private-ballot/proof-statement/v1",
+            Self::ArchiveFileV1 => "tari-cc-private-ballot/archive-file/v1",
             Self::ArchiveManifestV1 => "tari-cc-private-ballot/archive-manifest/v1",
         }
     }
@@ -148,6 +150,7 @@ mod tests {
             HashDomain::BallotPackageV1,
             HashDomain::ElectionScopeV1,
             HashDomain::ProofStatementV1,
+            HashDomain::ArchiveFileV1,
             HashDomain::ArchiveManifestV1,
         ];
 

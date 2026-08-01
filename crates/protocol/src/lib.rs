@@ -19,9 +19,9 @@ pub use hashing::{
     HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
 };
 pub use limits::{
-    MAX_BALLOT_CONFIDENTIALITY_ID_BYTES, MAX_BALLOT_KIND_ID_BYTES,
-    MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
-    MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
+    MAX_ARCHIVE_FILES, MAX_ARCHIVE_PATH_BYTES, MAX_BALLOT_CONFIDENTIALITY_ID_BYTES,
+    MAX_BALLOT_KIND_ID_BYTES, MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES,
+    MAX_CANDIDATES, MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
     MAX_GOVERNANCE_REVISION_BYTES, MAX_NULLIFIER_BYTES, MAX_PROOF_BYTES, MAX_PROOF_STATEMENT_BYTES,
     MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
 };
@@ -69,6 +69,11 @@ pub enum ValidationCode {
     DuplicateBallotDecision,
     BallotDecisionDigestMismatch,
     IncompleteVerificationTranscript,
+    EmptyArchiveFileSet,
+    EmptyArchivePath,
+    InvalidArchivePath,
+    DuplicateArchivePath,
+    ArchiveFileDigestMismatch,
 }
 
 impl ValidationCode {
@@ -109,6 +114,11 @@ impl ValidationCode {
             Self::DuplicateBallotDecision => "DUPLICATE_BALLOT_DECISION",
             Self::BallotDecisionDigestMismatch => "BALLOT_DECISION_DIGEST_MISMATCH",
             Self::IncompleteVerificationTranscript => "INCOMPLETE_VERIFICATION_TRANSCRIPT",
+            Self::EmptyArchiveFileSet => "EMPTY_ARCHIVE_FILE_SET",
+            Self::EmptyArchivePath => "EMPTY_ARCHIVE_PATH",
+            Self::InvalidArchivePath => "INVALID_ARCHIVE_PATH",
+            Self::DuplicateArchivePath => "DUPLICATE_ARCHIVE_PATH",
+            Self::ArchiveFileDigestMismatch => "ARCHIVE_FILE_DIGEST_MISMATCH",
         }
     }
 }
@@ -206,6 +216,20 @@ mod tests {
             (
                 ValidationCode::IncompleteVerificationTranscript,
                 "INCOMPLETE_VERIFICATION_TRANSCRIPT",
+            ),
+            (
+                ValidationCode::EmptyArchiveFileSet,
+                "EMPTY_ARCHIVE_FILE_SET",
+            ),
+            (ValidationCode::EmptyArchivePath, "EMPTY_ARCHIVE_PATH"),
+            (ValidationCode::InvalidArchivePath, "INVALID_ARCHIVE_PATH"),
+            (
+                ValidationCode::DuplicateArchivePath,
+                "DUPLICATE_ARCHIVE_PATH",
+            ),
+            (
+                ValidationCode::ArchiveFileDigestMismatch,
+                "ARCHIVE_FILE_DIGEST_MISMATCH",
             ),
         ];
 

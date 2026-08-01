@@ -3,6 +3,12 @@
 /// Maximum size of one canonical protocol object.
 pub const MAX_CANONICAL_OBJECT_BYTES: usize = 1_048_576;
 
+/// Maximum UTF-8 byte length of one canonical archive-relative path.
+pub const MAX_ARCHIVE_PATH_BYTES: usize = 1_024;
+
+/// Maximum number of content-file entries in one archive manifest.
+pub const MAX_ARCHIVE_FILES: usize = 65_536;
+
 /// Maximum number of members in the first registry format.
 pub const MAX_REGISTRY_MEMBERS: usize = 4_096;
 
