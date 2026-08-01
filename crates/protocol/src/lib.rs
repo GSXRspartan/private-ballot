@@ -62,6 +62,9 @@ pub enum ValidationCode {
     SelectionCountOutOfRange,
     DuplicateSelection,
     UnknownCandidateId,
+    InvalidLifecycleTransition,
+    ElectionNotOpen,
+    LifecycleCommitmentMismatch,
 }
 
 impl ValidationCode {
@@ -95,6 +98,9 @@ impl ValidationCode {
             Self::SelectionCountOutOfRange => "SELECTION_COUNT_OUT_OF_RANGE",
             Self::DuplicateSelection => "DUPLICATE_SELECTION",
             Self::UnknownCandidateId => "UNKNOWN_CANDIDATE_ID",
+            Self::InvalidLifecycleTransition => "INVALID_LIFECYCLE_TRANSITION",
+            Self::ElectionNotOpen => "ELECTION_NOT_OPEN",
+            Self::LifecycleCommitmentMismatch => "LIFECYCLE_COMMITMENT_MISMATCH",
         }
     }
 }
@@ -168,6 +174,15 @@ mod tests {
                 "DUPLICATE_CANDIDATE_ID",
             ),
             (ValidationCode::UnknownCandidateId, "UNKNOWN_CANDIDATE_ID"),
+            (
+                ValidationCode::InvalidLifecycleTransition,
+                "INVALID_LIFECYCLE_TRANSITION",
+            ),
+            (ValidationCode::ElectionNotOpen, "ELECTION_NOT_OPEN"),
+            (
+                ValidationCode::LifecycleCommitmentMismatch,
+                "LIFECYCLE_COMMITMENT_MISMATCH",
+            ),
         ];
 
         for (code, expected) in cases {

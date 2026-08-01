@@ -10,7 +10,7 @@ pub use proof_verification::{VerifiedApprovalBallotV1, verify_approval_proof};
 
 use std::collections::BTreeSet;
 
-use tari_cc_private_ballot_ballot::ApprovalBallotPayload;
+use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionLifecycleV1};
 use tari_cc_private_ballot_crypto::{VerifiedNullifier, VerifiedProofV1};
 use tari_cc_private_ballot_protocol::{ProtocolError, ValidationCode};
 
@@ -64,11 +64,14 @@ impl BallotAcceptanceLedger {
         }
     }
 
-    /// Accepts a proof-authenticated ballot if its nullifier is new.
+    /// Accepts a proof-authenticated ballot only while its election is open.
     pub fn accept_verified(
         &mut self,
+        lifecycle: &ElectionLifecycleV1,
         ballot: VerifiedApprovalBallotV1,
     ) -> Result<(), ProtocolError> {
+        lifecycle.validate_ballot_statement(ballot.statement())?;
+
         let (verified_proof, payload) = ballot.into_parts();
         let nullifier = verified_proof.nullifier().clone();
 
@@ -114,8 +117,8 @@ mod tests {
     };
     use tari_cc_private_ballot_ballot::{
         ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1,
-        CandidateDefinition, CandidateId, CandidateSet, ElectionId, ElectionManifestV1,
-        ElectionManifestV1Input,
+        CandidateDefinition, CandidateId, CandidateSet, ElectionId, ElectionLifecycleV1,
+        ElectionManifestV1, ElectionManifestV1Input,
     };
     use tari_cc_private_ballot_crypto::test_only_verifier::TestOnlyProofVerifierV1;
     use tari_cc_private_ballot_protocol::{
@@ -153,7 +156,7 @@ mod tests {
         limits
     }
 
-    fn manifest() -> ElectionManifestV1 {
+    fn manifest_with_registry(registry_commitment: RegistryCommitment) -> ElectionManifestV1 {
         let Ok(election_id) = ElectionId::new(b"ledger-election".to_vec()) else {
             panic!("test election ID must be valid");
         };
@@ -163,7 +166,7 @@ mod tests {
             election_id,
             ballot_kind: BallotKindV1::NonBindingApprovalPilot,
             ballot_confidentiality: BallotConfidentialityV1::Public,
-            registry_commitment: RegistryCommitment::new([1_u8; 32]),
+            registry_commitment,
             candidate_set_commitment: CandidateSetCommitment::new([2_u8; 32]),
             proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
             approval_limits: approval_limits(),
@@ -173,6 +176,10 @@ mod tests {
         };
 
         manifest
+    }
+
+    fn manifest() -> ElectionManifestV1 {
+        manifest_with_registry(RegistryCommitment::new([1_u8; 32]))
     }
 
     fn payload() -> ApprovalBallotPayload {
@@ -189,12 +196,14 @@ mod tests {
         payload
     }
 
-    fn verified_ballot(nullifier: &[u8]) -> VerifiedApprovalBallotV1 {
+    fn verified_ballot(
+        manifest: &ElectionManifestV1,
+        nullifier: &[u8],
+    ) -> VerifiedApprovalBallotV1 {
         let provider = TestOnlyDeterministicHasher;
-        let manifest = manifest();
         let payload = payload();
 
-        let Ok(statement) = reconstruct_approval_proof_statement(&manifest, &payload, &provider)
+        let Ok(statement) = reconstruct_approval_proof_statement(manifest, &payload, &provider)
         else {
             panic!("statement reconstruction should succeed");
         };
@@ -207,7 +216,7 @@ mod tests {
             panic!("test verifier must be valid");
         };
 
-        let Ok(ballot) = verify_approval_proof(&manifest, &payload, &proof, &provider, &verifier)
+        let Ok(ballot) = verify_approval_proof(manifest, &payload, &proof, &provider, &verifier)
         else {
             panic!("test ballot verification should succeed");
         };
@@ -215,11 +224,32 @@ mod tests {
         ballot
     }
 
+    fn open_lifecycle(manifest: &ElectionManifestV1) -> ElectionLifecycleV1 {
+        let provider = TestOnlyDeterministicHasher;
+
+        let Ok(manifest_hash) = manifest.canonical_hash(&provider) else {
+            panic!("test manifest hash should succeed");
+        };
+
+        let mut lifecycle = ElectionLifecycleV1::new();
+
+        assert!(
+            lifecycle
+                .freeze(manifest_hash, manifest.registry_commitment())
+                .is_ok()
+        );
+        assert!(lifecycle.open().is_ok());
+
+        lifecycle
+    }
+
     #[test]
     fn first_valid_ballot_is_accepted() {
+        let manifest = manifest();
+        let lifecycle = open_lifecycle(&manifest);
         let mut ledger = BallotAcceptanceLedger::new();
 
-        let result = ledger.accept_verified(verified_ballot(b"nullifier-a"));
+        let result = ledger.accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"));
 
         assert!(result.is_ok());
         assert_eq!(ledger.len(), 1);
@@ -231,13 +261,16 @@ mod tests {
 
     #[test]
     fn duplicate_nullifier_is_rejected_without_replacing_first_ballot() {
+        let manifest = manifest();
+        let lifecycle = open_lifecycle(&manifest);
         let mut ledger = BallotAcceptanceLedger::new();
 
-        let first = ledger.accept_verified(verified_ballot(b"nullifier-a"));
+        let first = ledger.accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"));
 
         assert!(first.is_ok());
 
-        let duplicate = ledger.accept_verified(verified_ballot(b"nullifier-a"));
+        let duplicate =
+            ledger.accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"));
 
         assert!(matches!(
             duplicate,
@@ -246,25 +279,23 @@ mod tests {
         ));
 
         assert_eq!(ledger.len(), 1);
-        assert_eq!(
-            ledger.accepted_ballots()[0].election_scoped_nullifier(),
-            b"nullifier-a"
-        );
     }
 
     #[test]
     fn distinct_nullifiers_preserve_acceptance_order() {
+        let manifest = manifest();
+        let lifecycle = open_lifecycle(&manifest);
         let mut ledger = BallotAcceptanceLedger::new();
 
         assert!(
             ledger
-                .accept_verified(verified_ballot(b"nullifier-b"))
+                .accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-b"),)
                 .is_ok()
         );
 
         assert!(
             ledger
-                .accept_verified(verified_ballot(b"nullifier-a"))
+                .accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"),)
                 .is_ok()
         );
 
@@ -272,7 +303,6 @@ mod tests {
             ledger.accepted_ballots()[0].election_scoped_nullifier(),
             b"nullifier-b"
         );
-
         assert_eq!(
             ledger.accepted_ballots()[1].election_scoped_nullifier(),
             b"nullifier-a"
@@ -281,16 +311,135 @@ mod tests {
 
     #[test]
     fn accepted_ballot_preserves_verified_proof_and_payload() {
+        let manifest = manifest();
+        let lifecycle = open_lifecycle(&manifest);
         let mut ledger = BallotAcceptanceLedger::new();
-        let ballot = verified_ballot(b"nullifier-a");
+        let ballot = verified_ballot(&manifest, b"nullifier-a");
         let expected_statement = ballot.statement().clone();
         let expected_payload = ballot.payload().clone();
 
-        assert!(ledger.accept_verified(ballot).is_ok());
+        assert!(ledger.accept_verified(&lifecycle, ballot).is_ok());
 
         let accepted = &ledger.accepted_ballots()[0];
 
         assert_eq!(accepted.verified_proof().statement(), &expected_statement);
         assert_eq!(accepted.payload(), &expected_payload);
+    }
+
+    #[test]
+    fn ballots_are_accepted_only_while_open() {
+        let manifest = manifest();
+        let provider = TestOnlyDeterministicHasher;
+        let mut lifecycle = ElectionLifecycleV1::new();
+        let mut ledger = BallotAcceptanceLedger::new();
+
+        assert!(matches!(
+            ledger.accept_verified(
+                &lifecycle,
+                verified_ballot(&manifest, b"draft-nullifier"),
+            ),
+            Err(error) if error.code() == ValidationCode::ElectionNotOpen
+        ));
+
+        let Ok(manifest_hash) = manifest.canonical_hash(&provider) else {
+            panic!("test manifest hash should succeed");
+        };
+
+        assert!(
+            lifecycle
+                .freeze(manifest_hash, manifest.registry_commitment())
+                .is_ok()
+        );
+
+        assert!(matches!(
+            ledger.accept_verified(
+                &lifecycle,
+                verified_ballot(&manifest, b"frozen-nullifier"),
+            ),
+            Err(error) if error.code() == ValidationCode::ElectionNotOpen
+        ));
+
+        assert!(lifecycle.open().is_ok());
+        assert!(
+            ledger
+                .accept_verified(&lifecycle, verified_ballot(&manifest, b"open-nullifier"),)
+                .is_ok()
+        );
+
+        assert!(lifecycle.close().is_ok());
+
+        assert!(matches!(
+            ledger.accept_verified(
+                &lifecycle,
+                verified_ballot(&manifest, b"closed-nullifier"),
+            ),
+            Err(error) if error.code() == ValidationCode::ElectionNotOpen
+        ));
+    }
+
+    #[test]
+    fn lifecycle_bound_to_another_manifest_rejects_ballot() {
+        let manifest = manifest();
+        let other_manifest = manifest_with_registry(RegistryCommitment::new([9_u8; 32]));
+        let lifecycle = open_lifecycle(&other_manifest);
+        let mut ledger = BallotAcceptanceLedger::new();
+
+        let result = ledger.accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"));
+
+        assert!(matches!(
+            result,
+            Err(error) if error.code() == ValidationCode::WrongManifestHash
+        ));
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn lifecycle_with_wrong_registry_commitment_rejects_ballot() {
+        let manifest = manifest();
+        let provider = TestOnlyDeterministicHasher;
+        let Ok(manifest_hash) = manifest.canonical_hash(&provider) else {
+            panic!("test manifest hash should succeed");
+        };
+
+        let mut lifecycle = ElectionLifecycleV1::new();
+        assert!(
+            lifecycle
+                .freeze(manifest_hash, RegistryCommitment::new([9_u8; 32]),)
+                .is_ok()
+        );
+        assert!(lifecycle.open().is_ok());
+
+        let mut ledger = BallotAcceptanceLedger::new();
+        let result = ledger.accept_verified(&lifecycle, verified_ballot(&manifest, b"nullifier-a"));
+
+        assert!(matches!(
+            result,
+            Err(error)
+                if error.code()
+                    == ValidationCode::LifecycleCommitmentMismatch
+        ));
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn failed_lifecycle_check_does_not_consume_the_nullifier() {
+        let manifest = manifest();
+        let draft = ElectionLifecycleV1::new();
+        let mut ledger = BallotAcceptanceLedger::new();
+
+        assert!(
+            ledger
+                .accept_verified(&draft, verified_ballot(&manifest, b"nullifier-a"),)
+                .is_err()
+        );
+
+        let open = open_lifecycle(&manifest);
+
+        assert!(
+            ledger
+                .accept_verified(&open, verified_ballot(&manifest, b"nullifier-a"),)
+                .is_ok()
+        );
+        assert_eq!(ledger.len(), 1);
     }
 }

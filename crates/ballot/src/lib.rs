@@ -3,11 +3,13 @@
 //! Candidate and non-binding approval-ballot models.
 
 mod canonical;
+mod lifecycle;
 mod manifest;
 mod manifest_canonical;
 mod manifest_scope;
 mod package;
 
+pub use lifecycle::{ElectionLifecycleStateV1, ElectionLifecycleV1};
 pub use manifest::{
     BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
 };
