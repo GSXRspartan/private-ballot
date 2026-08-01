@@ -22,8 +22,8 @@ pub use limits::{
     MAX_ARCHIVE_FILES, MAX_ARCHIVE_PATH_BYTES, MAX_BALLOT_CONFIDENTIALITY_ID_BYTES,
     MAX_BALLOT_KIND_ID_BYTES, MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES,
     MAX_CANDIDATES, MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
-    MAX_GOVERNANCE_REVISION_BYTES, MAX_NULLIFIER_BYTES, MAX_PROOF_BYTES, MAX_PROOF_STATEMENT_BYTES,
-    MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
+    MAX_GOVERNANCE_REVISION_BYTES, MAX_HASH_ALGORITHM_ID_BYTES, MAX_NULLIFIER_BYTES,
+    MAX_PROOF_BYTES, MAX_PROOF_STATEMENT_BYTES, MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
 };
 pub use scope::derive_election_scope;
 
@@ -74,6 +74,10 @@ pub enum ValidationCode {
     InvalidArchivePath,
     DuplicateArchivePath,
     ArchiveFileDigestMismatch,
+    EmptyHashAlgorithmId,
+    UnsupportedHashAlgorithm,
+    InvalidArchiveManifest,
+    ArchiveManifestHashMismatch,
 }
 
 impl ValidationCode {
@@ -119,6 +123,10 @@ impl ValidationCode {
             Self::InvalidArchivePath => "INVALID_ARCHIVE_PATH",
             Self::DuplicateArchivePath => "DUPLICATE_ARCHIVE_PATH",
             Self::ArchiveFileDigestMismatch => "ARCHIVE_FILE_DIGEST_MISMATCH",
+            Self::EmptyHashAlgorithmId => "EMPTY_HASH_ALGORITHM_ID",
+            Self::UnsupportedHashAlgorithm => "UNSUPPORTED_HASH_ALGORITHM",
+            Self::InvalidArchiveManifest => "INVALID_ARCHIVE_MANIFEST",
+            Self::ArchiveManifestHashMismatch => "ARCHIVE_MANIFEST_HASH_MISMATCH",
         }
     }
 }
@@ -230,6 +238,22 @@ mod tests {
             (
                 ValidationCode::ArchiveFileDigestMismatch,
                 "ARCHIVE_FILE_DIGEST_MISMATCH",
+            ),
+            (
+                ValidationCode::EmptyHashAlgorithmId,
+                "EMPTY_HASH_ALGORITHM_ID",
+            ),
+            (
+                ValidationCode::UnsupportedHashAlgorithm,
+                "UNSUPPORTED_HASH_ALGORITHM",
+            ),
+            (
+                ValidationCode::InvalidArchiveManifest,
+                "INVALID_ARCHIVE_MANIFEST",
+            ),
+            (
+                ValidationCode::ArchiveManifestHashMismatch,
+                "ARCHIVE_MANIFEST_HASH_MISMATCH",
             ),
         ];
 

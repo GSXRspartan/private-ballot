@@ -8,10 +8,15 @@
 //! high-resolution timestamps.
 
 mod file_entry;
+mod manifest;
 mod replay;
 
 pub use file_entry::{
     ArchiveFileCatalogV1, ArchiveFileDigestV1, ArchiveFileEntryV1, ArchivePathV1,
+};
+pub use manifest::{
+    ARCHIVE_MANIFEST_CANONICAL_PATH, ARCHIVE_MANIFEST_VERSION_V1, ARCHIVE_SIGNATURE_PATH_PREFIX,
+    ArchiveHashV1, ArchiveManifestV1,
 };
 pub use replay::{
     BallotDecisionOutcomeV1, BallotDecisionV1, BallotPackageDigestV1, IngestSequenceV1,

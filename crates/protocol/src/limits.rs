@@ -9,6 +9,8 @@ pub const MAX_ARCHIVE_PATH_BYTES: usize = 1_024;
 /// Maximum number of content-file entries in one archive manifest.
 pub const MAX_ARCHIVE_FILES: usize = 65_536;
 
+/// Maximum UTF-8 byte length of one hash-algorithm identifier.
+pub const MAX_HASH_ALGORITHM_ID_BYTES: usize = 128;
 /// Maximum number of members in the first registry format.
 pub const MAX_REGISTRY_MEMBERS: usize = 4_096;
 
