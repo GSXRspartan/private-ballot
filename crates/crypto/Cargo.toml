@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+curve25519-dalek = { version = "=5.0.0", default-features = false, features = ["zeroize"] }
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 
 [lints]
