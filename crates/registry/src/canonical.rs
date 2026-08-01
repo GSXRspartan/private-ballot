@@ -81,7 +81,10 @@ impl RegistrySnapshot {
             }
         }
 
-        let entries = keys.into_iter().map(RegistryEntry::new).collect();
+        let entries = keys
+            .into_iter()
+            .map(RegistryEntry::from_snapshot_public_key)
+            .collect();
 
         Self::new(entries)
     }
@@ -111,7 +114,7 @@ mod tests {
             panic!("test governance key must be valid");
         };
 
-        RegistryEntry::new(key)
+        RegistryEntry::from_snapshot_public_key(key)
     }
 
     fn registry(entries: Vec<RegistryEntry>) -> RegistrySnapshot {

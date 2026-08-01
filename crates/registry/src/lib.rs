@@ -7,6 +7,11 @@ use tari_cc_private_ballot_protocol::{
 };
 
 mod canonical;
+mod key_policy;
+
+pub use key_policy::{
+    GOVERNANCE_KEY_WARNING, VoterGovernanceKeyRegistrationV1, VoterKeyProvisioningV1,
+};
 
 /// Canonical encoding of one dedicated governance public key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,9 +51,19 @@ pub struct RegistryEntry {
 }
 
 impl RegistryEntry {
-    /// Creates one registry entry.
+    /// Creates a registry entry from an explicit voter-controlled registration.
     #[must_use]
-    pub const fn new(governance_key: GovernancePublicKey) -> Self {
+    pub fn from_voter_registration(registration: VoterGovernanceKeyRegistrationV1) -> Self {
+        Self {
+            governance_key: registration.into_public_key(),
+        }
+    }
+
+    /// Reconstructs a public entry while decoding an already frozen snapshot.
+    ///
+    /// Snapshot decoding does not repeat or replace the original enrollment
+    /// authorization process.
+    pub(crate) const fn from_snapshot_public_key(governance_key: GovernancePublicKey) -> Self {
         Self { governance_key }
     }
 
@@ -115,7 +130,10 @@ impl RegistrySnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{GovernancePublicKey, RegistryEntry, RegistrySnapshot};
+    use super::{
+        GovernancePublicKey, RegistryEntry, RegistrySnapshot, VoterGovernanceKeyRegistrationV1,
+        VoterKeyProvisioningV1,
+    };
     use tari_cc_private_ballot_protocol::{
         MAX_GOVERNANCE_KEY_BYTES, MAX_REGISTRY_MEMBERS, ValidationCode,
     };
@@ -125,7 +143,26 @@ mod tests {
             panic!("test governance key must be valid");
         };
 
-        RegistryEntry::new(key)
+        let registration =
+            VoterGovernanceKeyRegistrationV1::new(key, VoterKeyProvisioningV1::GeneratedByVoter);
+
+        RegistryEntry::from_voter_registration(registration)
+    }
+
+    #[test]
+    fn registry_entry_is_created_from_voter_registration() {
+        let Ok(key) = GovernancePublicKey::new(b"voter-public-key".to_vec()) else {
+            panic!("test governance key must be valid");
+        };
+
+        let registration = VoterGovernanceKeyRegistrationV1::new(
+            key.clone(),
+            VoterKeyProvisioningV1::ImportedByVoter,
+        );
+
+        let entry = RegistryEntry::from_voter_registration(registration);
+
+        assert_eq!(entry.governance_key(), &key);
     }
 
     #[test]
