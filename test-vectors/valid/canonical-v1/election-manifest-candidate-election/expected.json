@@ -1,0 +1,9 @@
+{
+  "schema": "tari-cc-private-ballot-valid-result-v1",
+  "vector_id": "election-manifest-candidate-election",
+  "decision_type": "candidate-election",
+  "accepted": true,
+  "decoder_target": "ElectionManifestV1::from_canonical_cbor",
+  "canonical_byte_length": 237,
+  "canonical_encoding": "deterministic-cbor-rfc8949-4.2.1"
+}

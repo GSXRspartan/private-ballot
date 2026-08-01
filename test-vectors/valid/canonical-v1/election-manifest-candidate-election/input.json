@@ -1,0 +1,11 @@
+{
+  "schema": "tari-cc-private-ballot-valid-input-v1",
+  "vector_id": "election-manifest-candidate-election",
+  "object_family": "election-manifest-v1",
+  "decision_type": "candidate-election",
+  "decision_label": "Candidate election",
+  "ballot_kind": "NON_BINDING_APPROVAL_PILOT",
+  "ballot_confidentiality": "PUBLIC",
+  "proof_suite_id": "TEST_ONLY_NOT_ANONYMOUS_NOT_FOR_BINDING_ELECTIONS",
+  "allows_abstention": true
+}

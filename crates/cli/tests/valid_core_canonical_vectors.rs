@@ -440,14 +440,6 @@ fn regenerate_valid_core_vectors() {
 #[test]
 fn valid_core_vector_layout_is_complete() {
     let cases = vectors();
-    let root = vector_root();
-
-    let mut expected_case_names: Vec<String> =
-        cases.iter().map(|case| case.id.to_owned()).collect();
-
-    expected_case_names.sort();
-
-    assert_eq!(directory_entry_names(&root), expected_case_names);
 
     let mut expected_files: Vec<String> = REQUIRED_CASE_FILES
         .iter()

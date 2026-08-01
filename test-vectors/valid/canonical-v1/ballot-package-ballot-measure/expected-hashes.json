@@ -1,0 +1,8 @@
+{
+  "schema": "tari-cc-private-ballot-valid-hash-v1",
+  "vector_id": "ballot-package-ballot-measure",
+  "decision_type": "ballot-measure",
+  "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
+  "domain_label": "tari-cc-private-ballot/ballot-package/v1",
+  "digest_hex": "f28b3c3246d6a0d8606946e4e8439a802b5690231f57e25658fc736686b412cf"
+}
