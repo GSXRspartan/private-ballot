@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "invalid-utf8-text",
+  "target": "generic-text",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 2
+}

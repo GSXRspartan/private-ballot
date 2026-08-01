@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "indefinite-array",
+  "target": "generic-array",
+  "accepted": false,
+  "expected_rejection_code": "NON_CANONICAL_CBOR"
+}

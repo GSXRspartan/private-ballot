@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "truncated-candidate-set",
+  "target": "candidate-set",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 1
+}

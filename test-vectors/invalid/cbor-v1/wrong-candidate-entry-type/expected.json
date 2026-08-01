@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "wrong-candidate-entry-type",
+  "target": "candidate-set",
+  "accepted": false,
+  "expected_rejection_code": "UNEXPECTED_CBOR_TYPE"
+}

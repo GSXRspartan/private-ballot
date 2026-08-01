@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "trailing-registry-data",
+  "target": "registry-snapshot",
+  "accepted": false,
+  "expected_rejection_code": "TRAILING_CBOR_DATA"
+}

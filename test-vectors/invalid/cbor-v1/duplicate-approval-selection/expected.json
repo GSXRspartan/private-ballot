@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "duplicate-approval-selection",
+  "target": "approval-payload-min1-max2",
+  "accepted": false,
+  "expected_rejection_code": "DUPLICATE_SELECTION"
+}

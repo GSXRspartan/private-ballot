@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "trailing-registry-data",
+  "target": "registry-snapshot",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 4
+}

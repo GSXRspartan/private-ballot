@@ -20,7 +20,9 @@ dependencies = [
 name = "tari-cc-private-ballot-cli"
 version = "0.1.0"
 dependencies = [
+ "tari-cc-private-ballot-ballot",
  "tari-cc-private-ballot-protocol",
+ "tari-cc-private-ballot-registry",
 ]
 
 [[package]]

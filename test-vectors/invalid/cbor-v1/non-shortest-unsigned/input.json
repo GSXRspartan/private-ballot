@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "non-shortest-unsigned",
+  "target": "generic-unsigned",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 2
+}

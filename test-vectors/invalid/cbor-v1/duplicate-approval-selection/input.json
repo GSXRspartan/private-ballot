@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "duplicate-approval-selection",
+  "target": "approval-payload-min1-max2",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 5
+}

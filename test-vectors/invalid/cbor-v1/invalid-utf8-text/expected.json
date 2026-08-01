@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "invalid-utf8-text",
+  "target": "generic-text",
+  "accepted": false,
+  "expected_rejection_code": "INVALID_CBOR"
+}

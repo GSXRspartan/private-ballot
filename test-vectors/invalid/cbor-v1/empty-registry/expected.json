@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "empty-registry",
+  "target": "registry-snapshot",
+  "accepted": false,
+  "expected_rejection_code": "EMPTY_REGISTRY"
+}

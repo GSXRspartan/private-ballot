@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "duplicate-candidate-id",
+  "target": "candidate-set",
+  "accepted": false,
+  "expected_rejection_code": "DUPLICATE_CANDIDATE_ID"
+}

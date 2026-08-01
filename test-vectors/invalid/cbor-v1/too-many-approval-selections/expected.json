@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "too-many-approval-selections",
+  "target": "approval-payload-min1-max1",
+  "accepted": false,
+  "expected_rejection_code": "SELECTION_COUNT_OUT_OF_RANGE"
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "empty-registry",
+  "target": "registry-snapshot",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 1
+}

@@ -8,5 +8,9 @@ publish = false
 [dependencies]
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 
+[dev-dependencies]
+tari-cc-private-ballot-ballot = { path = "../ballot" }
+tari-cc-private-ballot-registry = { path = "../registry" }
+
 [lints]
 workspace = true

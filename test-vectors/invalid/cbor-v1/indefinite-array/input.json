@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "indefinite-array",
+  "target": "generic-array",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 1
+}

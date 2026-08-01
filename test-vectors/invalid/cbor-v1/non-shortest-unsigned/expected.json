@@ -1,0 +1,7 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "non-shortest-unsigned",
+  "target": "generic-unsigned",
+  "accepted": false,
+  "expected_rejection_code": "NON_CANONICAL_CBOR"
+}
