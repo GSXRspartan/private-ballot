@@ -1,12 +1,52 @@
 //! Proof invocation using verifier-reconstructed statements.
 
 use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionManifestV1};
-use tari_cc_private_ballot_crypto::{ProofVerifierV1, VerifiedProofV1};
+use tari_cc_private_ballot_crypto::{ProofVerifierV1, VerifiedNullifier, VerifiedProofV1};
 use tari_cc_private_ballot_protocol::{
-    HashProvider, MAX_PROOF_BYTES, ProtocolError, ValidationCode,
+    HashProvider, MAX_PROOF_BYTES, ProofStatementV1, ProtocolError, ValidationCode,
 };
 
 use crate::reconstruct_approval_proof_statement;
+
+/// One approval ballot whose exact statement and payload passed proof verification.
+///
+/// This type has no public constructor. Callers cannot combine a verified
+/// proof with a different payload before acceptance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedApprovalBallotV1 {
+    proof: VerifiedProofV1,
+    payload: ApprovalBallotPayload,
+}
+
+impl VerifiedApprovalBallotV1 {
+    /// Returns the complete successful proof-verification result.
+    #[must_use]
+    pub const fn proof(&self) -> &VerifiedProofV1 {
+        &self.proof
+    }
+
+    /// Returns the exact statement authenticated by the proof.
+    #[must_use]
+    pub const fn statement(&self) -> &ProofStatementV1 {
+        self.proof.statement()
+    }
+
+    /// Returns the proof-authenticated nullifier.
+    #[must_use]
+    pub const fn nullifier(&self) -> &VerifiedNullifier {
+        self.proof.nullifier()
+    }
+
+    /// Returns the exact payload whose hash was authenticated.
+    #[must_use]
+    pub const fn payload(&self) -> &ApprovalBallotPayload {
+        &self.payload
+    }
+
+    pub(crate) fn into_parts(self) -> (VerifiedProofV1, ApprovalBallotPayload) {
+        (self.proof, self.payload)
+    }
+}
 
 /// Reconstructs and verifies one approval-ballot proof.
 ///
@@ -18,7 +58,7 @@ pub fn verify_approval_proof<H, V>(
     proof_bytes: &[u8],
     hash_provider: &H,
     proof_verifier: &V,
-) -> Result<VerifiedProofV1, ProtocolError>
+) -> Result<VerifiedApprovalBallotV1, ProtocolError>
 where
     H: HashProvider,
     V: ProofVerifierV1,
@@ -55,7 +95,10 @@ where
         ));
     }
 
-    Ok(verified)
+    Ok(VerifiedApprovalBallotV1 {
+        proof: verified,
+        payload: payload.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -141,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_verification_returns_authenticated_nullifier() {
+    fn successful_verification_returns_authenticated_nullifier_and_payload() {
         let provider = TestOnlyDeterministicHasher;
         let manifest = manifest_with_suite(TEST_ONLY_SUITE_ID);
         let candidates = candidate_set();
@@ -167,6 +210,7 @@ mod tests {
 
         assert_eq!(result.statement(), &statement);
         assert_eq!(result.nullifier().as_bytes(), b"authenticated-nf");
+        assert_eq!(result.payload(), &payload);
     }
 
     #[test]

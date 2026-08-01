@@ -7,13 +7,15 @@ use tari_cc_private_ballot_protocol::{
 use crate::ApprovalBallotPayload;
 
 /// Unvalidated fields used to construct a version-one ballot package.
+///
+/// Duplicate-detection material is deliberately absent. A nullifier or
+/// key image becomes authoritative only after successful proof verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BallotPackageV1Input {
     pub protocol_version: u16,
     pub manifest_hash: ManifestHash,
     pub proof_suite_id: String,
     pub proof: Vec<u8>,
-    pub claimed_nullifier: Vec<u8>,
     pub payload: ApprovalBallotPayload,
 }
 
@@ -24,7 +26,6 @@ pub struct BallotPackageV1 {
     manifest_hash: ManifestHash,
     proof_suite_id: String,
     proof: Vec<u8>,
-    claimed_nullifier: Vec<u8>,
     payload: ApprovalBallotPayload,
 }
 
@@ -45,19 +46,11 @@ impl BallotPackageV1 {
             ));
         }
 
-        if input.claimed_nullifier.is_empty() {
-            return Err(ProtocolError::new(
-                ValidationCode::EmptyNullifier,
-                "claimed election-scoped nullifier must not be empty",
-            ));
-        }
-
         Ok(Self {
             protocol_version: input.protocol_version,
             manifest_hash: input.manifest_hash,
             proof_suite_id: input.proof_suite_id,
             proof: input.proof,
-            claimed_nullifier: input.claimed_nullifier,
             payload: input.payload,
         })
     }
@@ -106,11 +99,6 @@ impl BallotPackageV1 {
     }
 
     #[must_use]
-    pub fn claimed_nullifier(&self) -> &[u8] {
-        &self.claimed_nullifier
-    }
-
-    #[must_use]
     pub const fn payload(&self) -> &ApprovalBallotPayload {
         &self.payload
     }
@@ -156,13 +144,12 @@ mod tests {
         payload
     }
 
-    fn package() -> BallotPackageV1 {
+    fn package_with_proof(proof: Vec<u8>) -> BallotPackageV1 {
         let input = BallotPackageV1Input {
             protocol_version: PROTOCOL_VERSION_V1,
             manifest_hash: ManifestHash::new([5_u8; 32]),
             proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
-            proof: b"TEST_ONLY_PROOF".to_vec(),
-            claimed_nullifier: b"nullifier-a".to_vec(),
+            proof,
             payload: payload(),
         };
 
@@ -171,6 +158,10 @@ mod tests {
         };
 
         package
+    }
+
+    fn package() -> BallotPackageV1 {
+        package_with_proof(b"TEST_ONLY_PROOF".to_vec())
     }
 
     #[test]
@@ -210,21 +201,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_claimed_nullifier_is_rejected() {
-        let input = BallotPackageV1Input {
-            protocol_version: PROTOCOL_VERSION_V1,
-            manifest_hash: ManifestHash::new([5_u8; 32]),
-            proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
-            proof: Vec::new(),
-            claimed_nullifier: Vec::new(),
-            payload: payload(),
-        };
+    fn proof_and_payload_are_preserved_without_nullifier_metadata() {
+        let package = package();
 
-        let result = BallotPackageV1::new(input);
+        assert_eq!(package.proof(), b"TEST_ONLY_PROOF");
+        assert_eq!(package.payload().selections()[0].as_bytes(), b"candidate-a");
+    }
 
-        assert!(matches!(
-            result,
-            Err(error) if error.code() == ValidationCode::EmptyNullifier
-        ));
+    #[test]
+    fn empty_proof_is_left_for_the_verifier_boundary_to_reject() {
+        let package = package_with_proof(Vec::new());
+
+        assert!(package.proof().is_empty());
     }
 }
