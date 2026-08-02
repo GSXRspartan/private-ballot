@@ -383,6 +383,7 @@ dependencies = [
  "tari-cc-private-ballot-ballot",
  "tari-cc-private-ballot-crypto",
  "tari-cc-private-ballot-protocol",
+ "tari-cc-private-ballot-registry",
 ]
 
 [[package]]

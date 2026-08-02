@@ -4,9 +4,11 @@
 
 mod proof_statement;
 mod proof_verification;
+mod triptych_registry;
 
 pub use proof_statement::reconstruct_approval_proof_statement;
 pub use proof_verification::{VerifiedApprovalBallotV1, verify_approval_proof};
+pub use triptych_registry::build_tari_triptych_verifier_from_registry_v1;
 
 use std::collections::BTreeSet;
 
