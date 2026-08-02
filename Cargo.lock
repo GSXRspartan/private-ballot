@@ -353,8 +353,10 @@ dependencies = [
  "curve25519-dalek 4.1.3",
  "curve25519-dalek 5.0.0",
  "merlin",
+ "rand_core",
  "tari-cc-private-ballot-protocol",
  "triptych",
+ "zeroize",
 ]
 
 [[package]]

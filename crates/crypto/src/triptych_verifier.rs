@@ -120,7 +120,9 @@ impl ProofVerifierV1 for TariTriptychPrototypeVerifierV1 {
     }
 }
 
-fn triptych_transcript_v1(statement: &ProofStatementV1) -> Result<Transcript, ProtocolError> {
+pub(crate) fn triptych_transcript_v1(
+    statement: &ProofStatementV1,
+) -> Result<Transcript, ProtocolError> {
     let mut transcript = Transcript::new(TARI_TRIPTYCH_TRANSCRIPT_LABEL_V1);
     let statement_bytes = statement.transcript_bytes()?;
 
