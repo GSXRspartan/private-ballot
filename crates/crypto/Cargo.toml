@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 curve25519-dalek = { version = "=5.0.0", default-features = false, features = ["zeroize"] }
+triptych = { path = "../../third_party/tari-triptych", default-features = false }
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 
 [lints]
