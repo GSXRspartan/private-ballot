@@ -61,7 +61,7 @@ impl RistrettoPublicKeyV1 {
     }
 }
 
-fn decode_non_identity(
+pub(crate) fn decode_non_identity(
     encoded: [u8; RISTRETTO_COMPRESSED_POINT_BYTES],
 ) -> Result<RistrettoPoint, ProtocolError> {
     let Some(point) = CompressedRistretto(encoded).decompress() else {
