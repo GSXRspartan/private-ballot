@@ -59,6 +59,15 @@ pub(crate) fn build_triptych_statement_v1(
         .map_err(|_| malformed_proof("Triptych rejected the prototype proof statement"))
 }
 
+pub(crate) fn validate_triptych_registry_keys_v1(
+    registry_keys: &[[u8; COMPRESSED_RISTRETTO_BYTES]],
+) -> Result<(), ProtocolError> {
+    ring_exponent_v1(registry_keys.len())?;
+    parse_sorted_registry_keys_v1(registry_keys)?;
+
+    Ok(())
+}
+
 pub(crate) fn parse_canonical_triptych_proof_v1(
     proof_bytes: &[u8],
 ) -> Result<TriptychProof, ProtocolError> {
