@@ -9,9 +9,9 @@
 //! elections, key persistence, CLI secret handling, or Ootle deployment.
 
 use tari_cc_private_ballot_ballot::{
-    ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1,
-    CandidateDefinition, CandidateId, CandidateSet, ElectionId, ElectionLifecycleV1,
-    ElectionManifestV1, ElectionManifestV1Input,
+    ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
+    BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
+    ElectionLifecycleV1, ElectionManifestV1, ElectionManifestV1Input,
 };
 use tari_cc_private_ballot_crypto::{
     RISTRETTO_COMPRESSED_POINT_BYTES, TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychSecretKeyV1,
@@ -145,6 +145,111 @@ fn same_voter_in_different_elections_has_different_nullifiers() {
     );
 }
 
+#[test]
+fn real_triptych_package_round_trip_preserves_exact_bytes_and_verifies() {
+    let fixture = fixture(b"package-election-a");
+    let payload = payload(&fixture.candidates, b"candidate-a");
+    let package = package_for_payload(&fixture, &payload);
+    let provider = TestOnlyDeterministicHasher;
+
+    let Ok(original_hash) = package.canonical_hash(&provider) else {
+        panic!("real Triptych package hash must be derivable");
+    };
+    let Ok(encoded) = package.to_canonical_cbor() else {
+        panic!("real Triptych package must encode canonically");
+    };
+    let Ok(decoded) =
+        BallotPackageV1::from_canonical_cbor(&encoded, &fixture.candidates, approval_limits())
+    else {
+        panic!("real Triptych package must decode canonically");
+    };
+    let Ok(reencoded) = decoded.to_canonical_cbor() else {
+        panic!("decoded real Triptych package must re-encode");
+    };
+    let Ok(decoded_hash) = decoded.canonical_hash(&provider) else {
+        panic!("decoded real Triptych package hash must be derivable");
+    };
+
+    assert_eq!(reencoded, encoded);
+    assert_eq!(decoded_hash, original_hash);
+    assert_eq!(decoded.manifest_hash(), package.manifest_hash());
+    assert_eq!(decoded.proof_suite_id(), package.proof_suite_id());
+    assert_eq!(decoded.proof(), package.proof());
+    assert_eq!(decoded.payload(), package.payload());
+
+    let Ok(verified) = verify_decoded_package(&fixture, &decoded) else {
+        panic!("decoded real Triptych package must verify");
+    };
+    let lifecycle = open_lifecycle(&fixture.manifest);
+    let mut ledger = BallotAcceptanceLedger::new();
+
+    assert!(ledger.accept_verified(&lifecycle, verified).is_ok());
+    assert_eq!(ledger.len(), 1);
+}
+
+#[test]
+fn package_with_real_proof_and_changed_payload_is_rejected_after_round_trip() {
+    let fixture = fixture(b"package-election-b");
+    let first_payload = payload(&fixture.candidates, b"candidate-a");
+    let second_payload = payload(&fixture.candidates, b"candidate-b");
+    let first_package = package_for_payload(&fixture, &first_payload);
+
+    let Ok(changed_package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: first_package.manifest_hash(),
+        proof_suite_id: first_package.proof_suite_id().to_owned(),
+        proof: first_package.proof().to_vec(),
+        payload: second_payload,
+    }) else {
+        panic!("structurally valid changed-payload package must be constructible");
+    };
+    let Ok(encoded) = changed_package.to_canonical_cbor() else {
+        panic!("changed-payload package must encode canonically");
+    };
+    let Ok(decoded) =
+        BallotPackageV1::from_canonical_cbor(&encoded, &fixture.candidates, approval_limits())
+    else {
+        panic!("changed-payload package must decode canonically");
+    };
+
+    assert!(verify_decoded_package(&fixture, &decoded).is_err());
+}
+
+#[test]
+fn independently_round_tripped_packages_derive_one_election_nullifier() {
+    let fixture = fixture(b"package-election-c");
+    let first_payload = payload(&fixture.candidates, b"candidate-a");
+    let second_payload = payload(&fixture.candidates, b"candidate-b");
+    let first_package = round_trip_package(&fixture, package_for_payload(&fixture, &first_payload));
+    let second_package =
+        round_trip_package(&fixture, package_for_payload(&fixture, &second_payload));
+
+    let Ok(first_verified) = verify_decoded_package(&fixture, &first_package) else {
+        panic!("first round-tripped real Triptych package must verify");
+    };
+    let Ok(second_verified) = verify_decoded_package(&fixture, &second_package) else {
+        panic!("second round-tripped real Triptych package must verify");
+    };
+
+    assert_eq!(
+        first_verified.nullifier().as_bytes(),
+        second_verified.nullifier().as_bytes(),
+    );
+
+    let lifecycle = open_lifecycle(&fixture.manifest);
+    let mut ledger = BallotAcceptanceLedger::new();
+
+    assert!(ledger.accept_verified(&lifecycle, first_verified).is_ok());
+
+    let duplicate = ledger.accept_verified(&lifecycle, second_verified);
+
+    assert!(matches!(
+        duplicate,
+        Err(error) if error.code() == ValidationCode::DuplicateNullifier
+    ));
+    assert_eq!(ledger.len(), 1);
+}
+
 struct Fixture {
     registry: RegistrySnapshot,
     candidates: CandidateSet,
@@ -184,6 +289,75 @@ fn fixture(election_id_bytes: &[u8]) -> Fixture {
         candidates,
         manifest,
     }
+}
+
+fn package_for_payload(fixture: &Fixture, payload: &ApprovalBallotPayload) -> BallotPackageV1 {
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(verifier) = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("registry-bound Triptych verifier must be constructible");
+    };
+    let Ok(statement) = reconstruct_approval_proof_statement(&fixture.manifest, payload, &provider)
+    else {
+        panic!("package proof statement must be reconstructible");
+    };
+    let secret = secret_key();
+    let Ok(proof) = prove_tari_triptych_prototype_v1(&statement, &verifier, &secret) else {
+        panic!("real Triptych package proof must be constructible");
+    };
+    let Ok(manifest_hash) = fixture.manifest.canonical_hash(&provider) else {
+        panic!("package manifest hash must be derivable");
+    };
+    let Ok(package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        proof,
+        payload: payload.clone(),
+    }) else {
+        panic!("real Triptych ballot package must be valid");
+    };
+
+    package
+}
+
+fn round_trip_package(fixture: &Fixture, package: BallotPackageV1) -> BallotPackageV1 {
+    let Ok(encoded) = package.to_canonical_cbor() else {
+        panic!("real Triptych package must encode canonically");
+    };
+    let Ok(decoded) =
+        BallotPackageV1::from_canonical_cbor(&encoded, &fixture.candidates, approval_limits())
+    else {
+        panic!("real Triptych package must decode canonically");
+    };
+    let Ok(reencoded) = decoded.to_canonical_cbor() else {
+        panic!("decoded real Triptych package must re-encode");
+    };
+
+    assert_eq!(reencoded, encoded);
+
+    decoded
+}
+
+fn verify_decoded_package(
+    fixture: &Fixture,
+    package: &BallotPackageV1,
+) -> Result<VerifiedApprovalBallotV1, ProtocolError> {
+    let provider = TestOnlyDeterministicHasher;
+    let manifest_hash = fixture.manifest.canonical_hash(&provider)?;
+
+    assert_eq!(package.manifest_hash(), manifest_hash);
+    assert_eq!(package.proof_suite_id(), fixture.manifest.proof_suite_id(),);
+
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)?;
+
+    verify_approval_proof(
+        &fixture.manifest,
+        package.payload(),
+        package.proof(),
+        &provider,
+        &verifier,
+    )
 }
 
 fn prove_and_verify(
