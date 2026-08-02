@@ -6,6 +6,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+blake3 = { version = "=1.8.5", default-features = false }
+curve25519-dalek-v4 = { package = "curve25519-dalek", version = "=4.1.3", default-features = false, features = ["alloc", "digest", "rand_core", "zeroize"] }
 curve25519-dalek = { version = "=5.0.0", default-features = false, features = ["zeroize"] }
 triptych = { path = "../../third_party/tari-triptych", default-features = false }
 tari-cc-private-ballot-protocol = { path = "../protocol" }

@@ -335,6 +335,8 @@ dependencies = [
 name = "tari-cc-private-ballot-crypto"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "curve25519-dalek 4.1.3",
  "curve25519-dalek 5.0.0",
  "tari-cc-private-ballot-protocol",
  "triptych",

@@ -8,6 +8,7 @@
 mod ristretto;
 pub mod test_only_verifier;
 mod triptych_adapter;
+mod triptych_prototype;
 mod verification;
 
 pub use ristretto::{RISTRETTO_COMPRESSED_POINT_BYTES, RistrettoPublicKeyV1};
