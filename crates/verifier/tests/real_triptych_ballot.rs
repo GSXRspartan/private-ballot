@@ -24,8 +24,8 @@ use tari_cc_private_ballot_protocol::{
 use tari_cc_private_ballot_registry::RegistrySnapshot;
 use tari_cc_private_ballot_verifier::{
     BallotAcceptanceLedger, VerifiedApprovalBallotV1,
-    build_tari_triptych_verifier_from_registry_v1, reconstruct_approval_proof_statement,
-    verify_approval_proof,
+    build_tari_triptych_verifier_from_registry_v1, ingest_approval_ballot_package_v1,
+    reconstruct_approval_proof_statement, verify_approval_proof,
 };
 
 const RISTRETTO_BASEPOINT_BYTES: [u8; RISTRETTO_COMPRESSED_POINT_BYTES] = [
@@ -41,17 +41,140 @@ const SECRET_SCALAR_ONE_BYTES: [u8; RISTRETTO_COMPRESSED_POINT_BYTES] = [
 fn real_triptych_ballot_verifies_through_the_application_boundary() {
     let fixture = fixture(b"integration-election-a");
     let payload = payload(&fixture.candidates, b"candidate-a");
-
-    let Ok(verified) = prove_and_verify(&fixture, &payload) else {
-        panic!("real Triptych ballot must verify through the application boundary");
+    let package = package_for_payload(&fixture, &payload);
+    let Ok(package_bytes) = package.to_canonical_cbor() else {
+        panic!("real Triptych package must encode canonically");
+    };
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(verifier) = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("registry-bound Triptych verifier must be constructible");
     };
     let lifecycle = open_lifecycle(&fixture.manifest);
     let mut ledger = BallotAcceptanceLedger::new();
 
-    assert_eq!(verified.payload(), &payload);
-    assert!(ledger.accept_verified(&lifecycle, verified).is_ok());
+    assert!(
+        ingest_approval_ballot_package_v1(
+            &package_bytes,
+            &fixture.manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        )
+        .is_ok()
+    );
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger.accepted_ballots()[0].payload(), &payload);
+}
+
+#[test]
+fn bound_ingestion_rejects_a_proof_copied_to_another_election() {
+    let first_fixture = fixture(b"integration-copy-source");
+    let second_fixture = fixture(b"integration-copy-target");
+    let payload = payload(&first_fixture.candidates, b"candidate-a");
+    let first_package = package_for_payload(&first_fixture, &payload);
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(target_manifest_hash) = second_fixture.manifest.canonical_hash(&provider) else {
+        panic!("target manifest hash must be derivable");
+    };
+    let Ok(copied_package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: target_manifest_hash,
+        proof_suite_id: second_fixture.manifest.proof_suite_id().to_owned(),
+        proof: first_package.proof().to_vec(),
+        payload: first_package.payload().clone(),
+    }) else {
+        panic!("copied-proof package must remain structurally valid");
+    };
+    let Ok(package_bytes) = copied_package.to_canonical_cbor() else {
+        panic!("copied-proof package must encode canonically");
+    };
+    let Ok(verifier) =
+        build_tari_triptych_verifier_from_registry_v1(&second_fixture.registry, &provider)
+    else {
+        panic!("target registry verifier must be constructible");
+    };
+    let lifecycle = open_lifecycle(&second_fixture.manifest);
+    let mut ledger = BallotAcceptanceLedger::new();
+
+    assert!(
+        ingest_approval_ballot_package_v1(
+            &package_bytes,
+            &second_fixture.manifest,
+            &second_fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        )
+        .is_err()
+    );
+    assert!(ledger.is_empty());
+}
+
+#[test]
+fn bound_ingestion_rejects_a_proof_when_the_manifest_registry_changes() {
+    let fixture = fixture(b"integration-registry-source");
+    let payload = payload(&fixture.candidates, b"candidate-a");
+    let first_package = package_for_payload(&fixture, &payload);
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(candidate_set_commitment) = fixture.candidates.canonical_commitment(&provider) else {
+        panic!("candidate commitment must be derivable");
+    };
+    let Ok(election_id) = ElectionId::new(b"integration-registry-target".to_vec()) else {
+        panic!("target election ID must be valid");
+    };
+    let Ok(modified_manifest) = ElectionManifestV1::new(ElectionManifestV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        election_id,
+        ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+        ballot_confidentiality: BallotConfidentialityV1::Public,
+        registry_commitment: tari_cc_private_ballot_protocol::RegistryCommitment::new([9_u8; 32]),
+        candidate_set_commitment,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        approval_limits: approval_limits(),
+        governance_source_revision: "integration-registry-target".to_owned(),
+    }) else {
+        panic!("modified-registry manifest must be valid");
+    };
+    let Ok(modified_manifest_hash) = modified_manifest.canonical_hash(&provider) else {
+        panic!("modified-registry manifest hash must be derivable");
+    };
+    let Ok(copied_package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: modified_manifest_hash,
+        proof_suite_id: modified_manifest.proof_suite_id().to_owned(),
+        proof: first_package.proof().to_vec(),
+        payload: first_package.payload().clone(),
+    }) else {
+        panic!("modified-registry package must remain structurally valid");
+    };
+    let Ok(package_bytes) = copied_package.to_canonical_cbor() else {
+        panic!("modified-registry package must encode canonically");
+    };
+    let Ok(original_verifier) =
+        build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("source registry verifier must be constructible");
+    };
+    let lifecycle = open_lifecycle(&modified_manifest);
+    let mut ledger = BallotAcceptanceLedger::new();
+
+    assert!(
+        ingest_approval_ballot_package_v1(
+            &package_bytes,
+            &modified_manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &original_verifier,
+        )
+        .is_err()
+    );
+    assert!(ledger.is_empty());
 }
 
 #[test]

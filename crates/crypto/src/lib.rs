@@ -6,6 +6,7 @@
 //! verification results or authenticated duplicate-detection material.
 
 mod ristretto;
+#[cfg(any(test, feature = "test-only-suites"))]
 pub mod test_only_verifier;
 mod triptych_adapter;
 mod triptych_prototype;

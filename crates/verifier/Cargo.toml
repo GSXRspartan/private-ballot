@@ -11,5 +11,8 @@ tari-cc-private-ballot-crypto = { path = "../crypto" }
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 tari-cc-private-ballot-registry = { path = "../registry" }
 
+[dev-dependencies]
+tari-cc-private-ballot-crypto = { path = "../crypto", features = ["test-only-suites"] }
+
 [lints]
 workspace = true

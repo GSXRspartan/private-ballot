@@ -46,6 +46,21 @@ pub struct BallotPackageV1 {
     payload: ApprovalBallotPayload,
 }
 
+/// Canonically decoded ballot-package transport fields before payload context is applied.
+///
+/// The raw payload bytes remain untrusted until [`Self::into_ballot_package`]
+/// decodes them against an authoritative candidate set and manifest-derived
+/// approval limits. This lets application boundaries validate package binding
+/// before materializing the payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BallotPackageEnvelopeV1 {
+    protocol_version: u16,
+    manifest_hash: ManifestHash,
+    proof_suite_id: String,
+    proof: Vec<u8>,
+    payload_bytes: Vec<u8>,
+}
+
 impl BallotPackageV1 {
     /// Validates and freezes a version-one ballot package.
     pub fn new(input: BallotPackageV1Input) -> Result<Self, ProtocolError> {
@@ -120,77 +135,8 @@ impl BallotPackageV1 {
         candidates: &CandidateSet,
         limits: ApprovalLimits,
     ) -> Result<Self, ProtocolError> {
-        if encoded.len() > MAX_CANONICAL_OBJECT_BYTES {
-            return Err(ProtocolError::new(
-                ValidationCode::ProtocolLimitExceeded,
-                "encoded ballot package exceeds the protocol object limit",
-            ));
-        }
-
-        let mut reader = CanonicalCborReader::new(encoded);
-
-        if reader.read_array_len()? != BALLOT_PACKAGE_V1_FIELD_COUNT {
-            return Err(ProtocolError::new(
-                ValidationCode::InvalidCbor,
-                "ballot package must contain exactly five fields",
-            ));
-        }
-
-        let protocol_version = u16::try_from(reader.read_unsigned()?).map_err(|_| {
-            ProtocolError::new(
-                ValidationCode::InvalidCbor,
-                "ballot package protocol version exceeds the u16 range",
-            )
-        })?;
-
-        let manifest_hash_bytes = reader.read_byte_string()?;
-        let manifest_hash_array: [u8; 32] = manifest_hash_bytes.try_into().map_err(|_| {
-            ProtocolError::new(
-                ValidationCode::InvalidData,
-                "ballot package manifest hash must contain exactly 32 bytes",
-            )
-        })?;
-
-        let proof_suite_id = reader.read_text_string()?;
-
-        if proof_suite_id.len() > MAX_PROOF_SUITE_ID_BYTES {
-            return Err(ProtocolError::new(
-                ValidationCode::ProtocolLimitExceeded,
-                "proof suite identifier exceeds the protocol limit",
-            ));
-        }
-
-        let payload_bytes = reader.read_byte_string()?;
-        let proof_bytes = reader.read_byte_string()?;
-
-        if proof_bytes.len() > MAX_PROOF_BYTES {
-            return Err(ProtocolError::new(
-                ValidationCode::ProtocolLimitExceeded,
-                "proof bytes exceed the protocol limit",
-            ));
-        }
-
-        reader.finish()?;
-
-        let payload =
-            ApprovalBallotPayload::from_canonical_cbor(payload_bytes, candidates, limits)?;
-
-        let package = Self::new(BallotPackageV1Input {
-            protocol_version,
-            manifest_hash: ManifestHash::new(manifest_hash_array),
-            proof_suite_id: proof_suite_id.to_owned(),
-            proof: proof_bytes.to_vec(),
-            payload,
-        })?;
-
-        if package.to_canonical_cbor()? != encoded {
-            return Err(ProtocolError::new(
-                ValidationCode::NonCanonicalCbor,
-                "ballot package bytes are not the canonical encoding",
-            ));
-        }
-
-        Ok(package)
+        BallotPackageEnvelopeV1::from_canonical_cbor(encoded)?
+            .into_ballot_package(candidates, limits)
     }
 
     /// Derives the package hash from its exact canonical CBOR bytes.
@@ -250,6 +196,163 @@ impl BallotPackageV1 {
     #[must_use]
     pub const fn payload(&self) -> &ApprovalBallotPayload {
         &self.payload
+    }
+}
+
+impl BallotPackageEnvelopeV1 {
+    /// Strictly decodes the canonical package envelope without applying payload context.
+    pub fn from_canonical_cbor(encoded: &[u8]) -> Result<Self, ProtocolError> {
+        if encoded.len() > MAX_CANONICAL_OBJECT_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "encoded ballot package exceeds the protocol object limit",
+            ));
+        }
+
+        let mut reader = CanonicalCborReader::new(encoded);
+
+        if reader.read_array_len()? != BALLOT_PACKAGE_V1_FIELD_COUNT {
+            return Err(ProtocolError::new(
+                ValidationCode::InvalidCbor,
+                "ballot package must contain exactly five fields",
+            ));
+        }
+
+        let protocol_version = u16::try_from(reader.read_unsigned()?).map_err(|_| {
+            ProtocolError::new(
+                ValidationCode::InvalidCbor,
+                "ballot package protocol version exceeds the u16 range",
+            )
+        })?;
+
+        let manifest_hash_bytes = reader.read_byte_string()?;
+        let manifest_hash_array: [u8; 32] = manifest_hash_bytes.try_into().map_err(|_| {
+            ProtocolError::new(
+                ValidationCode::InvalidData,
+                "ballot package manifest hash must contain exactly 32 bytes",
+            )
+        })?;
+
+        let proof_suite_id = reader.read_text_string()?;
+        let payload_bytes = reader.read_byte_string()?;
+        let proof_bytes = reader.read_byte_string()?;
+
+        if proof_suite_id.trim().is_empty() {
+            return Err(ProtocolError::new(
+                ValidationCode::EmptyProofSuiteId,
+                "proof suite identifier must not be empty",
+            ));
+        }
+
+        if proof_suite_id.len() > MAX_PROOF_SUITE_ID_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "proof suite identifier exceeds the protocol limit",
+            ));
+        }
+
+        if proof_bytes.len() > MAX_PROOF_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "proof bytes exceed the protocol limit",
+            ));
+        }
+
+        reader.finish()?;
+
+        let envelope = Self {
+            protocol_version,
+            manifest_hash: ManifestHash::new(manifest_hash_array),
+            proof_suite_id: proof_suite_id.to_owned(),
+            proof: proof_bytes.to_vec(),
+            payload_bytes: payload_bytes.to_vec(),
+        };
+
+        if envelope.protocol_version != PROTOCOL_VERSION_V1 {
+            return Err(ProtocolError::new(
+                ValidationCode::UnsupportedProtocolVersion,
+                "ballot package does not use protocol version one",
+            ));
+        }
+
+        if envelope.to_canonical_cbor()? != encoded {
+            return Err(ProtocolError::new(
+                ValidationCode::NonCanonicalCbor,
+                "ballot package bytes are not the canonical encoding",
+            ));
+        }
+
+        Ok(envelope)
+    }
+
+    /// Validates package binding before the payload is materialized.
+    pub fn validate_manifest_binding(
+        &self,
+        expected_manifest_hash: ManifestHash,
+        expected_proof_suite_id: &str,
+    ) -> Result<(), ProtocolError> {
+        if self.manifest_hash != expected_manifest_hash {
+            return Err(ProtocolError::new(
+                ValidationCode::WrongManifestHash,
+                "ballot package is bound to a different election manifest",
+            ));
+        }
+
+        if self.proof_suite_id != expected_proof_suite_id {
+            return Err(ProtocolError::new(
+                ValidationCode::UnsupportedProofSuite,
+                "ballot proof suite differs from the election manifest",
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Applies authoritative context and materializes a validated ballot package.
+    pub fn into_ballot_package(
+        self,
+        candidates: &CandidateSet,
+        limits: ApprovalLimits,
+    ) -> Result<BallotPackageV1, ProtocolError> {
+        let payload =
+            ApprovalBallotPayload::from_canonical_cbor(&self.payload_bytes, candidates, limits)?;
+
+        if payload.to_canonical_cbor()? != self.payload_bytes {
+            return Err(ProtocolError::new(
+                ValidationCode::NonCanonicalCbor,
+                "ballot payload bytes are not the canonical encoding",
+            ));
+        }
+
+        BallotPackageV1::new(BallotPackageV1Input {
+            protocol_version: self.protocol_version,
+            manifest_hash: self.manifest_hash,
+            proof_suite_id: self.proof_suite_id,
+            proof: self.proof,
+            payload,
+        })
+    }
+
+    fn to_canonical_cbor(&self) -> Result<Vec<u8>, ProtocolError> {
+        let mut writer = CanonicalCborWriter::new();
+
+        writer.write_array_len(BALLOT_PACKAGE_V1_FIELD_COUNT)?;
+        writer.write_unsigned(u64::from(self.protocol_version));
+        writer.write_byte_string(self.manifest_hash.as_bytes())?;
+        writer.write_text_string(&self.proof_suite_id)?;
+        writer.write_byte_string(&self.payload_bytes)?;
+        writer.write_byte_string(&self.proof)?;
+
+        let encoded = writer.into_bytes();
+
+        if encoded.len() > MAX_CANONICAL_OBJECT_BYTES {
+            return Err(ProtocolError::new(
+                ValidationCode::ProtocolLimitExceeded,
+                "canonical ballot package exceeds the protocol object limit",
+            ));
+        }
+
+        Ok(encoded)
     }
 }
 

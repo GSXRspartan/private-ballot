@@ -24,8 +24,8 @@ use tari_cc_private_ballot_registry::RegistrySnapshot;
 use tari_cc_private_ballot_tally::{ApprovalTally, LeadingResult};
 use tari_cc_private_ballot_verifier::{
     BallotAcceptanceLedger, VerifiedApprovalBallotV1,
-    build_tari_triptych_verifier_from_registry_v1, reconstruct_approval_proof_statement,
-    verify_approval_proof,
+    build_tari_triptych_verifier_from_registry_v1, ingest_approval_ballot_package_v1,
+    reconstruct_approval_proof_statement, verify_approval_proof,
 };
 
 const PUBLIC_KEY_ONE_BYTES: [u8; RISTRETTO_COMPRESSED_POINT_BYTES] = [
@@ -311,15 +311,21 @@ fn replay_packages(
     let lifecycle = open_lifecycle(&fixture.manifest)?;
     let mut transcript = VerificationTranscriptV1::new(manifest_hash);
     let mut ledger = BallotAcceptanceLedger::new();
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)?;
 
     for bytes in packages {
         let digest = raw_package_digest(bytes);
         let sequence = transcript.record_submission(digest, true)?;
-        let outcome = match verify_package_bytes(fixture, bytes) {
-            Ok(verified) => match ledger.accept_verified(&lifecycle, verified) {
-                Ok(()) => BallotDecisionOutcomeV1::Accepted,
-                Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
-            },
+        let outcome = match ingest_approval_ballot_package_v1(
+            bytes,
+            &fixture.manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        ) {
+            Ok(()) => BallotDecisionOutcomeV1::Accepted,
             Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
         };
 

@@ -362,6 +362,9 @@ dependencies = [
 [[package]]
 name = "tari-cc-private-ballot-protocol"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+]
 
 [[package]]
 name = "tari-cc-private-ballot-registry"

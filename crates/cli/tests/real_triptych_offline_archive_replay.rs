@@ -23,9 +23,8 @@ use tari_cc_private_ballot_protocol::{
 use tari_cc_private_ballot_registry::RegistrySnapshot;
 use tari_cc_private_ballot_tally::{ApprovalTally, LeadingResult};
 use tari_cc_private_ballot_verifier::{
-    BallotAcceptanceLedger, VerifiedApprovalBallotV1,
-    build_tari_triptych_verifier_from_registry_v1, reconstruct_approval_proof_statement,
-    verify_approval_proof,
+    BallotAcceptanceLedger, build_tari_triptych_verifier_from_registry_v1,
+    ingest_approval_ballot_package_v1, reconstruct_approval_proof_statement,
 };
 
 const RISTRETTO_BASEPOINT_BYTES: [u8; RISTRETTO_COMPRESSED_POINT_BYTES] = [
@@ -249,22 +248,21 @@ fn replay_packages(
     let lifecycle = open_lifecycle(&fixture.manifest)?;
     let mut transcript = VerificationTranscriptV1::new(manifest_hash);
     let mut ledger = BallotAcceptanceLedger::new();
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)?;
 
     for bytes in packages {
         let digest = raw_package_digest(bytes);
         let sequence = transcript.record_submission(digest, true)?;
-        let outcome = match BallotPackageV1::from_canonical_cbor(
+        let outcome = match ingest_approval_ballot_package_v1(
             bytes,
+            &fixture.manifest,
             &fixture.candidates,
-            approval_limits(),
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
         ) {
-            Ok(package) => match verify_decoded_package(fixture, &package) {
-                Ok(verified) => match ledger.accept_verified(&lifecycle, verified) {
-                    Ok(()) => BallotDecisionOutcomeV1::Accepted,
-                    Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
-                },
-                Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
-            },
+            Ok(()) => BallotDecisionOutcomeV1::Accepted,
             Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
         };
 
@@ -280,38 +278,6 @@ fn replay_packages(
     let tally = ApprovalTally::from_ballots(&fixture.candidates, accepted_payloads)?;
 
     Ok((transcript, tally))
-}
-
-fn verify_decoded_package(
-    fixture: &Fixture,
-    package: &BallotPackageV1,
-) -> Result<VerifiedApprovalBallotV1, ProtocolError> {
-    let provider = TestOnlyDeterministicHasher;
-    let manifest_hash = fixture.manifest.canonical_hash(&provider)?;
-
-    if package.manifest_hash() != manifest_hash {
-        return Err(ProtocolError::new(
-            ValidationCode::WrongManifestHash,
-            "archived ballot package manifest hash does not match the frozen manifest",
-        ));
-    }
-
-    if package.proof_suite_id() != fixture.manifest.proof_suite_id() {
-        return Err(ProtocolError::new(
-            ValidationCode::UnsupportedProofSuite,
-            "archived ballot package proof suite does not match the frozen manifest",
-        ));
-    }
-
-    let verifier = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)?;
-
-    verify_approval_proof(
-        &fixture.manifest,
-        package.payload(),
-        package.proof(),
-        &provider,
-        &verifier,
-    )
 }
 
 fn raw_package_digest(bytes: &[u8]) -> BallotPackageDigestV1 {

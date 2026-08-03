@@ -16,7 +16,8 @@ pub use commitment::{
 #[cfg(any(test, debug_assertions))]
 pub use hashing::test_only;
 pub use hashing::{
-    HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
+    BLAKE3_256_HASH_ALGORITHM_ID_V1, Blake3HashProviderV1, HASH_FRAME_PREFIX, HashDomain,
+    HashProvider, domain_separated_input, hash_domain_separated,
 };
 pub use limits::{
     MAX_ARCHIVE_FILES, MAX_ARCHIVE_PATH_BYTES, MAX_BALLOT_CONFIDENTIALITY_ID_BYTES,
@@ -58,6 +59,7 @@ pub enum ValidationCode {
     EmptyCandidateId,
     EmptyCandidateDisplayName,
     DuplicateCandidateId,
+    CandidateSetCommitmentMismatch,
     InvalidSelectionLimits,
     SelectionCountOutOfRange,
     DuplicateSelection,
@@ -107,6 +109,7 @@ impl ValidationCode {
             Self::EmptyCandidateId => "EMPTY_CANDIDATE_ID",
             Self::EmptyCandidateDisplayName => "EMPTY_CANDIDATE_DISPLAY_NAME",
             Self::DuplicateCandidateId => "DUPLICATE_CANDIDATE_ID",
+            Self::CandidateSetCommitmentMismatch => "CANDIDATE_SET_COMMITMENT_MISMATCH",
             Self::InvalidSelectionLimits => "INVALID_SELECTION_LIMITS",
             Self::SelectionCountOutOfRange => "SELECTION_COUNT_OUT_OF_RANGE",
             Self::DuplicateSelection => "DUPLICATE_SELECTION",
@@ -198,6 +201,10 @@ mod tests {
             (
                 ValidationCode::DuplicateCandidateId,
                 "DUPLICATE_CANDIDATE_ID",
+            ),
+            (
+                ValidationCode::CandidateSetCommitmentMismatch,
+                "CANDIDATE_SET_COMMITMENT_MISMATCH",
             ),
             (ValidationCode::UnknownCandidateId, "UNKNOWN_CANDIDATE_ID"),
             (

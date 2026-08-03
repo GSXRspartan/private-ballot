@@ -2,11 +2,15 @@
 
 //! Verified-ballot acceptance and duplicate-nullifier handling.
 
+mod approval_ingestion;
 mod proof_statement;
+mod proof_suite_policy;
 mod proof_verification;
 mod triptych_registry;
 
+pub use approval_ingestion::ingest_approval_ballot_package_v1;
 pub use proof_statement::reconstruct_approval_proof_statement;
+pub use proof_suite_policy::ProductionProofSuitePolicyV1;
 pub use proof_verification::{VerifiedApprovalBallotV1, verify_approval_proof};
 pub use triptych_registry::build_tari_triptych_verifier_from_registry_v1;
 

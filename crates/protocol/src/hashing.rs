@@ -44,6 +44,28 @@ pub trait HashProvider {
     fn hash(&self, framed_input: &[u8]) -> [u8; 32];
 }
 
+/// Stable production hash-algorithm identifier for version-one artifacts.
+pub const BLAKE3_256_HASH_ALGORITHM_ID_V1: &str = "BLAKE3-256/tari-cc-private-ballot/v1";
+
+/// Project-owned BLAKE3-256 provider for production protocol artifacts.
+///
+/// The provider hashes exactly the already domain-separated framing supplied by
+/// [`HashProvider`]. Archives and vectors produced with the test-only provider
+/// remain test artifacts and are not interchangeable with this provider's
+/// artifacts.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Blake3HashProviderV1;
+
+impl HashProvider for Blake3HashProviderV1 {
+    fn algorithm_id(&self) -> &'static str {
+        BLAKE3_256_HASH_ALGORITHM_ID_V1
+    }
+
+    fn hash(&self, framed_input: &[u8]) -> [u8; 32] {
+        *blake3::hash(framed_input).as_bytes()
+    }
+}
+
 /// Creates the exact bytes supplied to a hash provider.
 ///
 /// The frame is:
@@ -137,7 +159,8 @@ mod tests {
 
     use super::test_only::{TEST_ONLY_HASH_ALGORITHM_ID, TestOnlyDeterministicHasher};
     use super::{
-        HASH_FRAME_PREFIX, HashDomain, HashProvider, domain_separated_input, hash_domain_separated,
+        BLAKE3_256_HASH_ALGORITHM_ID_V1, Blake3HashProviderV1, HASH_FRAME_PREFIX, HashDomain,
+        HashProvider, domain_separated_input, hash_domain_separated,
     };
 
     #[test]
@@ -222,5 +245,62 @@ mod tests {
 
         assert_eq!(provider.algorithm_id(), TEST_ONLY_HASH_ALGORITHM_ID);
         assert!(provider.algorithm_id().contains("NOT_CRYPTOGRAPHIC"));
+    }
+
+    #[test]
+    fn production_provider_has_stable_known_answer_vectors() {
+        let provider = Blake3HashProviderV1;
+        let fragments: [&[u8]; 2] = [b"alpha-", b"beta"];
+        let joined_fragments = fragments.concat();
+        let actual = [
+            hash_domain_separated(&provider, HashDomain::ElectionManifestV1, b""),
+            hash_domain_separated(&provider, HashDomain::RegistrySnapshotV1, b"registry"),
+            hash_domain_separated(&provider, HashDomain::BallotPackageV1, b"one\0two\0three"),
+            hash_domain_separated(&provider, HashDomain::CandidateSetV1, b"same-bytes"),
+            hash_domain_separated(&provider, HashDomain::ElectionScopeV1, b"same-bytes"),
+            hash_domain_separated(
+                &provider,
+                HashDomain::ApprovalBallotPayloadV1,
+                &joined_fragments,
+            ),
+        ];
+        let expected = [
+            [
+                43, 14, 203, 170, 186, 2, 127, 76, 248, 164, 195, 190, 240, 62, 137, 139, 232, 89,
+                97, 131, 209, 14, 12, 99, 42, 190, 59, 118, 185, 85, 109, 214,
+            ],
+            [
+                130, 39, 4, 144, 13, 195, 72, 188, 109, 48, 147, 223, 242, 107, 38, 90, 44, 139,
+                72, 237, 99, 52, 193, 109, 216, 80, 117, 34, 4, 95, 234, 135,
+            ],
+            [
+                95, 68, 181, 83, 61, 51, 204, 193, 147, 176, 166, 6, 246, 91, 182, 79, 139, 183,
+                197, 200, 17, 40, 117, 233, 75, 203, 235, 170, 236, 116, 108, 245,
+            ],
+            [
+                71, 173, 216, 65, 229, 191, 51, 149, 46, 195, 168, 10, 165, 123, 155, 31, 19, 44,
+                140, 89, 38, 1, 58, 228, 132, 193, 134, 5, 162, 30, 54, 68,
+            ],
+            [
+                233, 224, 35, 233, 194, 210, 7, 130, 93, 131, 116, 26, 71, 176, 109, 94, 6, 107,
+                110, 85, 74, 111, 52, 50, 79, 246, 66, 115, 155, 217, 159, 58,
+            ],
+            [
+                52, 123, 46, 122, 62, 127, 161, 23, 97, 94, 242, 71, 21, 91, 185, 135, 233, 137,
+                70, 225, 237, 3, 158, 66, 145, 217, 136, 207, 154, 101, 243, 236,
+            ],
+        ];
+
+        assert_eq!(provider.algorithm_id(), BLAKE3_256_HASH_ALGORITHM_ID_V1);
+        assert_eq!(actual, expected);
+        assert_ne!(actual[3], actual[4]);
+        assert_eq!(
+            actual[5],
+            hash_domain_separated(
+                &provider,
+                HashDomain::ApprovalBallotPayloadV1,
+                b"alpha-beta",
+            )
+        );
     }
 }

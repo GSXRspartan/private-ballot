@@ -13,7 +13,7 @@ pub use lifecycle::{ElectionLifecycleStateV1, ElectionLifecycleV1};
 pub use manifest::{
     BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
 };
-pub use package::{BallotPackageV1, BallotPackageV1Input};
+pub use package::{BallotPackageEnvelopeV1, BallotPackageV1, BallotPackageV1Input};
 
 use tari_cc_private_ballot_protocol::{
     MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES, ProtocolError,
