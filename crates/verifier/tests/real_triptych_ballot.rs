@@ -14,7 +14,8 @@ use tari_cc_private_ballot_ballot::{
     ElectionLifecycleV1, ElectionManifestV1, ElectionManifestV1Input,
 };
 use tari_cc_private_ballot_crypto::{
-    RISTRETTO_COMPRESSED_POINT_BYTES, TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychSecretKeyV1,
+    RISTRETTO_COMPRESSED_POINT_BYTES, TARI_TRIPTYCH_PROOF_ENVELOPE_HEADER_BYTES,
+    TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychProofEnvelopeV1, TariTriptychSecretKeyV1,
     prove_tari_triptych_prototype_v1,
 };
 use tari_cc_private_ballot_protocol::{
@@ -311,6 +312,158 @@ fn real_triptych_package_round_trip_preserves_exact_bytes_and_verifies() {
 }
 
 #[test]
+fn appended_bytes_are_rejected_without_consuming_a_real_triptych_nullifier() {
+    let fixture = fixture(b"trailing-byte-rejection");
+    let ballot_payload = payload(&fixture.candidates, b"candidate-a");
+    let package = package_for_payload(&fixture, &ballot_payload);
+    let Ok(package_bytes) = package.to_canonical_cbor() else {
+        panic!("real Triptych package must encode canonically");
+    };
+    let Ok(decoded_package) = BallotPackageV1::from_canonical_cbor(
+        &package_bytes,
+        &fixture.candidates,
+        approval_limits(),
+    ) else {
+        panic!("canonical real Triptych package must decode");
+    };
+    let Ok(reencoded_package) = decoded_package.to_canonical_cbor() else {
+        panic!("decoded real Triptych package must re-encode");
+    };
+
+    assert_eq!(reencoded_package, package_bytes);
+
+    let Ok(canonical_payload_bytes) = ballot_payload.to_canonical_cbor() else {
+        panic!("real Triptych payload must encode canonically");
+    };
+    let package_suffixes = [
+        ("one zero byte", vec![0_u8]),
+        ("one nonzero byte", vec![0xa5_u8]),
+        (
+            "eight arbitrary bytes",
+            vec![0x10_u8, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87],
+        ),
+        ("thirty-two arbitrary bytes", vec![0x5a_u8; 32]),
+        ("canonical approval payload bytes", canonical_payload_bytes),
+    ];
+
+    for (label, suffix) in package_suffixes {
+        let mut mutated_package_bytes = package_bytes.clone();
+        mutated_package_bytes.extend_from_slice(&suffix);
+
+        assert_ne!(
+            mutated_package_bytes, package_bytes,
+            "{label} must alter the canonical ballot package bytes"
+        );
+
+        for repetition in 0..3 {
+            assert!(
+                matches!(
+                    BallotPackageV1::from_canonical_cbor(
+                        &mutated_package_bytes,
+                        &fixture.candidates,
+                        approval_limits(),
+                    ),
+                    Err(error) if error.code() == ValidationCode::TrailingCborData
+                ),
+                "{label} was not rejected by canonical package decoding on repetition {repetition}"
+            );
+        }
+
+        assert_rejected_package_does_not_consume_nullifier(
+            &fixture,
+            &package_bytes,
+            &mutated_package_bytes,
+            ValidationCode::TrailingCborData,
+            label,
+        );
+    }
+
+    let Ok(envelope) = TariTriptychProofEnvelopeV1::from_bytes(package.proof()) else {
+        panic!("real Triptych proof envelope must decode");
+    };
+    let original_inner_proof = envelope.triptych_proof_bytes().to_vec();
+    let other_payload = payload(&fixture.candidates, b"candidate-b");
+    let other_package = package_for_payload(&fixture, &other_payload);
+    let Ok(other_envelope) = TariTriptychProofEnvelopeV1::from_bytes(other_package.proof()) else {
+        panic!("second real Triptych proof envelope must decode");
+    };
+    let Some(serialized_a) = other_envelope.triptych_proof_bytes().get(8..40) else {
+        panic!("Triptych proof must contain its first serialized point");
+    };
+    let other_envelope_bytes = other_envelope.to_bytes();
+    let Some(version_and_linking_tag) =
+        other_envelope_bytes.get(..TARI_TRIPTYCH_PROOF_ENVELOPE_HEADER_BYTES)
+    else {
+        panic!("Triptych proof envelope must contain its fixed header");
+    };
+    let proof_suffixes = [
+        ("one zero byte", vec![0_u8]),
+        ("one nonzero byte", vec![0xa5_u8]),
+        (
+            "eight arbitrary bytes",
+            vec![0x10_u8, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87],
+        ),
+        ("thirty-two arbitrary bytes", vec![0x5a_u8; 32]),
+        (
+            "a serialized point copied from another valid proof",
+            serialized_a.to_vec(),
+        ),
+        (
+            "another envelope version and linking-tag header",
+            version_and_linking_tag.to_vec(),
+        ),
+        ("another complete valid envelope", other_envelope_bytes),
+    ];
+
+    for (label, suffix) in proof_suffixes {
+        let mut mutated_inner_proof = original_inner_proof.clone();
+        mutated_inner_proof.extend_from_slice(&suffix);
+        let Ok(mutated_envelope) =
+            TariTriptychProofEnvelopeV1::new(*envelope.linking_tag_bytes(), mutated_inner_proof)
+        else {
+            panic!("appended inner proof bytes must remain structurally encodable");
+        };
+        let Ok(mutated_package) = BallotPackageV1::new(BallotPackageV1Input {
+            protocol_version: package.protocol_version(),
+            manifest_hash: package.manifest_hash(),
+            proof_suite_id: package.proof_suite_id().to_owned(),
+            proof: mutated_envelope.to_bytes(),
+            payload: package.payload().clone(),
+        }) else {
+            panic!("package containing an appended proof envelope must remain canonical");
+        };
+        let Ok(mutated_package_bytes) = mutated_package.to_canonical_cbor() else {
+            panic!("package containing an appended proof envelope must encode canonically");
+        };
+        let Ok(decoded_mutated_package) = BallotPackageV1::from_canonical_cbor(
+            &mutated_package_bytes,
+            &fixture.candidates,
+            approval_limits(),
+        ) else {
+            panic!("canonical package with an appended proof envelope must decode");
+        };
+
+        for repetition in 0..3 {
+            assert!(
+                matches!(
+                    verify_decoded_package(&fixture, &decoded_mutated_package),
+                    Err(error) if error.code() == ValidationCode::MalformedProof
+                ),
+                "{label} was not rejected by proof verification on repetition {repetition}"
+            );
+        }
+
+        assert_rejected_package_does_not_consume_nullifier(
+            &fixture,
+            &package_bytes,
+            &mutated_package_bytes,
+            ValidationCode::MalformedProof,
+            label,
+        );
+    }
+}
+
+#[test]
 fn package_with_real_proof_and_changed_payload_is_rejected_after_round_trip() {
     let fixture = fixture(b"package-election-b");
     let first_payload = payload(&fixture.candidates, b"candidate-a");
@@ -578,4 +731,71 @@ fn open_lifecycle(manifest: &ElectionManifestV1) -> ElectionLifecycleV1 {
     assert!(lifecycle.open().is_ok());
 
     lifecycle
+}
+
+fn assert_rejected_package_does_not_consume_nullifier(
+    fixture: &Fixture,
+    original_package_bytes: &[u8],
+    rejected_package_bytes: &[u8],
+    expected_code: ValidationCode,
+    label: &str,
+) {
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(verifier) = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("registry-bound Triptych verifier must be constructible");
+    };
+    let lifecycle = open_lifecycle(&fixture.manifest);
+    let mut ledger = BallotAcceptanceLedger::new();
+
+    for repetition in 0..3 {
+        assert!(
+            matches!(
+                ingest_approval_ballot_package_v1(
+                    rejected_package_bytes,
+                    &fixture.manifest,
+                    &fixture.candidates,
+                    &lifecycle,
+                    &mut ledger,
+                    &provider,
+                    &verifier,
+                ),
+                Err(error) if error.code() == expected_code
+            ),
+            "{label} was not rejected by manifest-bound ingestion on repetition {repetition}"
+        );
+        assert!(
+            ledger.is_empty(),
+            "{label} must not mutate the acceptance ledger before rejection"
+        );
+    }
+
+    assert!(
+        ingest_approval_ballot_package_v1(
+            original_package_bytes,
+            &fixture.manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        )
+        .is_ok(),
+        "the original package must remain acceptable after {label}"
+    );
+    assert_eq!(ledger.len(), 1);
+
+    assert!(matches!(
+        ingest_approval_ballot_package_v1(
+            original_package_bytes,
+            &fixture.manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        ),
+        Err(error) if error.code() == ValidationCode::DuplicateNullifier
+    ));
+    assert_eq!(ledger.len(), 1);
 }

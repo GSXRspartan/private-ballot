@@ -142,6 +142,7 @@ fn malformed_proof(message: &'static str) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TARI_TRIPTYCH_PROOF_ENVELOPE_HEADER_BYTES;
     use curve25519_dalek_v4::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
     use tari_cc_private_ballot_protocol::{
         BallotPayloadHash, ElectionScope, ManifestHash, PROTOCOL_VERSION_V1, ProofStatementV1Input,
@@ -278,6 +279,106 @@ mod tests {
             verified.nullifier().as_bytes(),
             fixture.linking_tag.as_slice(),
         );
+    }
+
+    #[test]
+    fn canonical_triptych_proof_and_envelope_reject_appended_bytes() {
+        let fixture = valid_fixture(4);
+        let Ok(envelope) = TariTriptychProofEnvelopeV1::from_bytes(&fixture.envelope) else {
+            panic!("valid Triptych proof envelope must decode");
+        };
+        let canonical_proof = envelope.triptych_proof_bytes().to_vec();
+
+        assert!(parse_canonical_triptych_proof_v1(&canonical_proof).is_ok());
+        assert!(
+            fixture
+                .verifier
+                .verify(&fixture.statement, &fixture.envelope)
+                .is_ok()
+        );
+
+        let other_fixture = valid_fixture(5);
+        let Ok(other_envelope) = TariTriptychProofEnvelopeV1::from_bytes(&other_fixture.envelope)
+        else {
+            panic!("second valid Triptych proof envelope must decode");
+        };
+        let Some(serialized_a) = other_envelope.triptych_proof_bytes().get(8..40) else {
+            panic!("Triptych proof must contain its first serialized point");
+        };
+        let other_envelope_bytes = other_envelope.to_bytes();
+        let Some(version_and_linking_tag) =
+            other_envelope_bytes.get(..TARI_TRIPTYCH_PROOF_ENVELOPE_HEADER_BYTES)
+        else {
+            panic!("Triptych proof envelope must contain its fixed header");
+        };
+
+        let suffixes = [
+            ("one zero byte", vec![0_u8]),
+            ("one nonzero byte", vec![0xa5_u8]),
+            (
+                "eight arbitrary bytes",
+                vec![0x10_u8, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87],
+            ),
+            ("thirty-two arbitrary bytes", vec![0x5a_u8; 32]),
+            (
+                "a serialized point copied from another valid proof",
+                serialized_a.to_vec(),
+            ),
+            (
+                "another envelope version and linking-tag header",
+                version_and_linking_tag.to_vec(),
+            ),
+            ("another complete valid envelope", other_envelope_bytes),
+        ];
+
+        for (label, suffix) in suffixes {
+            let mut mutated_proof = canonical_proof.clone();
+            mutated_proof.extend_from_slice(&suffix);
+
+            assert_ne!(
+                mutated_proof, canonical_proof,
+                "{label} must alter the canonical Triptych proof bytes"
+            );
+
+            let Ok(mutated_envelope) = TariTriptychProofEnvelopeV1::new(
+                *envelope.linking_tag_bytes(),
+                mutated_proof.clone(),
+            ) else {
+                panic!("appended proof bytes must remain structurally encodable");
+            };
+            let mutated_envelope_bytes = mutated_envelope.to_bytes();
+
+            let Ok(decoded_mutated_envelope) =
+                TariTriptychProofEnvelopeV1::from_bytes(&mutated_envelope_bytes)
+            else {
+                panic!("envelope transport decoding must retain all supplied proof bytes");
+            };
+            assert_eq!(decoded_mutated_envelope.to_bytes(), mutated_envelope_bytes);
+            assert_eq!(
+                decoded_mutated_envelope.triptych_proof_bytes(),
+                mutated_proof.as_slice(),
+            );
+
+            for repetition in 0..3 {
+                assert!(
+                    matches!(
+                        parse_canonical_triptych_proof_v1(&mutated_proof),
+                        Err(error) if error.code() == ValidationCode::MalformedProof
+                    ),
+                    "{label} was not rejected by canonical Triptych parsing on repetition {repetition}"
+                );
+
+                assert!(
+                    matches!(
+                        fixture
+                            .verifier
+                            .verify(&fixture.statement, &mutated_envelope_bytes),
+                        Err(error) if error.code() == ValidationCode::MalformedProof
+                    ),
+                    "{label} was not rejected by Triptych verification on repetition {repetition}"
+                );
+            }
+        }
     }
 
     #[test]
