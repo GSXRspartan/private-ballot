@@ -147,7 +147,7 @@ mod tests {
     use tari_cc_private_ballot_protocol::{
         BallotPayloadHash, ElectionScope, ManifestHash, PROTOCOL_VERSION_V1, ProofStatementV1Input,
     };
-    use triptych::{TriptychProof, TriptychWitness};
+    use triptych::{TriptychProof, TriptychStatement, TriptychWitness, proof::ProofError};
 
     struct ValidFixture {
         statement: ProofStatementV1,
@@ -488,6 +488,173 @@ mod tests {
         };
 
         assert_eq!(verifier.proof_suite_id(), TARI_TRIPTYCH_PROOF_SUITE_ID_V1,);
+    }
+
+    #[test]
+    fn vendor_batch_verification_matches_individual_verification_for_project_statements() {
+        let valid = batch_components(&[4, 5, 6, 7]);
+        assert_batch_matches_individual(&valid, "all valid proofs");
+
+        let empty_statements: Vec<TriptychStatement> = Vec::new();
+        let empty_proofs: Vec<TriptychProof> = Vec::new();
+        let mut empty_transcripts: Vec<Transcript> = Vec::new();
+        assert!(
+            TriptychProof::verify_batch(&empty_statements, &empty_proofs, &mut empty_transcripts,)
+                .is_ok(),
+            "the vendored API defines an empty homogeneous batch as valid",
+        );
+
+        let single = batch_components(&[4]);
+        assert_batch_matches_individual(&single, "single proof");
+
+        let duplicate_source = batch_components(&[4]);
+        let duplicate = BatchComponents {
+            statements: vec![
+                duplicate_source.statements[0].clone(),
+                duplicate_source.statements[0].clone(),
+            ],
+            proofs: vec![
+                duplicate_source.proofs[0].clone(),
+                duplicate_source.proofs[0].clone(),
+            ],
+            transcripts: vec![
+                duplicate_source.transcripts[0].clone(),
+                duplicate_source.transcripts[0].clone(),
+            ],
+        };
+        assert_batch_matches_individual(&duplicate, "duplicate cryptographically valid proof");
+
+        let wrong = batch_components(&[99]);
+        for (index, label) in [(0_usize, "first"), (2, "middle"), (3, "last")] {
+            let mut invalid = batch_components(&[4, 5, 6, 7]);
+            invalid.proofs[index] = wrong.proofs[0].clone();
+
+            assert_batch_matches_individual(&invalid, label);
+            assert_full_batch_blame_indexes(&invalid, &[index]);
+        }
+
+        let mut multiple_invalid = batch_components(&[4, 5, 6, 7]);
+        multiple_invalid.proofs[1] = wrong.proofs[0].clone();
+        multiple_invalid.proofs[3] = wrong.proofs[0].clone();
+        assert_batch_matches_individual(&multiple_invalid, "multiple invalid proofs");
+        assert_full_batch_blame_indexes(&multiple_invalid, &[1, 3]);
+
+        let fixture = valid_fixture(4);
+        let Ok(envelope) = TariTriptychProofEnvelopeV1::from_bytes(&fixture.envelope) else {
+            panic!("valid project proof envelope must decode for the batch API inventory");
+        };
+        let alternate_registry = registry_keys(&[1, 2, 3, 8]);
+        let Ok(alternate_statement) = build_triptych_statement_v1(
+            fixture.statement.protocol_version(),
+            fixture.statement.proof_suite_id(),
+            fixture.statement.election_scope().as_bytes(),
+            &alternate_registry,
+            *envelope.linking_tag_bytes(),
+        ) else {
+            panic!("alternate registry statement must remain structurally valid");
+        };
+        let homogeneous = batch_components(&[4]);
+        let mut cross_registry_transcripts = vec![
+            homogeneous.transcripts[0].clone(),
+            homogeneous.transcripts[0].clone(),
+        ];
+        let cross_registry_result = TriptychProof::verify_batch(
+            &[homogeneous.statements[0].clone(), alternate_statement],
+            &[homogeneous.proofs[0].clone(), homogeneous.proofs[0].clone()],
+            &mut cross_registry_transcripts,
+        );
+        assert!(matches!(
+            cross_registry_result,
+            Err(ProofError::InvalidParameter { .. })
+        ));
+    }
+
+    struct BatchComponents {
+        statements: Vec<TriptychStatement>,
+        proofs: Vec<TriptychProof>,
+        transcripts: Vec<Transcript>,
+    }
+
+    fn batch_components(payload_bytes: &[u8]) -> BatchComponents {
+        let mut statements = Vec::with_capacity(payload_bytes.len());
+        let mut proofs = Vec::with_capacity(payload_bytes.len());
+        let mut transcripts = Vec::with_capacity(payload_bytes.len());
+
+        for payload_byte in payload_bytes {
+            let fixture = valid_fixture(*payload_byte);
+            let Ok(envelope) = TariTriptychProofEnvelopeV1::from_bytes(&fixture.envelope) else {
+                panic!("valid project proof envelope must decode for a batch component");
+            };
+            let Ok(statement) = build_triptych_statement_v1(
+                fixture.statement.protocol_version(),
+                fixture.statement.proof_suite_id(),
+                fixture.statement.election_scope().as_bytes(),
+                fixture.verifier.registry_keys(),
+                *envelope.linking_tag_bytes(),
+            ) else {
+                panic!("valid project proof statement must reconstruct for a batch component");
+            };
+            let Ok(proof) = parse_canonical_triptych_proof_v1(envelope.triptych_proof_bytes())
+            else {
+                panic!("valid project inner proof must parse for a batch component");
+            };
+            let Ok(transcript) = triptych_transcript_v1(&fixture.statement) else {
+                panic!("valid project proof transcript must reconstruct for a batch component");
+            };
+
+            statements.push(statement);
+            proofs.push(proof);
+            transcripts.push(transcript);
+        }
+
+        BatchComponents {
+            statements,
+            proofs,
+            transcripts,
+        }
+    }
+
+    fn assert_batch_matches_individual(components: &BatchComponents, label: &str) {
+        let individual = components
+            .statements
+            .iter()
+            .zip(&components.proofs)
+            .zip(&components.transcripts)
+            .map(|((statement, proof), transcript)| {
+                let mut transcript = transcript.clone();
+
+                proof.verify(statement, &mut transcript).is_ok()
+            })
+            .collect::<Vec<_>>();
+        let every_individual_proof_verified = individual.iter().all(|result| *result);
+        let mut batch_transcripts = components.transcripts.clone();
+        let batch_verified = TriptychProof::verify_batch(
+            &components.statements,
+            &components.proofs,
+            &mut batch_transcripts,
+        )
+        .is_ok();
+
+        assert_eq!(
+            batch_verified, every_individual_proof_verified,
+            "vendor batch verification must match individual project-proof verification for {label}",
+        );
+    }
+
+    fn assert_full_batch_blame_indexes(components: &BatchComponents, expected: &[usize]) {
+        let mut transcripts = components.transcripts.clone();
+        let result = TriptychProof::verify_batch_with_full_blame(
+            &components.statements,
+            &components.proofs,
+            &mut transcripts,
+        );
+
+        match result {
+            Err(ProofError::FailedBatchVerificationWithFullBlame { indexes }) => {
+                assert_eq!(indexes, expected);
+            }
+            other => panic!("batch full-blame result must report exact invalid indexes: {other:?}"),
+        }
     }
 
     fn registry_keys(multipliers: &[u64]) -> Vec<[u8; RISTRETTO_COMPRESSED_POINT_BYTES]> {
