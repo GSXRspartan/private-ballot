@@ -1,6 +1,7 @@
 [workspace]
 exclude = ["third_party/tari-triptych"]
 members = [
+    "crates/anchor",
     "crates/archive",
     "crates/ballot",
     "crates/cli",

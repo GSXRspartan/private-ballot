@@ -89,6 +89,14 @@ Exit gate:
 
 ## Phase 4 â€” Harmless non-binding pilot
 
+Phase 4 now also covers the harmless, non-binding Ootle testnet anchor
+prototype. The prototype anchors only the existing completed `ArchiveHashV1`
+and keeps offline verification authoritative. Earlier wording that placed this
+anchor work in Phase 5 is superseded and renumbered into Phase 4; see
+[ADR-0006](docs/decisions/ADR-0006-phase4-ootle-anchor-prototype-scope.md).
+Binding governance use remains unauthorized, and independent cryptographic and
+implementation review remains required before any binding use.
+
 Run a volunteer-only, low-consequence approval poll.
 
 Publish:
@@ -113,6 +121,10 @@ Exit gate:
 - all participants are told the pilot is experimental and non-binding.
 
 ## Phase 5 â€” Ootle testnet anchoring
+
+The harmless, non-binding testnet anchor *prototype* is renumbered into Phase 4
+(see [ADR-0006](docs/decisions/ADR-0006-phase4-ootle-anchor-prototype-scope.md)).
+Phase 5 retains the later, broader on-chain work beyond that prototype.
 
 Add an optional template that records only append-only commitments and
 lifecycle transitions.
