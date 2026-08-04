@@ -2,6 +2,7 @@
 exclude = ["third_party/tari-triptych"]
 members = [
     "crates/anchor",
+    "crates/anchor-transport",
     "crates/archive",
     "crates/ballot",
     "crates/cli",

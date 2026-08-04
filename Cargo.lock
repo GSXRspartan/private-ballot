@@ -327,6 +327,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari-cc-private-ballot-anchor-transport"
+version = "0.1.0"
+dependencies = [
+ "tari-cc-private-ballot-anchor",
+ "tari-cc-private-ballot-archive",
+ "tari-cc-private-ballot-protocol",
+]
+
+[[package]]
 name = "tari-cc-private-ballot-archive"
 version = "0.1.0"
 dependencies = [
