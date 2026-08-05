@@ -1,0 +1,135 @@
+//! Section I / Section M(13) — the deterministic 4A4 fake and the real Ootle
+//! construction adapter agree on every project-boundary value.
+//!
+//! Parity is asserted only over project-owned values: anchor digest, exact anchor
+//! log payload bytes, network, account, fee policy, and client reference, plus
+//! the shared invariants that neither side claims a transaction identifier before
+//! submission and neither claims finality. The fake's post-submission transaction
+//! identifier is fake-only and is deliberately never compared to the unsigned
+//! Ootle transaction.
+
+mod common;
+
+use common::{binding, client_reference};
+use tari_cc_private_ballot_anchor_transport::{
+    AnchorLifecycleState, AnchorMaxFeeV1, AnchorPreparationRequest, AnchorTransactionRequestStore,
+    DeterministicAnchorFake,
+};
+use tari_cc_private_ballot_ootle_anchor_adapter::{
+    OotleAnchorTransactionBuildRequestV1, build_unsigned_anchor_transaction,
+};
+use tari_ootle_transaction::Instruction;
+
+#[test]
+fn fake_and_real_adapter_agree_on_every_project_boundary_value() {
+    let preparation = AnchorPreparationRequest::new(
+        binding("esmeralda", "fee-account", 0x22),
+        AnchorMaxFeeV1::from_units(4_242),
+        Some(client_reference("parity-1")),
+    );
+    let adapter_request =
+        OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation.clone());
+
+    // Deterministic 4A4 fake path.
+    let mut fake = DeterministicAnchorFake::new();
+    let Ok(prepared) = fake.create_request(&preparation) else {
+        panic!("fake preparation must succeed");
+    };
+
+    // Real pinned Ootle construction path.
+    let Ok(result) = build_unsigned_anchor_transaction(&adapter_request) else {
+        panic!("real construction must succeed");
+    };
+    let evidence = result.evidence();
+    let preparation_dto = result.walletd_preparation();
+
+    // Anchor digest parity.
+    assert_eq!(prepared.anchor_digest(), evidence.anchor_digest());
+
+    // Exact anchor log payload bytes parity — fake payload, evidence payload, and
+    // the real EmitLog message all agree byte for byte.
+    let fake_payload_bytes = prepared.payload().to_encoded_string();
+    let evidence_payload_bytes = evidence.anchor_log_payload().to_encoded_string();
+    assert_eq!(
+        fake_payload_bytes.as_bytes(),
+        evidence_payload_bytes.as_bytes()
+    );
+    match result.unsigned_transaction().instructions() {
+        [Instruction::EmitLog { message, .. }] => {
+            let emitted: &str = message.as_ref();
+            assert_eq!(emitted.as_bytes(), fake_payload_bytes.as_bytes());
+        }
+        other => panic!("expected exactly one EmitLog, got {}", other.len()),
+    }
+
+    // Network parity.
+    assert_eq!(
+        prepared.binding().network().as_str(),
+        evidence.network().as_str()
+    );
+
+    // Account reference parity.
+    assert_eq!(
+        prepared.binding().account().as_str(),
+        evidence.account().as_str()
+    );
+
+    // Fee policy parity at the project boundary.
+    assert_eq!(
+        prepared.max_fee().value(),
+        preparation_dto.max_fee().value()
+    );
+    assert_eq!(preparation_dto.max_fee().value(), 4_242);
+
+    // Client reference parity.
+    match preparation_dto.client_reference() {
+        Some(reference) => assert_eq!(reference.as_str(), "parity-1"),
+        None => panic!("client reference must be preserved on the real path"),
+    }
+
+    // Neither side claims a transaction identifier before submission: the fake's
+    // prepared snapshot has none, and the real evidence has no such field.
+    assert_eq!(prepared.state(), AnchorLifecycleState::Prepared);
+    let Ok(snapshot) = fake.get_request(prepared.request_id()) else {
+        panic!("prepared request must be retrievable");
+    };
+    assert!(
+        snapshot.transaction_id().is_none(),
+        "no transaction id before submission"
+    );
+    assert_eq!(snapshot.last_receipt_status(), None, "no finality claim");
+}
+
+#[test]
+fn fake_idempotency_reference_matches_the_preserved_real_reference() {
+    // The same client reference is honoured on both paths: the fake returns the
+    // same request on re-preparation, and the real path preserves the reference.
+    let preparation = AnchorPreparationRequest::new(
+        binding("igor", "treasury", 0x77),
+        AnchorMaxFeeV1::from_units(10),
+        Some(client_reference("idem-9")),
+    );
+
+    let mut fake = DeterministicAnchorFake::new();
+    let Ok(first) = fake.create_request(&preparation) else {
+        panic!("first preparation must succeed");
+    };
+    let Ok(second) = fake.create_request(&preparation) else {
+        panic!("idempotent re-preparation must succeed");
+    };
+    assert_eq!(
+        first.request_id(),
+        second.request_id(),
+        "fake honours the client reference"
+    );
+
+    let Ok(result) = build_unsigned_anchor_transaction(
+        &OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation),
+    ) else {
+        panic!("real construction must succeed");
+    };
+    match result.walletd_preparation().client_reference() {
+        Some(reference) => assert_eq!(reference.as_str(), "idem-9"),
+        None => panic!("real path must preserve the client reference"),
+    }
+}

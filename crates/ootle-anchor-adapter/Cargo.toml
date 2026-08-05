@@ -1,0 +1,48 @@
+[package]
+name = "tari-cc-private-ballot-ootle-anchor-adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Project-owned offline anchor-transport contract: preparation DTOs, canonical
+# EmitLog payload, opaque identifiers, and the deterministic fake. This is the
+# only project boundary the adapter translates from.
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+# Project-owned anchor record/digest/network-id types named at this boundary
+# (OotleNetworkIdV1, OotleAnchorRecordHashV1).
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+# Production BLAKE3-256 provider, reused ONLY to derive the adapter-owned
+# unsigned-transaction inspection fingerprint under a distinct adapter domain
+# frame. No election artifact is rehashed here.
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
+# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# The confirmed TransactionBuilder / Instruction::EmitLog / UnsignedTransaction /
+# Network API comes from this git checkout (Slice 4A3), so it must not be
+# substituted with a crates.io release. No branch, no tag, no floating HEAD.
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies LogLevel and MaxString, the exact field types of Instruction::EmitLog.
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Canonical CBOR encoder for the pinned UnsignedTransaction, used only to derive
+# the adapter-owned inspection fingerprint. Version pinned to the Ootle
+# workspace's minicbor so no additional version is introduced.
+minicbor = { version = "2.2", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+# Project types the offline test suites name directly: preparation DTOs, payload,
+# identifiers, the deterministic fake (parity), the anchor record/digest/network
+# id, the production hash provider, and archive types (archive-independence).
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+tari-cc-private-ballot-archive = { path = "../archive" }
+# Pinned Ootle types the mutation tests construct directly to build invalid
+# transactions. Pinned to the exact same git revision as the library dependency
+# so both resolve to a single crate instance.
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+
+[lints]
+workspace = true
