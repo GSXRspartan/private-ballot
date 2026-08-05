@@ -1,0 +1,49 @@
+[package]
+name = "tari-cc-private-ballot-ootle-walletd-anchor-adapter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Project-owned offline anchor-transport contract: lifecycle DTOs, canonical
+# EmitLog payload, opaque identifiers, and the merged lifecycle-state enum.
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+# Pinned Slice 4A5 construction adapter: the fee-less unsigned anchor transaction,
+# its project-owned inspection evidence/fingerprint, the offline walletd
+# preparation DTO, and the pure inspector re-run before creating a request.
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+# Project-owned anchor record/digest/network-id types named at this boundary.
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+# Production BLAKE3-256 provider, reused ONLY to derive the adapter-owned project
+# request identifier under a distinct adapter domain frame. No election artifact
+# is rehashed here.
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
+# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# The confirmed walletd JSON-RPC request/response wire types for the
+# transaction_requests.create / approve / reject lifecycle. Same exact revision
+# as Slice 4A5 so a single crate instance resolves. No branch, tag, or floating
+# HEAD.
+tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies KeyId / EffectiveStatus, the public field types of the walletd
+# request/response structs. Named ONLY to construct and read those structs behind
+# project-owned wrappers; this project never calls a signing or key-derivation
+# API and no wallet-SDK type appears in this crate's public surface. Same rev.
+tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+
+[dev-dependencies]
+# Project types the offline test suites name directly.
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+# Archive commitment type used only by the archive-independence tests.
+tari-cc-private-ballot-archive = { path = "../archive" }
+# Pinned Ootle transaction types the mutation tests construct directly to build
+# invalid unsigned transactions for the re-inspection mapping. Same git revision.
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+
+[lints]
+workspace = true
