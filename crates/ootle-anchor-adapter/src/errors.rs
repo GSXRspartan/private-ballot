@@ -51,9 +51,21 @@ pub enum OotleAnchorAdapterError {
     ArbitraryBlobAttached,
     /// The transaction carried an unexpected substate input.
     UnexpectedInput,
-    /// The transaction carried a fee instruction, which this architecture defers
-    /// entirely to walletd preparation.
+    /// The transaction carried a fee instruction where none was expected (the
+    /// fee-less construction path), or carried more than one fee instruction in
+    /// the fee-bearing path.
     UnexpectedFeeInstruction,
+    /// The fee-bearing construction path required exactly one `pay_fee`
+    /// instruction, but the transaction carried none.
+    MissingFeeInstruction,
+    /// The single fee instruction was not the expected shape: it was not a
+    /// `pay_fee` component method call, or named a workspace component.
+    MalformedFeeInstruction,
+    /// The fee instruction paid from a component other than the expected fee
+    /// account component address.
+    FeeAccountMismatch,
+    /// The fee instruction locked an amount other than the expected maximum fee.
+    FeeAmountMismatch,
     /// An anchor log instruction was present but malformed (bad prefix, length,
     /// separator, uppercase hex, or trailing content).
     MalformedAnchorPayload,
@@ -117,6 +129,18 @@ impl fmt::Display for OotleAnchorAdapterError {
             Self::UnexpectedInput => formatter.write_str("unexpected substate input present"),
             Self::UnexpectedFeeInstruction => {
                 formatter.write_str("unexpected fee instruction present")
+            }
+            Self::MissingFeeInstruction => {
+                formatter.write_str("required pay_fee instruction absent")
+            }
+            Self::MalformedFeeInstruction => {
+                formatter.write_str("fee instruction is not the expected pay_fee component call")
+            }
+            Self::FeeAccountMismatch => {
+                formatter.write_str("fee instruction pays from the wrong component")
+            }
+            Self::FeeAmountMismatch => {
+                formatter.write_str("fee instruction locks the wrong maximum fee amount")
             }
             Self::MalformedAnchorPayload => {
                 formatter.write_str("malformed project anchor log payload")

@@ -92,8 +92,11 @@ impl OotleUnsignedAnchorTransactionEvidenceV1 {
         self.anchor_instruction_index
     }
 
-    /// Returns whether any fee instruction is present (always false in this
-    /// walletd-injected-fee architecture).
+    /// Returns whether any fee instruction is present.
+    ///
+    /// False for a fee-less construction (Slice 4A5); true for a fee-bearing
+    /// construction carrying exactly one `pay_fee_from_component` instruction
+    /// (Slice 4A6B).
     #[must_use]
     pub const fn fee_instructions_present(&self) -> bool {
         self.fee_instructions_present

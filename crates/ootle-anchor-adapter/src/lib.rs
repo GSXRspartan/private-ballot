@@ -39,12 +39,16 @@ mod network;
 mod request;
 
 pub use build::{
-    OotleAnchorBuildResultV1, OotleWalletdAnchorPreparationV1, build_unsigned_anchor_transaction,
+    OotleAnchorBuildResultV1, OotleWalletdAnchorPreparationV1,
+    build_fee_bearing_anchor_transaction, build_unsigned_anchor_transaction,
 };
 pub use constructor::{AnchorTransactionConstructor, PinnedOotleAnchorTransactionConstructor};
 pub use errors::OotleAnchorAdapterError;
 pub use evidence::{OotleAnchorInspectionFingerprintV1, OotleUnsignedAnchorTransactionEvidenceV1};
-pub use inspect::{AnchorInspectionExpectationV1, inspect_unsigned_anchor_transaction};
+pub use inspect::{
+    AnchorInspectionExpectationV1, inspect_fee_bearing_anchor_transaction,
+    inspect_unsigned_anchor_transaction,
+};
 pub use log_instruction::{ANCHOR_EMIT_LOG_LEVEL, build_anchor_emit_log};
 pub use network::{map_ootle_network, supported_testnet_network_ids};
 pub use request::OotleAnchorTransactionBuildRequestV1;

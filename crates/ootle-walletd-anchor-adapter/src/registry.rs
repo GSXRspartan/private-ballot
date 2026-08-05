@@ -9,10 +9,11 @@
 
 use std::collections::BTreeMap;
 
-use tari_cc_private_ballot_anchor_transport::AnchorRequestId;
+use tari_cc_private_ballot_anchor_transport::{AnchorRequestId, AnchorTransactionId};
 
 use crate::binding::WalletdAnchorBindingV1;
 use crate::identifiers::WalletdRequestId;
+use crate::status::WalletdEffectiveStatusV1;
 
 /// Project-owned decision state of a stored walletd request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,12 +41,44 @@ impl WalletdRequestDecisionV1 {
     }
 }
 
+/// Project-owned submission-attempt state, orthogonal to the approval decision.
+///
+/// Submission only ever follows an `Approved` decision. `TimedOutUnknown` is the
+/// safe state after a submit whose result was lost: the request may or may not
+/// have reached walletd, so a status lookup — never a blind resubmit — must
+/// resolve it. `Submitted` is terminal and carries the sealed transaction id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WalletdSubmissionStateV1 {
+    /// No submit has completed; the request has not been sealed.
+    NotSubmitted,
+    /// A submit attempt's result was lost; the observable state is unknown.
+    TimedOutUnknown,
+    /// The request was sealed and submitted; a transaction id is bound.
+    Submitted,
+}
+
+impl WalletdSubmissionStateV1 {
+    /// Returns the stable machine-readable submission-state code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotSubmitted => "NOT_SUBMITTED",
+            Self::TimedOutUnknown => "TIMED_OUT_UNKNOWN",
+            Self::Submitted => "SUBMITTED",
+        }
+    }
+}
+
 /// One stored request record.
 #[derive(Debug, Clone)]
 pub(crate) struct WalletdRequestRecord {
     pub(crate) walletd_request_id: WalletdRequestId,
     pub(crate) binding: WalletdAnchorBindingV1,
     pub(crate) decision: WalletdRequestDecisionV1,
+    pub(crate) submission: WalletdSubmissionStateV1,
+    pub(crate) transaction_id: Option<AnchorTransactionId>,
+    pub(crate) last_effective_status: Option<WalletdEffectiveStatusV1>,
+    pub(crate) retry_count: u32,
     pub(crate) sequence: u64,
     pub(crate) last_diagnostic: Option<&'static str>,
 }
@@ -60,6 +93,10 @@ pub struct WalletdAnchorSnapshotV1 {
     walletd_request_id: WalletdRequestId,
     binding: WalletdAnchorBindingV1,
     decision: WalletdRequestDecisionV1,
+    submission: WalletdSubmissionStateV1,
+    transaction_id: Option<AnchorTransactionId>,
+    last_effective_status: Option<WalletdEffectiveStatusV1>,
+    retry_count: u32,
     sequence: u64,
     last_diagnostic: Option<&'static str>,
 }
@@ -67,11 +104,16 @@ pub struct WalletdAnchorSnapshotV1 {
 impl WalletdAnchorSnapshotV1 {
     /// Builds a recovery snapshot.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_request_id: AnchorRequestId,
         walletd_request_id: WalletdRequestId,
         binding: WalletdAnchorBindingV1,
         decision: WalletdRequestDecisionV1,
+        submission: WalletdSubmissionStateV1,
+        transaction_id: Option<AnchorTransactionId>,
+        last_effective_status: Option<WalletdEffectiveStatusV1>,
+        retry_count: u32,
         sequence: u64,
         last_diagnostic: Option<&'static str>,
     ) -> Self {
@@ -80,6 +122,10 @@ impl WalletdAnchorSnapshotV1 {
             walletd_request_id,
             binding,
             decision,
+            submission,
+            transaction_id,
+            last_effective_status,
+            retry_count,
             sequence,
             last_diagnostic,
         }
@@ -107,6 +153,30 @@ impl WalletdAnchorSnapshotV1 {
     #[must_use]
     pub const fn decision(&self) -> WalletdRequestDecisionV1 {
         self.decision
+    }
+
+    /// Returns the recorded submission-attempt state.
+    #[must_use]
+    pub const fn submission(&self) -> WalletdSubmissionStateV1 {
+        self.submission
+    }
+
+    /// Returns the bound sealed transaction id, if known.
+    #[must_use]
+    pub const fn transaction_id(&self) -> Option<&AnchorTransactionId> {
+        self.transaction_id.as_ref()
+    }
+
+    /// Returns the last confirmed walletd effective status, if any.
+    #[must_use]
+    pub const fn last_effective_status(&self) -> Option<WalletdEffectiveStatusV1> {
+        self.last_effective_status
+    }
+
+    /// Returns the number of recovery-gated submit retries recorded.
+    #[must_use]
+    pub const fn retry_count(&self) -> u32 {
+        self.retry_count
     }
 
     /// Returns the deterministic registration sequence.
@@ -155,6 +225,10 @@ impl LocalWalletdAnchorRegistry {
                 walletd_request_id,
                 binding,
                 decision: WalletdRequestDecisionV1::Prepared,
+                submission: WalletdSubmissionStateV1::NotSubmitted,
+                transaction_id: None,
+                last_effective_status: None,
+                retry_count: 0,
                 sequence,
                 last_diagnostic: None,
             },
@@ -192,6 +266,57 @@ impl LocalWalletdAnchorRegistry {
         }
     }
 
+    /// Records the last confirmed walletd effective status for a stored request.
+    pub(crate) fn set_last_effective_status(
+        &mut self,
+        project_request_id: &AnchorRequestId,
+        status: WalletdEffectiveStatusV1,
+    ) {
+        if let Some(record) = self.records.get_mut(project_request_id) {
+            record.last_effective_status = Some(status);
+        }
+    }
+
+    /// Marks a stored request submitted, binding its sealed transaction id.
+    pub(crate) fn mark_submitted(
+        &mut self,
+        project_request_id: &AnchorRequestId,
+        transaction_id: AnchorTransactionId,
+    ) {
+        if let Some(record) = self.records.get_mut(project_request_id) {
+            record.submission = WalletdSubmissionStateV1::Submitted;
+            record.transaction_id = Some(transaction_id);
+        }
+    }
+
+    /// Marks a stored request's submission state as timed-out/unknown.
+    ///
+    /// Never overwrites a known submission with an unknown one.
+    pub(crate) fn mark_timed_out_unknown(&mut self, project_request_id: &AnchorRequestId) {
+        if let Some(record) = self.records.get_mut(project_request_id)
+            && record.submission != WalletdSubmissionStateV1::Submitted
+        {
+            record.submission = WalletdSubmissionStateV1::TimedOutUnknown;
+        }
+    }
+
+    /// Resets a timed-out/unknown submission back to not-submitted after a status
+    /// lookup confirmed the request never left the approval gate.
+    pub(crate) fn reset_submission_not_submitted(&mut self, project_request_id: &AnchorRequestId) {
+        if let Some(record) = self.records.get_mut(project_request_id)
+            && record.submission != WalletdSubmissionStateV1::Submitted
+        {
+            record.submission = WalletdSubmissionStateV1::NotSubmitted;
+        }
+    }
+
+    /// Increments the recovery-gated retry counter for a stored request.
+    pub(crate) fn increment_retry(&mut self, project_request_id: &AnchorRequestId) {
+        if let Some(record) = self.records.get_mut(project_request_id) {
+            record.retry_count = record.retry_count.saturating_add(1);
+        }
+    }
+
     /// Returns whether a walletd request identifier is already tracked.
     #[must_use]
     pub fn contains_walletd_request(&self, walletd_request_id: WalletdRequestId) -> bool {
@@ -221,6 +346,10 @@ impl LocalWalletdAnchorRegistry {
             record.walletd_request_id,
             record.binding.clone(),
             record.decision,
+            record.submission,
+            record.transaction_id.clone(),
+            record.last_effective_status,
+            record.retry_count,
             record.sequence,
             record.last_diagnostic,
         ))
@@ -260,6 +389,10 @@ impl LocalWalletdAnchorRegistry {
                     walletd_request_id: snapshot.walletd_request_id(),
                     binding: snapshot.binding().clone(),
                     decision: snapshot.decision(),
+                    submission: snapshot.submission(),
+                    transaction_id: snapshot.transaction_id().cloned(),
+                    last_effective_status: snapshot.last_effective_status(),
+                    retry_count: snapshot.retry_count(),
                     sequence: snapshot.sequence(),
                     last_diagnostic: snapshot.last_diagnostic(),
                 },

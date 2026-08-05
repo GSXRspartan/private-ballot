@@ -21,10 +21,14 @@ use tari_cc_private_ballot_anchor_transport::{
     AnchorAccountReference, AnchorClientReferenceV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
 };
 use tari_ootle_transaction::{TransactionBuilder, UnsignedTransaction};
+use tari_template_lib_types::{Amount, ComponentAddress};
 
 use crate::errors::OotleAnchorAdapterError;
 use crate::evidence::OotleUnsignedAnchorTransactionEvidenceV1;
-use crate::inspect::{AnchorInspectionExpectationV1, inspect_unsigned_anchor_transaction};
+use crate::inspect::{
+    AnchorInspectionExpectationV1, inspect_fee_bearing_anchor_transaction,
+    inspect_unsigned_anchor_transaction,
+};
 use crate::log_instruction::build_anchor_emit_log;
 use crate::network::map_ootle_network;
 use crate::request::OotleAnchorTransactionBuildRequestV1;
@@ -172,6 +176,71 @@ pub fn build_unsigned_anchor_transaction(
         request.network().clone(),
         request.account().clone(),
         request.max_fee(),
+        request.client_reference().cloned(),
+        request.anchor_digest(),
+        *request.payload(),
+    );
+
+    Ok(OotleAnchorBuildResultV1 {
+        unsigned_transaction,
+        evidence,
+        walletd_preparation,
+    })
+}
+
+/// Constructs a fee-bearing unsigned anchor transaction and its evidence.
+///
+/// Identical to [`build_unsigned_anchor_transaction`] except the transaction also
+/// carries exactly one `pay_fee_from_component` fee instruction naming the
+/// resolved `fee_component` and locking the request's maximum fee. The pinned
+/// builder places `pay_fee` in the separate fee-instruction list; the normal
+/// instruction list still contains exactly the one anchor `EmitLog`. Inputs are
+/// intentionally left empty (no auto-fill): the confirmed
+/// `transaction_requests.submit` path seals the frozen transaction verbatim with
+/// `detect_inputs = false`, so any input resolution a real flow needs happens
+/// out of band before creation, never here.
+///
+/// The opaque project account reference is **not** resolved here: the caller (the
+/// walletd leaf adapter) resolves it into `fee_component` and passes the exact
+/// Ootle [`ComponentAddress`], keeping address resolution at that single leaf.
+///
+/// # Errors
+///
+/// Returns an [`OotleAnchorAdapterError`] if the network is unsupported, the
+/// payload cannot be converted, or the constructed transaction fails the
+/// fee-bearing inspection.
+pub fn build_fee_bearing_anchor_transaction(
+    request: &OotleAnchorTransactionBuildRequestV1,
+    fee_component: ComponentAddress,
+) -> Result<OotleAnchorBuildResultV1, OotleAnchorAdapterError> {
+    let network = map_ootle_network(request.network())?;
+    let anchor_instruction = build_anchor_emit_log(request.payload())?;
+    let max_fee = request.max_fee();
+
+    let unsigned_transaction = TransactionBuilder::new(network)
+        .add_instruction(anchor_instruction)
+        .pay_fee_from_component(fee_component, Amount::from_u64(max_fee.value()))
+        .build_unsigned();
+
+    let expectation = AnchorInspectionExpectationV1::new(
+        request.network().clone(),
+        network,
+        request.account().clone(),
+        request.anchor_digest(),
+        *request.payload(),
+    );
+
+    let evidence = inspect_fee_bearing_anchor_transaction(
+        &unsigned_transaction,
+        &expectation,
+        fee_component,
+        max_fee,
+    )?;
+
+    let walletd_preparation = OotleWalletdAnchorPreparationV1::new(
+        request.network().clone(),
+        request.account().clone(),
+        max_fee,
         request.client_reference().cloned(),
         request.anchor_digest(),
         *request.payload(),

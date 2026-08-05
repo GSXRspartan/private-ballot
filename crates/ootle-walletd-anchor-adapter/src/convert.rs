@@ -24,10 +24,11 @@
 use tari_cc_private_ballot_anchor_transport::{AnchorClientReferenceV1, AnchorRequestId};
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     AnchorInspectionExpectationV1, OotleAnchorBuildResultV1, OotleAnchorInspectionFingerprintV1,
-    inspect_unsigned_anchor_transaction, map_ootle_network,
+    inspect_fee_bearing_anchor_transaction, inspect_unsigned_anchor_transaction, map_ootle_network,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 use tari_ootle_walletd_client::types::TransactionRequestCreateRequest;
+use tari_template_lib_types::ComponentAddress;
 
 use crate::binding::WalletdAnchorBindingV1;
 use crate::errors::WalletdAnchorAdapterError;
@@ -161,6 +162,88 @@ pub fn build_walletd_create_request(
     if evidence.fingerprint() != build_result.evidence().fingerprint() {
         return Err(WalletdAnchorAdapterError::UnsupportedWalletdApi {
             detail: "build-result fingerprint inconsistent with re-inspection",
+        });
+    }
+
+    let binding = WalletdAnchorBindingV1::new(
+        preparation.network().clone(),
+        preparation.fee_account().clone(),
+        preparation.anchor_digest(),
+        *preparation.anchor_payload(),
+        preparation.max_fee(),
+        evidence.fingerprint(),
+    );
+
+    let project_request_id = derive_project_request_id(&binding);
+
+    let wire = TransactionRequestCreateRequest {
+        transaction: build_result.unsigned_transaction().clone(),
+        seal_signer: seal_signer.to_key_id(),
+        other_signers: Vec::new(),
+        signatures: Vec::new(),
+        lock_ids: Vec::new(),
+        ttl_secs,
+    };
+
+    Ok(WalletdCreateAnchorRequestV1 {
+        project_request_id,
+        binding,
+        client_reference: preparation.client_reference().cloned(),
+        wire,
+    })
+}
+
+/// Converts a fee-bearing Slice 4A5 build result into the confirmed walletd
+/// create request (Slice 4A6B, Strategy 2).
+///
+/// Identical to [`build_walletd_create_request`] except the build result must
+/// carry exactly one `pay_fee_from_component` instruction naming `fee_component`.
+/// The re-inspection is fee-aware, so a fee-less or wrong-fee transaction is
+/// rejected before it can reach walletd. The resulting binding fingerprint is
+/// taken over the whole fee-bearing transaction, so it transitively binds the fee
+/// account and amount: a request prepared for a different fee can never approve or
+/// submit against this binding.
+///
+/// The confirmed `transaction_requests.submit` path seals this transaction
+/// verbatim (`detect_inputs = false`) with no fee injection, so embedding the fee
+/// here is what makes the frozen request submittable at all.
+///
+/// # Errors
+///
+/// Returns [`WalletdAnchorAdapterError::UnsafeUnsignedTransaction`] if the
+/// fee-aware re-inspection fails, or [`WalletdAnchorAdapterError::UnsupportedWalletdApi`]
+/// if the re-inspection disagrees with the build result's recorded fingerprint.
+pub fn build_fee_bearing_walletd_create_request(
+    build_result: &OotleAnchorBuildResultV1,
+    fee_component: ComponentAddress,
+    seal_signer: WalletdSealSignerRef,
+    ttl_secs: Option<u64>,
+) -> Result<WalletdCreateAnchorRequestV1, WalletdAnchorAdapterError> {
+    let preparation = build_result.walletd_preparation();
+
+    // Re-run the fee-aware Slice 4A5 safety inspection over the unsigned
+    // transaction: exactly one anchor EmitLog plus exactly one pay_fee to the
+    // resolved fee component locking the bound maximum fee.
+    let ootle_network = map_ootle_network(preparation.network())
+        .map_err(WalletdAnchorAdapterError::UnsafeUnsignedTransaction)?;
+    let expectation = AnchorInspectionExpectationV1::new(
+        preparation.network().clone(),
+        ootle_network,
+        preparation.fee_account().clone(),
+        preparation.anchor_digest(),
+        *preparation.anchor_payload(),
+    );
+    let evidence = inspect_fee_bearing_anchor_transaction(
+        build_result.unsigned_transaction(),
+        &expectation,
+        fee_component,
+        preparation.max_fee(),
+    )
+    .map_err(WalletdAnchorAdapterError::UnsafeUnsignedTransaction)?;
+
+    if evidence.fingerprint() != build_result.evidence().fingerprint() {
+        return Err(WalletdAnchorAdapterError::UnsupportedWalletdApi {
+            detail: "build-result fingerprint inconsistent with fee-aware re-inspection",
         });
     }
 

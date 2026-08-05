@@ -14,7 +14,9 @@ use tari_cc_private_ballot_ootle_anchor_adapter::{
     OotleAnchorBuildResultV1, OotleAnchorTransactionBuildRequestV1,
     build_unsigned_anchor_transaction,
 };
-use tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdSealSignerRef;
+use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
+    WalletdFeeComponentRef, WalletdSealSignerRef,
+};
 
 /// Builds a valid bounded network identifier or panics.
 pub fn network(value: &str) -> OotleNetworkIdV1 {
@@ -99,4 +101,33 @@ pub fn valid_build_result() -> OotleAnchorBuildResultV1 {
 /// A deterministic seal-signer reference (account key, index 0).
 pub fn seal_signer() -> WalletdSealSignerRef {
     WalletdSealSignerRef::AccountKey { index: 0 }
+}
+
+/// A canonical, valid Slice 4A5 build request on the Esmeralda testnet.
+///
+/// Unlike [`valid_build_result`], this returns the fee-less *request* DTO, which
+/// the fee-bearing prepare path turns into a fee-bearing frozen transaction.
+pub fn valid_build_request() -> OotleAnchorTransactionBuildRequestV1 {
+    build_request("esmeralda", "fee-account", 0x22, 1_000, None)
+}
+
+/// A deterministic, valid resolved fee account component address.
+///
+/// A component address is a 32-byte object key rendered as `component_<64 hex>`.
+pub fn fee_component() -> WalletdFeeComponentRef {
+    fee_component_from(&format!("component_{}", "11".repeat(32)))
+}
+
+/// An alternate valid fee account component address, distinct from
+/// [`fee_component`], for wrong-fee-account rejection tests.
+pub fn other_fee_component() -> WalletdFeeComponentRef {
+    fee_component_from(&format!("component_{}", "33".repeat(32)))
+}
+
+/// Parses a fee component reference or panics.
+pub fn fee_component_from(value: &str) -> WalletdFeeComponentRef {
+    match WalletdFeeComponentRef::parse(value) {
+        Ok(reference) => reference,
+        Err(_error) => panic!("test fee component address must be valid"),
+    }
 }

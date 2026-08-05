@@ -56,6 +56,32 @@ pub enum WalletdAnchorAdapterError {
         /// Fixed, non-secret detail text.
         detail: &'static str,
     },
+    /// The supplied fee account component address could not be parsed into a
+    /// pinned Ootle component address.
+    FeeComponentInvalid,
+    /// The request must be approved before it can be submitted.
+    RequestNotApproved,
+    /// The submit call timed out; the request may or may not have reached walletd,
+    /// so its observable state is now unknown and must be recovered before retry.
+    SubmitTimeout,
+    /// The walletd submit response could not be parsed into the expected shape.
+    MalformedSubmitResponse,
+    /// Walletd reported the request submitted but returned no transaction id.
+    SubmittedButTransactionIdMissing,
+    /// Walletd reported the request already submitted; recover the original
+    /// transaction id through the status API rather than submitting again.
+    AlreadySubmitted,
+    /// A submit or recovery was attempted while the local state is unknown; a
+    /// status lookup must resolve it before any retry.
+    SubmissionStateUnknown,
+    /// The recovered or observed transaction id conflicts with the one already
+    /// bound to this request.
+    ConflictingTransactionId,
+    /// The observed request status could not be read for recovery.
+    StatusUnavailable,
+    /// A caller attempted to supply a transaction id for a fresh submission; a
+    /// transaction id exists only after walletd seals, never as an input.
+    CallerSuppliedTransactionId,
 }
 
 impl WalletdAnchorAdapterError {
@@ -81,6 +107,18 @@ impl WalletdAnchorAdapterError {
             Self::RequestIdMismatch => "WALLETD_REQUEST_ID_MISMATCH",
             Self::UnsafeUnsignedTransaction(_) => "WALLETD_UNSAFE_UNSIGNED_TRANSACTION",
             Self::UnsupportedWalletdApi { .. } => "WALLETD_UNSUPPORTED_API",
+            Self::FeeComponentInvalid => "WALLETD_FEE_COMPONENT_INVALID",
+            Self::RequestNotApproved => "WALLETD_REQUEST_NOT_APPROVED",
+            Self::SubmitTimeout => "WALLETD_SUBMIT_TIMEOUT",
+            Self::MalformedSubmitResponse => "WALLETD_MALFORMED_SUBMIT_RESPONSE",
+            Self::SubmittedButTransactionIdMissing => {
+                "WALLETD_SUBMITTED_BUT_TRANSACTION_ID_MISSING"
+            }
+            Self::AlreadySubmitted => "WALLETD_ALREADY_SUBMITTED",
+            Self::SubmissionStateUnknown => "WALLETD_SUBMISSION_STATE_UNKNOWN",
+            Self::ConflictingTransactionId => "WALLETD_CONFLICTING_TRANSACTION_ID",
+            Self::StatusUnavailable => "WALLETD_STATUS_UNAVAILABLE",
+            Self::CallerSuppliedTransactionId => "WALLETD_CALLER_SUPPLIED_TRANSACTION_ID",
         }
     }
 }

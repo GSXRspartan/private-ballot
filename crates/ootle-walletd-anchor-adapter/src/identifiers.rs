@@ -7,8 +7,14 @@
 //! wallet-SDK type appears in this module's public surface.
 
 use core::fmt;
+use core::str::FromStr;
 
+use tari_cc_private_ballot_anchor_transport::AnchorTransactionId;
+use tari_ootle_transaction::TransactionId;
 use tari_ootle_wallet_sdk::models::{KeyBranch, KeyId};
+use tari_template_lib_types::ComponentAddress;
+
+use crate::errors::WalletdAnchorAdapterError;
 
 /// Opaque walletd transaction-request identifier.
 ///
@@ -76,6 +82,79 @@ impl WalletdSealSignerRef {
             Self::AccountKey { index } => KeyId::derived(KeyBranch::Account, index),
             Self::TransactionKey { index } => KeyId::derived(KeyBranch::Transaction, index),
             Self::ImportedKey { local_key_id } => KeyId::imported(local_key_id),
+        }
+    }
+}
+
+/// Project-owned, resolved reference to the fee account's Ootle component address.
+///
+/// The opaque project [`AnchorAccountReference`] cannot be resolved offline, so a
+/// human operator supplies the exact Ootle component address of the fee account
+/// (as printed by walletd, `component_<hex>` or bare hex). This is the single
+/// place the project turns that string into a pinned Ootle [`ComponentAddress`]
+/// for the `pay_fee_from_component` instruction — address resolution never leaks
+/// past this leaf. A component address is public ledger data but still identifies
+/// an account, so its `Debug` is redacted to keep it out of logs.
+///
+/// [`AnchorAccountReference`]: tari_cc_private_ballot_anchor_transport::AnchorAccountReference
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WalletdFeeComponentRef {
+    component: ComponentAddress,
+}
+
+impl WalletdFeeComponentRef {
+    /// Parses and freezes a resolved fee account component address.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WalletdAnchorAdapterError::FeeComponentInvalid`] if `value` is not
+    /// a valid Ootle component address.
+    pub fn parse(value: &str) -> Result<Self, WalletdAnchorAdapterError> {
+        let component = ComponentAddress::from_str(value)
+            .map_err(|_error| WalletdAnchorAdapterError::FeeComponentInvalid)?;
+        Ok(Self { component })
+    }
+
+    /// Returns the resolved pinned Ootle component address (leaf-internal).
+    #[must_use]
+    pub(crate) const fn component_address(&self) -> ComponentAddress {
+        self.component
+    }
+
+    /// Returns the canonical `component_<hex>` display string for human review.
+    #[must_use]
+    pub fn display_string(&self) -> String {
+        self.component.to_string()
+    }
+}
+
+impl fmt::Debug for WalletdFeeComponentRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WalletdFeeComponentRef(<redacted>)")
+    }
+}
+
+/// Canonicalizes a sealed Ootle [`TransactionId`] into a project transaction id.
+///
+/// The pinned `TransactionId` is a fixed 32-byte value whose `Display` is exactly
+/// 64 lowercase hexadecimal characters — always a valid bounded
+/// [`AnchorTransactionId`]. This is the single, safe canonicalization a real
+/// walletd client uses at this leaf to turn the submit response's opaque id into a
+/// project-owned identifier; it derives nothing and cannot fail. It is the one
+/// deliberate seam that names the pinned Ootle `TransactionId`, mirroring how the
+/// construction adapter names the pinned `UnsignedTransaction`.
+#[must_use]
+pub fn canonicalize_transaction_id(id: &TransactionId) -> AnchorTransactionId {
+    let mut encoded = String::with_capacity(64);
+    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for &byte in id.as_bytes() {
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+    }
+    match AnchorTransactionId::new(encoded) {
+        Ok(transaction_id) => transaction_id,
+        Err(_error) => {
+            unreachable!("64 lowercase hex characters are always a valid transaction identifier")
         }
     }
 }

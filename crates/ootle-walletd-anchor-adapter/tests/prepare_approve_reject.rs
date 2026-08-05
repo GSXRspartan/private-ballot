@@ -128,11 +128,14 @@ fn human_review_summary_is_an_exact_stable_vector() {
     };
 
     let hex = "22".repeat(32);
+    // The legacy fee-less prepare path carries no pay_fee instruction, so the
+    // summary states fee_instruction=NONE. The fee-bearing path is asserted
+    // separately in the submission suite.
     let expected = format!(
         "walletd-anchor-request purpose=NON_BINDING_APPROVAL_PILOT_ARCHIVE_ANCHOR \
-network=esmeralda fee_account=fee-account max_fee=1000 anchor_digest={hex} \
-emit_log_payload=TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1:{hex} instruction_count=1 \
-transaction_id=NONE_YET voter_or_ballot_data=NONE"
+network=esmeralda fee_account=fee-account max_fee=1000 fee_instruction=NONE \
+anchor_digest={hex} emit_log_payload=TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1:{hex} \
+instruction_count=1 transaction_id=NONE_YET voter_or_ballot_data=NONE"
     );
 
     let summary = prepared.human_review_summary();
