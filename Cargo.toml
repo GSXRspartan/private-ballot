@@ -8,6 +8,7 @@ members = [
     "crates/cli",
     "crates/crypto",
     "crates/ootle-anchor-adapter",
+    "crates/ootle-receipt-anchor-adapter",
     "crates/ootle-walletd-anchor-adapter",
     "crates/protocol",
     "crates/registry",
