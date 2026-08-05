@@ -3055,6 +3055,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "tari-cc-private-ballot-anchor",
+ "tari-cc-private-ballot-anchor-transport",
+ "tari-cc-private-ballot-archive",
+ "tari-cc-private-ballot-ootle-anchor-adapter",
+ "tari-cc-private-ballot-ootle-receipt-anchor-adapter",
+ "tari-cc-private-ballot-ootle-walletd-anchor-adapter",
+ "tari-cc-private-ballot-protocol",
+]
+
+[[package]]
 name = "tari-cc-private-ballot-ootle-receipt-anchor-adapter"
 version = "0.1.0"
 dependencies = [

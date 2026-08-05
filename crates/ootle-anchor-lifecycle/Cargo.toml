@@ -1,0 +1,43 @@
+[package]
+name = "tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Pinned Slice 4A6A/4A6B walletd adapter: WalletdAnchorCoordinator, the
+# prepare/approve/submit/recover methods, the decision/submit request DTOs, the
+# prepared/approved/rejected/submitted/recovered result DTOs,
+# WalletdRecoveryStateV1, WalletdAnchorSnapshotV1, LocalWalletdAnchorRegistry,
+# WalletdFeeComponentRef, WalletdSealSignerRef, FakeWalletdAnchorClient. Driven
+# verbatim; this crate re-implements none of its logic.
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+# Pinned Slice 4A7 receipt adapter: AnchorReceiptCoordinator, register/query,
+# AnchorReceiptQueryV1::from_submitted, AnchorReceiptQueryReportV1,
+# AnchorReceiptQueryStateV1, AnchorReceiptQuerySnapshotV1,
+# LocalReceiptQueryRegistry, compare_walletd_and_indexer,
+# FakeIndexerReceiptClient, FakeReceiptStep, receipt_scenarios. Driven verbatim.
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+# Project-owned lifecycle DTOs: the merged AnchorLifecycleState enum, the
+# AnchorQueryOutcomeV1, AnchorReceiptV1, AnchorFinalStatusV1, and the opaque
+# identifiers. The unified state maps onto AnchorLifecycleState without
+# redefining it.
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+# Project-owned anchor record/digest/network-id types named at this boundary.
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+
+[dev-dependencies]
+# Project types the offline test suites name directly.
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+# Archive commitment type used only by the archive-independence integration test
+# to build a real OotleAnchorRecordV1 / ArchiveHashV1.
+tari-cc-private-ballot-archive = { path = "../archive" }
+
+[lints]
+workspace = true

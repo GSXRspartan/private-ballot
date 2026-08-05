@@ -102,3 +102,9 @@ pub use results::{
     SubmittedWalletdAnchorRequestV1, WalletdRecoveryStateV1,
 };
 pub use status::WalletdEffectiveStatusV1;
+/// Re-exported so downstream crates that depend only on this adapter can name
+/// the build-request type that `prepare_fee_bearing` takes as a parameter. This
+/// is a narrow interface fix: the type is already part of this crate's public
+/// API surface (a parameter to a public method) but was not previously
+/// re-exported. No semantics are changed.
+pub use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1;
