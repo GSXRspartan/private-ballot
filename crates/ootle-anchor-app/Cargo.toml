@@ -1,0 +1,29 @@
+[package]
+name = "tari-cc-private-ballot-ootle-anchor-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator = { path = "../ootle-anchor-lifecycle" }
+tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../ootle-anchor-network-adapters" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+tari-cc-private-ballot-archive = { path = "../archive" }
+
+tokio = { version = "1", default-features = false, features = ["rt"] }
+
+[lib]
+name = "tari_cc_private_ballot_ootle_anchor_app"
+
+[[bin]]
+name = "tari-cc-private-ballot-anchor"
+path = "src/main.rs"
+
+[lints]
+workspace = true

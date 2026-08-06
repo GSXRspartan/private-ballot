@@ -251,8 +251,14 @@ pub struct SubmittedWalletdAnchorRequestV1 {
 
 impl SubmittedWalletdAnchorRequestV1 {
     /// Assembles a submitted result in the `Submitted` state.
+    ///
+    /// This constructor is `pub` (not `pub(crate)`) so the application-layer
+    /// durable lifecycle snapshot codec in `ootle-anchor-app` can reconstruct
+    /// the already-public submitted DTO from canonical on-disk bytes. The
+    /// reconstructed state is always `Submitted`; no field beyond the four
+    /// public parts is accepted, so no behavior or invariants change.
     #[must_use]
-    pub(crate) fn new(
+    pub fn new(
         project_request_id: AnchorRequestId,
         walletd_request_id: WalletdRequestId,
         transaction_id: AnchorTransactionId,
