@@ -67,10 +67,7 @@ fn duplicate_drive_never_creates_second_distinct_transaction() {
     assert_eq!(submit_calls, 1);
 
     // Driving submit again is an idempotent no-op (already submitted).
-    let Ok(report) = harness
-        .orchestrator
-        .submit(&mut harness.walletd_client)
-    else {
+    let Ok(report) = harness.orchestrator.submit(&mut harness.walletd_client) else {
         panic!("idempotent")
     };
     assert_eq!(report.phase(), UnifiedAnchorLifecyclePhase::Submitted);
@@ -133,10 +130,7 @@ fn retry_after_recover_never_submitted_uses_same_transaction() {
     assert_eq!(harness.submit_calls(), 2);
 
     // A second submit is idempotent.
-    let Ok(_idempotent) = harness
-        .orchestrator
-        .submit(&mut harness.walletd_client)
-    else {
+    let Ok(_idempotent) = harness.orchestrator.submit(&mut harness.walletd_client) else {
         panic!("idempotent")
     };
     assert_eq!(harness.submit_calls(), 2);
@@ -260,13 +254,17 @@ fn disagreement_does_not_mutate_artifacts() {
         .registry()
         .snapshots();
 
-    // Walletd disagrees (rejects while indexer accepted).
+    // Walletd disagrees (rejects while indexer accepted). Because the
+    // lifecycle is already terminal (FinalizedAccept), check_agreement is an
+    // idempotent no-op: the phase, diagnostic, and cached receipt evidence are
+    // never mutated, so a FinalizedAccept can never be rewound to
+    // FinalizedDisagreement.
     let walletd = rejected_receipt(&tx);
     let result = harness.orchestrator.check_agreement(&walletd);
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert_eq!(
         harness.phase(),
-        UnifiedAnchorLifecyclePhase::FinalizedDisagreement
+        UnifiedAnchorLifecyclePhase::FinalizedAccept
     );
 
     // The submitted transaction id and fingerprint are unchanged.
@@ -319,12 +317,14 @@ fn disagreement_does_not_convert_verified_acceptance_into_failure_of_artifacts()
     };
     assert!(receipt_snapshot.verified());
 
-    // Disagreement surfaces but the verified evidence is preserved.
+    // Disagreement is an idempotent no-op on a terminal phase: the verified
+    // evidence is preserved and the phase never rewinds.
     let walletd = rejected_receipt(&tx);
-    let _ = harness.orchestrator.check_agreement(&walletd);
+    let result = harness.orchestrator.check_agreement(&walletd);
+    assert!(result.is_ok());
     assert_eq!(
         harness.phase(),
-        UnifiedAnchorLifecyclePhase::FinalizedDisagreement
+        UnifiedAnchorLifecyclePhase::FinalizedAccept
     );
 
     let Some(receipt_snapshot_after) = harness
@@ -363,9 +363,9 @@ fn no_panic_on_invalid_cases() {
     assert!(result.is_err());
 
     // agreement before any receipt.
-    let Ok(valid_id) = tari_cc_private_ballot_anchor_transport::AnchorTransactionId::new(
-        "0".repeat(64),
-    ) else {
+    let Ok(valid_id) =
+        tari_cc_private_ballot_anchor_transport::AnchorTransactionId::new("0".repeat(64))
+    else {
         panic!("valid id")
     };
     let result = harness

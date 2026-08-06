@@ -62,6 +62,15 @@ pub enum DriverError {
     Reconstruction,
     /// A receipt re-query failed after a terminal acceptance.
     ReceiptRetrieval,
+    /// The current configuration does not match the immutable anchor binding
+    /// recorded in the persisted snapshot. The configuration must not be
+    /// allowed to reinterpret a lifecycle created for another archive,
+    /// election, network, account, fee, payload, or transaction.
+    ConfigSnapshotBindingMismatch,
+    /// The verified indexer receipt does not match the config-derived archive
+    /// locators. ACCEPTED evidence cannot be created for a different archive,
+    /// network, or transaction than the one the receipt actually verified.
+    EvidenceBindingMismatch,
 }
 
 impl DriverError {
@@ -75,6 +84,8 @@ impl DriverError {
             Self::Lifecycle(error) => error.as_str(),
             Self::Reconstruction => "DRIVER_RECONSTRUCTION",
             Self::ReceiptRetrieval => "DRIVER_RECEIPT_RETRIEVAL",
+            Self::ConfigSnapshotBindingMismatch => "DRIVER_CONFIG_SNAPSHOT_BINDING_MISMATCH",
+            Self::EvidenceBindingMismatch => "DRIVER_EVIDENCE_BINDING_MISMATCH",
         }
     }
 }
@@ -264,6 +275,17 @@ where
             Err(SnapshotFileError::FileNotFound) => None,
             Err(error) => return Err(DriverError::Snapshot(error)),
         };
+
+        // Restore-time binding validation: the current configuration must not
+        // reinterpret a lifecycle created for another archive, election,
+        // network, account, fee, payload, or transaction. If a snapshot
+        // exists, its immutable anchor binding is compared with the
+        // config-derived binding before any transport construction or receipt
+        // lookup.
+        if let Some(ref snapshot) = snapshot {
+            Self::validate_snapshot_binding(&config, snapshot)?;
+        }
+
         let max_attempts = config.network_adapter().receipt_query_max_attempts();
         let orchestrator = match snapshot {
             Some(snapshot) => AnchorLifecycleOrchestrator::from_snapshot(snapshot)?,
@@ -462,6 +484,64 @@ where
         ))
     }
 
+    /// Validates that the current configuration's immutable anchor binding
+    /// matches the binding recorded in the persisted snapshot.
+    ///
+    /// This prevents a config change from reinterpreting a lifecycle created
+    /// for another archive, election, network, account, fee, payload, or
+    /// transaction. It is a pure comparison of already-frozen values and never
+    /// contacts a transport or mutates an artifact.
+    fn validate_snapshot_binding(
+        config: &AnchorAppConfig,
+        snapshot: &AnchorLifecycleRecoverySnapshot,
+    ) -> Result<(), DriverError> {
+        // No walletd snapshot means nothing to compare (NotPrepared).
+        let Some(walletd) = snapshot.walletd_snapshots().first() else {
+            return Ok(());
+        };
+
+        let binding = walletd.binding();
+
+        // Network.
+        if config.anchor_record_network() != binding.network() {
+            return Err(DriverError::ConfigSnapshotBindingMismatch);
+        }
+
+        // Account reference.
+        if config.account_reference() != binding.account() {
+            return Err(DriverError::ConfigSnapshotBindingMismatch);
+        }
+
+        // Anchor-record digest: re-derive from the config's locator triple and
+        // compare with the snapshot's recorded digest.
+        let record = OotleAnchorRecordV1::new(
+            config.anchor_record_network().clone(),
+            config.archive_manifest_hash(),
+            config.archive_hash(),
+        );
+        let config_digest = record
+            .canonical_hash(&Blake3HashProviderV1)
+            .map_err(|_| DriverError::Evidence(EvidenceError::InvalidData))?;
+        if config_digest != binding.anchor_digest() {
+            return Err(DriverError::ConfigSnapshotBindingMismatch);
+        }
+
+        // Canonical anchor-log payload: derived from the digest, so if the
+        // digest matches the payload must match too. Check explicitly for
+        // defense-in-depth.
+        let config_payload = AnchorLogPayloadV1::from_digest(config_digest);
+        if &config_payload != binding.payload() {
+            return Err(DriverError::ConfigSnapshotBindingMismatch);
+        }
+
+        // Maximum fee.
+        if config.network_adapter().max_fee() != binding.max_fee() {
+            return Err(DriverError::ConfigSnapshotBindingMismatch);
+        }
+
+        Ok(())
+    }
+
     fn step_prepare(&mut self) -> Result<(), DriverError> {
         let archive = self.build_archive_proof_inputs()?;
         let payload = AnchorLogPayloadV1::from_digest(archive.anchor_digest());
@@ -586,6 +666,29 @@ where
         // that re-runs the pure fetch+verify over the frozen commitments. It
         // mutates no artifact and is safe to call after `FinalizedAccept`.
         let verified = self.requery_verified_indexer_anchor()?;
+
+        // Accepted-evidence binding validation: the config-derived archive
+        // locators must match the verified indexer receipt. This prevents a
+        // config change from misbinding the ACCEPTED evidence to a different
+        // archive, network, or transaction than the one the receipt actually
+        // verified. If any comparison fails, no ACCEPTED evidence is created
+        // and the existing snapshot and artifacts are left unchanged.
+        let verified_evidence = verified.evidence();
+        if archive.anchor_digest() != verified_evidence.anchor_digest() {
+            return Err(DriverError::EvidenceBindingMismatch);
+        }
+        if archive.network() != verified_evidence.network() {
+            return Err(DriverError::EvidenceBindingMismatch);
+        }
+        // The verified transaction id must match the submitted lifecycle
+        // transaction id.
+        let Some(submitted) = self.orchestrator.submitted() else {
+            return Err(DriverError::Lifecycle(LifecycleError::NotSubmitted));
+        };
+        if verified_evidence.transaction_id() != submitted.transaction_id() {
+            return Err(DriverError::EvidenceBindingMismatch);
+        }
+
         let evidence = AnchorEvidenceRecordV1::from_verified_indexer_accept(
             &archive,
             &verified,

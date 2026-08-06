@@ -14,7 +14,7 @@
 //! [`WalletdAnchorCoordinator`]: tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorCoordinator
 //! [`AnchorReceiptCoordinator`]: tari_cc_private_ballot_ootle_receipt_anchor_adapter::AnchorReceiptCoordinator
 
-use tari_cc_private_ballot_anchor_transport::AnchorReceiptV1;
+use tari_cc_private_ballot_anchor_transport::{AnchorFinalStatusV1, AnchorReceiptV1};
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptAgreementError, AnchorReceiptCoordinator, AnchorReceiptQueryReportV1,
     AnchorReceiptQuerySnapshotV1, AnchorReceiptQueryStateV1, AnchorReceiptQueryV1,
@@ -24,7 +24,8 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     ApprovedWalletdAnchorRequestV1, OotleAnchorTransactionBuildRequestV1,
     PreparedWalletdAnchorRequestV1, SubmittedWalletdAnchorRequestV1, WalletdAnchorAdapterError,
     WalletdAnchorCoordinator, WalletdAnchorSnapshotV1, WalletdDecisionRequestV1,
-    WalletdFeeComponentRef, WalletdRecoveryStateV1, WalletdSealSignerRef, WalletdSubmitRequestV1,
+    WalletdFeeComponentRef, WalletdRecoveryStateV1, WalletdRequestDecisionV1, WalletdSealSignerRef,
+    WalletdSubmissionStateV1, WalletdSubmitRequestV1,
 };
 
 use crate::policy::PollingPolicy;
@@ -219,6 +220,19 @@ impl AnchorLifecycleOrchestrator {
         if !receipt_snapshots.is_empty() && submitted.is_none() {
             return Err(LifecycleReconstructionError::MissingSubmittedHandle);
         }
+
+        // Strict phase-consistency validation: the declared phase must be
+        // derivable from and consistent with the contained walletd snapshots,
+        // receipt snapshots, submitted handle, and polling policy state. This
+        // prevents a forged snapshot from fabricating a submitted, approved,
+        // verified, or successful state from inconsistent parts.
+        Self::validate_reconstruction(
+            &walletd_snapshots,
+            &receipt_snapshots,
+            submitted.as_ref(),
+            policy,
+            phase,
+        )?;
 
         let walletd = WalletdAnchorCoordinator::from_snapshots(walletd_snapshots);
         let receipt = AnchorReceiptCoordinator::from_snapshots(receipt_snapshots);
@@ -672,11 +686,18 @@ impl AnchorLifecycleOrchestrator {
     /// Returns [`LifecycleError::Agreement`] on disagreement (the phase is also
     /// set to `FinalizedDisagreement`). Returns
     /// [`LifecycleError::NotSubmitted`] if no indexer receipt has been cached
-    /// yet.
+    /// yet. A terminal phase is an idempotent no-op: the phase, diagnostic, and
+    /// cached receipt evidence are never mutated, so a `FinalizedAccept` can
+    /// never be rewound to `FinalizedDisagreement` (or any other terminal) by a
+    /// late agreement check.
     pub fn check_agreement(
         &mut self,
         walletd_observation: &AnchorReceiptV1,
     ) -> Result<LifecycleStepReport, LifecycleError> {
+        if self.phase.is_terminal() {
+            return Ok(self.idempotent_no_op());
+        }
+
         let Some(cached) = &self.cached_receipt else {
             return Err(LifecycleError::NotSubmitted);
         };
@@ -707,6 +728,302 @@ impl AnchorLifecycleOrchestrator {
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // Reconstruction validation (Section D — snapshot phase consistency)
+    // ------------------------------------------------------------------
+
+    /// Validates that the declared phase is consistent with the contained
+    /// snapshot state.
+    ///
+    /// This prevents a forged or corrupted snapshot from fabricating a
+    /// submitted, approved, verified, or successful state from inconsistent
+    /// parts. It is a pure function of the snapshot fields and never contacts
+    /// a transport or mutates an artifact.
+    fn validate_reconstruction(
+        walletd_snapshots: &[WalletdAnchorSnapshotV1],
+        receipt_snapshots: &[AnchorReceiptQuerySnapshotV1],
+        submitted: Option<&SubmittedWalletdAnchorRequestV1>,
+        policy: PollingPolicy,
+        phase: UnifiedAnchorLifecyclePhase,
+    ) -> Result<(), LifecycleReconstructionError> {
+        // A single anchor lifecycle describes at most one walletd snapshot and
+        // one receipt-query snapshot.
+        if walletd_snapshots.len() > 1 || receipt_snapshots.len() > 1 {
+            return Err(LifecycleReconstructionError::TooManySnapshots);
+        }
+
+        // Cross-check the submitted handle against the walletd snapshot, if both
+        // exist.
+        if let Some(submitted) = submitted {
+            let Some(walletd) = walletd_snapshots.first() else {
+                return Err(LifecycleReconstructionError::SubmittedHandleWithoutWalletdSnapshot);
+            };
+
+            if walletd.project_request_id() != submitted.project_request_id()
+                || walletd.walletd_request_id() != submitted.walletd_request_id()
+            {
+                return Err(LifecycleReconstructionError::DuplicateIdentifier);
+            }
+
+            if walletd.binding() != submitted.binding() {
+                return Err(LifecycleReconstructionError::BindingMismatch);
+            }
+
+            // The walletd snapshot's transaction id, when present, must match
+            // the submitted handle's transaction id.
+            if walletd.transaction_id() != Some(submitted.transaction_id()) {
+                return Err(LifecycleReconstructionError::TransactionIdMismatch);
+            }
+        }
+
+        // Cross-check the receipt snapshot's query against the submitted
+        // handle, if both exist.
+        if let Some(receipt) = receipt_snapshots.first() {
+            let Some(submitted) = submitted else {
+                // Already caught by the MissingSubmittedHandle check above,
+                // but defend in depth.
+                return Err(LifecycleReconstructionError::MissingSubmittedHandle);
+            };
+
+            let query = receipt.query();
+            if query.project_request_id() != submitted.project_request_id()
+                || query.walletd_request_id() != submitted.walletd_request_id()
+                || query.transaction_id() != submitted.transaction_id()
+                || query.network() != submitted.binding().network()
+                || query.account() != submitted.binding().account()
+                || query.anchor_digest() != submitted.binding().anchor_digest()
+                || query.payload() != submitted.binding().payload()
+                || query.fingerprint() != submitted.binding().fingerprint()
+            {
+                return Err(LifecycleReconstructionError::BindingMismatch);
+            }
+        }
+
+        // Phase-specific consistency checks.
+        let walletd = walletd_snapshots.first();
+        let receipt = receipt_snapshots.first();
+
+        match phase {
+            UnifiedAnchorLifecyclePhase::NotPrepared => {
+                if walletd.is_some() || receipt.is_some() || submitted.is_some() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::Prepared => {
+                let Some(ws) = walletd else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if ws.decision() != WalletdRequestDecisionV1::Prepared
+                    || ws.submission() != WalletdSubmissionStateV1::NotSubmitted
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                if submitted.is_some() || receipt.is_some() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::Approved => {
+                let Some(ws) = walletd else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if ws.decision() != WalletdRequestDecisionV1::Approved
+                    || ws.submission() != WalletdSubmissionStateV1::NotSubmitted
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                if submitted.is_some() || receipt.is_some() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::RejectedByApprover => {
+                let Some(ws) = walletd else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if ws.decision() != WalletdRequestDecisionV1::Rejected {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                if submitted.is_some() || receipt.is_some() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::Submitted => {
+                let Some(submitted) = submitted else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                let Some(ws) = walletd else {
+                    return Err(
+                        LifecycleReconstructionError::SubmittedHandleWithoutWalletdSnapshot,
+                    );
+                };
+                if ws.submission() != WalletdSubmissionStateV1::Submitted {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                if ws.transaction_id() != Some(submitted.transaction_id()) {
+                    return Err(LifecycleReconstructionError::TransactionIdMismatch);
+                }
+                // Receipt state, if present, must be SubmittedNotQueried and
+                // not verified.
+                if let Some(rs) = receipt
+                    && (rs.state() != AnchorReceiptQueryStateV1::SubmittedNotQueried
+                        || rs.verified())
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::PollingInProgress => {
+                let Some(submitted) = submitted else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                let Some(ws) = walletd else {
+                    return Err(
+                        LifecycleReconstructionError::SubmittedHandleWithoutWalletdSnapshot,
+                    );
+                };
+                if ws.submission() != WalletdSubmissionStateV1::Submitted {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                if ws.transaction_id() != Some(submitted.transaction_id()) {
+                    return Err(LifecycleReconstructionError::TransactionIdMismatch);
+                }
+                let Some(rs) = receipt else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                // Receipt state must be a resumable non-terminal state.
+                if !matches!(
+                    rs.state(),
+                    AnchorReceiptQueryStateV1::ReceiptNotFound
+                        | AnchorReceiptQueryStateV1::ReceiptPending
+                        | AnchorReceiptQueryStateV1::ReceiptUnknown
+                        | AnchorReceiptQueryStateV1::SubmittedNotQueried
+                ) || rs.verified()
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                // At least one attempt must have been consumed.
+                if policy.attempts_consumed() == 0 {
+                    return Err(LifecycleReconstructionError::PolicyInconsistent);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::Unknown => {
+                // Unknown arises from either a submit timeout (no submitted
+                // handle, walletd snapshot with TimedOutUnknown) or poll
+                // exhaustion (submitted handle, walletd snapshot with
+                // Submitted, non-terminal receipt state).
+                if let Some(submitted) = submitted {
+                    let Some(ws) = walletd else {
+                        return Err(
+                            LifecycleReconstructionError::SubmittedHandleWithoutWalletdSnapshot,
+                        );
+                    };
+                    if ws.submission() != WalletdSubmissionStateV1::Submitted
+                        || ws.transaction_id() != Some(submitted.transaction_id())
+                    {
+                        return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                    }
+                    // Must not carry a verified successful receipt.
+                    if let Some(rs) = receipt
+                        && rs.verified()
+                    {
+                        return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                    }
+                } else {
+                    // Submit-timeout Unknown: a walletd snapshot with
+                    // TimedOutUnknown must exist.
+                    let Some(ws) = walletd else {
+                        return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                    };
+                    if ws.submission() != WalletdSubmissionStateV1::TimedOutUnknown {
+                        return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                    }
+                    if receipt.is_some() {
+                        return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                    }
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedAccept => {
+                let Some(submitted) = submitted else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                let Some(ws) = walletd else {
+                    return Err(
+                        LifecycleReconstructionError::SubmittedHandleWithoutWalletdSnapshot,
+                    );
+                };
+                if ws.submission() != WalletdSubmissionStateV1::Submitted
+                    || ws.transaction_id() != Some(submitted.transaction_id())
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                let Some(rs) = receipt else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if rs.state() != AnchorReceiptQueryStateV1::ReceiptFinalizedAccept
+                    || !rs.verified()
+                    || rs.last_final_status() != Some(AnchorFinalStatusV1::Accepted)
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedFeeOnly => {
+                if submitted.is_none() || receipt.is_none() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                let Some(rs) = receipt else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if rs.state() != AnchorReceiptQueryStateV1::ReceiptFinalizedFeeOnly || rs.verified()
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedReject => {
+                if submitted.is_none() || receipt.is_none() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                let Some(rs) = receipt else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                if rs.state() != AnchorReceiptQueryStateV1::ReceiptFinalizedReject || rs.verified()
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedVerificationFailed => {
+                if submitted.is_none() || receipt.is_none() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+                let Some(rs) = receipt else {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                };
+                // Verification failed: state is ReceiptVerificationFailed, or
+                // ReceiptFinalizedAccept without a verified flag (a finalized
+                // full acceptance that failed verification).
+                if !matches!(
+                    rs.state(),
+                    AnchorReceiptQueryStateV1::ReceiptVerificationFailed
+                        | AnchorReceiptQueryStateV1::ReceiptFinalizedAccept
+                ) || rs.verified()
+                {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedDisagreement => {
+                // A disagreement requires a submitted handle and a receipt
+                // snapshot (the disagreement is about a submitted transaction's
+                // receipt). It must not simultaneously represent a clean
+                // verified agreement — but the phase itself
+                // (FinalizedDisagreement, not FinalizedAccept) distinguishes
+                // them. A verified receipt may coexist with a disagreement
+                // diagnostic (the indexer verified but walletd disagreed).
+                if submitted.is_none() || receipt.is_none() {
+                    return Err(LifecycleReconstructionError::PhaseStateMismatch);
+                }
+            }
+        }
+
+        Ok(())
+    }
 
     /// Registers a submitted request with the receipt coordinator.
     fn register_submitted(

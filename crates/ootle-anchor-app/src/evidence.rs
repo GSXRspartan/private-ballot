@@ -526,6 +526,123 @@ impl AnchorEvidenceRecordV1 {
         summary.push_str("required before any binding use.");
         summary
     }
+
+    /// Decodes and verifies a canonical evidence record from its envelope
+    /// bytes.
+    ///
+    /// This is the inverse of [`Self::canonical_bytes`]. It verifies the
+    /// envelope record-type, hash-algorithm identifier, and the embedded body
+    /// digest **before** trusting any decoded field, and rejects trailing
+    /// bytes, wrong versions, wrong hash algorithms, malformed digests, and
+    /// altered bodies.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded [`EvidenceError`] on any failure.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, EvidenceError> {
+        if bytes.len() > MAX_EVIDENCE_FILE_BYTES {
+            return Err(EvidenceError::ProtocolLimitExceeded);
+        }
+
+        let mut reader = CanonicalCborReader::new(bytes);
+        if reader.read_array_len().map_err(from_protocol)? != ENVELOPE_FIELD_COUNT {
+            return Err(EvidenceError::InvalidData);
+        }
+        if reader.read_text_string().map_err(from_protocol)? != EVIDENCE_RECORD_TYPE_ID_V1 {
+            return Err(EvidenceError::InvalidData);
+        }
+        if reader.read_text_string().map_err(from_protocol)? != EVIDENCE_HASH_ALGORITHM_ID_V1 {
+            return Err(EvidenceError::InvalidData);
+        }
+        let recorded_digest = read_digest(&mut reader)?;
+        let body = reader.read_byte_string().map_err(from_protocol)?;
+        reader.finish().map_err(from_protocol)?;
+
+        // Verify the body digest before trusting any decoded field.
+        let framed = evidence_domain_input(body);
+        let recomputed = Blake3HashProviderV1.hash(&framed);
+        if recomputed != recorded_digest {
+            return Err(EvidenceError::InvalidData);
+        }
+
+        // Decode the 12-element body.
+        let mut body_reader = CanonicalCborReader::new(body);
+        if body_reader.read_array_len().map_err(from_protocol)? != BODY_FIELD_COUNT {
+            return Err(EvidenceError::InvalidData);
+        }
+
+        // 1. purpose
+        let purpose = body_reader.read_text_string().map_err(from_protocol)?;
+        if purpose != OOTLE_ANCHOR_PURPOSE_ID_V1 {
+            return Err(EvidenceError::InvalidData);
+        }
+
+        // 2. network
+        let network = OotleNetworkIdV1::new(
+            body_reader
+                .read_text_string()
+                .map_err(from_protocol)?
+                .to_owned(),
+        )
+        .map_err(|_| EvidenceError::InvalidData)?;
+
+        // 3. manifest hash
+        let manifest_hash = ManifestHash::new(read_digest(&mut body_reader)?);
+
+        // 4. archive hash
+        let archive_hash = ArchiveHashV1::new(read_digest(&mut body_reader)?);
+
+        // 5. anchor digest
+        let anchor_digest = OotleAnchorRecordHashV1::new(read_digest(&mut body_reader)?);
+
+        // 6. optional transaction id
+        let transaction_id = decode_option_text_value(&mut body_reader)?
+            .map(|text| AnchorTransactionId::new(text).map_err(|_| EvidenceError::InvalidData))
+            .transpose()?;
+
+        // 7. optional ledger position (read and consumed from the body but not
+        // stored in the struct; it is encoded only during construction).
+        let _ledger_position = decode_option_u64_value(&mut body_reader)?;
+
+        // 8. final status
+        let final_status_text = body_reader.read_text_string().map_err(from_protocol)?;
+        let final_status =
+            final_status_from_str(final_status_text).ok_or(EvidenceError::InvalidData)?;
+
+        // 9. receipt source
+        let receipt_source_text = body_reader.read_text_string().map_err(from_protocol)?;
+        let receipt_source =
+            receipt_source_from_str(receipt_source_text).ok_or(EvidenceError::InvalidData)?;
+
+        // 10. lifecycle phase
+        let phase_text = body_reader.read_text_string().map_err(from_protocol)?;
+        let phase = phase_from_str(phase_text).ok_or(EvidenceError::InvalidData)?;
+
+        // 11. snapshot digest
+        let snapshot_digest = read_digest(&mut body_reader)?;
+
+        // 12. evidence digest algorithm
+        let algo = body_reader.read_text_string().map_err(from_protocol)?;
+        if algo != BLAKE3_256_HASH_ALGORITHM_ID_V1 {
+            return Err(EvidenceError::InvalidData);
+        }
+
+        body_reader.finish().map_err(from_protocol)?;
+
+        Ok(Self {
+            envelope: bytes.to_vec(),
+            body_digest: recorded_digest,
+            network,
+            manifest_hash,
+            archive_hash,
+            anchor_digest,
+            transaction_id,
+            final_status,
+            receipt_source,
+            phase,
+            snapshot_digest,
+        })
+    }
 }
 
 /// Writes `record`'s canonical bytes to `path` atomically.
@@ -691,11 +808,72 @@ fn to_lower_hex(bytes: &[u8; 32]) -> String {
     out
 }
 
-// A compile-time proof that the evidence body is decodable by the same
-// canonical subset used to encode it. This keeps the reader import live and
-// guards against accidental drift in field count.
-#[allow(dead_code)]
-fn _decode_envelope_proof(bytes: &[u8]) {
-    let mut reader = CanonicalCborReader::new(bytes);
-    let _ = reader.read_array_len();
+fn read_digest(reader: &mut CanonicalCborReader<'_>) -> Result<[u8; 32], EvidenceError> {
+    <[u8; 32]>::try_from(reader.read_byte_string().map_err(from_protocol)?)
+        .map_err(|_| EvidenceError::InvalidData)
+}
+
+fn decode_option_text_value(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<Option<String>, EvidenceError> {
+    let len = reader.read_array_len().map_err(from_protocol)?;
+    match len {
+        0 => Ok(None),
+        1 => Ok(Some(
+            reader.read_text_string().map_err(from_protocol)?.to_owned(),
+        )),
+        _ => Err(EvidenceError::InvalidData),
+    }
+}
+
+fn decode_option_u64_value(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<Option<u64>, EvidenceError> {
+    let len = reader.read_array_len().map_err(from_protocol)?;
+    match len {
+        0 => Ok(None),
+        1 => Ok(Some(reader.read_unsigned().map_err(from_protocol)?)),
+        _ => Err(EvidenceError::InvalidData),
+    }
+}
+
+fn final_status_from_str(text: &str) -> Option<&'static str> {
+    match text {
+        "ACCEPTED" => Some(FINAL_STATUS_ACCEPTED),
+        "FEE_ONLY_ACCEPTED" => Some(FINAL_STATUS_FEE_ONLY),
+        "REJECTED" => Some(FINAL_STATUS_REJECTED),
+        "VERIFICATION_FAILED" => Some(FINAL_STATUS_VERIFICATION_FAILED),
+        "DISAGREEMENT" => Some(FINAL_STATUS_DISAGREEMENT),
+        "POLL_EXHAUSTED_UNKNOWN" => Some(FINAL_STATUS_POLL_EXHAUSTED_UNKNOWN),
+        "REJECTED_BY_APPROVER" => Some(FINAL_STATUS_REJECTED_BY_APPROVER),
+        _ => None,
+    }
+}
+
+fn receipt_source_from_str(text: &str) -> Option<&'static str> {
+    match text {
+        "INDEPENDENT_INDEXER" => Some(SOURCE_INDEPENDENT_INDEXER),
+        "WALLETD_AND_INDEXER" => Some(SOURCE_WALLETD_AND_INDEXER),
+        "NONE" => Some(SOURCE_NONE),
+        _ => None,
+    }
+}
+
+fn phase_from_str(text: &str) -> Option<UnifiedAnchorLifecyclePhase> {
+    use UnifiedAnchorLifecyclePhase::*;
+    match text {
+        "NOT_PREPARED" => Some(NotPrepared),
+        "PREPARED" => Some(Prepared),
+        "APPROVED" => Some(Approved),
+        "REJECTED_BY_APPROVER" => Some(RejectedByApprover),
+        "SUBMITTED" => Some(Submitted),
+        "POLLING_IN_PROGRESS" => Some(PollingInProgress),
+        "FINALIZED_ACCEPT" => Some(FinalizedAccept),
+        "FINALIZED_FEE_ONLY" => Some(FinalizedFeeOnly),
+        "FINALIZED_REJECT" => Some(FinalizedReject),
+        "FINALIZED_VERIFICATION_FAILED" => Some(FinalizedVerificationFailed),
+        "FINALIZED_DISAGREEMENT" => Some(FinalizedDisagreement),
+        "UNKNOWN" => Some(Unknown),
+        _ => None,
+    }
 }

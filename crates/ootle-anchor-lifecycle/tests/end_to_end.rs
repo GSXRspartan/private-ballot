@@ -243,7 +243,7 @@ fn approver_reject_is_terminal() {
 }
 
 #[test]
-fn disagreement_surfaces_as_distinct_terminal() {
+fn disagreement_check_on_terminal_is_idempotent_noop() {
     let mut harness = LifecycleHarness::new(5);
     let tx = harness.prepare_approve_submit();
     // Indexer sees a full acceptance.
@@ -254,16 +254,19 @@ fn disagreement_surfaces_as_distinct_terminal() {
         UnifiedAnchorLifecyclePhase::FinalizedAccept
     );
 
-    // Walletd sees a rejection — disagreement.
+    // Walletd disagrees (rejects while indexer accepted). Because the
+    // lifecycle is already terminal (FinalizedAccept), check_agreement is
+    // an idempotent no-op: the phase never rewinds to FinalizedDisagreement,
+    // and the cached receipt evidence is preserved unchanged.
     let walletd = receipt_scenarios::rejected_receipt(&tx, &common::canonical_network());
     let result = harness.orchestrator.check_agreement(&walletd);
-    assert!(result.is_err());
+    assert!(result.is_ok());
     assert_eq!(
         harness.phase(),
-        UnifiedAnchorLifecyclePhase::FinalizedDisagreement
+        UnifiedAnchorLifecyclePhase::FinalizedAccept
     );
     assert!(harness.phase().is_terminal());
-    assert!(!harness.phase().is_terminal_success());
+    assert!(harness.phase().is_terminal_success());
 }
 
 #[test]

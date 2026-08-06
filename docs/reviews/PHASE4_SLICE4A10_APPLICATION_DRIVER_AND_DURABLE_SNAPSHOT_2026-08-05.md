@@ -106,7 +106,7 @@ The reference snapshot (`known_answer_snapshot` in `tests/common/mod.rs`) contai
 
 **Pinned digest** (BLAKE3, domain-separated):
 ```
-d4a9d17742c47c71cd08848d41fc6fa33f925daad6200d087f1340 6710d86275
+d4a9d17742c47c71cd08848d41fc6fa33f925daad6200d087f13406710d86275
 ```
 (hex: `212, 169, 209, 119, 66, 196, 124, 113, 205, 8, 132, 141, 65, 252, 111, 163, 63, 146, 93, 170, 214, 32, 13, 8, 127, 19, 64, 103, 16, 216, 98, 117`)
 

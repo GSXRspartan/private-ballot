@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod backoff;
+pub mod cli;
 pub mod config;
 pub mod driver;
 pub mod evidence;

@@ -21,7 +21,7 @@ use std::process::ExitCode;
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
-    TokioBlockingExecutor,
+    TokioBlockingExecutor, cli,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
@@ -44,8 +44,14 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
-    let config_path = find_flag_value(&args, "--config");
-    let auth_env = find_flag_value(&args, "--auth-env");
+
+    // Validate the argument set before any config loading, transport
+    // construction, runtime construction, snapshot mutation, or transaction
+    // submission.
+    cli::validate_args(&args)?;
+
+    let config_path = cli::find_flag_value(&args, "--config");
+    let auth_env = cli::find_flag_value(&args, "--auth-env");
     let approve = args.iter().any(|a| a == "--approve");
     let reject = args.iter().any(|a| a == "--reject");
     let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -159,16 +165,6 @@ fn print_outcome(
     } else {
         println!("no_evidence_non_terminal");
     }
-}
-
-fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        if arg == flag {
-            return iter.next().cloned();
-        }
-    }
-    None
 }
 
 fn to_lower_hex(bytes: &[u8; 32]) -> String {

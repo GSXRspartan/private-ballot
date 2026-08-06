@@ -201,13 +201,18 @@ fn scenario_6_disagreement() {
     let mut ix = IndexerReceiptNetworkAdapter::new(it);
     orch.advance_one_poll(&mut ix)
         .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(orch.phase(), UnifiedAnchorLifecyclePhase::FinalizedAccept);
     let walletd_obs =
         receipt_scenarios::walletd_accepted_receipt(&tx_id, &network(), &payload(0x99));
     let result = orch.check_agreement(&walletd_obs);
-    assert!(result.is_err(), "disagreement should return an error");
+    assert!(
+        result.is_ok(),
+        "check_agreement on a terminal phase must be an idempotent no-op"
+    );
     assert_eq!(
         orch.phase(),
-        UnifiedAnchorLifecyclePhase::FinalizedDisagreement
+        UnifiedAnchorLifecyclePhase::FinalizedAccept,
+        "FinalizedAccept must not rewind to FinalizedDisagreement"
     );
 }
 

@@ -277,9 +277,11 @@ fn every_orchestration_outcome_leaves_archive_and_transaction_unchanged() {
         let fingerprint_before = submitted.binding().fingerprint();
         let walletd = rejected_receipt(&tx);
         let _ = harness.orchestrator.check_agreement(&walletd);
+        // check_agreement on a terminal phase is an idempotent no-op: the
+        // phase never rewinds from FinalizedAccept to FinalizedDisagreement.
         assert_eq!(
             harness.phase(),
-            UnifiedAnchorLifecyclePhase::FinalizedDisagreement
+            UnifiedAnchorLifecyclePhase::FinalizedAccept
         );
         assert_artifacts_unchanged(
             &record,

@@ -17,6 +17,9 @@ use crate::policy::PollingPolicy;
 use crate::state::UnifiedAnchorLifecyclePhase;
 
 /// An error raised when reconstructing the orchestrator from a snapshot.
+///
+/// Every variant is a bounded, stable code. No variant carries a secret, a
+/// pinned Ootle type, or raw third-party text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LifecycleReconstructionError {
     /// The walletd and receipt snapshots disagree on which project request they
@@ -27,6 +30,30 @@ pub enum LifecycleReconstructionError {
     /// polling without the cached submitted handle (its constructor is
     /// crate-private to the walletd adapter).
     MissingSubmittedHandle,
+    /// The declared lifecycle phase is inconsistent with the contained
+    /// walletd snapshots, receipt snapshots, submitted handle, or polling
+    /// policy state. A consistent snapshot's phase must be derivable from its
+    /// contained state.
+    PhaseStateMismatch,
+    /// A submitted handle is present but no walletd snapshot describes it, or
+    /// the walletd snapshot's submission state does not indicate submission.
+    SubmittedHandleWithoutWalletdSnapshot,
+    /// The transaction identifier in the submitted handle does not match the
+    /// one recorded in the walletd snapshot or the receipt-query snapshot.
+    TransactionIdMismatch,
+    /// The frozen binding (network, account, anchor digest, payload, maximum
+    /// fee, or fingerprint) differs between the walletd snapshot, the submitted
+    /// handle, and/or the receipt-query snapshot.
+    BindingMismatch,
+    /// Duplicate project request identifiers, walletd request identifiers, or
+    /// transaction identifiers were found across the snapshots.
+    DuplicateIdentifier,
+    /// More than one walletd or receipt-query snapshot was present. A single
+    /// anchor lifecycle describes at most one of each.
+    TooManySnapshots,
+    /// The polling policy's consumed attempts exceed the maximum, or the
+    /// declared phase requires a non-zero attempt count that is absent.
+    PolicyInconsistent,
 }
 
 impl LifecycleReconstructionError {
@@ -36,6 +63,15 @@ impl LifecycleReconstructionError {
         match self {
             Self::SnapshotRequestMismatch => "LIFECYCLE_SNAPSHOT_REQUEST_MISMATCH",
             Self::MissingSubmittedHandle => "LIFECYCLE_MISSING_SUBMITTED_HANDLE",
+            Self::PhaseStateMismatch => "LIFECYCLE_PHASE_STATE_MISMATCH",
+            Self::SubmittedHandleWithoutWalletdSnapshot => {
+                "LIFECYCLE_SUBMITTED_HANDLE_WITHOUT_WALLETD_SNAPSHOT"
+            }
+            Self::TransactionIdMismatch => "LIFECYCLE_TRANSACTION_ID_MISMATCH",
+            Self::BindingMismatch => "LIFECYCLE_BINDING_MISMATCH",
+            Self::DuplicateIdentifier => "LIFECYCLE_DUPLICATE_IDENTIFIER",
+            Self::TooManySnapshots => "LIFECYCLE_TOO_MANY_SNAPSHOTS",
+            Self::PolicyInconsistent => "LIFECYCLE_POLICY_INCONSISTENT",
         }
     }
 }
