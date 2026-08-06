@@ -1545,6 +1545,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2211,7 +2220,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -2444,6 +2453,7 @@ dependencies = [
  "cookie_store",
  "encoding_rs",
  "futures-core",
+ "futures-util",
  "h2",
  "http",
  "http-body",
@@ -2465,12 +2475,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-streams",
  "web-sys",
 ]
 
@@ -2744,6 +2756,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6662b5879511e06e8999a8a235d848113e942c9124f211511b16466ee2995f26"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "serde_urlencoded"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3491c14715ca2294c4d6a88f15e84739788c1d030eed8c110436aafdaa2f3fd"
+dependencies = [
+ "form_urlencoded",
+ "itoa",
+ "ryu",
+ "serde",
 ]
 
 [[package]]
@@ -3068,6 +3092,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari-cc-private-ballot-ootle-anchor-network-adapters"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tari-cc-private-ballot-anchor",
+ "tari-cc-private-ballot-anchor-transport",
+ "tari-cc-private-ballot-archive",
+ "tari-cc-private-ballot-ootle-anchor-adapter",
+ "tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator",
+ "tari-cc-private-ballot-ootle-receipt-anchor-adapter",
+ "tari-cc-private-ballot-ootle-walletd-anchor-adapter",
+ "tari-cc-private-ballot-protocol",
+ "tari_consensus_types",
+ "tari_engine_types",
+ "tari_indexer_client",
+ "tari_ootle_transaction",
+ "tari_ootle_wallet_sdk",
+ "tari_ootle_walletd_client",
+ "tari_template_lib_types",
+ "time",
+ "url",
+]
+
+[[package]]
 name = "tari-cc-private-ballot-ootle-receipt-anchor-adapter"
 version = "0.1.0"
 dependencies = [
@@ -3320,12 +3368,15 @@ source = "git+https://github.com/tari-project/tari-ootle?rev=92023e0#92023e0b7c2
 dependencies = [
  "anyhow",
  "bounded-vec",
+ "bytes",
  "futures",
  "log",
  "memchr",
  "prost",
+ "reqwest",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "tari_consensus_types",
  "tari_engine_types",
  "tari_ootle_common_types",
@@ -3333,6 +3384,7 @@ dependencies = [
  "tari_ootle_transaction",
  "tari_template_abi",
  "tari_template_lib_types",
+ "thiserror 2.0.19",
  "time",
 ]
 
@@ -4248,6 +4300,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f01b580c9ac74c8d8f0c0e4afb04eeef2acf145458e52c03845ee9cd23e3d12"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wasm-streams"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1ec4f6517c9e11ae630e200b2b65d193279042e28edd4a2cda233e46670bbb"
+dependencies = [
+ "futures-util",
+ "js-sys",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

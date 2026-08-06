@@ -1,0 +1,80 @@
+[package]
+name = "tari-cc-private-ballot-ootle-anchor-network-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+# Pinned Slice 4A6A/4A6B walletd adapter: the synchronous WalletdAnchorClient trait,
+# the project-owned command/DTO types, the wire-request conversion, the
+# WalletdEffectiveStatusV1::from_wire mapping, the WalletdRequestId handle, the
+# WalletdSealSignerRef key-id conversion, the canonicalize_transaction_id
+# canonicalization, and the WalletdAnchorAdapterError categories. Driven verbatim;
+# this crate re-implements none of its logic.
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+# Pinned Slice 4A7 receipt adapter: the synchronous IndexerAnchorReceiptClient
+# trait, the AnchorReceiptQueryV1 query, the IndexerReceiptFetchV1 outcome, the
+# IndexerReceiptTransportError categories, the receipt conversion functions
+# (convert_receipt_response, convert_transaction_receipt, transaction_id_to_ootle,
+# transaction_id_from_ootle), and the receipt-address derivation. Driven verbatim.
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+# Pinned Slice 4A5 construction adapter: the OotleAnchorInspectionFingerprintV1 type
+# and the map_ootle_network mapping, reused for network-safety checks.
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+# Project-owned lifecycle/transport DTOs and the network identifier.
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+
+# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# The confirmed walletd JSON-RPC client (WalletDaemonClient) and its wire
+# request/response types. reqwest is a mandatory dependency of this crate;
+# the network-adapter crate does not create a runtime. Same exact revision
+# as Slices 4A5–4A8 so a single crate instance resolves.
+tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies KeyId and EffectiveStatus, the public field types of the walletd
+# request/response structs. Named only at this leaf; no wallet-SDK type
+# appears in this crate's public API surface. Same rev.
+tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies TransactionId (canonicalization and receipt-address derivation)
+# and Network (network mapping). The serde feature is enabled so the wire
+# request types serialize correctly. Same rev.
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0", features = ["serde"] }
+# Supplies ComponentAddress (resolved fee account) and TransactionReceiptAddress
+# (the persisted receipt substate address). Same rev.
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies TransactionReceipt, FinalizeOutcome, LogEntry, and Epoch — the
+# exact pinned receipt types the indexer adapter converts. Same rev.
+tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# The confirmed indexer REST client (IndexerRestApiClient) and its wire
+# request/response types. The default `client` feature enables reqwest;
+# the network-adapter crate does not create a runtime. Same rev.
+tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# Supplies the Decision enum (Commit/Abort) used by the indexer transaction-result
+# variant to distinguish full acceptance from rejection. Same rev.
+tari_consensus_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+# URL parsing for endpoint configuration validation. Already in the lock via reqwest.
+url = "2"
+# JSON serialization for offline endpoint-shape validation tests. Already in the lock.
+serde_json = "1"
+# Time primitives for constructing `PrimitiveDateTime` in the scripted indexer
+# transport (the `IndexerTransactionFinalizedResult::Rejected` variant requires
+# `rejected_time`). Already in the lock via `tari_indexer_client`.
+time = "0.3"
+
+[dev-dependencies]
+# Project types the offline test suites name directly.
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+# Pinned Slice 4A8 lifecycle orchestrator: the AnchorLifecycleOrchestrator and
+# PollingPolicy, driven verbatim in the offline orchestrator integration test.
+tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator = { path = "../ootle-anchor-lifecycle" }
+# Archive commitment type used by the archive-independence integration test.
+tari-cc-private-ballot-archive = { path = "../archive" }
+
+[lints]
+workspace = true
