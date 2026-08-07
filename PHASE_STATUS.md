@@ -1,11 +1,33 @@
 # Phase Status
 
-- Last updated: 2026-08-01
-- Current branch: `phase2/protocol-foundation`
-- Current project state: Phase 2 offline Rust foundation complete
-- Implementation baseline: `d9e46e1`
-- Next authorized work: Phase 3 anonymous-membership prototype and
-  cross-platform CI
+- Last updated: 2026-08-07
+- Current branch: `phase5/gui-core-foundation`
+- Current project state: Phase 4 harmless non-binding Ootle testnet anchor
+  prototype complete at tag `phase4-release-build-2026-08-06`
+  (`05d923da1e552b7fdf2abf1129bf53334620d6f1`); Phase 5 GUI begun
+- Implementation baseline: `05d923da` (Phase 4 release build)
+- Next authorized work: Phase 5 GUI slices following Slice 5A3
+  (Tauri desktop shell and design system)
+
+> Note: the sections below this header were last maintained at the Phase 2
+> closeout (2026-08-01). Phase 3 delivered the reviewed Triptych
+> anonymous-membership prototype; Phase 4 delivered the canonical anchor
+> record, walletd/indexer adapters, lifecycle orchestration, durable
+> snapshots, canonical evidence, and operator tooling; see `ROADMAP.md`,
+> `docs/decisions/ADR-0006`, and the Phase 3/Phase 4 review documents under
+> `docs/reviews/`. Phase 5 Slice 5A2 added the additive
+> `tari-cc-private-ballot-gui-core` application facade crate; see
+> `docs/reviews/PHASE5_SLICE5A2_GUI_CORE_FOUNDATION_2026-08-07.md` and
+> `docs/decisions/ADR-0007-phase5-gui-stack-and-rust-boundary.md`.
+> Phase 5 Slice 5A3 added the Tauri 2 + React + TypeScript + Vite desktop
+> shell under `gui/` (see
+> `docs/reviews/PHASE5_SLICE5A3_TAURI_DESKTOP_SHELL_2026-08-07.md`). After a
+> one-time networked fetch of the Tauri crate family, the native build was
+> completed on this machine: the Rust shell and its full dependency graph
+> compiled (offline `cargo check` passes), the release executable was
+> produced, and Windows MSI and NSIS installers were built. Slice 5A3 is
+> documented as READY FOR 5A4 (see §14 of that review). Installer
+> installation, code signing, and macOS/Linux packaging were not tested.
 
 ## Phase 2 assessment
 

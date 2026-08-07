@@ -16,3 +16,9 @@ Thumbs.db
 /fuzz/coverage/
 /fuzz/target/
 !/fuzz/Cargo.lock
+
+# Phase 5 desktop shell build artifacts
+/gui/node_modules/
+/gui/dist/
+/gui/src-tauri/target/
+/gui/src-tauri/gen/

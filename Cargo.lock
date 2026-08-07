@@ -3066,6 +3066,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari-cc-private-ballot-gui-core"
+version = "0.1.0"
+dependencies = [
+ "curve25519-dalek 4.1.3",
+ "serde",
+ "tari-cc-private-ballot-anchor",
+ "tari-cc-private-ballot-anchor-transport",
+ "tari-cc-private-ballot-archive",
+ "tari-cc-private-ballot-ballot",
+ "tari-cc-private-ballot-crypto",
+ "tari-cc-private-ballot-ootle-anchor-adapter",
+ "tari-cc-private-ballot-ootle-anchor-app",
+ "tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator",
+ "tari-cc-private-ballot-ootle-anchor-network-adapters",
+ "tari-cc-private-ballot-ootle-receipt-anchor-adapter",
+ "tari-cc-private-ballot-ootle-walletd-anchor-adapter",
+ "tari-cc-private-ballot-protocol",
+ "tari-cc-private-ballot-registry",
+ "tari-cc-private-ballot-tally",
+ "tari-cc-private-ballot-verifier",
+]
+
+[[package]]
 name = "tari-cc-private-ballot-ootle-anchor-adapter"
 version = "0.1.0"
 dependencies = [

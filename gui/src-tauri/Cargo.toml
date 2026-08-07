@@ -1,0 +1,27 @@
+[package]
+name = "tari-cc-private-ballot-gui"
+version = "0.1.0"
+description = "Tari Private Ballot desktop shell (Tauri 2)"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+# This crate is deliberately detached from the election workspace: the shell
+# is a Tauri application with its own lockfile, and the workspace build must
+# remain hermetic without GUI framework dependencies. gui-core remains the
+# only backend interface (path dependency), per ADR-0007.
+[workspace]
+
+[lib]
+name = "tari_cc_private_ballot_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+tari-cc-private-ballot-gui-core = { path = "../../crates/gui-core" }
