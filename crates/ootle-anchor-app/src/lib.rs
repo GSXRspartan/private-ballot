@@ -32,20 +32,23 @@ pub mod config;
 pub mod driver;
 pub mod evidence;
 pub mod executor;
+pub mod inspect_snapshot;
 pub mod report;
 pub mod snapshot_store;
+pub mod verify_evidence;
+pub mod write_config;
 
 pub use backoff::{BackoffError, WallClockBackoff};
 pub use config::{AnchorAppConfig, ConfigFileError};
 pub use driver::{AnchorAppDriver, DriverError, DriverRunOutcome, OperatorDecision};
 pub use evidence::{
-    AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError, EvidenceFileError,
-    TerminalEvidenceInputs, TerminalIncidentKind, write_evidence_atomic,
+    write_evidence_atomic, AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError,
+    EvidenceFileError, TerminalEvidenceInputs, TerminalIncidentKind,
 };
 pub use executor::{TokioBlockingExecutor, TokioRuntimeBuildError};
 pub use report::MachineReportCode;
 pub use snapshot_store::{
+    read_snapshot, snapshot_digest, write_snapshot_atomic, SnapshotFileError,
     MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1,
-    SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1, SnapshotFileError, read_snapshot,
-    snapshot_digest, write_snapshot_atomic,
+    SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1,
 };

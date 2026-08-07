@@ -23,15 +23,15 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use tari_cc_private_ballot_anchor::{
-    OOTLE_ANCHOR_PURPOSE_ID_V1, OotleAnchorRecordHashV1, OotleNetworkIdV1,
+    OotleAnchorRecordHashV1, OotleNetworkIdV1, OOTLE_ANCHOR_PURPOSE_ID_V1,
 };
 use tari_cc_private_ballot_anchor_transport::AnchorTransactionId;
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::UnifiedAnchorLifecyclePhase;
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::VerifiedIndexerAnchorV1;
 use tari_cc_private_ballot_protocol::{
-    BLAKE3_256_HASH_ALGORITHM_ID_V1, Blake3HashProviderV1, CanonicalCborReader,
-    CanonicalCborWriter, HashProvider, ManifestHash, ProtocolError, ValidationCode,
+    Blake3HashProviderV1, CanonicalCborReader, CanonicalCborWriter, HashProvider, ManifestHash,
+    ProtocolError, ValidationCode, BLAKE3_256_HASH_ALGORITHM_ID_V1,
 };
 
 /// Maximum encoded evidence file size (envelope + body).
@@ -332,6 +332,7 @@ pub struct AnchorEvidenceRecordV1 {
     receipt_source: &'static str,
     phase: UnifiedAnchorLifecyclePhase,
     snapshot_digest: [u8; 32],
+    ledger_position: Option<u64>,
 }
 
 impl AnchorEvidenceRecordV1 {
@@ -429,6 +430,7 @@ impl AnchorEvidenceRecordV1 {
             receipt_source,
             phase,
             snapshot_digest,
+            ledger_position,
         })
     }
 
@@ -481,6 +483,42 @@ impl AnchorEvidenceRecordV1 {
     #[must_use]
     pub fn transaction_id(&self) -> Option<&AnchorTransactionId> {
         self.transaction_id.as_ref()
+    }
+
+    /// Returns the network this evidence was recorded for.
+    #[must_use]
+    pub fn network(&self) -> &OotleNetworkIdV1 {
+        &self.network
+    }
+
+    /// Returns the election manifest hash.
+    #[must_use]
+    pub fn manifest_hash(&self) -> ManifestHash {
+        self.manifest_hash
+    }
+
+    /// Returns the archive hash.
+    #[must_use]
+    pub fn archive_hash(&self) -> ArchiveHashV1 {
+        self.archive_hash
+    }
+
+    /// Returns the anchor-record digest.
+    #[must_use]
+    pub fn anchor_digest(&self) -> OotleAnchorRecordHashV1 {
+        self.anchor_digest
+    }
+
+    /// Returns the 32-byte snapshot digest bound into this evidence record.
+    #[must_use]
+    pub fn snapshot_digest(&self) -> [u8; 32] {
+        self.snapshot_digest
+    }
+
+    /// Returns the optional ledger position, if recorded.
+    #[must_use]
+    pub fn ledger_position(&self) -> Option<u64> {
+        self.ledger_position
     }
 
     /// Returns the human-review summary.
@@ -600,9 +638,10 @@ impl AnchorEvidenceRecordV1 {
             .map(|text| AnchorTransactionId::new(text).map_err(|_| EvidenceError::InvalidData))
             .transpose()?;
 
-        // 7. optional ledger position (read and consumed from the body but not
-        // stored in the struct; it is encoded only during construction).
-        let _ledger_position = decode_option_u64_value(&mut body_reader)?;
+        // 7. optional ledger position (stored for read-only inspection; it is
+        // encoded only during construction and never affects the digest domain
+        // beyond the already-encoded body).
+        let ledger_position = decode_option_u64_value(&mut body_reader)?;
 
         // 8. final status
         let final_status_text = body_reader.read_text_string().map_err(from_protocol)?;
@@ -641,6 +680,7 @@ impl AnchorEvidenceRecordV1 {
             receipt_source,
             phase,
             snapshot_digest,
+            ledger_position,
         })
     }
 }

@@ -1,14 +1,17 @@
-//! `tari-cc-private-ballot-anchor` — application binary (Slice 4A10).
+//! `tari-cc-private-ballot-anchor` — application binary (Slice 4A10, extended
+//! by the Phase 4 operator-tooling slice).
 //!
-//! Thin wrapper that parses a small manual flag set, loads the canonical
-//! config, optionally loads walletd auth from an environment variable,
-//! constructs one current-thread Tokio runtime, builds the real Slice 4A9
-//! transports, creates or restores the driver, runs it, and prints the
-//! human-review summary plus the stable machine code and locator paths.
+//! Thin wrapper that parses the manual flag set, dispatches to the selected
+//! mode, and for the lifecycle mode loads the canonical config, optionally
+//! loads walletd auth from an environment variable, constructs one
+//! current-thread Tokio runtime, builds the real Slice 4A9 transports, creates
+//! or restores the driver, runs it, and prints the human-review summary plus
+//! the stable machine code and locator paths.
 //!
 //! Exit codes:
 //!
-//! * `0` only for finalized acceptance;
+//! * `0` for finalized acceptance (lifecycle mode), successful config write,
+//!   successful evidence verification, or successful snapshot inspection;
 //! * non-zero for every non-success or incomplete outcome.
 //!
 //! The binary accepts no private key, mnemonic, seed, wallet password, raw
@@ -20,8 +23,8 @@ use std::process::ExitCode;
 
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
-    TokioBlockingExecutor, cli,
+    cli, AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
+    TokioBlockingExecutor,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
@@ -45,16 +48,33 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().collect();
 
-    // Validate the argument set before any config loading, transport
-    // construction, runtime construction, snapshot mutation, or transaction
-    // submission.
-    cli::validate_args(&args)?;
+    // Parse and validate the argument set before any config loading, transport
+    // construction, runtime construction, snapshot mutation, evidence
+    // read/write, or transaction submission.
+    let mode = cli::parse(&args)?;
 
-    let config_path = cli::find_flag_value(&args, "--config");
-    let auth_env = cli::find_flag_value(&args, "--auth-env");
-    let approve = args.iter().any(|a| a == "--approve");
-    let reject = args.iter().any(|a| a == "--reject");
-    let dry_run = args.iter().any(|a| a == "--dry-run");
+    match mode {
+        cli::CliMode::WriteConfig(write_args) => {
+            tari_cc_private_ballot_ootle_anchor_app::write_config::run(&write_args)
+        }
+        cli::CliMode::VerifyEvidence { path } => {
+            tari_cc_private_ballot_ootle_anchor_app::verify_evidence::run(&path)
+        }
+        cli::CliMode::InspectSnapshot { path } => {
+            tari_cc_private_ballot_ootle_anchor_app::inspect_snapshot::run(&path)
+        }
+        cli::CliMode::Lifecycle(lifecycle) => run_lifecycle(lifecycle),
+    }
+}
+
+fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
+    let cli::LifecycleArgs {
+        config_path,
+        auth_env,
+        approve,
+        reject,
+        dry_run,
+    } = lifecycle;
 
     let Some(config_path) = config_path else {
         return Err(MachineReportCode::ConfigurationFailure.as_str().to_owned());

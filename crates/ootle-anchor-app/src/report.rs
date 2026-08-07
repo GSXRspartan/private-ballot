@@ -42,6 +42,18 @@ pub enum MachineReportCode {
     EvidenceFailure,
     /// A transport-level failure occurred while driving the adapters.
     TransportFailure,
+    /// A canonical config file was written and verified.
+    ConfigWritten,
+    /// A canonical config file could not be written or verified.
+    ConfigWriteFailed,
+    /// A canonical evidence file was decoded and its digest verified.
+    EvidenceVerified,
+    /// A canonical evidence file could not be decoded or its digest did not verify.
+    EvidenceVerifyFailed,
+    /// A canonical snapshot file was decoded and its digest verified.
+    SnapshotVerified,
+    /// A canonical snapshot file could not be decoded or its digest did not verify.
+    SnapshotVerifyFailed,
 }
 
 impl MachineReportCode {
@@ -66,6 +78,12 @@ impl MachineReportCode {
             Self::SnapshotFailure => "ANCHOR_APP_SNAPSHOT_FAILURE",
             Self::EvidenceFailure => "ANCHOR_APP_EVIDENCE_FAILURE",
             Self::TransportFailure => "ANCHOR_APP_TRANSPORT_FAILURE",
+            Self::ConfigWritten => "ANCHOR_APP_CONFIG_WRITTEN",
+            Self::ConfigWriteFailed => "ANCHOR_APP_CONFIG_WRITE_FAILED",
+            Self::EvidenceVerified => "ANCHOR_APP_EVIDENCE_VERIFIED",
+            Self::EvidenceVerifyFailed => "ANCHOR_APP_EVIDENCE_VERIFY_FAILED",
+            Self::SnapshotVerified => "ANCHOR_APP_SNAPSHOT_VERIFIED",
+            Self::SnapshotVerifyFailed => "ANCHOR_APP_SNAPSHOT_VERIFY_FAILED",
         }
     }
 }
