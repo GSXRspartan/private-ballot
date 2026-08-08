@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickDirectory, pickRegistryCborFile } from "../api/dialog";
+import { pickDirectory, pickGovernanceDocument, pickRegistryCborFile } from "../api/dialog";
 import type {
   GuiBallotPresentationType,
   GuiCommandError,
@@ -9,6 +9,7 @@ import type {
   GuiElectionDraftPreviewV1,
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
+  GuiGovernanceDocumentDigestV1,
 } from "../api/types";
 import { presentationIdentifier } from "../api/client";
 import { NavSection } from "../components/AppFrame";
@@ -23,6 +24,16 @@ import {
   parseVoterHexList,
   presentationLabel,
 } from "../creation";
+import {
+  ADVANCED_PIN_LABEL,
+  RECOMMENDED_PIN_LABEL,
+  documentMatchShortLabel,
+  documentMatchTone,
+  formatByteSize,
+  isGitCommitPin,
+  pinFormatTone,
+  pinKindLabel,
+} from "../governance";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -33,12 +44,14 @@ import {
   HashValue,
   LifecyclePill,
   Notice,
+  Pill,
 } from "../components/ui";
 
-type Step = "basics" | "voters" | "options" | "rules" | "review" | "frozen";
+type Step = "basics" | "governance" | "voters" | "options" | "rules" | "review" | "frozen";
 
 const STEPS: { id: Step; label: string }[] = [
   { id: "basics", label: "Basics" },
+  { id: "governance", label: "Governance source" },
   { id: "voters", label: "Eligible voters" },
   { id: "options", label: "Ballot options" },
   { id: "rules", label: "Voting rules" },
@@ -78,6 +91,9 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
+  const [governanceDocPath, setGovernanceDocPath] = useState<string | null>(null);
+  const [governanceDocDigest, setGovernanceDocDigest] =
+    useState<GuiGovernanceDocumentDigestV1 | null>(null);
 
   useEffect(() => {
     void api.startElectionDraft().catch((error) => captureError(error));
@@ -168,7 +184,39 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       });
       return;
     }
-    if (await commitBasics()) goNext("voters");
+    if (await commitBasics()) goNext("governance");
+  }
+
+  // ---- Governance source / document -------------------------------------
+  async function onSelectGovernanceDocument() {
+    const path = await pickGovernanceDocument("Select governance document");
+    if (!path) return;
+    const digest = await run(() => api.setDraftGovernanceDocument(path));
+    if (!digest) return;
+    setGovernanceDocPath(path);
+    setGovernanceDocDigest(digest);
+    await refreshPreview();
+  }
+
+  async function onClearGovernanceDocument() {
+    const ok = await run(() => api.clearDraftGovernanceDocument());
+    if (ok === null) return;
+    setGovernanceDocPath(null);
+    setGovernanceDocDigest(null);
+    await refreshPreview();
+  }
+
+  async function onUseDocumentDigestAsRevision() {
+    const ok = await run(() => api.useGovernanceDocumentDigestAsRevision());
+    if (ok === null) return;
+    const p = await refreshPreview();
+    if (p) {
+      setGovernanceRevision(p.governance_source_revision ?? "");
+    }
+  }
+
+  async function onGovernanceNext() {
+    goNext("voters");
   }
 
   // ---- Voters ------------------------------------------------------------
@@ -364,6 +412,29 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         />
       )}
 
+      {step === "governance" && (
+        <GovernanceStep
+          preview={preview}
+          governanceRevision={governanceRevision}
+          setGovernanceRevision={setGovernanceRevision}
+          governanceDocPath={governanceDocPath}
+          governanceDocDigest={governanceDocDigest}
+          busy={busy}
+          onSelectDocument={onSelectGovernanceDocument}
+          onClearDocument={onClearGovernanceDocument}
+          onUseDigestAsRevision={onUseDocumentDigestAsRevision}
+          onApplyRevision={async () => {
+            const ok = await run(() =>
+              api.setDraftGovernanceSourceRevision(governanceRevision),
+            );
+            if (ok === null) return;
+            await refreshPreview();
+          }}
+          onNext={onGovernanceNext}
+          onBack={() => goNext("basics")}
+        />
+      )}
+
       {step === "voters" && (
         <VotersStep
           voterText={voterText}
@@ -509,6 +580,165 @@ function BasicsStep(props: {
       </Card>
 
       <StepNav busy={props.busy} onNext={props.onNext} nextLabel="Continue" />
+    </>
+  );
+}
+
+// ------------------------------------------------------------- Governance
+
+function GovernanceStep(props: {
+  preview: GuiElectionDraftPreviewV1 | null;
+  governanceRevision: string;
+  setGovernanceRevision: (v: string) => void;
+  governanceDocPath: string | null;
+  governanceDocDigest: GuiGovernanceDocumentDigestV1 | null;
+  busy: boolean;
+  onSelectDocument: () => void;
+  onClearDocument: () => void;
+  onUseDigestAsRevision: () => void;
+  onApplyRevision: () => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const pin = props.preview?.governance_source_pin ?? null;
+  const docStatus = props.preview?.governance_document_status ?? null;
+  const doc = props.governanceDocDigest;
+  const formatTone = pinFormatTone(pin);
+  const matchTone = documentMatchTone(docStatus?.status);
+
+  return (
+    <>
+      <Card title="Governance source pin">
+        <p className="form-hint">
+          {RECOMMENDED_PIN_LABEL}. {ADVANCED_PIN_LABEL}. The bound reference must be immutable; a
+          mutable phrase such as <em>latest</em> or <em>main</em> is not accepted as a recognized
+          immutable pin.
+        </p>
+        <label className="field-label" htmlFor="governance-source-revision">
+          Governance source revision
+        </label>
+        <input
+          id="governance-source-revision"
+          className="text-input"
+          value={props.governanceRevision}
+          onChange={(e) => props.setGovernanceRevision(e.target.value)}
+          placeholder="blake3:<64 hex> (recommended) or git:<40 hex>"
+        />
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={props.onApplyRevision}
+            disabled={props.busy}
+          >
+            Apply revision
+          </button>
+        </div>
+        {pin && (
+          <div className="field-list">
+            <Field label="Pin kind">
+              <Pill tone={formatTone === "ok" ? "ok" : formatTone === "warn" ? "warn" : "neutral"}>
+                {pinKindLabel(pin)}
+              </Pill>
+            </Field>
+            <Field label="Format">
+              <span className="field-value">
+                {pin.format_valid
+                  ? "Valid immutable reference format"
+                  : pin.message}
+              </span>
+            </Field>
+            {pin.digest_hex && (
+              <Field label="Bound digest">
+                <HashValue value={pin.digest_hex} />
+                {pin.digest_hex && <CopyButton value={pin.digest_hex} />}
+              </Field>
+            )}
+            {pin.git_sha_hex && (
+              <Field label="Bound Git SHA">
+                <HashValue value={pin.git_sha_hex} />
+              </Field>
+            )}
+          </div>
+        )}
+        <Notice tone="info">
+          Format validity is not cryptographic verification. A green &ldquo;Matched&rdquo; status
+          appears below only when the selected document digest actually equals the bound reference.
+        </Notice>
+      </Card>
+
+      <Card title="Governance document">
+        <p className="form-hint">
+          Select the local governance document associated with this election. The document is treated
+          as immutable raw bytes for hashing and archival; its semantics are not parsed.
+        </p>
+        {doc ? (
+          <div className="field-list">
+            <Field label="Filename">
+              <span className="field-value">{doc.display_filename}</span>
+            </Field>
+            <Field label="Byte size">
+              <span className="field-value">{formatByteSize(doc.bytes)}</span>
+            </Field>
+            <Field label="Digest algorithm">
+              <span className="field-value">{doc.digest_algorithm_id}</span>
+            </Field>
+            <Field label="Document digest">
+              <HashValue value={doc.digest_hex} />
+              <CopyButton value={doc.digest_hex} />
+            </Field>
+            <Field label="Selected path">
+              <span className="field-value">{props.governanceDocPath}</span>
+            </Field>
+          </div>
+        ) : (
+          <p className="field-value">No governance document selected.</p>
+        )}
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={props.onSelectDocument}
+            disabled={props.busy}
+          >
+            {doc ? "Replace document" : "Select document"}
+          </button>
+          {doc && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={props.onClearDocument}
+              disabled={props.busy}
+            >
+              Clear
+            </button>
+          )}
+          {doc && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={props.onUseDigestAsRevision}
+              disabled={props.busy || isGitCommitPin(pin)}
+            >
+              Use this document digest as the pin
+            </button>
+          )}
+        </div>
+        {docStatus && (
+          <div className="field-list">
+            <Field label="Source ↔ document status">
+              <Pill tone={matchTone === "ok" ? "ok" : matchTone === "error" ? "error" : matchTone === "warn" ? "warn" : "neutral"}>
+                {documentMatchShortLabel(docStatus.status)}
+              </Pill>
+            </Field>
+            <Field label="Detail">
+              <span className="field-value">{docStatus.status_label}</span>
+            </Field>
+          </div>
+        )}
+      </Card>
+
+      <StepNav busy={props.busy} onNext={props.onNext} onBack={props.onBack} nextLabel="Continue" />
     </>
   );
 }
@@ -757,6 +987,30 @@ function ReviewStep(props: {
           <Field label="Governance source">
             <span className="field-value">{p.governance_source_revision ?? "\u2014"}</span>
           </Field>
+          {p.governance_source_pin && (
+            <Field label="Source pin format">
+              <span className="field-value">
+                {p.governance_source_pin.format_valid
+                  ? `${pinKindLabel(p.governance_source_pin)} — valid immutable reference format`
+                  : p.governance_source_pin.message}
+              </span>
+            </Field>
+          )}
+          {p.governance_document && (
+            <Field label="Governance document">
+              <span className="field-value">
+                {p.governance_document.display_filename} · {formatByteSize(p.governance_document.bytes)}
+              </span>
+            </Field>
+          )}
+          {p.governance_document_status && (
+            <Field label="Source ↔ document">
+              <span className="field-value">
+                {documentMatchShortLabel(p.governance_document_status.status)} —{" "}
+                {p.governance_document_status.status_label}
+              </span>
+            </Field>
+          )}
           <Field label="Ballot type">
             <span className="field-value">{presentationLabel(props.presentation)}</span>
           </Field>

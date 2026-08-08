@@ -23,6 +23,10 @@ use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, MAX_CANONICAL_OBJECT
 use crate::archive_writer::SUBMISSIONS_ARCHIVE_DIR;
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
+use crate::governance::{
+    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, GuiGovernanceArchivePinFactV1, MAX_GOVERNANCE_DOCUMENT_BYTES,
+    validate_governance_source_pin,
+};
 use crate::session::GuiElectionSessionV1;
 use crate::tally::GuiTallySummaryV1;
 
@@ -32,6 +36,8 @@ pub const STAGE_ARCHIVE_MANIFEST: &str = "ARCHIVE_MANIFEST";
 pub const STAGE_CATALOG_FILES: &str = "CATALOG_FILES";
 /// Verification stage: election artifact decode and cross-binding checks.
 pub const STAGE_ELECTION_ARTIFACTS: &str = "ELECTION_ARTIFACTS";
+/// Verification stage: governance source pin ↔ archived document cross-check.
+pub const STAGE_GOVERNANCE_PIN: &str = "GOVERNANCE_PIN";
 /// Verification stage: deterministic ballot replay through proof verification.
 pub const STAGE_BALLOT_REPLAY: &str = "BALLOT_REPLAY";
 /// Verification stage: archive manifest rebuild and archive-hash comparison.
@@ -79,6 +85,13 @@ pub struct GuiArchiveVerificationV1 {
     pub archive_hash_consistent: bool,
     /// The recomputed election manifest hash, lowercase hex.
     pub election_manifest_hash_hex: Option<String>,
+    /// Distinct application-level fact about whether the archived
+    /// governance document matches the bound `governance_source_revision`
+    /// pin. Separate from `verified`: archive integrity proves catalog/disk
+    /// consistency, not governance-source correspondence. For a `blake3:`
+    /// content-digest pin this is `Matched`/`Mismatch`/`Missing`; for a `git:`
+    /// pin it is `OperatorAttested`; otherwise `NotApplicable`.
+    pub governance_source_matches_pin: GuiGovernanceArchivePinFactV1,
 }
 
 impl GuiArchiveVerificationV1 {
@@ -98,6 +111,7 @@ impl GuiArchiveVerificationV1 {
             recomputed_archive_hash_hex: None,
             archive_hash_consistent: false,
             election_manifest_hash_hex: None,
+            governance_source_matches_pin: GuiGovernanceArchivePinFactV1::NotApplicable,
         }
     }
 
@@ -188,7 +202,7 @@ pub fn verify_archive_directory_v1(dir: &Path) -> Result<GuiArchiveVerificationV
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for entry in archive_manifest.files().entries() {
         let path = entry.path().as_str();
-        let bytes = read_bounded(&dir.join(path))?;
+        let bytes = read_bounded_archive_file(&dir.join(path), path)?;
         let digest_ok = entry.verify_bytes(&provider, &bytes).is_ok();
         result.files.push(GuiArchiveFileCheckV1 {
             path: path.to_owned(),
@@ -222,6 +236,55 @@ pub fn verify_archive_directory_v1(dir: &Path) -> Result<GuiArchiveVerificationV
     result.election_manifest_hash_hex = Some(crate::hex::to_lower_hex(
         artifacts.manifest_hash().as_bytes(),
     ));
+
+    // Stage 3b: governance source pin ↔ archived document cross-check
+    // (Slice 5A8 hardening, M1). Archive catalog verification proves the on-disk
+    // `governance/source.bin` bytes match the catalog digest, but that alone
+    // does not prove the archived governance document matches the manifest's
+    // bound `governance_source_revision` pin. An internally consistent archive
+    // could contain the wrong document. This application-level gate closes
+    // that gap using already-bound manifest data plus the existing, verified
+    // archive catalog. It does not add a fourth canonical election artifact.
+    let revision = artifacts.manifest().governance_source_revision();
+    let pin = validate_governance_source_pin(revision);
+    if pin.is_content_digest()
+        && let Some(pin_hex) = pin.digest_hex.as_deref()
+    {
+        let gov_entry = archive_manifest
+            .files()
+            .entries()
+            .iter()
+            .find(|entry| entry.path().as_str() == GOVERNANCE_DOCUMENT_ARCHIVE_PATH);
+        match gov_entry {
+            None => {
+                result.governance_source_matches_pin = GuiGovernanceArchivePinFactV1::Missing;
+                return Ok(result.fail(
+                    STAGE_GOVERNANCE_PIN,
+                    GuiCoreError::governance_archive_document_missing().code(),
+                ));
+            }
+            Some(entry) => {
+                let cat_hex = crate::hex::to_lower_hex(entry.digest().as_bytes());
+                if cat_hex == pin_hex {
+                    result.governance_source_matches_pin = GuiGovernanceArchivePinFactV1::Matched;
+                } else {
+                    result.governance_source_matches_pin =
+                        GuiGovernanceArchivePinFactV1::Mismatch;
+                    return Ok(result.fail(
+                        STAGE_GOVERNANCE_PIN,
+                        GuiCoreError::governance_archive_pin_mismatch().code(),
+                    ));
+                }
+            }
+        }
+    } else if pin.is_git_commit() {
+        // A Git commit SHA pin cannot be cryptographically matched to a local
+        // file without repository history access. Report operator-attested,
+        // not "verified", regardless of whether a document is archived.
+        result.governance_source_matches_pin = GuiGovernanceArchivePinFactV1::OperatorAttested;
+    } else {
+        result.governance_source_matches_pin = GuiGovernanceArchivePinFactV1::NotApplicable;
+    }
 
     // Stage 4: deterministic ballot replay through the ingestion pipeline.
     let submission_paths: Vec<String> = catalog_paths
@@ -318,6 +381,36 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, GuiCoreError> {
             crate::error::GuiErrorCategory::InvalidInput,
             Some("archive-file"),
             "archive file exceeds the protocol object size limit",
+        ));
+    }
+    std::fs::read(path).map_err(|_| GuiCoreError::io_failure("archive-file"))
+}
+
+/// Reads one hash-covered archive content file, applying the governance
+/// document pilot limit to the project-controlled governance path and the
+/// canonical-object limit to every other content file.
+fn read_bounded_archive_file(path: &Path, relative: &str) -> Result<Vec<u8>, GuiCoreError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            GuiCoreError::file_not_found("archive-file")
+        } else {
+            GuiCoreError::io_failure("archive-file")
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(GuiCoreError::io_failure("archive-file"));
+    }
+    let limit = if relative == GOVERNANCE_DOCUMENT_ARCHIVE_PATH {
+        MAX_GOVERNANCE_DOCUMENT_BYTES
+    } else {
+        MAX_CANONICAL_OBJECT_BYTES
+    };
+    if metadata.len() > limit as u64 {
+        return Err(GuiCoreError::new(
+            "PROTOCOL_LIMIT_EXCEEDED",
+            crate::error::GuiErrorCategory::InvalidInput,
+            Some("archive-file"),
+            "archive file exceeds its size limit",
         ));
     }
     std::fs::read(path).map_err(|_| GuiCoreError::io_failure("archive-file"))

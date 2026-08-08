@@ -53,6 +53,31 @@
 > authoritative. Post-freeze immutability is enforced in Rust. See
 > `docs/reviews/PHASE5_SLICE5A6_ORGANIZER_ELECTION_CREATION_2026-08-07.md`.
 > Slice 5A6 is documented as READY FOR OPUS REVIEW. No commit was created; all
+> changes are staged only. Phase 5 Slice 5A8 implemented the ADR-0008
+> process-hardening requirements before voter credential/proof generation:
+> application-level governance source pinning (`blake3:<64 hex>` content
+> digest, recommended, and `git:<40 hex>` Git commit SHA, advanced), local
+> governance document selection/digesting (existing `ArchiveFileV1`
+> domain-separated BLAKE3-256, 50 MiB cap, symlink/directory rejection),
+> source↔document matching with honest operator-attested labeling for Git SHAs,
+> archival of the governance document as supporting evidence at the
+> project-controlled `governance/source.bin` path (hash-covered by the existing
+> `ArchiveManifestV1` catalog, no schema change), a freeze hard gate that
+> blocks a content-digest pin whose selected document does not match, and the
+> first real voter confirmation boundary view model that separates
+> cryptographically bound manifest fields from the non-canonical presentation
+> label and explicitly states no proposal question exists. A final pre-commit
+> hardening pass added paired write-time and verify-time governance pin↔document
+> gates (so an internally catalog-consistent archive containing the wrong
+> governance document for a bound `blake3:` pin is rejected), a distinct
+> `governance_source_matches_pin` verification DTO fact, a frozen governance
+> digest KAT, and the pin↔catalog digest equality regression. No canonical
+> change; V1 manifest/archive bytes are byte-identical. No voter secrets, no
+> network, no walletd/indexer/signing. See
+> `docs/reviews/PHASE5_SLICE5A8_GOVERNANCE_SOURCE_AND_VOTER_CONFIRMATION_2026-08-07.md`.
+> Slice 5A8 passed independent Opus review (APPROVE WITH NON-BLOCKING
+> FOLLOW-UPS); the one MEDIUM finding (M1) and LOW/INFO follow-ups are resolved
+> by the final hardening pass. READY TO COMMIT. No commit was created; all
 > changes are staged only.
 
 ## Phase 2 assessment

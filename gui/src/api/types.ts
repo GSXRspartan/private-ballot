@@ -137,7 +137,24 @@ export interface GuiArchiveVerificationV1 {
   recomputed_archive_hash_hex: string | null;
   archive_hash_consistent: boolean;
   election_manifest_hash_hex: string | null;
+  /** Distinct application-level fact about whether the archived governance
+   *  document matches the bound `governance_source_revision` pin. This is
+   *  SEPARATE from `verified` (archive integrity): archive integrity proves
+   *  catalog/disk consistency, not governance-source correspondence. The UI
+   *  must not collapse these into one ambiguous "Verified" badge. */
+  governance_source_matches_pin: GuiGovernanceArchivePinFactV1;
 }
+
+/** Distinct archive-verification fact describing the relationship between the
+ *  bound `governance_source_revision` pin and the archived
+ *  `governance/source.bin` document. Mirrors the Rust
+ *  `GuiGovernanceArchivePinFactV1` enum. */
+export type GuiGovernanceArchivePinFactV1 =
+  | "Matched"
+  | "Mismatch"
+  | "Missing"
+  | "OperatorAttested"
+  | "NotApplicable";
 
 export interface GuiAnchorConfigInspectionV1 {
   network: string;
@@ -290,6 +307,9 @@ export interface GuiElectionDraftPreviewV1 {
   missing: string[];
   frozen: boolean;
   presentation_is_canonical: boolean;
+  governance_source_pin: GuiGovernanceSourcePinV1;
+  governance_document: GuiGovernanceDocumentDigestV1 | null;
+  governance_document_status: GuiGovernanceDocumentStatusV1;
 }
 
 /** Result of a successful freeze. `presentation_is_canonical` is always false
@@ -313,4 +333,88 @@ export interface GuiElectionExportResultV1 {
   registry_commitment_hex: string;
   candidate_set_commitment_hex: string;
   files: GuiElectionExportFileV1[];
+}
+
+// ---------------------------------------------------------------------------
+// Slice 5A8: governance source pinning, document archival, voter confirmation.
+//
+// Application-level governance evidence. The governance document is supporting
+// evidence, NOT a fourth canonical election artifact. No voter secret material
+// crosses the boundary in any of these types.
+// ---------------------------------------------------------------------------
+
+/** Stable machine-readable kind code for a governance source pin. */
+export type GuiGovernancePinKind = "BLAKE3_DIGEST" | "GIT_COMMIT" | "UNRECOGNIZED";
+
+/** Structured validation result for one `governance_source_revision` string.
+ *  `format_valid` is NOT cryptographic verification — only an immutable-shape
+ *  check. A green "Matched" status is reported separately by
+ *  `GuiGovernanceDocumentStatusV1`. */
+export interface GuiGovernanceSourcePinV1 {
+  normalized: string;
+  kind: GuiGovernancePinKind;
+  format_valid: boolean;
+  digest_hex: string | null;
+  git_sha_hex: string | null;
+  message: string;
+}
+
+/** Metadata for one selected governance document (non-secret). */
+export interface GuiGovernanceDocumentDigestV1 {
+  display_filename: string;
+  bytes: number;
+  digest_algorithm_id: string;
+  digest_hex: string;
+}
+
+/** Stable machine-readable match status code. */
+export type GuiGovernanceMatchStatus =
+  | "MATCHED"
+  | "MISMATCH"
+  | "OPERATOR_ATTESTED"
+  | "UNVERIFIED_REFERENCE"
+  | "NOT_APPLICABLE";
+
+/** Structured result of matching a governance document against a bound pin. */
+export interface GuiGovernanceDocumentStatusV1 {
+  governance_source_revision: string;
+  pin: GuiGovernanceSourcePinV1;
+  document: GuiGovernanceDocumentDigestV1 | null;
+  status: GuiGovernanceMatchStatus;
+  status_label: string;
+}
+
+/** Cryptographically bound values shown to the voter as authoritative. */
+export interface GuiVoterBoundFieldsV1 {
+  election_id_hex: string;
+  election_id_text: string | null;
+  ballot_kind: string;
+  ballot_confidentiality: string;
+  manifest_hash_hex: string;
+  governance_source_revision: string;
+  proof_suite_id: string;
+  approval_min: number;
+  approval_max: number;
+  abstention_allowed: boolean;
+  option_display_labels: string[];
+}
+
+/** Auditor-facing advanced commitments. */
+export interface GuiVoterAdvancedDetailsV1 {
+  option_machine_ids_hex: string[];
+  registry_commitment_hex: string;
+  candidate_set_commitment_hex: string;
+  voter_count: number;
+}
+
+/** The complete voter confirmation view model. Read-only confirmation only. */
+export interface GuiVoterElectionConfirmationV1 {
+  bound: GuiVoterBoundFieldsV1;
+  advanced: GuiVoterAdvancedDetailsV1;
+  candidates: GuiCandidateSummaryV1[];
+  governance_document_status: GuiGovernanceDocumentStatusV1;
+  presentation_is_canonical: boolean;
+  presentation_notice: string;
+  next_stage_placeholder: string;
+  no_proposal_question_notice: string;
 }

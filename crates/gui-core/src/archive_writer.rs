@@ -25,6 +25,10 @@ use tari_cc_private_ballot_archive::{
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
 use crate::error::GuiCoreError;
+use crate::governance::{
+    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, governance_document_digest_for_bytes,
+    validate_governance_source_pin,
+};
 use crate::session::GuiElectionSessionV1;
 
 /// Canonical archive path of the election manifest.
@@ -40,9 +44,7 @@ pub const SUBMISSIONS_ARCHIVE_DIR: &str = "submissions";
 #[must_use]
 pub fn submission_archive_path(index: usize) -> String {
     format!("{SUBMISSIONS_ARCHIVE_DIR}/{index:08}.cbor")
-}
-
-/// One written archive content file.
+}/// One written archive content file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiArchiveFileSummaryV1 {
     /// Canonical archive-relative path.
@@ -75,6 +77,10 @@ pub struct GuiArchiveWriteResultV1 {
 /// directory is rejected, and no file is ever silently overwritten. Each file
 /// is written atomically (temporary file, flush, sync, rename).
 ///
+/// Delegates to [`write_archive_directory_v1_with_governance_document`] with no
+/// governance document. Use that variant to include a governance supporting
+/// document (ADR-0008).
+///
 /// # Errors
 ///
 /// Returns a bounded [`GuiCoreError`] on any encoding, catalog, hashing, or
@@ -82,6 +88,31 @@ pub struct GuiArchiveWriteResultV1 {
 pub fn write_archive_directory_v1(
     session: &GuiElectionSessionV1,
     target_dir: &Path,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_governance_document(session, target_dir, None)
+}
+
+/// Writes one complete election archive, optionally including a governance
+/// supporting document (ADR-0008).
+///
+/// When `governance_document_bytes` is `Some`, the exact bytes are written to
+/// the project-controlled path [`GOVERNANCE_DOCUMENT_ARCHIVE_PATH`]
+/// (`governance/source.bin`) and added to the hash-covered content catalog, so
+/// the archive hash covers them and any one-byte mutation breaks archive
+/// verification. The governance document is **supporting governance evidence**,
+/// not a fourth canonical election artifact: the three-file V1 loader
+/// (`manifest`, `registry`, `candidate-set`) remains unchanged and does not
+/// require the document to decode a valid election. The original organizer
+/// filename is never used as the archive path.
+///
+/// # Errors
+///
+/// Returns a bounded [`GuiCoreError`] on any encoding, catalog, hashing, or
+/// filesystem failure.
+pub fn write_archive_directory_v1_with_governance_document(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    governance_document_bytes: Option<&[u8]>,
 ) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
     prepare_target_directory(target_dir)?;
 
@@ -107,6 +138,34 @@ pub fn write_archive_directory_v1(
     files.insert(VOTER_REGISTRY_ARCHIVE_PATH.to_owned(), registry_bytes);
     for (index, package) in session.packages().iter().enumerate() {
         files.insert(submission_archive_path(index), package.clone());
+    }
+    if let Some(doc_bytes) = governance_document_bytes {
+        files.insert(GOVERNANCE_DOCUMENT_ARCHIVE_PATH.to_owned(), doc_bytes.to_vec());
+    }
+
+    // ADR-0008 write-time governance pin/document gate (Slice 5A8 hardening,
+    // M1). When a governance document is being archived and the manifest binds
+    // a `blake3:` content-digest pin, the bytes actually being archived MUST
+    // hash (under the project ArchiveFileV1 domain, the same digest the catalog
+    // will record) to the digest encoded in the pin. This prevents writing an
+    // archive that is internally catalog-consistent but contains the wrong
+    // governance document for the bound pin. A Git SHA pin is not
+    // cryptographically matchable to a local file and is left as
+    // operator-attested (no write-time rejection here). This gate complements
+    // the freeze-time gate in `creation.rs`: the freeze gate checks the
+    // organizer's selected document digest, this gate checks the bytes that
+    // actually land in the archive.
+    if let Some(doc_bytes) = governance_document_bytes {
+        let pin = validate_governance_source_pin(artifacts.manifest().governance_source_revision());
+        if pin.is_content_digest()
+            && let Some(pin_hex) = pin.digest_hex.as_deref()
+        {
+            let doc_digest = governance_document_digest_for_bytes(doc_bytes);
+            let doc_hex = crate::hex::to_lower_hex(&doc_digest);
+            if doc_hex != pin_hex {
+                return Err(GuiCoreError::governance_digest_mismatch());
+            }
+        }
     }
 
     let entries = files
@@ -136,6 +195,11 @@ pub fn write_archive_directory_v1(
     if !session.packages().is_empty() {
         let submissions_dir = target_dir.join(SUBMISSIONS_ARCHIVE_DIR);
         std::fs::create_dir(&submissions_dir)
+            .map_err(|_| GuiCoreError::io_failure("archive-directory"))?;
+    }
+    if governance_document_bytes.is_some() {
+        let governance_dir = target_dir.join("governance");
+        std::fs::create_dir(&governance_dir)
             .map_err(|_| GuiCoreError::io_failure("archive-directory"))?;
     }
 

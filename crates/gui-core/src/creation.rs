@@ -50,6 +50,11 @@ use tari_cc_private_ballot_registry::{
 
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::{GuiCoreError, GuiErrorCategory};
+use crate::governance::{
+    GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiGovernanceSourcePinV1,
+    content_digest_pin_for_bytes, match_governance_document, read_governance_document,
+    validate_governance_source_pin,
+};
 use crate::hex::{abbreviate_hex, from_hex, to_lower_hex};
 use crate::session::GuiElectionSessionV1;
 use crate::summary::GuiElectionSummaryV1;
@@ -148,6 +153,14 @@ pub struct GuiElectionDraftPreviewV1 {
     /// Whether the presentation type is part of the canonical manifest. Always
     /// `false` for version one; documented for the frontend.
     pub presentation_is_canonical: bool,
+    /// Application-level validation of the governance source pin (Slice 5A8).
+    /// Advisory: format validity is not a hard freeze gate; only a
+    /// content-digest mismatch against a selected document blocks freeze.
+    pub governance_source_pin: GuiGovernanceSourcePinV1,
+    /// The selected governance document digest, when one has been attached.
+    pub governance_document: Option<GuiGovernanceDocumentDigestV1>,
+    /// Match status between the bound revision and the selected document.
+    pub governance_document_status: GuiGovernanceDocumentStatusV1,
 }
 
 /// The result of a successful freeze.
@@ -202,6 +215,12 @@ pub struct GuiElectionDraftV1 {
     voters: Vec<Vec<u8>>,
     options: Vec<(Vec<u8>, String)>,
     presentation: GuiBallotPresentationType,
+    /// Selected governance document raw bytes (non-secret, bounded by the pilot
+    /// limit). Retained so the archive writer can include the exact bytes the
+    /// organizer pinned.
+    governance_document_bytes: Option<Vec<u8>>,
+    /// Digest metadata for the selected governance document.
+    governance_document_digest: Option<GuiGovernanceDocumentDigestV1>,
     frozen: bool,
     result: Option<GuiElectionCreationResultV1>,
 }
@@ -225,6 +244,8 @@ impl GuiElectionDraftV1 {
             voters: Vec::new(),
             options: Vec::new(),
             presentation: GuiBallotPresentationType::default(),
+            governance_document_bytes: None,
+            governance_document_digest: None,
             frozen: false,
             result: None,
         }
@@ -269,6 +290,70 @@ impl GuiElectionDraftV1 {
         validate_governance_revision(&governance_source_revision)?;
         self.election_id = Some(id_bytes);
         self.governance_source_revision = Some(governance_source_revision);
+        Ok(())
+    }
+
+    /// Sets only the governance source revision, leaving the election
+    /// identifier intact. Used after a governance document digest is computed
+    /// so the organizer can pin the document by content digest without
+    /// re-entering the election identifier.
+    pub fn set_governance_source_revision(
+        &mut self,
+        governance_source_revision: String,
+    ) -> Result<(), GuiCoreError> {
+        self.reject_if_frozen()?;
+        validate_governance_revision(&governance_source_revision)?;
+        self.governance_source_revision = Some(governance_source_revision);
+        Ok(())
+    }
+
+    /// Returns the currently selected governance document digest metadata, if
+    /// any.
+    #[must_use]
+    pub fn governance_document_digest(&self) -> Option<&GuiGovernanceDocumentDigestV1> {
+        self.governance_document_digest.as_ref()
+    }
+
+    /// Returns the currently selected governance document bytes, if any. The
+    /// bytes are non-secret governance content retained for archive inclusion.
+    #[must_use]
+    pub fn governance_document_bytes(&self) -> Option<&[u8]> {
+        self.governance_document_bytes.as_deref()
+    }
+
+    /// Selects a governance document from a local path. Reads, sizes-checks,
+    /// and digests the exact raw bytes (no semantic parsing, no network). The
+    /// document is treated as immutable raw bytes for hashing and archival.
+    /// Symlinks, directories, and oversized files are rejected.
+    pub fn set_governance_document(&mut self, path: &Path) -> Result<GuiGovernanceDocumentDigestV1, GuiCoreError> {
+        self.reject_if_frozen()?;
+        let (bytes, digest) = read_governance_document(path)?;
+        self.governance_document_bytes = Some(bytes);
+        self.governance_document_digest = Some(digest.clone());
+        Ok(digest)
+    }
+
+    /// Clears any selected governance document.
+    pub fn clear_governance_document(&mut self) -> Result<(), GuiCoreError> {
+        self.reject_if_frozen()?;
+        self.governance_document_bytes = None;
+        self.governance_document_digest = None;
+        Ok(())
+    }
+
+    /// Convenience: pins the currently selected governance document by content
+    /// digest, setting `governance_source_revision` to `blake3:<digest>`. This
+    /// is the recommended pilot workflow. Requires that a governance document
+    /// has been selected.
+    pub fn use_governance_document_digest_as_revision(&mut self) -> Result<(), GuiCoreError> {
+        self.reject_if_frozen()?;
+        let bytes = self
+            .governance_document_bytes
+            .as_ref()
+            .ok_or_else(GuiCoreError::no_governance_document)?;
+        let pin = content_digest_pin_for_bytes(bytes);
+        validate_governance_revision(&pin)?;
+        self.governance_source_revision = Some(pin);
         Ok(())
     }
 
@@ -441,6 +526,13 @@ impl GuiElectionDraftV1 {
             .as_ref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok().map(str::to_owned));
 
+        let revision = self
+            .governance_source_revision
+            .clone()
+            .unwrap_or_default();
+        let pin = validate_governance_source_pin(&revision);
+        let doc_status = match_governance_document(&revision, self.governance_document_digest.as_ref());
+
         GuiElectionDraftPreviewV1 {
             election_id_hex,
             election_id_text,
@@ -460,6 +552,9 @@ impl GuiElectionDraftV1 {
             missing,
             frozen: self.frozen,
             presentation_is_canonical: false,
+            governance_source_pin: pin,
+            governance_document: self.governance_document_digest.clone(),
+            governance_document_status: doc_status,
         }
     }
 
@@ -515,6 +610,21 @@ impl GuiElectionDraftV1 {
             governance_source_revision,
         })
         .map_err(|error| wrap(&error, "manifest"))?;
+
+        // ADR-0008 governance source hard gate: if the bound revision is a
+        // content-digest pin and a governance document has been selected, the
+        // document digest MUST match. This is the one application-level freeze
+        // gate introduced by Slice 5A8; it does not alter the canonical
+        // manifest bytes and does not gate on pin format validity (advisory),
+        // preserving the existing V1 vectors and round-trip behavior.
+        let revision_str = manifest.governance_source_revision();
+        let pin = validate_governance_source_pin(revision_str);
+        if pin.is_content_digest()
+            && let Some(doc) = self.governance_document_digest.as_ref()
+            && pin.digest_hex.as_deref() != Some(doc.digest_hex.as_str())
+        {
+            return Err(GuiCoreError::governance_digest_mismatch());
+        }
 
         let manifest_bytes = manifest
             .to_canonical_cbor()

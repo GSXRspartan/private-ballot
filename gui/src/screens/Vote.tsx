@@ -1,41 +1,319 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
+import { api, BackendError } from "../api/client";
+import { pickGovernanceDocument } from "../api/dialog";
+import type {
+  GuiCommandError,
+  GuiGovernanceDocumentDigestV1,
+  GuiVoterElectionConfirmationV1,
+} from "../api/types";
+import {
+  ADVANCED_DETAILS_LABEL,
+  BOUND_SECTION_LABEL,
+  INFORMATIONAL_LABEL,
+  PRESENTATION_SECTION_LABEL,
+  confirmationContinueAvailable,
+  documentMatchShortLabel,
+  documentMatchTone,
+  formatByteSize,
+  isCryptographicallyMatched,
+} from "../governance";
 import { useAppState } from "../state/AppState";
-import { Card, Field, LifecyclePill, Notice, Placeholder } from "../components/ui";
-
-const STEPS = [
-  "Import credential",
-  "Review ballot",
-  "Cast vote",
-  "Export ballot package",
-] as const;
+import {
+  BackendErrorNotice,
+  Card,
+  CopyButton,
+  DetailsSection,
+  Field,
+  HashValue,
+  LifecyclePill,
+  Notice,
+  Pill,
+  Placeholder,
+} from "../components/ui";
 
 /**
- * Vote (voter) — staged-state screen (Slice 5A4).
+ * Vote (voter) — confirmation boundary (Slice 5A8).
  *
- * Steps: Import credential → Review ballot → Cast vote → Export ballot
- * package. When a real election is loaded, read-only election information and
- * the option list render from the real gui-core summary. Credential import and
- * proof construction are not yet enabled in 5A4; those steps are clearly marked
- * and never simulated. Voter key generation is a separately reviewed crypto
- * change (see the 5A2 design note).
+ * This is read-only confirmation only. When an election is loaded, the screen
+ * shows exactly the values that are cryptographically bound by the election
+ * manifest, clearly labels the application-local presentation type as
+ * non-canonical, and reports governance document status honestly. The
+ * "Continue" action advances only to a deferred placeholder — credential
+ * handling and proof generation are NOT enabled in this slice and are never
+ * simulated.
  */
 export function Vote() {
-  const { election } = useAppState();
-  const [step, setStep] = useState(0);
-  const presentation = presentationFor(election);
+  const { election, shellAvailable } = useAppState();
+  const [confirmation, setConfirmation] = useState<GuiVoterElectionConfirmationV1 | null>(null);
+  const [govDocDigest, setGovDocDigest] = useState<GuiGovernanceDocumentDigestV1 | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const [error, setError] = useState<GuiCommandError | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setConfirmation(null);
+    setGovDocDigest(null);
+    setConfirmed(false);
+    setAdvanced(false);
+  }, [election]);
+
+  function captureError(err: unknown) {
+    if (err instanceof BackendError) setError(err.payload);
+    else
+      setError({
+        code: "GUI_UNEXPECTED_ERROR",
+        category: "INVALID_INPUT",
+        context: null,
+        message: "an unexpected frontend/backend boundary error occurred",
+      });
+  }
+
+  async function loadConfirmation(path: string | null) {
+    if (!election || !shellAvailable) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const c = await api.voterConfirmation(path);
+      setConfirmation(c);
+    } catch (err) {
+      captureError(err);
+      setConfirmation(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (election && shellAvailable) void loadConfirmation(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election, shellAvailable]);
+
+  async function onSelectGovernanceDocument() {
+    const path = await pickGovernanceDocument("Select local governance document to inspect");
+    if (!path) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const digest = await api.computeGovernanceDocumentDigest(path);
+      setGovDocDigest(digest);
+      const c = await api.voterConfirmation(path);
+      setConfirmation(c);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onClearGovernanceDocument() {
+    setGovDocDigest(null);
+    await loadConfirmation(null);
+  }
+
+  const docStatus = confirmation?.governance_document_status ?? null;
+  const matchTone = documentMatchTone(docStatus?.status);
 
   return (
     <>
       <h1 className="screen-header">Vote</h1>
       <p className="screen-lede">
-        Cast a privacy-preserving approval ballot against a frozen election. Submission is
-        file-based: you export a canonical ballot package and deliver it to the organizer out
-        of band.
+        Review the cryptographically bound election details before voting. This is the confirmation
+        boundary: credential import and proof construction are not yet enabled and are never
+        simulated. Voter key generation is a separately reviewed change.
       </p>
 
-      {election ? (
+      {!election && (
+        <Notice tone="info">
+          No election is loaded. Load one from the Manage Election screen to review its ballot.
+        </Notice>
+      )}
+
+      <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
+
+      {confirmation && (
+        <>
+          <Card title={BOUND_SECTION_LABEL}>
+            <Notice tone="info">
+              These values are cryptographically bound by the election manifest.
+            </Notice>
+            <div className="field-list">
+              <Field label="Election ID">
+                <span className="field-value">
+                  {confirmation.bound.election_id_text ?? confirmation.bound.election_id_hex}
+                </span>
+              </Field>
+              <Field label="Canonical ballot kind">
+                <span className="field-value">{confirmation.bound.ballot_kind}</span>
+              </Field>
+              <Field label="Manifest hash">
+                <HashValue value={confirmation.bound.manifest_hash_hex} />
+                <CopyButton value={confirmation.bound.manifest_hash_hex} />
+              </Field>
+              <Field label="Governance source revision">
+                <span className="field-value">
+                  {confirmation.bound.governance_source_revision}
+                </span>
+              </Field>
+              <Field label="Option display labels">
+                <ul className="option-list bound-labels" aria-label="Bound option labels">
+                  {confirmation.bound.option_display_labels.map((label, i) => (
+                    <li key={i} className="option-item">
+                      <span className="option-marker" aria-hidden="true" />
+                      <span>{label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Field>
+              <Field label="Approval rules">
+                <span className="field-value">
+                  between {confirmation.bound.approval_min} and {confirmation.bound.approval_max}{" "}
+                  options; abstention{" "}
+                  {confirmation.bound.abstention_allowed ? "permitted" : "not permitted"}
+                </span>
+              </Field>
+              <Field label="Proof-suite ID">
+                <span className="field-value">{confirmation.bound.proof_suite_id}</span>
+              </Field>
+            </div>
+          </Card>
+
+          <Card title="Governance document">
+            <p className="form-hint">
+              Optionally select the local governance document to check whether its digest matches the
+              bound governance source. This is read-only; no document content is parsed or
+              transmitted.
+            </p>
+            {govDocDigest ? (
+              <div className="field-list">
+                <Field label="Filename">
+                  <span className="field-value">{govDocDigest.display_filename}</span>
+                </Field>
+                <Field label="Byte size">
+                  <span className="field-value">{formatByteSize(govDocDigest.bytes)}</span>
+                </Field>
+                <Field label="Document digest">
+                  <HashValue value={govDocDigest.digest_hex} />
+                  <CopyButton value={govDocDigest.digest_hex} />
+                </Field>
+              </div>
+            ) : (
+              <p className="field-value">No governance document selected.</p>
+            )}
+            <div className="action-row">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onSelectGovernanceDocument}
+                disabled={busy}
+              >
+                {govDocDigest ? "Replace document" : "Select governance document"}
+              </button>
+              {govDocDigest && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onClearGovernanceDocument}
+                  disabled={busy}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {docStatus && (
+              <div className="field-list">
+                <Field label="Status">
+                  <Pill tone={matchTone === "ok" ? "ok" : matchTone === "error" ? "error" : matchTone === "warn" ? "warn" : "neutral"}>
+                    {documentMatchShortLabel(docStatus.status)}
+                  </Pill>
+                </Field>
+                <Field label="Detail">
+                  <span className="field-value">{docStatus.status_label}</span>
+                </Field>
+                {isCryptographicallyMatched(docStatus.status) && (
+                  <Field label="Binding">
+                    <span className="field-value">
+                      Digest matches bound governance source
+                    </span>
+                  </Field>
+                )}
+              </div>
+            )}
+          </Card>
+
+          <Card title={PRESENTATION_SECTION_LABEL}>
+            <div className="field-list">
+              <Field label="Presentation">
+                <span className="field-value">Ballot options (neutral)</span>
+              </Field>
+            </div>
+            <Notice tone="info">
+              <strong>{INFORMATIONAL_LABEL}.</strong> {confirmation.presentation_notice}
+            </Notice>
+            <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
+          </Card>
+
+          <Card title={ADVANCED_DETAILS_LABEL}>
+            <DetailsSection summary="Show advanced commitments">
+              <div className="field-list">
+                <Field label="Option machine IDs">
+                  <ul className="option-list bound-labels">
+                    {confirmation.advanced.option_machine_ids_hex.map((id, i) => (
+                      <li key={i} className="option-item">
+                        <span className="hash">{id}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Field>
+                <Field label="Registry commitment">
+                  <HashValue value={confirmation.advanced.registry_commitment_hex} />
+                  <CopyButton value={confirmation.advanced.registry_commitment_hex} />
+                </Field>
+                <Field label="Candidate-set commitment">
+                  <HashValue value={confirmation.advanced.candidate_set_commitment_hex} />
+                  <CopyButton value={confirmation.advanced.candidate_set_commitment_hex} />
+                </Field>
+                <Field label="Voter count / anonymity-set size">
+                  <span className="field-value">{confirmation.advanced.voter_count}</span>
+                </Field>
+              </div>
+            </DetailsSection>
+          </Card>
+
+          <Card title="Review election">
+            <label className="radio-option">
+              <input
+                type="checkbox"
+                checked={confirmed}
+                onChange={(e) => setConfirmed(e.target.checked)}
+              />
+              I reviewed the cryptographically bound election details.
+            </label>
+            <div className="action-row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!confirmed || !confirmationContinueAvailable(confirmation) || busy}
+                onClick={() => setAdvanced(true)}
+              >
+                Continue
+              </button>
+            </div>
+            {advanced && (
+              <Placeholder>
+                {confirmation.next_stage_placeholder}
+              </Placeholder>
+            )}
+            <p className="form-hint">
+              Continuing does not start credential handling or proof generation, and does not
+              accept a ballot selection.
+            </p>
+          </Card>
+        </>
+      )}
+
+      {election && !confirmation && (
         <Card title="Loaded election (read-only)">
           <div className="field-list">
             <Field label="Election">
@@ -44,107 +322,9 @@ export function Vote() {
             <Field label="Lifecycle">
               <LifecyclePill state={election.lifecycle_state} />
             </Field>
-            <Field label="Rules">{approvalRuleText(election)}</Field>
-            <Field label="Proof suite">{election.proof_suite_id}</Field>
           </div>
         </Card>
-      ) : (
-        <Notice tone="info">
-          No election is loaded. Load one from the Manage Election screen to review its ballot.
-        </Notice>
       )}
-
-      <ol className="steps" aria-label="Voting steps">
-        {STEPS.map((label, index) => (
-          <li
-            key={label}
-            className={`step${index === step ? " step-current" : ""}${index < step ? " step-done" : ""}`}
-            aria-current={index === step ? "step" : undefined}
-          >
-            {index + 1} · {label}
-          </li>
-        ))}
-      </ol>
-
-      {step === 0 && (
-        <Card title="Import credential">
-          <Placeholder>
-            Credential import is not yet enabled in Slice 5A4. It will be per session and never
-            persisted. Voter key generation is a separately reviewed change to the crypto crate
-            (deferred before Slice 5A6); this screen will import an existing governance
-            credential. No credential material is shown, stored, or transmitted by this
-            application.
-          </Placeholder>
-          <Notice tone="warn">
-            A governance key is not a wallet key. Never import a wallet seed or derive one from
-            wallet material.
-          </Notice>
-        </Card>
-      )}
-
-      {step === 1 && (
-        <Card title="Review ballot">
-          {election ? (
-            <>
-              <p className="card-body">{approvalRuleText(election)}</p>
-              <h3>{presentation.selectionHeading}</h3>
-              <ul className="option-list" aria-label={presentation.optionSetNoun}>
-                {election.candidates.map((option) => (
-                  <li key={option.machine_id_hex} className="option-item">
-                    <span className="option-marker" aria-hidden="true" />
-                    <span>{option.display_name}</span>
-                  </li>
-                ))}
-              </ul>
-              <p className="form-hint">{presentation.approvalMeaning}</p>
-            </>
-          ) : (
-            <Placeholder>
-              The review layout renders from the loaded option set and adapts its vocabulary to
-              the ballot type (candidate election, governance proposal, or ballot measure).
-              Nothing here assumes a candidate election. Load an election to see real options.
-            </Placeholder>
-          )}
-        </Card>
-      )}
-
-      {step === 2 && (
-        <Card title="Cast vote">
-          <Placeholder>
-            Proof construction is not yet enabled in Slice 5A4. It will happen entirely in the
-            Rust crypto/verifier crates in a later slice. This application never implements
-            cryptography in JavaScript and never simulates a successful vote.
-          </Placeholder>
-        </Card>
-      )}
-
-      {step === 3 && (
-        <Card title="Export ballot package">
-          <Placeholder>
-            Exports one canonical ballot package file. Not yet enabled in Slice 5A4. Delivery to
-            the organizer is out of band; there is no voter network submission protocol.
-          </Placeholder>
-        </Card>
-      )}
-
-      <div className="btn-row">
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={step === 0}
-          onClick={() => setStep((s) => Math.max(0, s - 1))}
-        >
-          Back
-        </button>
-        <button
-          type="button"
-          className="btn btn-primary"
-          disabled={step === STEPS.length - 1}
-          onClick={() => setStep((s) => Math.min(STEPS.length - 1, s + 1))}
-        >
-          Next
-        </button>
-      </div>
     </>
   );
 }

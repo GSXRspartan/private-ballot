@@ -121,6 +121,59 @@ export function Archive() {
             </div>
           </Card>
 
+          <Card title="Governance source">
+            <p className="card-body">
+              Archive integrity proves the catalog digests match the bytes on disk; it does not
+              by itself prove the archived governance document matches the bound
+              governance source pin. The fact below is a distinct, separate check.
+            </p>
+            <div className="field-list">
+              <Field label="Governance supporting document">
+                {result.files.some(
+                  (f) => f.path === "governance/source.bin" && f.present,
+                ) ? (
+                  <Pill tone="ok">Present</Pill>
+                ) : (
+                  <Pill tone="neutral">Absent</Pill>
+                )}
+              </Field>
+              <Field label="Governance source pin">
+                {(() => {
+                  const fact = result.governance_source_matches_pin;
+                  switch (fact) {
+                    case "Matched":
+                      return <Pill tone="ok">Matched</Pill>;
+                    case "Mismatch":
+                      return <Pill tone="error">Mismatch</Pill>;
+                    case "Missing":
+                      return <Pill tone="error">Missing</Pill>;
+                    case "OperatorAttested":
+                      return <Pill tone="warn">Operator-attested</Pill>;
+                    case "NotApplicable":
+                    default:
+                      return <Pill tone="neutral">Not applicable</Pill>;
+                  }
+                })()}
+              </Field>
+              {result.governance_source_matches_pin === "OperatorAttested" && (
+                <Field label="Note">
+                  <span className="field-value">
+                    Git reference correspondence is not independently verified by this
+                    application; it is operator-attested.
+                  </span>
+                </Field>
+              )}
+              {result.governance_source_matches_pin === "NotApplicable" && (
+                <Field label="Note">
+                  <span className="field-value">
+                    Bound reference is not a recognized immutable pin format; the
+                    governance-source cross-check does not apply.
+                  </span>
+                </Field>
+              )}
+            </div>
+          </Card>
+
           <div className="card-grid">
             <Card title="Manifest">
               <div className="field-list">
@@ -184,12 +237,15 @@ export function Archive() {
             <p className="card-body">
               The registry and option set are validated during replay: their recomputed
               commitments must equal the manifest&rsquo;s. Catalog membership is strict —
-              missing and unexpected files both fail verification.
+              missing and unexpected files both fail verification. Canonical election artifacts
+              (manifest, registry, candidate-set) are distinct from the governance supporting
+              document, if present.
             </p>
             <table className="data">
               <thead>
                 <tr>
                   <th scope="col">File</th>
+                  <th scope="col">Role</th>
                   <th scope="col">Present</th>
                   <th scope="col">Digest</th>
                 </tr>
@@ -200,6 +256,7 @@ export function Archive() {
                     <td>
                       <span className="hash">{file.path}</span>
                     </td>
+                    <td>{archiveFileRole(file.path)}</td>
                     <td>{file.present ? "yes" : "no"}</td>
                     <td>
                       {file.digest_ok ? (
@@ -217,4 +274,20 @@ export function Archive() {
       )}
     </>
   );
+}
+
+/** Classifies one archive content file as a canonical election artifact or a
+ *  governance supporting document (Slice 5A8). The governance document is
+ *  supporting evidence, not a fourth canonical election artifact. */
+function archiveFileRole(path: string): string {
+  switch (path) {
+    case "election-manifest.cbor":
+    case "voter-registry.cbor":
+    case "candidate-set.cbor":
+      return "Canonical election artifact";
+    case "governance/source.bin":
+      return "Governance supporting document";
+    default:
+      return path.startsWith("submissions/") ? "Ballot package" : "Content file";
+  }
 }

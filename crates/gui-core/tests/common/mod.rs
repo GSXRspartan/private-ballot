@@ -178,6 +178,58 @@ pub fn manifest() -> ElectionManifestV1 {
     )
 }
 
+/// Builds a manifest bound to the canonical registry and candidate set with a
+/// custom governance source revision (Slice 5A8 voter-confirmation fixtures).
+pub fn manifest_with_revision(revision: &str) -> ElectionManifestV1 {
+    let provider = Blake3HashProviderV1;
+    let registry = registry();
+    let candidates = candidate_set();
+    let registry_commitment = match registry.canonical_commitment(&provider) {
+        Ok(commitment) => commitment,
+        Err(_) => panic!("fixture registry commitment must derive"),
+    };
+    let candidate_set_commitment = match candidates.canonical_commitment(&provider) {
+        Ok(commitment) => commitment,
+        Err(_) => panic!("fixture candidate commitment must derive"),
+    };
+    let election_id = match ElectionId::new(b"gui-core-test-election".to_vec()) {
+        Ok(id) => id,
+        Err(_) => panic!("fixture election ID must be valid"),
+    };
+    match ElectionManifestV1::new(ElectionManifestV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        election_id,
+        ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+        ballot_confidentiality: BallotConfidentialityV1::Public,
+        registry_commitment,
+        candidate_set_commitment,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        approval_limits: approval_limits(),
+        governance_source_revision: revision.to_owned(),
+    }) {
+        Ok(manifest) => manifest,
+        Err(_) => panic!("fixture manifest with revision must be valid"),
+    }
+}
+
+/// Loads the canonical validated artifact triple with a custom governance
+/// source revision (Slice 5A8 voter-confirmation fixtures).
+pub fn artifacts_with_revision(revision: &str) -> tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1 {
+    let manifest = manifest_with_revision(revision);
+    let manifest_bytes = match manifest.to_canonical_cbor() {
+        Ok(bytes) => bytes,
+        Err(_) => panic!("fixture manifest with revision must encode"),
+    };
+    match tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1::from_bytes(
+        &manifest_bytes,
+        &registry_bytes(),
+        &candidate_bytes(),
+    ) {
+        Ok(artifacts) => artifacts,
+        Err(error) => panic!("fixture artifacts with revision must load: {error}"),
+    }
+}
+
 pub fn manifest_bytes() -> Vec<u8> {
     match manifest().to_canonical_cbor() {
         Ok(bytes) => bytes,
@@ -200,6 +252,24 @@ pub fn artifacts() -> tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1 {
 /// Returns an opened organizer session over the canonical election.
 pub fn open_session() -> tari_cc_private_ballot_gui_core::GuiElectionSessionV1 {
     let session = tari_cc_private_ballot_gui_core::GuiElectionSessionV1::new(artifacts());
+    let mut session = match session {
+        Ok(session) => session,
+        Err(error) => panic!("fixture session must construct: {error}"),
+    };
+    if let Err(error) = session.open() {
+        panic!("fixture session must open: {error}");
+    }
+    session
+}
+
+/// Returns an opened organizer session over the canonical election with a
+/// custom governance source revision (Slice 5A8 archive governance tests).
+pub fn open_session_with_revision(
+    revision: &str,
+) -> tari_cc_private_ballot_gui_core::GuiElectionSessionV1 {
+    let session = tari_cc_private_ballot_gui_core::GuiElectionSessionV1::new(
+        artifacts_with_revision(revision),
+    );
     let mut session = match session {
         Ok(session) => session,
         Err(error) => panic!("fixture session must construct: {error}"),

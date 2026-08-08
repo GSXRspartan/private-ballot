@@ -20,9 +20,11 @@ use tari_cc_private_ballot_gui_core::{
     GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotPresentationType,
     GuiBallotIntakeResultV1, GuiCoreError, GuiElectionArtifactsV1, GuiElectionCreationResultV1,
     GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportResultV1,
-    GuiElectionSessionV1, GuiElectionSummaryV1, GuiParticipationSummaryV1, GuiTallySummaryV1,
-    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    verify_archive_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
+    GuiElectionSessionV1, GuiElectionSummaryV1, GuiGovernanceDocumentDigestV1,
+    GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1, GuiTallySummaryV1,
+    GuiVoterElectionConfirmationV1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
+    inspect_anchor_snapshot_v1, verify_archive_directory_v1, write_archive_directory_v1,
+    write_election_artifacts_v1,
 };
 
 /// Serializable command error: a bounded copy of the gui-core error model.
@@ -447,6 +449,139 @@ fn export_election_artifacts(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Slice 5A8: governance source pinning, document archival, voter confirmation.
+//
+// All governance-source work is local. No network, walletd, indexer, or
+// signing is performed. The shell owns the optional governance document bytes
+// selected by the organizer so the archive writer can include the exact bytes
+// the organizer pinned. The shell holds no voter secrets.
+// ---------------------------------------------------------------------------
+
+/// Sets only the governance source revision, leaving the election identifier
+/// intact. Used after a governance document digest is computed.
+#[tauri::command]
+fn set_draft_governance_source_revision(
+    governance_source_revision: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.set_governance_source_revision(governance_source_revision)?;
+        Ok(())
+    })
+}
+
+/// Selects a governance document from a local path, reading, size-checking,
+/// and digesting the exact raw bytes in Rust. Symlinks, directories, and
+/// oversized files are rejected.
+#[tauri::command]
+fn set_draft_governance_document(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiGovernanceDocumentDigestV1, CommandError> {
+    state.with_draft_mut(|draft| {
+        Ok(draft.set_governance_document(Path::new(&path))?)
+    })
+}
+
+/// Clears any selected governance document.
+#[tauri::command]
+fn clear_draft_governance_document(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.clear_governance_document()?;
+        Ok(())
+    })
+}
+
+/// Pins the currently selected governance document by content digest, setting
+/// `governance_source_revision` to `blake3:<digest>`. Requires that a document
+/// has been selected.
+#[tauri::command]
+fn use_governance_document_digest_as_revision(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.use_governance_document_digest_as_revision()?;
+        Ok(())
+    })
+}
+
+/// Computes the governance document digest from a local path (read-only; no
+/// draft mutation). Used by the voter to inspect a locally selected governance
+/// document without affecting an organizer draft.
+#[tauri::command]
+fn compute_governance_document_digest(
+    path: String,
+) -> Result<GuiGovernanceDocumentDigestV1, CommandError> {
+    Ok(tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path))?)
+}
+
+/// Matches a governance document digest against a bound
+/// `governance_source_revision` pin. When `governance_document_path` is set,
+/// the digest is computed in Rust from the local file; otherwise the bound
+/// revision is validated against no document. Pure besides the optional read:
+/// no network.
+#[tauri::command]
+fn match_governance_document(
+    governance_source_revision: String,
+    governance_document_path: Option<String>,
+) -> Result<GuiGovernanceDocumentStatusV1, CommandError> {
+    let digest = governance_document_path
+        .map(|path| tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path)))
+        .transpose()?;
+    Ok(tari_cc_private_ballot_gui_core::match_governance_document(
+        &governance_source_revision,
+        digest.as_ref(),
+    ))
+}
+
+/// Builds the voter confirmation view model from the active session and an
+/// optional governance document digest (computed from a locally selected
+/// document). Read-only: no credential handling, no proof generation.
+#[tauri::command]
+fn voter_confirmation(
+    governance_document_path: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterElectionConfirmationV1, CommandError> {
+    state.with_session(|session| {
+        let digest = governance_document_path
+            .map(|path| tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path)))
+            .transpose()?;
+        Ok(tari_cc_private_ballot_gui_core::build_voter_election_confirmation(
+            session.artifacts(),
+            digest.as_ref(),
+        ))
+    })
+}
+
+/// Writes the complete offline archive directory, optionally including a
+/// governance supporting document. When `governance_document_path` is set, the
+/// exact bytes are read in Rust and archived at the project-controlled
+/// `governance/source.bin` path.
+#[tauri::command]
+fn write_archive_with_governance_document(
+    target_dir: String,
+    governance_document_path: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiArchiveWriteResultV1, CommandError> {
+    state.with_session(|session| {
+        let doc_bytes = governance_document_path
+            .map(|path| {
+                let bytes = std::fs::read(Path::new(&path))
+                    .map_err(|_| CommandError::package_read_failed())?;
+                Ok::<Vec<u8>, CommandError>(bytes)
+            })
+            .transpose()?;
+        Ok(tari_cc_private_ballot_gui_core::archive_writer::write_archive_directory_v1_with_governance_document(
+            session,
+            Path::new(&target_dir),
+            doc_bytes.as_deref(),
+        )?)
+    })
+}
+
 /// One ballot option input from the frontend.
 #[derive(Debug, Clone, serde::Deserialize)]
 struct DraftOptionInput {
@@ -487,6 +622,14 @@ pub fn run() {
             preview_draft,
             freeze_election,
             export_election_artifacts,
+            set_draft_governance_source_revision,
+            set_draft_governance_document,
+            clear_draft_governance_document,
+            use_governance_document_digest_as_revision,
+            compute_governance_document_digest,
+            match_governance_document,
+            voter_confirmation,
+            write_archive_with_governance_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Tari Private Ballot shell");

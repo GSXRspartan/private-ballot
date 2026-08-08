@@ -325,6 +325,18 @@ impl GuiCoreError {
             "At least one approval must be allowed when abstention is disabled.",
         )
     }
+
+    /// No governance document has been selected, but an operation requiring one
+    /// (e.g. pin-by-document-digest) was requested.
+    #[must_use]
+    pub const fn no_governance_document() -> Self {
+        Self::new(
+            "GUI_NO_GOVERNANCE_DOCUMENT",
+            GuiErrorCategory::InvalidInput,
+            Some("governance-document"),
+            "select a governance document first",
+        )
+    }
 }
 
 /// Maps an existing protocol validation code onto a coarse GUI category.

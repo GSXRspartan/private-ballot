@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickElectionArtifact } from "../api/dialog";
+import { pickElectionArtifact, pickGovernanceDocument } from "../api/dialog";
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
@@ -75,6 +75,7 @@ export function ManageElection() {
   const [optionSetPath, setOptionSetPath] = useState("");
   const [packagePath, setPackagePath] = useState("");
   const [archiveDir, setArchiveDir] = useState("");
+  const [archiveGovernanceDocPath, setArchiveGovernanceDocPath] = useState<string | null>(null);
   const [intakeNote, setIntakeNote] = useState<string | null>(null);
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
@@ -169,12 +170,24 @@ export function ManageElection() {
   const onWriteArchive = async () => {
     clearLocalError();
     try {
-      const result = await api.writeArchive(archiveDir);
+      const result = await api.writeArchiveWithGovernanceDocument(
+        archiveDir,
+        archiveGovernanceDocPath,
+      );
       setArchiveResult(result);
-      recordAction("Wrote offline archive");
+      recordAction(
+        archiveGovernanceDocPath
+          ? "Wrote offline archive with governance document"
+          : "Wrote offline archive",
+      );
     } catch (error) {
       showError(error);
     }
+  };
+
+  const onPickArchiveGovernanceDoc = async () => {
+    const path = await pickGovernanceDocument("Select governance document to archive");
+    setArchiveGovernanceDocPath(path);
   };
 
   return (
@@ -549,7 +562,10 @@ export function ManageElection() {
         <Card title="Archive">
           <p className="card-body">
             Writes the canonical offline archive (manifest, registry, option set, submissions,
-            archive manifest) with atomic file writes.
+            archive manifest) with atomic file writes. Optionally include the governance
+            supporting document (ADR-0008); it is archived at the project-controlled
+            <span className="hash"> governance/source.bin</span> path and covered by the archive
+            hash. It is supporting evidence, not a fourth canonical election artifact.
           </p>
           <div className="form-row">
             <label htmlFor="archive-dir">Target directory (new or empty)</label>
@@ -560,6 +576,35 @@ export function ManageElection() {
               onChange={(e) => setArchiveDir(e.target.value)}
               placeholder="archive output directory"
             />
+          </div>
+          <div className="form-row">
+            <label htmlFor="archive-gov-doc">Governance document (optional)</label>
+            <input
+              id="archive-gov-doc"
+              type="text"
+              readOnly
+              value={archiveGovernanceDocPath ?? ""}
+              placeholder="no governance document selected"
+            />
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onPickArchiveGovernanceDoc}
+                disabled={!canAct}
+              >
+                Select governance document
+              </button>
+              {archiveGovernanceDocPath && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setArchiveGovernanceDocPath(null)}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
           <div className="btn-row">
             <button

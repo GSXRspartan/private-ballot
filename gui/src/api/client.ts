@@ -23,8 +23,11 @@ import type {
   GuiElectionDraftPreviewV1,
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
+  GuiGovernanceDocumentDigestV1,
+  GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
   GuiTallySummaryV1,
+  GuiVoterElectionConfirmationV1,
   PresentationIdentifier,
   ShellInfoV1,
 } from "./types";
@@ -141,6 +144,35 @@ export const api = {
   freezeElection: () => call<GuiElectionCreationResultV1>("freeze_election"),
   exportElectionArtifacts: (targetDir: string) =>
     call<GuiElectionExportResultV1>("export_election_artifacts", { targetDir }),
+
+  // Slice 5A8: governance source pinning, document archival, voter confirmation.
+  setDraftGovernanceSourceRevision: (governanceSourceRevision: string) =>
+    call<void>("set_draft_governance_source_revision", { governanceSourceRevision }),
+  setDraftGovernanceDocument: (path: string) =>
+    call<GuiGovernanceDocumentDigestV1>("set_draft_governance_document", { path }),
+  clearDraftGovernanceDocument: () => call<void>("clear_draft_governance_document"),
+  useGovernanceDocumentDigestAsRevision: () =>
+    call<void>("use_governance_document_digest_as_revision"),
+  computeGovernanceDocumentDigest: (path: string) =>
+    call<GuiGovernanceDocumentDigestV1>("compute_governance_document_digest", { path }),
+  matchGovernanceDocument: (
+    governanceSourceRevision: string,
+    governanceDocumentPath: string | null,
+  ) =>
+    call<GuiGovernanceDocumentStatusV1>("match_governance_document", {
+      governanceSourceRevision,
+      governanceDocumentPath,
+    }),
+  voterConfirmation: (governanceDocumentPath: string | null) =>
+    call<GuiVoterElectionConfirmationV1>("voter_confirmation", { governanceDocumentPath }),
+  writeArchiveWithGovernanceDocument: (
+    targetDir: string,
+    governanceDocumentPath: string | null,
+  ) =>
+    call<GuiArchiveWriteResultV1>("write_archive_with_governance_document", {
+      targetDir,
+      governanceDocumentPath,
+    }),
 };
 
 /** The presentation type the frontend should send to the backend for a given

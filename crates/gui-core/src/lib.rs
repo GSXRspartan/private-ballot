@@ -37,6 +37,7 @@ pub mod archive_writer;
 pub mod artifacts;
 pub mod creation;
 pub mod error;
+pub mod governance;
 mod hex;
 pub mod inspect;
 pub mod intake;
@@ -44,6 +45,7 @@ pub mod participation;
 pub mod session;
 pub mod summary;
 pub mod tally;
+pub mod voter_confirmation;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, verify_archive_directory_v1,
@@ -58,6 +60,13 @@ pub use creation::{
     GuiElectionExportResultV1, write_election_artifacts_v1,
 };
 pub use error::{GuiCoreError, GuiErrorCategory};
+pub use governance::{
+    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, GOVERNANCE_PIN_PREFIX_BLAKE3, GOVERNANCE_PIN_PREFIX_GIT,
+    GuiGovernanceArchivePinFactV1, MAX_GOVERNANCE_DOCUMENT_BYTES,
+    compute_governance_document_digest, content_digest_pin_for_bytes, match_governance_document,
+    read_governance_document, validate_governance_source_pin, GuiGovernanceDocumentDigestV1,
+    GuiGovernanceDocumentStatusV1, GuiGovernanceMatchStatusV1, GuiGovernanceSourcePinV1,
+};
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
     GuiReceiptSnapshotSummaryV1, GuiWalletdSnapshotSummaryV1, inspect_anchor_config_v1,
@@ -71,3 +80,7 @@ pub use participation::{
 pub use session::GuiElectionSessionV1;
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
+pub use voter_confirmation::{
+    build_voter_election_confirmation, GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1,
+    GuiVoterElectionConfirmationV1, VOTER_NEXT_STAGE_PLACEHOLDER,
+};
