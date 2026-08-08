@@ -35,6 +35,7 @@
 pub mod archive_verify;
 pub mod archive_writer;
 pub mod artifacts;
+pub mod creation;
 pub mod error;
 mod hex;
 pub mod inspect;
@@ -51,6 +52,11 @@ pub use archive_writer::{
     GuiArchiveFileSummaryV1, GuiArchiveWriteResultV1, write_archive_directory_v1,
 };
 pub use artifacts::GuiElectionArtifactsV1;
+pub use creation::{
+    GuiBallotPresentationType, GuiDraftOptionV1, GuiDraftVoterV1, GuiElectionCreationResultV1,
+    GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportFileV1,
+    GuiElectionExportResultV1, write_election_artifacts_v1,
+};
 pub use error::{GuiCoreError, GuiErrorCategory};
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,

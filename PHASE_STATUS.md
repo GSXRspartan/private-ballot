@@ -6,8 +6,8 @@
   prototype complete at tag `phase4-release-build-2026-08-06`
   (`05d923da1e552b7fdf2abf1129bf53334620d6f1`); Phase 5 GUI begun
 - Implementation baseline: `05d923da` (Phase 4 release build)
-- Next authorized work: Phase 5 GUI slices following Slice 5A5
-  (participation metrics, sealed disclosure policy, and dashboard analytics)
+- Next authorized work: Phase 5 GUI slices following Slice 5A6
+  (organizer election creation, eligibility registry, freeze, and export)
 
 > Note: the sections below this header were last maintained at the Phase 2
 > closeout (2026-08-01). Phase 3 delivered the reviewed Triptych
@@ -37,6 +37,22 @@
 > Testnet as the current network (see
 > `docs/reviews/PHASE5_SLICE5A4_REAL_ELECTION_LOADING_2026-08-07.md`).
 > Slice 5A4 is documented as READY FOR 5A5. No commit was created; all
+> changes are staged only. Phase 5 Slice 5A5 added privacy-aware participation
+> metrics and a sealed-disclosure policy (default `SealedUntilClose` while
+> voting is open) derived authoritatively from the registry size and acceptance
+> ledger, plus dashboard analytics (see
+> `docs/reviews/PHASE5_SLICE5A5_PARTICIPATION_AND_DISCLOSURE_2026-08-07.md`).
+> Phase 5 Slice 5A6 added the real organizer election-creation workflow: a
+> backend-authoritative `GuiElectionDraftV1` facade that validates every field,
+> constructs the canonical registry, candidate set, and manifest, derives all
+> commitments and the manifest hash, freezes through the existing lifecycle,
+> exports the three canonical artifacts, and round-trips through the existing
+> 5A4 loader. The candidate/governance/ballot-measure distinction is modeled as
+> application-local presentation (the manifest carries only
+> `NON_BINDING_APPROVAL_PILOT`); no unbound proposal text is presented as
+> authoritative. Post-freeze immutability is enforced in Rust. See
+> `docs/reviews/PHASE5_SLICE5A6_ORGANIZER_ELECTION_CREATION_2026-08-07.md`.
+> Slice 5A6 is documented as READY FOR OPUS REVIEW. No commit was created; all
 > changes are staged only.
 
 ## Phase 2 assessment

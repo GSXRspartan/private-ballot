@@ -235,3 +235,82 @@ export interface ShellInfoV1 {
   gui_core_boundary: string;
   binding_notice: string;
 }
+
+// ---------------------------------------------------------------------------
+// Organizer election creation (Slice 5A6).
+//
+// The frontend collects ordinary strings and public keys; Rust validates every
+// field and builds the canonical types. No field carries secret material.
+// ---------------------------------------------------------------------------
+
+/** Application-local ballot presentation vocabulary (non-canonical). */
+export type GuiBallotPresentationType =
+  | "Candidate"
+  | "GovernanceProposal"
+  | "BallotMeasure";
+
+/** Stable identifier string for a presentation type. */
+export type PresentationIdentifier =
+  | "CANDIDATE"
+  | "GOVERNANCE_PROPOSAL"
+  | "BALLOT_MEASURE"
+  | "candidate"
+  | "governance-proposal"
+  | "ballot-measure";
+
+export interface GuiDraftOptionV1 {
+  machine_id_hex: string;
+  machine_id_text: string | null;
+  display_name: string;
+}
+
+export interface GuiDraftVoterV1 {
+  public_key_hex: string;
+  public_key_abbrev: string;
+}
+
+/** Pre-freeze review of the current draft. Commitments and the manifest hash
+ *  are null until the relevant sections are complete. */
+export interface GuiElectionDraftPreviewV1 {
+  election_id_hex: string | null;
+  election_id_text: string | null;
+  governance_source_revision: string | null;
+  proof_suite_id: string;
+  approval_min: number | null;
+  approval_max: number | null;
+  allow_abstention: boolean;
+  voter_count: number;
+  registry_commitment_hex: string | null;
+  voters: GuiDraftVoterV1[];
+  options: GuiDraftOptionV1[];
+  candidate_set_commitment_hex: string | null;
+  manifest_hash_hex: string | null;
+  presentation: GuiBallotPresentationType;
+  complete: boolean;
+  missing: string[];
+  frozen: boolean;
+  presentation_is_canonical: boolean;
+}
+
+/** Result of a successful freeze. `presentation_is_canonical` is always false
+ *  for version one: the presentation type does not survive export/import. */
+export interface GuiElectionCreationResultV1 {
+  summary: GuiElectionSummaryV1;
+  presentation: GuiBallotPresentationType;
+  presentation_is_canonical: boolean;
+}
+
+export interface GuiElectionExportFileV1 {
+  path: string;
+  absolute_path: string;
+  bytes: number;
+  digest_hex: string;
+}
+
+export interface GuiElectionExportResultV1 {
+  directory: string;
+  manifest_hash_hex: string;
+  registry_commitment_hex: string;
+  candidate_set_commitment_hex: string;
+  files: GuiElectionExportFileV1[];
+}

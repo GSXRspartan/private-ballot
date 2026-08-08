@@ -32,7 +32,7 @@ export default function App() {
         {SCREEN_TITLES[section]}
       </div>
       {section === "home" && <Home onNavigate={setSection} />}
-      {section === "create" && <CreateElection />}
+      {section === "create" && <CreateElection onNavigate={setSection} />}
       {section === "manage" && <ManageElection />}
       {section === "vote" && <Vote />}
       {section === "archive" && <Archive />}

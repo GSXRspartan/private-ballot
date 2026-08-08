@@ -870,3 +870,171 @@ table.data th {
   font-weight: 600;
   color: var(--text-secondary);
 }
+
+/* ------------------------------------------------------------------ */
+/* Create Election wizard (Slice 5A6). Professional governance/admin   */
+/* stepper, voter textarea, option editor, and freeze modal.           */
+/* ------------------------------------------------------------------ */
+.stepper {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  list-style: none;
+  margin: 0 0 1rem;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+.stepper-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+}
+.stepper-current {
+  color: var(--text);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+.stepper-done {
+  color: var(--text);
+}
+.stepper-todo {
+  color: var(--text-secondary);
+}
+.stepper-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+}
+.stepper-current .stepper-index {
+  background: var(--primary);
+  color: var(--on-primary);
+  border-color: var(--primary);
+}
+
+.text-input {
+  width: 100%;
+  padding: 0.5rem 0.625rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+}
+.text-input:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+.number-input {
+  width: 6rem;
+}
+.voter-textarea {
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.8125rem;
+  resize: vertical;
+}
+.form-hint {
+  margin: 0.375rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9375rem;
+}
+.voters-header,
+.options-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+.option-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.option-edit-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.option-edit-id {
+  flex: 0 0 12rem;
+}
+.option-edit-label {
+  flex: 1 1 auto;
+}
+.btn-remove {
+  flex: 0 0 auto;
+}
+.action-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.step-nav {
+  justify-content: space-between;
+  margin-top: 1rem;
+}
+.option-id {
+  margin-left: auto;
+  font-size: 0.75rem;
+}
+
+/* Freeze confirmation modal. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 0.75rem);
+  max-width: 32rem;
+  width: 100%;
+  padding: 1.25rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+.modal-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.125rem;
+}
+.modal-body {
+  margin: 0 0 0.75rem;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.export-result .field-value {
+  font-size: 0.8125rem;
+}

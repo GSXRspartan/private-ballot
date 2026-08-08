@@ -216,6 +216,115 @@ impl GuiCoreError {
             "Tally results are not available until voting is closed.",
         )
     }
+
+    /// A frozen draft can no longer be mutated.
+    #[must_use]
+    pub const fn draft_already_frozen() -> Self {
+        Self::new(
+            "GUI_DRAFT_ALREADY_FROZEN",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("draft"),
+            "the election draft is frozen and can no longer be edited",
+        )
+    }
+
+    /// Freeze was attempted before the draft was complete.
+    #[must_use]
+    pub const fn draft_incomplete() -> Self {
+        Self::new(
+            "GUI_DRAFT_INCOMPLETE",
+            GuiErrorCategory::InvalidInput,
+            Some("draft"),
+            "the election draft is missing required fields before freeze",
+        )
+    }
+
+    /// A governance public key was malformed (bad hex, wrong length, or not a
+    /// canonical non-identity Ristretto point).
+    #[must_use]
+    pub const fn malformed_public_key() -> Self {
+        Self::new(
+            "GUI_MALFORMED_PUBLIC_KEY",
+            GuiErrorCategory::InvalidInput,
+            Some("voters"),
+            "a governance public key is malformed",
+        )
+    }
+
+    /// A hex string was not valid even-length lowercase/uppercase hex.
+    #[must_use]
+    pub const fn malformed_hex_input() -> Self {
+        Self::new(
+            "GUI_MALFORMED_HEX",
+            GuiErrorCategory::InvalidInput,
+            Some("voters"),
+            "a hex value is not valid hexadecimal",
+        )
+    }
+
+    /// Export was requested before a frozen election exists.
+    #[must_use]
+    pub const fn no_frozen_election() -> Self {
+        Self::new(
+            "GUI_NO_FROZEN_ELECTION",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("draft"),
+            "no frozen election is available to export",
+        )
+    }
+
+    /// The export target directory already contains files.
+    #[must_use]
+    pub const fn export_target_not_empty() -> Self {
+        Self::new(
+            "GUI_EXPORT_TARGET_NOT_EMPTY",
+            GuiErrorCategory::FileIo,
+            Some("export-directory"),
+            "the export target directory already contains files",
+        )
+    }
+
+    /// The export target path exists and is not a directory.
+    #[must_use]
+    pub const fn export_target_invalid() -> Self {
+        Self::new(
+            "GUI_EXPORT_TARGET_INVALID",
+            GuiErrorCategory::FileIo,
+            Some("export-directory"),
+            "the export target path exists and is not a directory",
+        )
+    }
+
+    /// Two ballot options share the same display label after the existing
+    /// display-label normalization. The canonical `CandidateSet` deduplicates
+    /// by machine ID only; the organizer facade additionally rejects
+    /// ambiguous duplicate display labels so voters cannot be presented with
+    /// indistinguishable options.
+    #[must_use]
+    pub const fn duplicate_option_display_label() -> Self {
+        Self::new(
+            "GUI_DUPLICATE_OPTION_DISPLAY_LABEL",
+            GuiErrorCategory::InvalidInput,
+            Some("options"),
+            "Ballot option display labels must be unique.",
+        )
+    }
+
+    /// The configured approval limits would permit no castable ballot: maximum
+    /// approvals is zero while abstention is disabled. The canonical
+    /// `ApprovalLimits` type permits this combination, but no valid ballot
+    /// could then be cast (an empty selection requires abstention, and a
+    /// non-empty selection would exceed the zero maximum), so the organizer
+    /// facade rejects it as an organizer safety rule.
+    #[must_use]
+    pub const fn uncastable_approval_limits() -> Self {
+        Self::new(
+            "GUI_UNCASTABLE_APPROVAL_LIMITS",
+            GuiErrorCategory::InvalidInput,
+            Some("rules"),
+            "At least one approval must be allowed when abstention is disabled.",
+        )
+    }
 }
 
 /// Maps an existing protocol validation code onto a coarse GUI category.

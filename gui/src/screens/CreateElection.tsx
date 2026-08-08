@@ -1,20 +1,329 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { BALLOT_PRESENTATIONS, BALLOT_TYPE_LABELS, BallotType } from "../ballot/ballotTypes";
-import { Card, Notice, Placeholder } from "../components/ui";
+import { api, BackendError } from "../api/client";
+import { pickDirectory, pickRegistryCborFile } from "../api/dialog";
+import type {
+  GuiBallotPresentationType,
+  GuiCommandError,
+  GuiElectionCreationResultV1,
+  GuiElectionDraftPreviewV1,
+  GuiElectionExportResultV1,
+  GuiElectionSummaryV1,
+} from "../api/types";
+import { presentationIdentifier } from "../api/client";
+import { NavSection } from "../components/AppFrame";
+import {
+  approvalRulePreview,
+  freezeAvailable,
+  isUncastableApprovalConfig,
+  NO_QUORUM_STATEMENT,
+  optionNoun,
+  optionSetNoun,
+  optionValidationErrors,
+  parseVoterHexList,
+  presentationLabel,
+} from "../creation";
+import { useAppState } from "../state/AppState";
+import {
+  BackendErrorNotice,
+  Card,
+  CopyButton,
+  DetailsSection,
+  Field,
+  HashValue,
+  LifecyclePill,
+  Notice,
+} from "../components/ui";
+
+type Step = "basics" | "voters" | "options" | "rules" | "review" | "frozen";
+
+const STEPS: { id: Step; label: string }[] = [
+  { id: "basics", label: "Basics" },
+  { id: "voters", label: "Eligible voters" },
+  { id: "options", label: "Ballot options" },
+  { id: "rules", label: "Voting rules" },
+  { id: "review", label: "Review" },
+  { id: "frozen", label: "Freeze & Export" },
+];
+
+interface DraftOption {
+  id: string;
+  label: string;
+}
 
 /**
- * Create Election (organizer) — staged-state screen.
- *
- * Election creation (manifest, registry, option-set construction) is not wired
- * in this slice. This screen shows the intended structure and the
- * ballot-type-driven layout only; nothing is written to disk here and there
- * are no Save/Create actions. The creation workflow is being added in the next
- * organizer slice.
+ * Create Election (organizer): a real wizard for constructing a new election
+ * package from non-secret public inputs. The frontend collects ordinary
+ * strings and public keys; Rust validates every field, builds the canonical
+ * registry, candidate set, and manifest, derives all commitments, and freezes
+ * the election through the existing lifecycle. After freeze, the draft is
+ * immutable (enforced by the backend) and a frozen session is loaded.
  */
-export function CreateElection() {
-  const [ballotType, setBallotType] = useState<BallotType>("ballot-measure");
-  const presentation = BALLOT_PRESENTATIONS[ballotType];
+export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => void }) {
+  const { refreshElection, refreshParticipation, recordAction } = useAppState();
+
+  const [step, setStep] = useState<Step>("basics");
+  const [ballotType, setBallotType] = useState<GuiBallotPresentationType>("BallotMeasure");
+  const [electionIdText, setElectionIdText] = useState("");
+  const [governanceRevision, setGovernanceRevision] = useState("");
+  const [voterText, setVoterText] = useState("");
+  const [options, setOptions] = useState<DraftOption[]>([]);
+  const [approvalMin, setApprovalMin] = useState(1);
+  const [approvalMax, setApprovalMax] = useState(1);
+  const [allowAbstention, setAllowAbstention] = useState(false);
+
+  const [preview, setPreview] = useState<GuiElectionDraftPreviewV1 | null>(null);
+  const [frozen, setFrozen] = useState<GuiElectionCreationResultV1 | null>(null);
+  const [exportResult, setExportResult] = useState<GuiElectionExportResultV1 | null>(null);
+  const [localError, setLocalError] = useState<GuiCommandError | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmFreeze, setConfirmFreeze] = useState(false);
+
+  useEffect(() => {
+    void api.startElectionDraft().catch((error) => captureError(error));
+    return () => {
+      void api.discardElectionDraft().catch(() => {});
+    };
+  }, []);
+
+  function captureError(error: unknown) {
+    if (error instanceof BackendError) setLocalError(error.payload);
+    else
+      setLocalError({
+        code: "GUI_UNEXPECTED_ERROR",
+        category: "INVALID_INPUT",
+        context: null,
+        message: "an unexpected frontend/backend boundary error occurred",
+      });
+  }
+
+  async function run<T>(fn: () => Promise<T>): Promise<T | null> {
+    setBusy(true);
+    setLocalError(null);
+    try {
+      const result = await fn();
+      setBusy(false);
+      return result;
+    } catch (error) {
+      captureError(error);
+      setBusy(false);
+      return null;
+    }
+  }
+
+  async function commitBasics(): Promise<boolean> {
+    const ok = await run(() =>
+      api.setDraftBasics(electionIdText, governanceRevision),
+    );
+    if (ok === null) return false;
+    const ok2 = await run(() =>
+      api.setDraftPresentation(presentationIdentifier(ballotType)),
+    );
+    return ok2 !== null;
+  }
+
+  async function commitVoters(keys: string[]): Promise<boolean> {
+    const ok = await run(() => api.setDraftVoters(keys));
+    return ok !== null;
+  }
+
+  async function commitOptions(): Promise<boolean> {
+    const payload = options.map((o) => ({
+      machine_id_text: o.id,
+      display_name: o.label,
+    }));
+    const ok = await run(() => api.setDraftOptions(payload));
+    return ok !== null;
+  }
+
+  async function commitRules(): Promise<boolean> {
+    const ok = await run(() =>
+      api.setDraftRules(approvalMin, approvalMax, allowAbstention),
+    );
+    return ok !== null;
+  }
+
+  async function refreshPreview() {
+    const p = await run(() => api.previewDraft());
+    if (p) setPreview(p);
+    return p;
+  }
+
+  function stepIndex(): number {
+    return STEPS.findIndex((s) => s.id === step);
+  }
+
+  function goNext(target: Step) {
+    setStep(target);
+  }
+
+  // ---- Basics ------------------------------------------------------------
+  async function onBasicsNext() {
+    if (electionIdText.trim().length === 0 || governanceRevision.trim().length === 0) {
+      setLocalError({
+        code: "GUI_DRAFT_INCOMPLETE",
+        category: "INVALID_INPUT",
+        context: "draft",
+        message: "election identifier and governance source revision are required",
+      });
+      return;
+    }
+    if (await commitBasics()) goNext("voters");
+  }
+
+  // ---- Voters ------------------------------------------------------------
+  const parsedVoters = parseVoterHexList(voterText);
+
+  async function onVotersNext() {
+    if (parsedVoters.errors.length > 0) {
+      setLocalError({
+        code: "GUI_MALFORMED_PUBLIC_KEY",
+        category: "INVALID_INPUT",
+        context: "voters",
+        message: parsedVoters.errors[0] ?? "a governance public key is malformed",
+      });
+      return;
+    }
+    if (parsedVoters.keys.length === 0) {
+      setLocalError({
+        code: "GUI_DRAFT_INCOMPLETE",
+        category: "INVALID_INPUT",
+        context: "voters",
+        message: "add at least one eligible voter governance public key",
+      });
+      return;
+    }
+    if (await commitVoters(parsedVoters.keys)) goNext("options");
+  }
+
+  async function onImportRegistryFile() {
+    const path = await pickRegistryCborFile("Import canonical voter registry");
+    if (!path) return;
+    const ok = await run(() => api.importRegistryToDraft(path));
+    if (ok === null) return;
+    // After import, refresh the preview to learn the imported key count and
+    // surface them in the textarea (hex, one per line).
+    const p = await run(() => api.previewDraft());
+    if (p) {
+      setPreview(p);
+      setVoterText(p.voters.map((v) => v.public_key_hex).join("\n"));
+    }
+  }
+
+  // ---- Options -----------------------------------------------------------
+  const optionErrors = optionValidationErrors(
+    options.map((o) => ({ machine_id_text: o.id, display_name: o.label })),
+  );
+
+  function addOption() {
+    setOptions((prev) => [...prev, { id: "", label: "" }]);
+  }
+  function updateOption(index: number, patch: Partial<DraftOption>) {
+    setOptions((prev) => prev.map((o, i) => (i === index ? { ...o, ...patch } : o)));
+  }
+  function removeOption(index: number) {
+    setOptions((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  async function onOptionsNext() {
+    if (options.length === 0) {
+      setLocalError({
+        code: "GUI_DRAFT_INCOMPLETE",
+        category: "INVALID_INPUT",
+        context: "options",
+        message: "add at least one ballot option",
+      });
+      return;
+    }
+    if (optionErrors.length > 0) {
+      setLocalError({
+        code: "GUI_DRAFT_INCOMPLETE",
+        category: "INVALID_INPUT",
+        context: "options",
+        message: optionErrors[0],
+      });
+      return;
+    }
+    if (await commitOptions()) goNext("rules");
+  }
+
+  // ---- Rules -------------------------------------------------------------
+  async function onRulesNext() {
+    if (approvalMin > approvalMax) {
+      setLocalError({
+        code: "INVALID_SELECTION_LIMITS",
+        category: "INVALID_INPUT",
+        context: "rules",
+        message: "minimum selections exceed maximum selections",
+      });
+      return;
+    }
+    if (isUncastableApprovalConfig(approvalMin, approvalMax, allowAbstention)) {
+      setLocalError({
+        code: "GUI_UNCASTABLE_APPROVAL_LIMITS",
+        category: "INVALID_INPUT",
+        context: "rules",
+        message: "At least one approval must be allowed when abstention is disabled.",
+      });
+      return;
+    }
+    if (await commitRules()) {
+      const p = await refreshPreview();
+      if (p) goNext("review");
+    }
+  }
+
+  // ---- Review / Freeze ---------------------------------------------------
+  useEffect(() => {
+    if (step === "review") void refreshPreview();
+  }, [step]);
+
+  async function onFreeze() {
+    setConfirmFreeze(false);
+    const result = await run(() => api.freezeElection());
+    if (!result) return;
+    setFrozen(result);
+    setStep("frozen");
+    await refreshElection();
+    void refreshParticipation();
+    recordAction(
+      `Froze election ${result.summary.election_id_text ?? result.summary.election_id_hex}`,
+    );
+  }
+
+  // ---- Export ------------------------------------------------------------
+  async function onExport() {
+    const dir = await pickDirectory("Choose export directory");
+    if (!dir) return;
+    const result = await run(() => api.exportElectionArtifacts(dir));
+    if (result) {
+      setExportResult(result);
+      recordAction("Exported election artifacts");
+    }
+  }
+
+  async function onOpenVoting() {
+    await run(async () => {
+      await api.openVoting();
+      await refreshElection();
+      recordAction("Opened voting");
+    });
+  }
+
+  function restart() {
+    void api.startElectionDraft();
+    setStep("basics");
+    setFrozen(null);
+    setExportResult(null);
+    setPreview(null);
+    setVoterText("");
+    setOptions([]);
+    setElectionIdText("");
+    setGovernanceRevision("");
+  }
+
+  const presentation = ballotType;
+  const readOnly = frozen !== null;
 
   return (
     <>
@@ -22,76 +331,688 @@ export function CreateElection() {
       <p className="screen-lede">
         Define a new election package: election manifest, voter registry, and the canonical
         option set. The three artifacts stay separate canonical files; there is no single-file
-        container.
+        container. The organizer never possesses voter credentials — only public governance keys.
       </p>
 
-      <Placeholder>
-        Election creation workflow is being added in the next organizer slice. This screen shows
-        the planned structure and ballot-type-driven vocabulary only; nothing is written to disk
-        here and there are no Save or Create actions.
-      </Placeholder>
+      <BackendErrorNotice error={localError ?? null} onDismiss={() => setLocalError(null)} />
 
+      <ol className="stepper" aria-label="Creation steps">
+        {STEPS.map((s, i) => {
+          const state =
+            s.id === step ? "current" : i < stepIndex() || readOnly ? "done" : "todo";
+          return (
+            <li key={s.id} className={`stepper-item stepper-${state}`}>
+              <span className="stepper-index" aria-hidden="true">
+                {i + 1}
+              </span>
+              <span className="stepper-label">{s.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {step === "basics" && (
+        <BasicsStep
+          ballotType={ballotType}
+          setBallotType={setBallotType}
+          electionIdText={electionIdText}
+          setElectionIdText={setElectionIdText}
+          governanceRevision={governanceRevision}
+          setGovernanceRevision={setGovernanceRevision}
+          busy={busy}
+          onNext={onBasicsNext}
+        />
+      )}
+
+      {step === "voters" && (
+        <VotersStep
+          voterText={voterText}
+          setVoterText={setVoterText}
+          parsed={parsedVoters}
+          busy={busy}
+          onImportRegistryFile={onImportRegistryFile}
+          onNext={onVotersNext}
+          onBack={() => goNext("basics")}
+        />
+      )}
+
+      {step === "options" && (
+        <OptionsStep
+          presentation={presentation}
+          options={options}
+          addOption={addOption}
+          updateOption={updateOption}
+          removeOption={removeOption}
+          optionErrors={optionErrors}
+          busy={busy}
+          onNext={onOptionsNext}
+          onBack={() => goNext("voters")}
+        />
+      )}
+
+      {step === "rules" && (
+        <RulesStep
+          approvalMin={approvalMin}
+          setApprovalMin={setApprovalMin}
+          approvalMax={approvalMax}
+          setApprovalMax={setApprovalMax}
+          allowAbstention={allowAbstention}
+          setAllowAbstention={setAllowAbstention}
+          optionCount={options.length}
+          busy={busy}
+          onNext={onRulesNext}
+          onBack={() => goNext("options")}
+        />
+      )}
+
+      {(step === "review" || step === "frozen") && (
+        <ReviewStep
+          preview={preview}
+          frozen={frozen}
+          presentation={presentation}
+          busy={busy}
+          readOnly={readOnly}
+          exportResult={exportResult}
+          onFreeze={() => setConfirmFreeze(true)}
+          onExport={onExport}
+          onOpenVoting={onOpenVoting}
+          onManage={() => onNavigate("manage")}
+          onRestart={restart}
+          onBack={() => goNext("rules")}
+        />
+      )}
+
+      {confirmFreeze && (
+        <FreezeConfirmation
+          preview={preview}
+          busy={busy}
+          onConfirm={onFreeze}
+          onCancel={() => setConfirmFreeze(false)}
+        />
+      )}
+    </>
+  );
+}
+
+// ----------------------------------------------------------------- Basics
+
+function BasicsStep(props: {
+  ballotType: GuiBallotPresentationType;
+  setBallotType: (t: GuiBallotPresentationType) => void;
+  electionIdText: string;
+  setElectionIdText: (v: string) => void;
+  governanceRevision: string;
+  setGovernanceRevision: (v: string) => void;
+  busy: boolean;
+  onNext: () => void;
+}) {
+  return (
+    <>
       <Card title="Ballot type">
         <div className="radio-group" role="radiogroup" aria-label="Ballot type">
-          {(Object.keys(BALLOT_TYPE_LABELS) as BallotType[]).map((type) => (
+          {(["Candidate", "GovernanceProposal", "BallotMeasure"] as const).map((type) => (
             <label key={type} className="radio-option">
               <input
                 type="radio"
                 name="ballot-type"
                 value={type}
-                checked={ballotType === type}
-                onChange={() => setBallotType(type)}
+                checked={props.ballotType === type}
+                onChange={() => props.setBallotType(type)}
               />
-              {BALLOT_TYPE_LABELS[type]}
+              {presentationLabel(type)}
             </label>
           ))}
         </div>
         <p className="form-hint">
-          The ballot type selects presentation vocabulary. The underlying canonical option set
-          is identical in every case: ordered options with stable machine IDs and display
-          names.
+          This label controls application presentation. The current canonical protocol does not
+          encode a candidate/governance/measure distinction; the underlying option set is identical
+          in every case.
         </p>
       </Card>
 
-      <div className="card-grid">
-        <Card title="Election manifest">
-          <div className="card-body">
-            Versioned manifest binding the registry commitment, the option-set commitment, the
-            proof suite, approval limits, and the governance source revision.
-          </div>
-        </Card>
-        <Card title="Voter registry">
-          <div className="card-body">
-            Frozen snapshot of voter governance public keys. Voters own their keys; the
-            authority never sees private keys.
-          </div>
-        </Card>
-        <Card title={presentation.optionSetNoun}>
-          <div className="card-body">
-            {ballotType === "candidate" &&
-              "The people standing for election, in canonical machine-ID order."}
-            {ballotType === "governance-proposal" &&
-              "The choices offered on the governance proposal, in canonical machine-ID order."}
-            {ballotType === "ballot-measure" &&
-              "The options offered by the ballot measure, in canonical machine-ID order."}
-          </div>
-          <ul className="option-list" aria-label={`Example ${presentation.optionSetNoun}`}>
-            {[1, 2, 3].map((n) => (
-              <li key={n} className="option-item">
+      <Card title="Election identifier">
+        <label className="field-label" htmlFor="election-id">
+          Election identifier (text)
+        </label>
+        <input
+          id="election-id"
+          className="text-input"
+          value={props.electionIdText}
+          onChange={(e) => props.setElectionIdText(e.target.value)}
+          placeholder="e.g. pilot-election-001"
+        />
+        <p className="form-hint">
+          A stable, human-chosen identifier bound into the manifest. Keep it short and unique.
+        </p>
+      </Card>
+
+      <Card title="Governance source">
+        <label className="field-label" htmlFor="governance-revision">
+          Governance source revision
+        </label>
+        <input
+          id="governance-revision"
+          className="text-input"
+          value={props.governanceRevision}
+          onChange={(e) => props.setGovernanceRevision(e.target.value)}
+          placeholder="e.g. rfc-pr-185:f9e86cca"
+        />
+        <p className="form-hint">
+          The only cryptographically bound governance text. This should pin the authoritative
+          source (e.g. a proposal PR or document revision) voters should consult.
+        </p>
+        <Notice tone="info">
+          The version-one manifest has no title, description, or proposal-question field. Do not
+          present unbound text to voters as the signed question; the governance source revision
+          and the option display names are the binding.
+        </Notice>
+      </Card>
+
+      <StepNav busy={props.busy} onNext={props.onNext} nextLabel="Continue" />
+    </>
+  );
+}
+
+// ----------------------------------------------------------------- Voters
+
+function VotersStep(props: {
+  voterText: string;
+  setVoterText: (v: string) => void;
+  parsed: { keys: string[]; errors: string[] };
+  busy: boolean;
+  onImportRegistryFile: () => void;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <>
+      <Card title="Eligible voters">
+        <div className="voters-header">
+          <span className="field-value">
+            {props.parsed.keys.length} eligible voter{props.parsed.keys.length === 1 ? "" : "s"}
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={props.onImportRegistryFile}
+          >
+            Import canonical registry
+          </button>
+        </div>
+        <label className="field-label" htmlFor="voter-text">
+          Governance public keys (hex, one per line)
+        </label>
+        <textarea
+          id="voter-text"
+          className="text-input voter-textarea"
+          value={props.voterText}
+          onChange={(e) => props.setVoterText(e.target.value)}
+          rows={8}
+          spellCheck={false}
+          placeholder={
+            "6a493210f7499cd17fecb510ae0a23fda0d4b58a1b48d4ecc0f4cbc9423e86f2\n" +
+            "7858e0c0c4ad4ad27a6f9e9d4b6a5b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a"
+          }
+        />
+        <p className="form-hint">
+          Add one 32-byte governance public key per line (64 hex characters). This is a
+          non-canonical convenience input; the canonical output remains registry CBOR. The
+          organizer never handles voter credentials.
+        </p>
+        {props.parsed.errors.length > 0 && (
+          <Notice tone="warn">{props.parsed.errors[0]}</Notice>
+        )}
+      </Card>
+
+      <StepNav busy={props.busy} onNext={props.onNext} onBack={props.onBack} nextLabel="Continue" />
+    </>
+  );
+}
+
+// ----------------------------------------------------------------- Options
+
+function OptionsStep(props: {
+  presentation: GuiBallotPresentationType;
+  options: DraftOption[];
+  addOption: () => void;
+  updateOption: (index: number, patch: Partial<DraftOption>) => void;
+  removeOption: (index: number) => void;
+  optionErrors: string[];
+  busy: boolean;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  const noun = optionNoun(props.presentation);
+  return (
+    <>
+      <Card title={optionSetNoun(props.presentation)}>
+        <div className="options-header">
+          <span className="field-value">
+            {props.options.length} {noun}
+            {props.options.length === 1 ? "" : "s"}
+          </span>
+          <button type="button" className="btn btn-secondary" onClick={props.addOption}>
+            Add {noun}
+          </button>
+        </div>
+        <p className="form-hint">
+          Options are sorted by machine ID in the canonical option set, so display order here is
+          cosmetic. Each option has a stable machine ID (text) and a human-facing display label.
+        </p>
+        <div className="option-editor">
+          {props.options.map((option, index) => (
+            <div key={index} className="option-edit-row">
+              <input
+                className="text-input option-edit-id"
+                value={option.id}
+                onChange={(e) => props.updateOption(index, { id: e.target.value })}
+                placeholder="machine ID"
+                aria-label={`Machine ID for ${noun} ${index + 1}`}
+              />
+              <input
+                className="text-input option-edit-label"
+                value={option.label}
+                onChange={(e) => props.updateOption(index, { label: e.target.value })}
+                placeholder="display label"
+                aria-label={`Display label for ${noun} ${index + 1}`}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary btn-remove"
+                onClick={() => props.removeOption(index)}
+                aria-label={`Remove ${noun} ${index + 1}`}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+        {props.optionErrors.length > 0 && (
+          <Notice tone="warn">{props.optionErrors[0]}</Notice>
+        )}
+      </Card>
+
+      <StepNav busy={props.busy} onNext={props.onNext} onBack={props.onBack} nextLabel="Continue" />
+    </>
+  );
+}
+
+// ----------------------------------------------------------------- Rules
+
+function RulesStep(props: {
+  approvalMin: number;
+  setApprovalMin: (n: number) => void;
+  approvalMax: number;
+  setApprovalMax: (n: number) => void;
+  allowAbstention: boolean;
+  setAllowAbstention: (b: boolean) => void;
+  optionCount: number;
+  busy: boolean;
+  onNext: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <>
+      <Card title="Voting rules">
+        <div className="field-list">
+          <Field label="Minimum approvals">
+            <input
+              type="number"
+              className="text-input number-input"
+              min={0}
+              max={props.optionCount}
+              value={props.approvalMin}
+              onChange={(e) => props.setApprovalMin(Number(e.target.value))}
+            />
+          </Field>
+          <Field label="Maximum approvals">
+            <input
+              type="number"
+              className="text-input number-input"
+              min={0}
+              max={props.optionCount}
+              value={props.approvalMax}
+              onChange={(e) => props.setApprovalMax(Number(e.target.value))}
+            />
+          </Field>
+          <Field label="Abstention">
+            <label className="radio-option">
+              <input
+                type="checkbox"
+                checked={props.allowAbstention}
+                onChange={(e) => props.setAllowAbstention(e.target.checked)}
+              />
+              Allow an empty selection (abstain)
+            </label>
+          </Field>
+        </div>
+        <p className="form-hint">
+          {approvalRulePreview(props.approvalMin, props.approvalMax, props.allowAbstention)}
+        </p>
+        <Notice tone="info">{NO_QUORUM_STATEMENT}</Notice>
+        <p className="form-hint">
+          Proof suite: the production Triptych prototype suite is used by default and is not
+          selectable.
+        </p>
+      </Card>
+
+      <StepNav busy={props.busy} onNext={props.onNext} onBack={props.onBack} nextLabel="Review" />
+    </>
+  );
+}
+
+// ----------------------------------------------------------------- Review
+
+function ReviewStep(props: {
+  preview: GuiElectionDraftPreviewV1 | null;
+  frozen: GuiElectionCreationResultV1 | null;
+  presentation: GuiBallotPresentationType;
+  busy: boolean;
+  readOnly: boolean;
+  exportResult: GuiElectionExportResultV1 | null;
+  onFreeze: () => void;
+  onExport: () => void;
+  onOpenVoting: () => void;
+  onManage: () => void;
+  onRestart: () => void;
+  onBack: () => void;
+}) {
+  const p = props.preview;
+  const summary: GuiElectionSummaryV1 | null = props.frozen?.summary ?? null;
+
+  if (props.readOnly && summary) {
+    return (
+      <FrozenView
+        summary={summary}
+        presentation={props.presentation}
+        exportResult={props.exportResult}
+        busy={props.busy}
+        onExport={props.onExport}
+        onOpenVoting={props.onOpenVoting}
+        onManage={props.onManage}
+        onRestart={props.onRestart}
+      />
+    );
+  }
+
+  if (!p) {
+    return (
+      <Card title="Review">
+        <p className="field-value">Loading review…</p>
+      </Card>
+    );
+  }
+
+  return (
+    <>
+      <Card title="Review election">
+        <Notice tone="info">
+          Freezing locks the election definition, eligible voter registry, and ballot options.
+          Changes become impossible without creating a new election.
+        </Notice>
+        <div className="field-list">
+          <Field label="Election ID">
+            <span className="field-value">{p.election_id_text ?? p.election_id_hex ?? "\u2014"}</span>
+          </Field>
+          <Field label="Governance source">
+            <span className="field-value">{p.governance_source_revision ?? "\u2014"}</span>
+          </Field>
+          <Field label="Ballot type">
+            <span className="field-value">{presentationLabel(props.presentation)}</span>
+          </Field>
+          <Field label="Proof suite">
+            <span className="field-value">{p.proof_suite_id}</span>
+          </Field>
+          <Field label="Voting rules">
+            <span className="field-value">
+              {approvalRulePreview(p.approval_min, p.approval_max, p.allow_abstention)}
+            </span>
+          </Field>
+          <Field label="Quorum">
+            <span className="field-value">{NO_QUORUM_STATEMENT}</span>
+          </Field>
+        </div>
+      </Card>
+
+      <Card title="Eligibility">
+        <div className="field-list">
+          <Field label="Eligible voters">
+            <span className="field-value">{p.voter_count}</span>
+          </Field>
+          <Field label="Registry commitment">
+            <HashValue value={p.registry_commitment_hex} />
+            {p.registry_commitment_hex && <CopyButton value={p.registry_commitment_hex} />}
+          </Field>
+        </div>
+      </Card>
+
+      <Card title={optionSetNoun(props.presentation)}>
+        <div className="field-list">
+          <Field label="Option count">
+            <span className="field-value">{p.options.length}</span>
+          </Field>
+          <Field label="Option-set commitment">
+            <HashValue value={p.candidate_set_commitment_hex} />
+            {p.candidate_set_commitment_hex && (
+              <CopyButton value={p.candidate_set_commitment_hex} />
+            )}
+          </Field>
+        </div>
+        <DetailsSection summary={`All ${optionNoun(props.presentation)}s`}>
+          <ul className="option-list">
+            {p.options.map((o) => (
+              <li key={o.machine_id_hex} className="option-item">
                 <span className="option-marker" aria-hidden="true" />
-                <span>
-                  Example {presentation.optionNoun} {n}
-                </span>
+                <span>{o.display_name}</span>
+                <span className="hash option-id">{o.machine_id_text ?? o.machine_id_hex}</span>
               </li>
             ))}
           </ul>
-        </Card>
-      </div>
+        </DetailsSection>
+      </Card>
 
-      <Notice tone="info">
-        Approval limits (minimum/maximum selections, abstention) come from the manifest and are
-        enforced by the backend during intake, not by this form.
-      </Notice>
+      <Card title="Final binding">
+        <div className="field-list">
+          <Field label="Manifest hash">
+            <HashValue value={p.manifest_hash_hex} />
+            {p.manifest_hash_hex && <CopyButton value={p.manifest_hash_hex} />}
+          </Field>
+        </div>
+        <p className="form-hint">
+          {p.complete
+            ? "The draft is complete and ready to freeze."
+            : `Missing: ${p.missing.join(", ")}.`}
+        </p>
+      </Card>
+
+      <StepNav
+        busy={props.busy}
+        onNext={props.onFreeze}
+        onBack={props.onBack}
+        nextLabel="Freeze Election"
+        nextDisabled={!freezeAvailable(p)}
+      />
     </>
+  );
+}
+
+function FrozenView(props: {
+  summary: GuiElectionSummaryV1;
+  presentation: GuiBallotPresentationType;
+  exportResult: GuiElectionExportResultV1 | null;
+  busy: boolean;
+  onExport: () => void;
+  onOpenVoting: () => void;
+  onManage: () => void;
+  onRestart: () => void;
+}) {
+  const s = props.summary;
+  return (
+    <>
+      <Card title="Election frozen">
+        <Notice tone="ok">
+          Election frozen. The manifest, registry, and option set are now immutable.
+        </Notice>
+        <div className="field-list">
+          <Field label="Lifecycle">
+            <LifecyclePill state={s.lifecycle_state} />
+          </Field>
+          <Field label="Election ID">
+            <span className="field-value">{s.election_id_text ?? s.election_id_hex}</span>
+          </Field>
+          <Field label="Manifest hash">
+            <HashValue value={s.manifest_hash_hex} />
+            <CopyButton value={s.manifest_hash_hex} />
+          </Field>
+          <Field label="Registry commitment">
+            <HashValue value={s.registry_commitment_hex} />
+            <CopyButton value={s.registry_commitment_hex} />
+          </Field>
+          <Field label="Option-set commitment">
+            <HashValue value={s.candidate_set_commitment_hex} />
+            <CopyButton value={s.candidate_set_commitment_hex} />
+          </Field>
+        </div>
+        <p className="form-hint">
+          Presentation type ({presentationLabel(props.presentation)}) is application-local and is
+          not part of the canonical manifest; it will not appear when the exported files are
+          reloaded through Manage Election.
+        </p>
+      </Card>
+
+      <Card title="Export">
+        <p className="field-value">
+          Export the three canonical artifacts before opening voting.
+        </p>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={props.onExport}
+          disabled={props.busy}
+        >
+          Export Election Package
+        </button>
+        {props.exportResult && (
+          <div className="field-list export-result">
+            <Field label="Directory">
+              <span className="field-value">{props.exportResult.directory}</span>
+            </Field>
+            {props.exportResult.files.map((f) => (
+              <Field key={f.path} label={f.path}>
+                <span className="field-value">
+                  {f.bytes} bytes · <span className="hash">{f.digest_hex}</span>
+                </span>
+              </Field>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <Card title="Open voting">
+        <p className="field-value">
+          Opening voting is a separate deliberate action. Voter proof generation is not enabled in
+          this slice.
+        </p>
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={props.onOpenVoting}
+            disabled={props.busy}
+          >
+            Open Voting
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={props.onManage}
+          >
+            Go to Manage Election
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={props.onRestart}>
+            Start another
+          </button>
+        </div>
+      </Card>
+    </>
+  );
+}
+
+// --------------------------------------------------------------- Modal
+
+function FreezeConfirmation(props: {
+  preview: GuiElectionDraftPreviewV1 | null;
+  busy: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="freeze-title">
+      <div className="modal">
+        <h3 id="freeze-title" className="modal-title">
+          Freeze election?
+        </h3>
+        <p className="modal-body">
+          Freezing locks the election definition, eligible voter registry, and ballot options.
+          Changes become impossible without creating a new election.
+        </p>
+        {props.preview?.manifest_hash_hex && (
+          <p className="modal-body">
+            Manifest hash: <span className="hash">{props.preview.manifest_hash_hex}</span>
+          </p>
+        )}
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={props.onCancel}
+            disabled={props.busy}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={props.onConfirm}
+            disabled={props.busy}
+          >
+            Freeze Election
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --------------------------------------------------------------- Nav
+
+function StepNav(props: {
+  busy: boolean;
+  onNext: () => void;
+  onBack?: () => void;
+  nextLabel: string;
+  nextDisabled?: boolean;
+}) {
+  return (
+    <div className="action-row step-nav">
+      {props.onBack && (
+        <button
+          type="button"
+          className="btn btn-secondary"
+          onClick={props.onBack}
+          disabled={props.busy}
+        >
+          Back
+        </button>
+      )}
+      <button
+        type="button"
+        className="btn btn-primary"
+        onClick={props.onNext}
+        disabled={props.busy || props.nextDisabled === true}
+      >
+        {props.nextLabel}
+      </button>
+    </div>
   );
 }

@@ -344,3 +344,142 @@ describe("no fake trend state", () => {
     assert.match(participationAccessibleText(null), /No participation data available/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice 5A6: organizer creation pure helpers.
+// ---------------------------------------------------------------------------
+
+import {
+  approvalRulePreview,
+  freezeAvailable,
+  isUncastableApprovalConfig,
+  NO_QUORUM_STATEMENT,
+  optionNoun,
+  optionSetNoun,
+  optionValidationErrors,
+  parseVoterHexList,
+  presentationLabel,
+} from "../src/creation.ts";
+
+const KEY64 = "6a493210f7499cd17fecb510ae0a23fda0d4b58a1b48d4ecc0f4cbc9423e86f2";
+
+describe("creation: voter hex list parsing", () => {
+  it("accepts valid keys and trims/ignores blanks", () => {
+    const text = `${KEY64}\n  ${KEY64.slice(0, 32)}\n\n`;
+    // The second line is only 32 hex chars -> error.
+    const parsed = parseVoterHexList(text);
+    assert.equal(parsed.keys.length, 1);
+    assert.equal(parsed.errors.length, 1);
+  });
+
+  it("rejects non-hex and wrong length", () => {
+    const parsed = parseVoterHexList("notahexkey\nabc");
+    assert.equal(parsed.keys.length, 0);
+    assert.equal(parsed.errors.length, 2);
+  });
+
+  it("surfaces duplicate keys", () => {
+    const parsed = parseVoterHexList(`${KEY64}\n${KEY64.toUpperCase()}`);
+    assert.equal(parsed.keys.length, 1);
+    assert.equal(parsed.errors.length, 1);
+    assert.match(parsed.errors[0], /Duplicate/i);
+  });
+});
+
+describe("creation: option validation", () => {
+  it("rejects empty IDs, empty labels, and duplicates", () => {
+    const empty = optionValidationErrors([
+      { machine_id_text: "", display_name: "A" },
+    ]);
+    assert.ok(empty.some((e) => /empty machine ID/i.test(e)));
+    const emptyLabel = optionValidationErrors([
+      { machine_id_text: "b", display_name: "   " },
+    ]);
+    assert.ok(emptyLabel.some((e) => /empty display label/i.test(e)));
+    const dup = optionValidationErrors([
+      { machine_id_text: "c", display_name: "C" },
+      { machine_id_text: "c", display_name: "D" },
+    ]);
+    assert.ok(dup.some((e) => /duplicate machine ID/i.test(e)));
+  });
+
+  it("rejects duplicate display labels after trim normalization", () => {
+    const dup = optionValidationErrors([
+      { machine_id_text: "a", display_name: "Yes" },
+      { machine_id_text: "b", display_name: "Yes" },
+    ]);
+    assert.ok(dup.some((e) => /duplicate display label/i.test(e)));
+    const trimDup = optionValidationErrors([
+      { machine_id_text: "a", display_name: "Yes" },
+      { machine_id_text: "b", display_name: "   Yes   " },
+    ]);
+    assert.ok(trimDup.some((e) => /duplicate display label/i.test(e)));
+  });
+
+  it("passes for a valid list or empty list", () => {
+    assert.deepEqual(optionValidationErrors([]), []);
+    assert.deepEqual(
+      optionValidationErrors([
+        { machine_id_text: "a", display_name: "A" },
+        { machine_id_text: "b", display_name: "B" },
+      ]),
+      [],
+    );
+  });
+});
+
+describe("creation: freeze availability", () => {
+  it("requires complete and not frozen", () => {
+    assert.equal(freezeAvailable(null), false);
+    assert.equal(freezeAvailable({ complete: false, frozen: false } as never), false);
+    assert.equal(freezeAvailable({ complete: true, frozen: false } as never), true);
+    assert.equal(freezeAvailable({ complete: true, frozen: true } as never), false);
+  });
+});
+
+describe("creation: presentation vocabulary", () => {
+  it("maps presentation nouns", () => {
+    assert.equal(presentationLabel("Candidate"), "Candidate election");
+    assert.equal(optionSetNoun("GovernanceProposal"), "Choices");
+    assert.equal(optionNoun("BallotMeasure"), "response");
+  });
+});
+
+describe("creation: approval rule preview", () => {
+  it("formats range, exact, and abstention rules", () => {
+    assert.match(approvalRulePreview(1, 2, false), /between 1 and 2 options/);
+    assert.match(approvalRulePreview(1, 1, false), /exactly 1 option/);
+    assert.match(approvalRulePreview(0, 2, true), /up to 2 options.*Abstaining.*permitted/);
+  });
+
+  it("handles unset limits", () => {
+    assert.match(approvalRulePreview(null, null, false), /not set/);
+  });
+});
+
+describe("creation: uncastable approval config", () => {
+  it("flags zero max with abstention disabled", () => {
+    assert.equal(isUncastableApprovalConfig(0, 0, false), true);
+  });
+
+  it("allows zero max when abstention is enabled", () => {
+    assert.equal(isUncastableApprovalConfig(0, 0, true), false);
+  });
+
+  it("allows nonzero max with abstention disabled", () => {
+    assert.equal(isUncastableApprovalConfig(0, 1, false), false);
+    assert.equal(isUncastableApprovalConfig(1, 2, false), false);
+  });
+
+  it("treats unset limits as not uncastable", () => {
+    assert.equal(isUncastableApprovalConfig(null, null, false), false);
+    assert.equal(isUncastableApprovalConfig(null, 0, false), false);
+    assert.equal(isUncastableApprovalConfig(0, null, false), false);
+  });
+});
+
+describe("creation: quorum statement", () => {
+  it("states no quorum field exists", () => {
+    assert.match(NO_QUORUM_STATEMENT, /No quorum rule/i);
+  });
+});

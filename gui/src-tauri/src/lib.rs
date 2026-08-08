@@ -17,10 +17,12 @@ use std::sync::Mutex;
 use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
-    GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotIntakeResultV1, GuiCoreError,
-    GuiElectionArtifactsV1, GuiElectionSessionV1, GuiElectionSummaryV1, GuiParticipationSummaryV1,
-    GuiTallySummaryV1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
-    inspect_anchor_snapshot_v1, verify_archive_directory_v1, write_archive_directory_v1,
+    GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotPresentationType,
+    GuiBallotIntakeResultV1, GuiCoreError, GuiElectionArtifactsV1, GuiElectionCreationResultV1,
+    GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportResultV1,
+    GuiElectionSessionV1, GuiElectionSummaryV1, GuiParticipationSummaryV1, GuiTallySummaryV1,
+    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
+    verify_archive_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
 };
 
 /// Serializable command error: a bounded copy of the gui-core error model.
@@ -51,6 +53,14 @@ impl CommandError {
             "GUI_NO_ACTIVE_ELECTION",
             "INVALID_LIFECYCLE_TRANSITION",
             "no election session is active in this shell",
+        )
+    }
+
+    fn no_draft() -> Self {
+        Self::new(
+            "GUI_NO_ACTIVE_DRAFT",
+            "INVALID_INPUT",
+            "no election draft is active; start one first",
         )
     }
 
@@ -89,6 +99,7 @@ impl From<GuiCoreError> for CommandError {
 #[derive(Default)]
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
+    draft: Mutex<Option<GuiElectionDraftV1>>,
 }
 
 impl AppState {
@@ -111,6 +122,17 @@ impl AppState {
         match guard.as_mut() {
             Some(session) => f(session),
             None => Err(CommandError::no_session()),
+        }
+    }
+
+    fn with_draft_mut<T>(
+        &self,
+        f: impl FnOnce(&mut GuiElectionDraftV1) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let mut guard = self.draft.lock().map_err(|_| CommandError::state_poisoned())?;
+        match guard.as_mut() {
+            Some(draft) => f(draft),
+            None => Err(CommandError::no_draft()),
         }
     }
 }
@@ -283,6 +305,155 @@ fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1
     Ok(inspect_anchor_evidence_v1(Path::new(&path))?)
 }
 
+// ---------------------------------------------------------------------------
+// Organizer election creation (Slice 5A6).
+//
+// The shell owns one mutable draft and one loaded session. The frontend
+// collects ordinary strings and public keys; every validation lives in
+// gui-core. After freeze, the draft becomes immutable and a frozen session is
+// loaded. Exporting writes the three canonical artifacts; opening voting is a
+// separate deliberate action.
+// ---------------------------------------------------------------------------
+
+/// Starts a fresh organizer election draft, clearing any existing draft. A
+/// previously loaded frozen session is left intact so the organizer can review
+/// it; calling this discards only the in-progress draft.
+#[tauri::command]
+fn start_election_draft(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
+    let mut guard = state.draft.lock().map_err(|_| CommandError::state_poisoned())?;
+    *guard = Some(GuiElectionDraftV1::new());
+    Ok(())
+}
+
+/// Discards the in-progress draft. Does not unload a frozen session.
+#[tauri::command]
+fn discard_election_draft(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
+    let mut guard = state.draft.lock().map_err(|_| CommandError::state_poisoned())?;
+    *guard = None;
+    Ok(())
+}
+
+/// Sets the election basics (identifier text + governance source revision).
+#[tauri::command]
+fn set_draft_basics(
+    election_id_text: String,
+    governance_source_revision: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.set_basics(election_id_text, governance_source_revision)?;
+        Ok(())
+    })
+}
+
+/// Sets the voting rules (minimum/maximum approvals, abstention policy).
+#[tauri::command]
+fn set_draft_rules(
+    approval_min: usize,
+    approval_max: usize,
+    allow_abstention: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.set_rules(approval_min, approval_max, allow_abstention)?;
+        Ok(())
+    })
+}
+
+/// Replaces the eligible-voter list from hex governance public keys.
+#[tauri::command]
+fn set_draft_voters(
+    public_key_hexs: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        draft.set_voters(public_key_hexs)?;
+        Ok(())
+    })
+}
+
+/// Replaces the ballot option list from `(machine_id_text, display_name)` pairs.
+#[tauri::command]
+fn set_draft_options(
+    options: Vec<DraftOptionInput>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        let parsed: Vec<(String, String)> =
+            options.into_iter().map(|o| (o.machine_id_text, o.display_name)).collect();
+        draft.set_options(parsed)?;
+        Ok(())
+    })
+}
+
+/// Sets the application-local ballot presentation type (non-canonical).
+#[tauri::command]
+fn set_draft_presentation(
+    presentation: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    state.with_draft_mut(|draft| {
+        let parsed = GuiBallotPresentationType::from_identifier(&presentation)?;
+        draft.set_presentation(parsed)?;
+        Ok(())
+    })
+}
+
+/// Imports an existing canonical registry CBOR file into the draft, replacing
+/// the current voter list with its public keys.
+#[tauri::command]
+fn import_registry_to_draft(
+    registry_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let bytes =
+        std::fs::read(Path::new(&registry_path)).map_err(|_| CommandError::package_read_failed())?;
+    state.with_draft_mut(|draft| {
+        draft.import_registry_bytes(&bytes)?;
+        Ok(())
+    })
+}
+
+/// Returns a pre-freeze review of the current draft.
+#[tauri::command]
+fn preview_draft(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionDraftPreviewV1, CommandError> {
+    state.with_draft_mut(|draft| Ok(draft.preview()))
+}
+
+/// Freezes the draft and loads the frozen election session. Returns the
+/// creation result. After this, the draft is immutable and the session is
+/// active in the `FROZEN` lifecycle state.
+#[tauri::command]
+fn freeze_election(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionCreationResultV1, CommandError> {
+    let (result, session) = state.with_draft_mut(|draft| Ok(draft.freeze()?))?;
+    let mut guard = state.session.lock().map_err(|_| CommandError::state_poisoned())?;
+    *guard = Some(session);
+    Ok(result)
+}
+
+/// Exports the three canonical election artifacts from the loaded frozen
+/// session into `target_dir`, never overwriting existing files.
+#[tauri::command]
+fn export_election_artifacts(
+    target_dir: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionExportResultV1, CommandError> {
+    state.with_session(|session| {
+        Ok(write_election_artifacts_v1(session.artifacts(), Path::new(&target_dir))?)
+    })
+}
+
+/// One ballot option input from the frontend.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct DraftOptionInput {
+    machine_id_text: String,
+    display_name: String,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -305,6 +476,17 @@ pub fn run() {
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,
+            start_election_draft,
+            discard_election_draft,
+            set_draft_basics,
+            set_draft_rules,
+            set_draft_voters,
+            set_draft_options,
+            set_draft_presentation,
+            import_registry_to_draft,
+            preview_draft,
+            freeze_election,
+            export_election_artifacts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Tari Private Ballot shell");

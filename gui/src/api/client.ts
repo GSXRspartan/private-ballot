@@ -16,11 +16,16 @@ import type {
   GuiAnchorSnapshotInspectionV1,
   GuiArchiveVerificationV1,
   GuiArchiveWriteResultV1,
+  GuiBallotPresentationType,
   GuiBallotIntakeResultV1,
   GuiCommandError,
+  GuiElectionCreationResultV1,
+  GuiElectionDraftPreviewV1,
+  GuiElectionExportResultV1,
   GuiElectionSummaryV1,
   GuiParticipationSummaryV1,
   GuiTallySummaryV1,
+  PresentationIdentifier,
   ShellInfoV1,
 } from "./types";
 
@@ -115,4 +120,40 @@ export const api = {
 
   inspectAnchorEvidence: (path: string) =>
     call<GuiAnchorEvidenceInspectionV1>("inspect_anchor_evidence", { path }),
+
+  // Organizer election creation (Slice 5A6).
+  startElectionDraft: () => call<void>("start_election_draft"),
+  discardElectionDraft: () => call<void>("discard_election_draft"),
+  setDraftBasics: (electionIdText: string, governanceSourceRevision: string) =>
+    call<void>("set_draft_basics", { electionIdText, governanceSourceRevision }),
+  setDraftRules: (approvalMin: number, approvalMax: number, allowAbstention: boolean) =>
+    call<void>("set_draft_rules", { approvalMin, approvalMax, allowAbstention }),
+  setDraftVoters: (publicKeyHexs: string[]) =>
+    call<void>("set_draft_voters", { publicKeyHexs }),
+  setDraftOptions: (
+    options: { machine_id_text: string; display_name: string }[],
+  ) => call<void>("set_draft_options", { options }),
+  setDraftPresentation: (presentation: PresentationIdentifier) =>
+    call<void>("set_draft_presentation", { presentation }),
+  importRegistryToDraft: (registryPath: string) =>
+    call<void>("import_registry_to_draft", { registryPath }),
+  previewDraft: () => call<GuiElectionDraftPreviewV1>("preview_draft"),
+  freezeElection: () => call<GuiElectionCreationResultV1>("freeze_election"),
+  exportElectionArtifacts: (targetDir: string) =>
+    call<GuiElectionExportResultV1>("export_election_artifacts", { targetDir }),
 };
+
+/** The presentation type the frontend should send to the backend for a given
+ *  UI ballot-type choice. */
+export function presentationIdentifier(
+  type: GuiBallotPresentationType,
+): PresentationIdentifier {
+  switch (type) {
+    case "Candidate":
+      return "candidate";
+    case "GovernanceProposal":
+      return "governance-proposal";
+    case "BallotMeasure":
+      return "ballot-measure";
+  }
+}
