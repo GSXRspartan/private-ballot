@@ -124,6 +124,24 @@
 > changed. Focused gui-core check and frontend build passed; the focused test
 > binary timed out during compilation, so this slice remains CONDITIONAL READY
 > pending the wider offline test and performance matrix. No commit was created.
+> Phase 5 Slice 5A11 adds the complete local voter export to organizer ballot
+> office byte-intake workflow. The explicit shared boundary is
+> `GuiElectionSessionV1::intake_ballot_package_bytes(&[u8])`, which wraps the
+> existing production ingestion pipeline without changing `BallotPackageV1` or
+> verifier policy. The organizer UI now uses a native local ballot-package
+> import picker and displays safe accepted/rejected messages without voter
+> identity, raw nullifier, or intake sequence counts. Tauri proof preparation
+> now releases the organizer session mutex before real proof generation by
+> cloning only public immutable election artifacts and lifecycle state; the
+> voter credential secret remains borrowed Rust-only. No-overwrite export
+> collision messaging is clearer while retaining `create_new(true)`. Targeted
+> gui-core intake tests cover valid import, exact replay, regenerated
+> same-voter duplicate, second voter acceptance, wrong election, trailing bytes,
+> governance-source-revision mutation, non-OPEN lifecycle rejection, and source
+> metadata minimization. See
+> `docs/reviews/PHASE5_SLICE5A11_LOCAL_BALLOT_OFFICE_WORKFLOW_2026-08-08.md`.
+> No canonical format, vendored Triptych code, network, walletd, indexer,
+> Ootle submission, relay, Tor, or OHTTP path was added.
 
 ## Phase 2 assessment
 

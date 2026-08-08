@@ -734,7 +734,7 @@ impl GuiVoterSessionV1 {
                         "GUI_BALLOT_EXPORT_COLLISION",
                         GuiErrorCategory::FileIo,
                         Some("export-ballot"),
-                        "the selected ballot package file already exists",
+                        "For safety, ballot exports never overwrite an existing file. Choose a new filename.",
                     )
                 } else {
                     GuiCoreError::io_failure("export-ballot")

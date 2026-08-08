@@ -7,8 +7,8 @@ use tari_cc_private_ballot_gui_core::{GuiElectionSessionV1, GuiErrorCategory, Gu
 use tari_cc_private_ballot_protocol::PROTOCOL_VERSION_V1;
 
 use common::{
-    candidate_id, candidate_set, manifest, manifest_with, open_session, package_bytes_for,
-    triptych_package_bytes,
+    candidate_id, candidate_set, manifest, manifest_with, manifest_with_revision, open_session,
+    package_bytes_for, triptych_package_bytes,
 };
 
 #[test]
@@ -62,6 +62,28 @@ fn duplicate_nullifier_is_rejected_with_first_valid_reference() {
 }
 
 #[test]
+fn exact_replay_is_rejected_by_nullifier_not_package_digest_only() {
+    let mut session = open_session();
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+
+    let first = match session.intake_ballot_package_bytes(&package) {
+        Ok(result) => result,
+        Err(error) => panic!("first ballot must intake: {error}"),
+    };
+    let replay = match session.intake_ballot_package_bytes(&package) {
+        Ok(result) => result,
+        Err(error) => panic!("replay must return a duplicate decision: {error}"),
+    };
+
+    assert!(first.accepted);
+    assert!(!replay.accepted);
+    assert_eq!(replay.code, "DUPLICATE_NULLIFIER");
+    assert_eq!(replay.category, GuiIntakeCategory::Duplicate);
+    assert_eq!(replay.nullifier_hex, first.nullifier_hex);
+    assert_eq!(session.accepted_count(), 1);
+}
+
+#[test]
 fn wrong_manifest_ballot_is_rejected() {
     let mut session = open_session();
     let other_manifest = manifest_with(
@@ -80,6 +102,30 @@ fn wrong_manifest_ballot_is_rejected() {
     assert_eq!(result.code, "WRONG_MANIFEST_HASH");
     assert_eq!(result.category, GuiIntakeCategory::WrongElection);
     assert!(result.nullifier_hex.is_none());
+    assert_eq!(session.accepted_count(), 0);
+}
+
+#[test]
+fn governance_source_revision_mutation_rejects_preserved_package() {
+    let old_manifest = manifest_with_revision("governance-revision-a");
+    let preserved_package = package_bytes_for(&old_manifest, 1, &[b"candidate-a"]);
+    let new_artifacts = common::artifacts_with_revision("governance-revision-b");
+    let mut session = match GuiElectionSessionV1::new(new_artifacts) {
+        Ok(session) => session,
+        Err(error) => panic!("mutated-revision session must construct: {error}"),
+    };
+    if let Err(error) = session.open() {
+        panic!("mutated-revision session must open: {error}");
+    }
+
+    let result = match session.intake_ballot_package_bytes(&preserved_package) {
+        Ok(result) => result,
+        Err(error) => panic!("revision-mismatched package must return a decision: {error}"),
+    };
+
+    assert!(!result.accepted);
+    assert_eq!(result.code, "WRONG_MANIFEST_HASH");
+    assert_eq!(result.category, GuiIntakeCategory::WrongElection);
     assert_eq!(session.accepted_count(), 0);
 }
 
@@ -146,6 +192,22 @@ fn ballot_referencing_unknown_candidate_is_rejected() {
 }
 
 #[test]
+fn trailing_bytes_are_rejected_by_canonical_byte_boundary() {
+    let mut session = open_session();
+    let mut package = triptych_package_bytes(0, &[b"candidate-a"]);
+    package.push(0x00);
+
+    let result = match session.intake_ballot_package_bytes(&package) {
+        Ok(result) => result,
+        Err(error) => panic!("trailing bytes must return a rejection decision: {error}"),
+    };
+
+    assert!(!result.accepted);
+    assert_eq!(result.category, GuiIntakeCategory::Invalid);
+    assert_eq!(session.accepted_count(), 0);
+}
+
+#[test]
 fn malformed_proof_is_rejected() {
     let mut session = open_session();
     let valid = triptych_package_bytes(1, &[b"candidate-a"]);
@@ -195,6 +257,39 @@ fn malformed_proof_is_rejected() {
     );
     assert!(result.nullifier_hex.is_none());
     assert_eq!(session.accepted_count(), 0);
+}
+
+#[test]
+fn intake_result_does_not_expose_voter_identity_or_source_metadata() {
+    let mut session = open_session();
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+
+    let result = match session.intake_ballot_package_bytes(&package) {
+        Ok(result) => result,
+        Err(error) => panic!("valid ballot intake must succeed: {error}"),
+    };
+    let rendered = match serde_json::to_string(&result) {
+        Ok(rendered) => rendered.to_lowercase(),
+        Err(error) => panic!("intake result must serialize: {error}"),
+    };
+
+    for forbidden in [
+        "path",
+        "filename",
+        "file_name",
+        "import_time",
+        "ip",
+        "username",
+        "machine",
+        "voter_identity",
+        "registry_index",
+        "member_index",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "intake result exposed forbidden marker {forbidden}: {rendered}"
+        );
+    }
 }
 
 #[test]
@@ -284,6 +379,60 @@ fn intake_outside_open_state_is_a_facade_error_without_recording() {
     }
     let error = match session.intake_ballot(&package) {
         Ok(_) => panic!("closed session must refuse intake"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), "ELECTION_NOT_OPEN");
+    assert_eq!(session.transcript().submissions().len(), 0);
+}
+
+#[test]
+fn intake_is_authoritatively_open_only_across_lifecycle() {
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+
+    let mut frozen = match GuiElectionSessionV1::new(common::artifacts()) {
+        Ok(session) => session,
+        Err(error) => panic!("frozen session must construct: {error}"),
+    };
+    assert_not_open(&mut frozen, &package);
+
+    let mut open = open_session();
+    let open_result = match open.intake_ballot_package_bytes(&package) {
+        Ok(result) => result,
+        Err(error) => panic!("open intake must return accepted result: {error}"),
+    };
+    assert!(open_result.accepted);
+
+    let mut closed = open_session();
+    if let Err(error) = closed.close() {
+        panic!("session must close: {error}");
+    }
+    assert_not_open(&mut closed, &package);
+
+    let mut verified = open_session();
+    if let Err(error) = verified.close() {
+        panic!("session must close before verification: {error}");
+    }
+    if let Err(error) = verified.mark_verified() {
+        panic!("session must mark verified: {error}");
+    }
+    assert_not_open(&mut verified, &package);
+
+    let mut finalized = open_session();
+    if let Err(error) = finalized.close() {
+        panic!("session must close before verification: {error}");
+    }
+    if let Err(error) = finalized.mark_verified() {
+        panic!("session must mark verified before finalization: {error}");
+    }
+    if let Err(error) = finalized.finalize() {
+        panic!("session must finalize: {error}");
+    }
+    assert_not_open(&mut finalized, &package);
+}
+
+fn assert_not_open(session: &mut GuiElectionSessionV1, package: &[u8]) {
+    let error = match session.intake_ballot_package_bytes(package) {
+        Ok(_) => panic!("non-open session must refuse intake"),
         Err(error) => error,
     };
     assert_eq!(error.code(), "ELECTION_NOT_OPEN");

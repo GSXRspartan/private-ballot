@@ -143,7 +143,7 @@ impl GuiElectionSessionV1 {
     /// Returns a bounded [`GuiCoreError`] with code `ELECTION_NOT_OPEN` when
     /// the election is not open (nothing is recorded), or if transcript
     /// recording itself fails.
-    pub fn intake_ballot(
+    pub fn intake_ballot_package_bytes(
         &mut self,
         package_bytes: &[u8],
     ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
@@ -188,6 +188,18 @@ impl GuiElectionSessionV1 {
         self.packages.push(package_bytes.to_vec());
 
         Ok(self.intake_result(sequence, digest, package_bytes, outcome))
+    }
+
+    /// Backward-compatible name for the canonical byte-intake boundary.
+    ///
+    /// All transports (local file today, future privacy transport later) must
+    /// hand exact canonical package bytes to `intake_ballot_package_bytes`.
+    /// The carrier path/name/timestamp is deliberately outside this facade.
+    pub fn intake_ballot(
+        &mut self,
+        package_bytes: &[u8],
+    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
+        self.intake_ballot_package_bytes(package_bytes)
     }
 
     /// Builds the structured intake result, resolving public post-verification

@@ -214,7 +214,9 @@ pub fn manifest_with_revision(revision: &str) -> ElectionManifestV1 {
 
 /// Loads the canonical validated artifact triple with a custom governance
 /// source revision (Slice 5A8 voter-confirmation fixtures).
-pub fn artifacts_with_revision(revision: &str) -> tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1 {
+pub fn artifacts_with_revision(
+    revision: &str,
+) -> tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1 {
     let manifest = manifest_with_revision(revision);
     let manifest_bytes = match manifest.to_canonical_cbor() {
         Ok(bytes) => bytes,

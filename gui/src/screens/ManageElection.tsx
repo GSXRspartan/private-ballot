@@ -1,13 +1,14 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickElectionArtifact, pickGovernanceDocument } from "../api/dialog";
+import { pickBallotPackageFile, pickElectionArtifact, pickGovernanceDocument } from "../api/dialog";
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
   GuiTallySummaryV1,
 } from "../api/types";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
+import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
 import {
   canShowTally,
   coarseBucketLabel,
@@ -76,7 +77,7 @@ export function ManageElection() {
   const [packagePath, setPackagePath] = useState("");
   const [archiveDir, setArchiveDir] = useState("");
   const [archiveGovernanceDocPath, setArchiveGovernanceDocPath] = useState<string | null>(null);
-  const [intakeNote, setIntakeNote] = useState<string | null>(null);
+  const [lastIntake, setLastIntake] = useState<Awaited<ReturnType<typeof api.intakeBallotPackage>> | null>(null);
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
@@ -84,6 +85,7 @@ export function ManageElection() {
   const presentation = presentationFor(election);
   const lifecycle = election?.lifecycle_state ?? null;
   const canAct = shellAvailable && election !== null;
+  const canImportBallot = canAct && intakeCanImport(shellAvailable, lifecycle);
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
   const tallyAvailable = canShowTally(lifecycle);
   const participationSealed =
@@ -127,6 +129,7 @@ export function ManageElection() {
       await loadElection(manifestPath, registryPath, optionSetPath);
       setTally(null);
       setArchiveResult(null);
+      setLastIntake(null);
     } catch (error) {
       showError(error);
     }
@@ -134,19 +137,13 @@ export function ManageElection() {
 
   const onIntake = async () => {
     clearLocalError();
-    setIntakeNote(null);
     try {
-      const result = await api.intakeBallotPackage(packagePath);
-      setIntakeNote(
-        result.accepted
-          ? `Accepted as submission #${result.sequence}.`
-          : `Rejected (${result.code}) as submission #${result.sequence}.`,
-      );
-      recordAction(
-        result.accepted
-          ? `Accepted ballot #${result.sequence}`
-          : `Rejected ballot #${result.sequence} (${result.code})`,
-      );
+      const picked = await pickBallotPackageFile();
+      if (picked === null) return;
+      setPackagePath(picked);
+      const result = await api.intakeBallotPackage(picked);
+      setLastIntake(result);
+      recordAction(result.accepted ? "Ballot accepted" : `Ballot rejected (${result.code})`);
       // Refresh participation so the dashboard reflects the new acceptance
       // state. While OPEN the backend still returns sealed numerics, so no
       // sealed value is disclosed by this refresh.
@@ -420,30 +417,37 @@ export function ManageElection() {
           </button>
         </Card>
 
-        <Card title="Ballot intake">
+        <Card title="Ballot office">
           <p className="card-body">
-            Ingest one canonical ballot package file. The first valid ballot for a nullifier
-            counts; duplicates and invalid packages are rejected deterministically.
+            Import one local canonical ballot package. The file is only a carrier for exact
+            package bytes; validation, proof verification, lifecycle checks, and duplicate
+            detection happen in Rust.
           </p>
           <div className="form-row">
-            <label htmlFor="package-path">Ballot package path</label>
+            <label htmlFor="package-path">Last selected package</label>
             <input
               id="package-path"
               type="text"
+              readOnly
               value={packagePath}
-              onChange={(e) => setPackagePath(e.target.value)}
-              placeholder="ballot-package.cbor"
+              placeholder="no ballot package selected"
             />
           </div>
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!canAct || lifecycle !== "OPEN" || !packagePath}
+            disabled={!canImportBallot}
             onClick={() => void onIntake()}
           >
-            Ingest ballot
+            Import ballot package
           </button>
-          {intakeNote && <p className="card-body">{intakeNote}</p>}
+          <div className="field-list">
+            <Field label="Last intake">{intakeResultTitle(lastIntake)}</Field>
+            {lastIntake && <Field label="Result">{intakeResultMessage(lastIntake)}</Field>}
+          </div>
+          {lifecycle !== "OPEN" && lifecycle !== null && (
+            <p className="card-body">Ballot intake is available only while voting is open.</p>
+          )}
         </Card>
 
         <Card title="Close Voting">

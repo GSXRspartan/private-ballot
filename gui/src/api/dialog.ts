@@ -60,6 +60,26 @@ export async function pickBallotPackagePath(): Promise<string | null> {
 }
 
 /**
+ * Opens a native single-file picker for a canonical ballot package import.
+ * The selected path is transient operator UX only; Rust reads the bytes and
+ * gui-core validates them without persisting the filename or path.
+ */
+export async function pickBallotPackageFile(title = "Import ballot package"): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const selected = await open({
+    title,
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Canonical ballot package", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return selected ?? null;
+}
+
+/**
  * Opens a native single-file picker for a canonical registry CBOR file (the
  * canonical organizer import format). Reading and validation happen in Rust;
  * this only returns a path. Distinct from `pickTextFile`, which is the

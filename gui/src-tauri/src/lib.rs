@@ -26,9 +26,9 @@ use tari_cc_private_ballot_gui_core::{
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1,
     GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiTallySummaryV1,
     GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
-    GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
-    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    verify_archive_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
+    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, inspect_anchor_config_v1,
+    inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, verify_archive_directory_v1,
+    write_archive_directory_v1, write_election_artifacts_v1,
 };
 
 /// Serializable command error: a bounded copy of the gui-core error model.
@@ -315,7 +315,7 @@ fn intake_ballot_package(
 ) -> Result<GuiBallotIntakeResultV1, CommandError> {
     let package_bytes =
         std::fs::read(Path::new(&package_path)).map_err(|_| CommandError::package_read_failed())?;
-    state.with_session_mut(|session| Ok(session.intake_ballot(&package_bytes)?))
+    state.with_session_mut(|session| Ok(session.intake_ballot_package_bytes(&package_bytes)?))
 }
 
 /// Computes the deterministic tally over the currently accepted ballots.
@@ -810,12 +810,15 @@ fn clear_voter_ballot_selection(
 fn prepare_voter_ballot(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
-    let session_guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
-        return Err(CommandError::no_session());
+    let (artifacts, lifecycle_state) = {
+        let session_guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = session_guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        (session.artifacts().clone(), session.lifecycle_state_v1())
     };
     let mut voter_guard = state
         .voter
@@ -824,7 +827,7 @@ fn prepare_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    Ok(voter.prepare_ballot(session.artifacts(), session.lifecycle_state_v1())?)
+    Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
 }
 
 /// Writes a prepared canonical ballot package to the user-selected new path.

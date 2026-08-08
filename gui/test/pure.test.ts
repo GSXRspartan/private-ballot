@@ -368,6 +368,11 @@ import {
   parseVoterHexList,
   presentationLabel,
 } from "../src/creation.ts";
+import {
+  intakeCanImport,
+  intakeResultMessage,
+  intakeResultTitle,
+} from "../src/intake.ts";
 
 const KEY64 = "6a493210f7499cd17fecb510ae0a23fda0d4b58a1b48d4ecc0f4cbc9423e86f2";
 
@@ -462,6 +467,40 @@ describe("creation: approval rule preview", () => {
 
   it("handles unset limits", () => {
     assert.match(approvalRulePreview(null, null, false), /not set/);
+  });
+});
+
+describe("ballot office intake helpers", () => {
+  it("uses safe accepted and duplicate messages without sequence or nullifier display", () => {
+    const accepted = {
+      accepted: true,
+      code: "ACCEPTED",
+      category: "Accepted",
+      package_digest_hex: "a".repeat(64),
+      sequence: 12,
+      nullifier_hex: "b".repeat(64),
+      duplicate_of_sequence: null,
+    } as const;
+    const duplicate = {
+      ...accepted,
+      accepted: false,
+      code: "DUPLICATE_NULLIFIER",
+      category: "Duplicate",
+      sequence: 13,
+      duplicate_of_sequence: 12,
+    } as const;
+
+    assert.equal(intakeResultTitle(accepted), "Ballot accepted");
+    assert.equal(intakeResultMessage(accepted), "Ballot accepted.");
+    assert.equal(intakeResultMessage(duplicate), "Duplicate ballot for this election.");
+    assert.doesNotMatch(intakeResultMessage(duplicate), /12|13|bbbb|nullifier/i);
+  });
+
+  it("gates import to the open lifecycle", () => {
+    assert.equal(intakeCanImport(true, "OPEN"), true);
+    assert.equal(intakeCanImport(true, "FROZEN"), false);
+    assert.equal(intakeCanImport(true, "CLOSED"), false);
+    assert.equal(intakeCanImport(false, "OPEN"), false);
   });
 });
 
