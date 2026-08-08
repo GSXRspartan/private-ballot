@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "election-loader",
+  "description": "Narrow capability for the Load Election workflow: permits only the native file-open dialog so the organizer can select the three canonical election artifacts. Grants no filesystem write, no recursive directory scan, no shell execution, and no remote access. CSP remains strict (default-src 'self', no remote origins).",
+  "windows": ["main"],
+  "permissions": ["dialog:allow-open"]
+}

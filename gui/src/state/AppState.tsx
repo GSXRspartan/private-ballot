@@ -1,7 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import { api, BackendError, isDesktopShell } from "../api/client";
-import type { GuiElectionSummaryV1, GuiTallySummaryV1 } from "../api/types";
+import type { GuiCommandError, GuiElectionSummaryV1, GuiTallySummaryV1 } from "../api/types";
 
 export interface RecentAction {
   at: string;
@@ -14,18 +14,34 @@ export interface AppSettings {
   devDiagnostics: boolean;
 }
 
+/** Session-only record of the artifact paths selected for the loaded election.
+ *  Not persisted; cleared on unload. */
+export interface SelectedArtifactPaths {
+  manifest: string;
+  registry: string;
+  optionSet: string;
+}
+
 interface AppStateValue {
   shellAvailable: boolean;
   election: GuiElectionSummaryV1 | null;
   tally: GuiTallySummaryV1 | null;
   recentActions: RecentAction[];
   settings: AppSettings;
-  backendError: string | null;
+  /** Last structured backend error, or null when none is active. */
+  backendError: GuiCommandError | null;
+  /** Paths chosen for the loaded election (session-only, not persisted). */
+  selectedArtifactPaths: SelectedArtifactPaths | null;
   setSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
   refreshElection: () => Promise<void>;
   runLifecycle: (action: "open" | "close" | "verify" | "finalize") => Promise<void>;
-  loadElection: (manifestPath: string, registryPath: string, optionSetPath: string) => Promise<void>;
+  loadElection: (
+    manifestPath: string,
+    registryPath: string,
+    optionSetPath: string,
+  ) => Promise<void>;
   unloadElection: () => Promise<void>;
+  dismissError: () => void;
   recordAction: (label: string) => void;
 }
 
@@ -63,7 +79,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
   const [settings, setSettings] = useState<AppSettings>(readSettings);
-  const [backendError, setBackendError] = useState<string | null>(null);
+  const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
+  const [selectedArtifactPaths, setSelectedArtifactPaths] =
+    useState<SelectedArtifactPaths | null>(null);
 
   const recordAction = useCallback((label: string) => {
     setRecentActions((prev) =>
@@ -73,11 +91,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   const captureError = useCallback((error: unknown) => {
     if (error instanceof BackendError) {
-      setBackendError(`${error.payload.code}: ${error.payload.message}`);
+      setBackendError(error.payload);
     } else {
-      setBackendError("unexpected boundary error");
+      setBackendError({
+        code: "GUI_UNEXPECTED_ERROR",
+        category: "INVALID_INPUT",
+        context: null,
+        message: "an unexpected frontend/backend boundary error occurred",
+      });
     }
   }, []);
+
+  const dismissError = useCallback(() => setBackendError(null), []);
 
   const refreshElection = useCallback(async () => {
     try {
@@ -102,6 +127,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         setElection(summary);
         setTally(null);
         setBackendError(null);
+        setSelectedArtifactPaths({
+          manifest: manifestPath,
+          registry: registryPath,
+          optionSet: optionSetPath,
+        });
         recordAction(`Loaded election ${summary.election_id_text ?? summary.election_id_hex}`);
       } catch (error) {
         captureError(error);
@@ -117,6 +147,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setElection(null);
       setTally(null);
       setBackendError(null);
+      setSelectedArtifactPaths(null);
       recordAction("Unloaded election session");
     } catch (error) {
       captureError(error);
@@ -173,11 +204,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       recentActions,
       settings,
       backendError,
+      selectedArtifactPaths,
       setSetting,
       refreshElection,
       runLifecycle,
       loadElection,
       unloadElection,
+      dismissError,
       recordAction,
     }),
     [
@@ -187,11 +220,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       recentActions,
       settings,
       backendError,
+      selectedArtifactPaths,
       setSetting,
       refreshElection,
       runLifecycle,
       loadElection,
       unloadElection,
+      dismissError,
       recordAction,
     ],
   );

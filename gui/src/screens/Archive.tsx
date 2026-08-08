@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import type { GuiArchiveVerificationV1 } from "../api/types";
+import type { GuiArchiveVerificationV1, GuiCommandError } from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -22,8 +22,20 @@ export function Archive() {
   const { shellAvailable, settings, recordAction } = useAppState();
   const [directory, setDirectory] = useState(settings.exportDirectory);
   const [result, setResult] = useState<GuiArchiveVerificationV1 | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<GuiCommandError | null>(null);
   const [running, setRunning] = useState(false);
+
+  const showError = (err: unknown) =>
+    setError(
+      err instanceof BackendError
+        ? err.payload
+        : {
+            code: "GUI_UNEXPECTED_ERROR",
+            category: "INVALID_INPUT",
+            context: null,
+            message: "an unexpected frontend/backend boundary error occurred",
+          },
+    );
 
   const onVerify = async () => {
     setError(null);
@@ -36,11 +48,7 @@ export function Archive() {
       );
     } catch (err) {
       setResult(null);
-      setError(
-        err instanceof BackendError
-          ? `${err.payload.code}: ${err.payload.message}`
-          : "unexpected boundary error",
-      );
+      showError(err);
     } finally {
       setRunning(false);
     }
@@ -60,7 +68,7 @@ export function Archive() {
           Browser preview: verification requires the desktop shell.
         </Notice>
       )}
-      <BackendErrorNotice message={error} />
+      <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
 
       <Card title="Verify archive directory">
         <div className="form-row">

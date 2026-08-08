@@ -3,11 +3,13 @@ import { useEffect, useState } from "react";
 import { api, isDesktopShell } from "../api/client";
 import type { ShellInfoV1 } from "../api/types";
 import TariLogo from "../branding/TariLogo";
-import { Card, Field, Notice } from "../components/ui";
+import { Card, Field, Notice, Pill } from "../components/ui";
 
 /**
- * About: application identity, branding attribution, and the non-production
- * statement.
+ * About: application identity, branding attribution, and the single fuller scope
+ * notice. The compact product-status label "Governance Pilot" lives here as a
+ * field and in the toolbar; this screen is the only place the longer scope
+ * statement appears.
  */
 export function About() {
   const [info, setInfo] = useState<ShellInfoV1 | null>(null);
@@ -33,6 +35,9 @@ export function About() {
           </span>
         </div>
         <div className="field-list">
+          <Field label="Status">
+            <Pill tone="brand">Governance Pilot</Pill>
+          </Field>
           <Field label="Version">{info?.shell_version ?? "0.1.0 (browser preview)"}</Field>
           <Field label="Backend boundary">
             {info?.gui_core_boundary ?? "gui-core typed commands (in process, no server)"}
@@ -59,9 +64,10 @@ export function About() {
         </p>
       </Card>
 
-      <Notice tone="warn">
+      <Notice tone="info">
+        <strong>Scope.</strong>{" "}
         {info?.binding_notice ??
-          "Non-production prototype. No binding election is conducted with this software."}
+          "This release is intended for governance pilots. Binding governance use requires the applicable review and authorization process."}
       </Notice>
     </>
   );

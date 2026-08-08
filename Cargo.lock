@@ -3071,6 +3071,7 @@ version = "0.1.0"
 dependencies = [
  "curve25519-dalek 4.1.3",
  "serde",
+ "serde_json",
  "tari-cc-private-ballot-anchor",
  "tari-cc-private-ballot-anchor-transport",
  "tari-cc-private-ballot-archive",

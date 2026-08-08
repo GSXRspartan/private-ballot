@@ -31,7 +31,7 @@ export default function App() {
       <div aria-live="polite" className="sr-only">
         {SCREEN_TITLES[section]}
       </div>
-      {section === "home" && <Home />}
+      {section === "home" && <Home onNavigate={setSection} />}
       {section === "create" && <CreateElection />}
       {section === "manage" && <ManageElection />}
       {section === "vote" && <Vote />}

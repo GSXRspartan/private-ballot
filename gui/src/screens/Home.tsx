@@ -1,21 +1,24 @@
+import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  CopyButton,
   Field,
   HashValue,
   LifecyclePill,
   Notice,
-  Pill,
 } from "../components/ui";
 
 /**
- * Home dashboard: status cards only. Complete workflows live on their own
- * screens; this dashboard summarizes the current election, hashes, anchor
- * and verification status, and recent actions.
+ * Home dashboard. When no election is loaded it shows a calm empty state with a
+ * Load Election primary action. When an election is loaded it displays real
+ * backend-derived values only — no fabricated participation counts, ballot
+ * counts, or dates.
  */
-export function Home() {
-  const { election, recentActions, backendError, shellAvailable } = useAppState();
+export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void }) {
+  const { election, recentActions, backendError, shellAvailable, dismissError } = useAppState();
+  const presentation = presentationFor(election);
 
   return (
     <>
@@ -31,68 +34,100 @@ export function Home() {
           cards stay empty; no sample data is shown.
         </Notice>
       )}
-      <BackendErrorNotice message={backendError} />
+      <BackendErrorNotice error={backendError} onDismiss={dismissError} />
 
-      <div className="card-grid">
-        <Card title="Current election">
-          {election ? (
-            <>
-              <div className="card-value">
-                {election.election_id_text ?? "Untitled election"}
-              </div>
-              <div className="field-list">
-                <Field label="Election ID">
-                  <HashValue value={election.election_id_hex} />
-                </Field>
-                <Field label="Registered voters">{election.voter_count}</Field>
-                <Field label="Ballot options">{election.candidates.length}</Field>
-              </div>
-            </>
-          ) : (
-            <div className="card-body">No election loaded in this session.</div>
-          )}
-        </Card>
+      {election ? (
+        <div className="card-grid">
+          <Card title="Current election">
+            <div className="card-value">
+              {election.election_id_text ?? "Untitled election"}
+            </div>
+            <div className="field-list">
+              <Field label="Election ID">
+                <HashValue value={election.election_id_hex} />
+                <CopyButton value={election.election_id_hex} label="Copy ID" />
+              </Field>
+              <Field label="Lifecycle">
+                <LifecyclePill state={election.lifecycle_state} />
+              </Field>
+              <Field label="Ballot kind">{election.ballot_kind}</Field>
+              <Field label="Eligible voters">{election.voter_count}</Field>
+              <Field label={presentation.optionSetNoun}>
+                {election.candidates.length}
+              </Field>
+            </div>
+          </Card>
 
-        <Card title="Election lifecycle">
-          <div className="card-value">
-            <LifecyclePill state={election?.lifecycle_state ?? null} />
-          </div>
+          <Card title="Election bindings">
+            <div className="field-list">
+              <Field label="Manifest hash">
+                <HashValue value={election.manifest_hash_hex} />
+                <CopyButton value={election.manifest_hash_hex} label="Copy" />
+              </Field>
+              <Field label="Registry commitment">
+                <HashValue value={election.registry_commitment_hex} />
+                <CopyButton value={election.registry_commitment_hex} label="Copy" />
+              </Field>
+              <Field label="Option-set commitment">
+                <HashValue value={election.candidate_set_commitment_hex} />
+                <CopyButton value={election.candidate_set_commitment_hex} label="Copy" />
+              </Field>
+            </div>
+          </Card>
+
+          <Card title="Voting rules">
+            <div className="field-list">
+              <Field label="Proof suite">{election.proof_suite_id}</Field>
+              <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
+              <Field label="Approval rule">{approvalRuleText(election)}</Field>
+              <Field label="Abstention">
+                {election.abstention_allowed ? "permitted" : "not permitted"}
+              </Field>
+              <Field label="Governance source">
+                {election.governance_source_revision}
+              </Field>
+            </div>
+          </Card>
+
+          <Card title="Archive status">
+            <div className="card-body">No archive loaded in this session</div>
+            <p className="card-body">
+              Write an offline archive from Manage Election after the election is verified.
+            </p>
+          </Card>
+
+          <Card title="Anchor status">
+            <div className="card-body">No anchor state loaded in this session</div>
+            <p className="card-body">
+              Anchoring is optional and non-binding. Inspect a snapshot on the Anchor screen.
+            </p>
+          </Card>
+
+          <Card title="Participation">
+            <div className="card-body">Not available</div>
+            <p className="card-body">
+              Participation and ballot counts are shown only after ballots are ingested and a tally
+              is computed on the Manage Election screen.
+            </p>
+          </Card>
+        </div>
+      ) : (
+        <Card title="No election loaded">
           <div className="card-body">
-            DRAFT → FROZEN → OPEN → CLOSED → VERIFIED → FINALIZED. Transitions are
-            append-only and enforced by the backend.
+            Load the three canonical election artifacts (manifest, voter registry, and
+            candidate/option set) to inspect a real election.
+          </div>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => onNavigate?.("manage")}
+            >
+              Load Election
+            </button>
           </div>
         </Card>
-
-        <Card title="Manifest hash">
-          {election ? (
-            <HashValue value={election.manifest_hash_hex} />
-          ) : (
-            <div className="card-body">Recomputed when an election is loaded.</div>
-          )}
-        </Card>
-
-        <Card title="Archive hash">
-          <div className="card-body">
-            Shown after the organizer writes an archive (Manage Election → Archive) or after
-            verifying an existing archive on the Archive screen.
-          </div>
-        </Card>
-
-        <Card title="Anchor status">
-          <div className="card-body">
-            Inspect a durable anchor snapshot on the Anchor screen to see the lifecycle phase,
-            submission state, and receipt verification. Anchoring never affects the offline
-            result.
-          </div>
-        </Card>
-
-        <Card title="Verification status">
-          <div className="card-body">
-            Verify an archive directory on the Archive screen. Every ballot proof is replayed
-            and the tally and archive hash are recomputed offline.
-          </div>
-        </Card>
-      </div>
+      )}
 
       <Card title="Recent actions">
         {recentActions.length === 0 ? (
@@ -116,11 +151,6 @@ export function Home() {
           </table>
         )}
       </Card>
-
-      <p className="form-hint">
-        <Pill tone="warn">Non-production prototype</Pill> No binding election is conducted with
-        this software.
-      </p>
     </>
   );
 }

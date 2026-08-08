@@ -41,18 +41,30 @@ export const BALLOT_PRESENTATIONS: Record<BallotType, BallotPresentation> = {
   },
   "governance-proposal": {
     type: "governance-proposal",
-    optionSetNoun: "Proposal choices",
+    optionSetNoun: "Choices",
     optionNoun: "choice",
-    selectionHeading: "Approve one or more proposal choices",
+    selectionHeading: "Approve one or more choices",
     approvalMeaning: "Each approved choice receives one approval from this ballot.",
   },
   "ballot-measure": {
     type: "ballot-measure",
-    optionSetNoun: "Measure options",
-    optionNoun: "option",
-    selectionHeading: "Approve one or more measure options",
-    approvalMeaning: "Each approved option receives one approval from this ballot.",
+    optionSetNoun: "Responses",
+    optionNoun: "response",
+    selectionHeading: "Approve one or more responses",
+    approvalMeaning: "Each approved response receives one approval from this ballot.",
   },
+};
+
+/** Neutral presentation used for a loaded election with no explicit
+ *  ballot-type discriminator. The current manifest format carries only
+ *  `NON_BINDING_APPROVAL_PILOT`, so the UI must not infer candidacy or
+ *  governance-ness from the manifest; "Ballot options" is always safe. */
+const NEUTRAL_PRESENTATION: BallotPresentation = {
+  type: "ballot-measure",
+  optionSetNoun: "Ballot options",
+  optionNoun: "option",
+  selectionHeading: "Approve one or more ballot options",
+  approvalMeaning: "Each approved option receives one approval from this ballot.",
 };
 
 export const BALLOT_TYPE_LABELS: Record<BallotType, string> = {
@@ -63,16 +75,18 @@ export const BALLOT_TYPE_LABELS: Record<BallotType, string> = {
 
 /**
  * Resolves the presentation for a screen. `requested` wins; otherwise the
- * presentation stays neutral (ballot-measure vocabulary is the most
- * type-neutral) because the current manifest format does not distinguish
- * candidate elections from governance ballots.
+ * presentation stays neutral ("Ballot options") because the current manifest
+ * format does not distinguish candidate elections from governance ballots or
+ * ballot measures. The loaded option set renders identically under each type,
+ * with vocabulary adjusted only when an explicit type is chosen (Create
+ * Election).
  */
 export function presentationFor(
   _summary: GuiElectionSummaryV1 | null,
   requested?: BallotType,
 ): BallotPresentation {
   if (requested) return BALLOT_PRESENTATIONS[requested];
-  return BALLOT_PRESENTATIONS["ballot-measure"];
+  return NEUTRAL_PRESENTATION;
 }
 
 /**

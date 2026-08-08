@@ -4,12 +4,13 @@ import { BALLOT_PRESENTATIONS, BALLOT_TYPE_LABELS, BallotType } from "../ballot/
 import { Card, Notice, Placeholder } from "../components/ui";
 
 /**
- * Create Election (organizer) — placeholder.
+ * Create Election (organizer) — staged-state screen.
  *
- * Election creation (manifest, registry, option-set construction) is not
- * wired in this slice. The screen demonstrates that the ballot type drives
- * the layout and vocabulary: candidate elections, governance proposals, and
- * ballot measures are all first-class. Nothing here assumes candidacy.
+ * Election creation (manifest, registry, option-set construction) is not wired
+ * in this slice. This screen shows the intended structure and the
+ * ballot-type-driven layout only; nothing is written to disk here and there
+ * are no Save/Create actions. The creation workflow is being added in the next
+ * organizer slice.
  */
 export function CreateElection() {
   const [ballotType, setBallotType] = useState<BallotType>("ballot-measure");
@@ -25,8 +26,9 @@ export function CreateElection() {
       </p>
 
       <Placeholder>
-        Artifact construction is implemented in a later slice. This screen shows the intended
-        structure and the ballot-type-driven layout only; nothing is written to disk here.
+        Election creation workflow is being added in the next organizer slice. This screen shows
+        the planned structure and ballot-type-driven vocabulary only; nothing is written to disk
+        here and there are no Save or Create actions.
       </Placeholder>
 
       <Card title="Ballot type">

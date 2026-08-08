@@ -3,7 +3,7 @@ import React from "react";
 import TariLogo from "../branding/TariLogo";
 import { useAppState } from "../state/AppState";
 import { useTheme } from "../theme/ThemeProvider";
-import { LifecyclePill } from "./ui";
+import { LifecyclePill, Pill } from "./ui";
 
 export type NavSection =
   | "home"
@@ -73,6 +73,12 @@ export function AppFrame({
         </div>
         <div className="toolbar-spacer" />
         <div className="toolbar-state">
+          <Pill tone="brand">Governance Pilot</Pill>
+          <span className="toolbar-election" title={election?.election_id_hex ?? undefined}>
+            {election
+              ? election.election_id_text ?? `${election.election_id_hex.slice(0, 10)}…`
+              : "No election loaded"}
+          </span>
           <LifecyclePill state={election?.lifecycle_state ?? null} />
           <button
             type="button"
@@ -124,6 +130,9 @@ export function AppFrame({
         <span>
           <span className="status-label">Backend:</span>{" "}
           {shellAvailable ? "gui-core (in process)" : "not connected (browser preview)"}
+        </span>
+        <span>
+          <span className="status-label">Network:</span> Esmeralda Testnet
         </span>
         <span>
           <span className="status-label">Lifecycle:</span>{" "}

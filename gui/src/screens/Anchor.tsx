@@ -4,6 +4,7 @@ import { api, BackendError } from "../api/client";
 import type {
   GuiAnchorConfigInspectionV1,
   GuiAnchorSnapshotInspectionV1,
+  GuiCommandError,
 } from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
@@ -33,13 +34,18 @@ export function Anchor() {
   const [snapshotPath, setSnapshotPath] = useState("");
   const [config, setConfig] = useState<GuiAnchorConfigInspectionV1 | null>(null);
   const [snapshot, setSnapshot] = useState<GuiAnchorSnapshotInspectionV1 | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<GuiCommandError | null>(null);
 
   const showError = (err: unknown) =>
     setError(
       err instanceof BackendError
-        ? `${err.payload.code}: ${err.payload.message}`
-        : "unexpected boundary error",
+        ? err.payload
+        : {
+            code: "GUI_UNEXPECTED_ERROR",
+            category: "INVALID_INPUT",
+            context: null,
+            message: "an unexpected frontend/backend boundary error occurred",
+          },
     );
 
   const onInspectConfig = async () => {
@@ -76,7 +82,7 @@ export function Anchor() {
       {!shellAvailable && (
         <Notice tone="info">Browser preview: inspection requires the desktop shell.</Notice>
       )}
-      <BackendErrorNotice message={error} />
+      <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
 
       <Card title="Anchor configuration">
         <div className="form-row">

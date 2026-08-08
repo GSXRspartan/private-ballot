@@ -14,7 +14,9 @@
 use tari_cc_private_ballot_archive::{
     BallotDecisionOutcomeV1, BallotPackageDigestV1, VerificationTranscriptV1,
 };
-use tari_cc_private_ballot_ballot::{BallotPackageEnvelopeV1, ElectionLifecycleV1};
+use tari_cc_private_ballot_ballot::{
+    BallotPackageEnvelopeV1, ElectionLifecycleStateV1, ElectionLifecycleV1,
+};
 use tari_cc_private_ballot_crypto::TariTriptychPrototypeVerifierV1;
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, ValidationCode, hash_domain_separated,
@@ -277,11 +279,30 @@ impl GuiElectionSessionV1 {
 
     /// Computes the deterministic tally over the currently accepted ballots.
     ///
+    /// Results are sealed until voting has closed. This method refuses to
+    /// disclose any tally data while the lifecycle is `DRAFT`, `FROZEN`, or
+    /// `OPEN`, returning a bounded [`GuiCoreError`] and computing nothing.
+    /// After close (`CLOSED`, `VERIFIED`, `FINALIZED`) the deterministic tally
+    /// is returned. This gate is authoritative: every caller that goes
+    /// through this facade receives the same protection, independent of the
+    /// frontend button state.
+    ///
     /// # Errors
     ///
-    /// Returns the existing tally error if the accepted set is inconsistent
-    /// with the frozen candidate set (not possible through this facade).
+    /// Returns [`GuiCoreError::tally_not_available_before_close`] when the
+    /// election has not yet closed, or the existing tally error if the
+    /// accepted set is inconsistent with the frozen candidate set (not
+    /// possible through this facade).
     pub fn tally(&self) -> Result<GuiTallySummaryV1, GuiCoreError> {
+        if !matches!(
+            self.lifecycle.state(),
+            ElectionLifecycleStateV1::Closed
+                | ElectionLifecycleStateV1::Verified
+                | ElectionLifecycleStateV1::Finalized
+        ) {
+            return Err(GuiCoreError::tally_not_available_before_close());
+        }
+
         let tally = self.direct_tally()?;
         Ok(summarize_tally(&tally, self.artifacts.candidates()))
     }

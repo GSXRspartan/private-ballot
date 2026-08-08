@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import type { GuiAnchorEvidenceInspectionV1 } from "../api/types";
+import type { GuiAnchorEvidenceInspectionV1, GuiCommandError } from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -21,7 +21,7 @@ export function Evidence() {
   const { shellAvailable, recordAction } = useAppState();
   const [path, setPath] = useState("");
   const [evidence, setEvidence] = useState<GuiAnchorEvidenceInspectionV1 | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<GuiCommandError | null>(null);
 
   const onInspect = async () => {
     setError(null);
@@ -33,8 +33,13 @@ export function Evidence() {
       setEvidence(null);
       setError(
         err instanceof BackendError
-          ? `${err.payload.code}: ${err.payload.message}`
-          : "unexpected boundary error",
+          ? err.payload
+          : {
+              code: "GUI_UNEXPECTED_ERROR",
+              category: "INVALID_INPUT",
+              context: null,
+              message: "an unexpected frontend/backend boundary error occurred",
+            },
       );
     }
   };
@@ -51,7 +56,7 @@ export function Evidence() {
       {!shellAvailable && (
         <Notice tone="info">Browser preview: inspection requires the desktop shell.</Notice>
       )}
-      <BackendErrorNotice message={error} />
+      <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
 
       <Card title="Anchor evidence record">
         <div className="form-row">

@@ -131,7 +131,7 @@ fn shell_info() -> ShellInfoV1 {
         application: "Tari Private Ballot",
         shell_version: env!("CARGO_PKG_VERSION"),
         gui_core_boundary: "gui-core typed commands (in process, no server)",
-        binding_notice: "Non-production prototype. No binding election is conducted.",
+        binding_notice: "This release is intended for governance pilots. Binding governance use requires the applicable review and authorization process.",
     }
 }
 

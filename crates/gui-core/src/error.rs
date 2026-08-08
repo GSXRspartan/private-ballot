@@ -201,6 +201,21 @@ impl GuiCoreError {
             "a required election artifact is absent from the archive catalog",
         )
     }
+
+    /// Tally results are sealed until voting has closed.
+    ///
+    /// Returned by [`crate::session::GuiElectionSessionV1::tally`] when the
+    /// election lifecycle is `DRAFT`, `FROZEN`, or `OPEN`. Carries no tally
+    /// data and no accepted-option counts.
+    #[must_use]
+    pub const fn tally_not_available_before_close() -> Self {
+        Self::new(
+            "GUI_TALLY_NOT_AVAILABLE_BEFORE_CLOSE",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("tally"),
+            "Tally results are not available until voting is closed.",
+        )
+    }
 }
 
 /// Maps an existing protocol validation code onto a coarse GUI category.

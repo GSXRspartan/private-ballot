@@ -286,6 +286,14 @@ a {
   align-items: center;
   gap: 0.5rem;
 }
+.toolbar-election {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .nav {
   grid-area: nav;
@@ -634,4 +642,74 @@ table.data th {
 .screen-lede {
   color: var(--text-secondary);
   max-width: 46rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Error card, details, copy, file selection                           */
+/* ------------------------------------------------------------------ */
+.error-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--error);
+  background: var(--error-bg);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+.error-card-main {
+  flex: 1;
+  min-width: 0;
+}
+.error-card-title {
+  font-weight: 600;
+  color: var(--error);
+  margin-bottom: 0.25rem;
+}
+.error-card-message {
+  color: var(--text);
+  font-size: 0.9375rem;
+  overflow-wrap: anywhere;
+}
+.error-card-dismiss {
+  flex: none;
+}
+
+.details-section {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.details-summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  list-style: revert;
+}
+.details-summary::-webkit-details-marker {
+  display: revert;
+}
+.details-body {
+  margin-top: 0.5rem;
+}
+
+.btn-copy {
+  margin-left: 0.5rem;
+  padding: 0.125rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  flex-wrap: wrap;
+}
+.file-name {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }

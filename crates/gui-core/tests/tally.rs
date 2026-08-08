@@ -64,6 +64,9 @@ fn no_approvals_is_reported_without_inventing_a_winner() {
         Err(error) => panic!("abstention ballot must intake: {error}"),
     };
     assert!(result.accepted);
+    if let Err(error) = session.close() {
+        panic!("session must close: {error}");
+    }
 
     let tally = match session.tally() {
         Ok(tally) => tally,
@@ -87,6 +90,9 @@ fn single_leader_is_reported() {
         if let Err(error) = session.intake_ballot(&package) {
             panic!("ballot must intake: {error}");
         }
+    }
+    if let Err(error) = session.close() {
+        panic!("session must close: {error}");
     }
 
     let tally = match session.tally() {
@@ -115,6 +121,9 @@ fn unresolved_top_count_is_reported_as_a_tie() {
         if let Err(error) = session.intake_ballot(&package) {
             panic!("ballot must intake: {error}");
         }
+    }
+    if let Err(error) = session.close() {
+        panic!("session must close: {error}");
     }
 
     let tally = match session.tally() {
@@ -145,6 +154,12 @@ fn facade_tally_equals_direct_backend_tally() {
         if let Err(error) = session.intake_ballot(package) {
             panic!("ballot must intake: {error}");
         }
+    }
+    // The facade tally is sealed until close; close first, then compare
+    // against the raw backend tally (which remains available for replay
+    // equality checks regardless of lifecycle).
+    if let Err(error) = session.close() {
+        panic!("session must close: {error}");
     }
 
     let facade = match session.tally() {
@@ -205,4 +220,162 @@ fn facade_tally_equals_direct_backend_tally() {
         LeadingResult::SingleLeader { approvals, .. } => assert_eq!(approvals, 2),
         other => panic!("expected single leader, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Sealed-results lifecycle gate (Slice 5A4 repair F1).
+//
+// Tally/results must NOT be available while the lifecycle is DRAFT, FROZEN, or
+// OPEN. They become available only after voting has closed (CLOSED, VERIFIED,
+// FINALIZED). The gate lives on `GuiElectionSessionV1::tally` so every caller
+// receives the same protection regardless of frontend button state. The raw
+// `direct_tally` remains available for archive-replay equality checks.
+// ---------------------------------------------------------------------------
+
+use tari_cc_private_ballot_gui_core::GuiCoreError;
+
+/// One accepted ballot so the closed-state tally has nonzero content and a
+/// real single leader, proving the gate does not silently mask success.
+fn closed_session_with_one_accepted_ballot() -> GuiElectionSessionV1 {
+    let mut session = open_session();
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    if let Err(error) = session.intake_ballot(&package) {
+        panic!("ballot must intake: {error}");
+    }
+    if let Err(error) = session.close() {
+        panic!("session must close: {error}");
+    }
+    session
+}
+
+#[test]
+fn tally_is_sealed_while_frozen() {
+    // `new` constructs a FROZEN session.
+    let session = match GuiElectionSessionV1::new(common::artifacts()) {
+        Ok(session) => session,
+        Err(error) => panic!("session must construct: {error}"),
+    };
+    assert_eq!(session.lifecycle_state(), "FROZEN");
+
+    match session.tally() {
+        Ok(_) => panic!("tally must be sealed while FROZEN"),
+        Err(error) => {
+            assert_eq!(error.code(), "GUI_TALLY_NOT_AVAILABLE_BEFORE_CLOSE");
+            assert_eq!(error.message(), "Tally results are not available until voting is closed.");
+            assert_eq!(error.context(), Some("tally"));
+            assert_no_tally_leak(&error);
+        }
+    }
+}
+
+#[test]
+fn tally_is_sealed_while_open() {
+    let mut session = open_session();
+    assert_eq!(session.lifecycle_state(), "OPEN");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    if let Err(error) = session.intake_ballot(&package) {
+        panic!("ballot must intake: {error}");
+    }
+
+    match session.tally() {
+        Ok(_) => panic!("tally must be sealed while OPEN"),
+        Err(error) => {
+            assert_eq!(error.code(), "GUI_TALLY_NOT_AVAILABLE_BEFORE_CLOSE");
+            assert_no_tally_leak(&error);
+        }
+    }
+}
+
+#[test]
+fn tally_is_available_after_close() {
+    let session = closed_session_with_one_accepted_ballot();
+    assert_eq!(session.lifecycle_state(), "CLOSED");
+
+    let tally = match session.tally() {
+        Ok(tally) => tally,
+        Err(error) => panic!("tally must compute after close: {error}"),
+    };
+    assert_eq!(tally.accepted_ballots, 1);
+    assert!(
+        matches!(tally.leading, GuiLeadingResultV1::SingleLeader { approvals, .. } if approvals == 1),
+        "expected a single leader, got {:?}",
+        tally.leading
+    );
+}
+
+#[test]
+fn tally_is_available_after_verified() {
+    let mut session = closed_session_with_one_accepted_ballot();
+    if let Err(error) = session.mark_verified() {
+        panic!("session must mark verified: {error}");
+    }
+    assert_eq!(session.lifecycle_state(), "VERIFIED");
+
+    let tally = match session.tally() {
+        Ok(tally) => tally,
+        Err(error) => panic!("tally must compute after verified: {error}"),
+    };
+    assert_eq!(tally.accepted_ballots, 1);
+}
+
+#[test]
+fn tally_is_available_after_finalized() {
+    let mut session = closed_session_with_one_accepted_ballot();
+    if let Err(error) = session.mark_verified() {
+        panic!("session must mark verified: {error}");
+    }
+    if let Err(error) = session.finalize() {
+        panic!("session must finalize: {error}");
+    }
+    assert_eq!(session.lifecycle_state(), "FINALIZED");
+
+    let tally = match session.tally() {
+        Ok(tally) => tally,
+        Err(error) => panic!("tally must compute after finalized: {error}"),
+    };
+    assert_eq!(tally.accepted_ballots, 1);
+}
+
+/// The sealed-results error must not echo any accepted-option counts, candidate
+/// IDs, leading-result text, or ballot totals.
+fn assert_no_tally_leak(error: &GuiCoreError) {
+    let rendered = format!("{error}");
+    assert!(
+        !rendered.contains("candidate"),
+        "sealed-results error leaked candidate text: {rendered}"
+    );
+    assert!(
+        !rendered.contains("approvals"),
+        "sealed-results error leaked approval counts: {rendered}"
+    );
+    assert!(
+        !rendered.contains("accepted"),
+        "sealed-results error leaked accepted-ballot text: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Leading"),
+        "sealed-results error leaked a leading result: {rendered}"
+    );
+    // The category is the existing lifecycle-transition category.
+    assert_eq!(error.category().as_str(), "INVALID_LIFECYCLE_TRANSITION");
+}
+
+/// `direct_tally` remains available for archive-replay equality checks and is
+/// not gated by the sealed-results policy (it is the raw backend entry point).
+#[test]
+fn direct_tally_remains_available_while_open_for_replay_equality() {
+    let mut session = open_session();
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    if let Err(error) = session.intake_ballot(&package) {
+        panic!("ballot must intake: {error}");
+    }
+    let direct = match session.direct_tally() {
+        Ok(tally) => tally,
+        Err(error) => panic!("direct tally must remain available while open: {error}"),
+    };
+    assert_eq!(direct.accepted_ballots(), 1);
+    assert!(matches!(
+        direct.leading_result(),
+        LeadingResult::SingleLeader { approvals: 1, .. }
+    ));
 }

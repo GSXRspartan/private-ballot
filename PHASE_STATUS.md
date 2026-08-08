@@ -6,8 +6,8 @@
   prototype complete at tag `phase4-release-build-2026-08-06`
   (`05d923da1e552b7fdf2abf1129bf53334620d6f1`); Phase 5 GUI begun
 - Implementation baseline: `05d923da` (Phase 4 release build)
-- Next authorized work: Phase 5 GUI slices following Slice 5A3
-  (Tauri desktop shell and design system)
+- Next authorized work: Phase 5 GUI slices following Slice 5A4
+  (real election loading and dashboard integration)
 
 > Note: the sections below this header were last maintained at the Phase 2
 > closeout (2026-08-01). Phase 3 delivered the reviewed Triptych
@@ -28,6 +28,16 @@
 > produced, and Windows MSI and NSIS installers were built. Slice 5A3 is
 > documented as READY FOR 5A4 (see §14 of that review). Installer
 > installation, code signing, and macOS/Linux packaging were not tested.
+> Phase 5 Slice 5A4 turned the GUI shell into a real application workflow
+> for loading and inspecting an existing election: native Tauri file
+> selection for the three canonical artifacts, real election loading
+> through gui-core, structured backend error presentation, real
+> backend-derived Home and Manage Election data, ballot-type-neutral
+> terminology, "Governance Pilot" product-status wording, and Esmeralda
+> Testnet as the current network (see
+> `docs/reviews/PHASE5_SLICE5A4_REAL_ELECTION_LOADING_2026-08-07.md`).
+> Slice 5A4 is documented as READY FOR 5A5. No commit was created; all
+> changes are staged only.
 
 ## Phase 2 assessment
 
