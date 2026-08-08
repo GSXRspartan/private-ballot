@@ -39,11 +39,14 @@ impl TariTriptychSecretKeyV1 {
     /// linking tag, nullifier, or ballot package.
     pub fn generate_os_rng() -> Result<Self, ProtocolError> {
         loop {
-            let scalar = Scalar::random(&mut OsRng);
-            if scalar == Scalar::ZERO {
+            let scalar = Zeroizing::new(Scalar::random(&mut OsRng));
+            if *scalar == Scalar::ZERO {
                 continue;
             }
-            return Self::from_canonical_bytes(scalar.to_bytes());
+            let mut bytes = scalar.to_bytes();
+            let secret = Self::from_canonical_bytes(bytes);
+            bytes.zeroize();
+            return secret;
         }
     }
 

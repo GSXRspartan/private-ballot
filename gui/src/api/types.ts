@@ -447,3 +447,62 @@ export interface GuiVoterCredentialStatusV1 {
   wallet_key_warning: string;
   enrollment_notice: string;
 }
+
+// ---------------------------------------------------------------------------
+// Slice 5A10A: voter ballot session, selection, and stale-state architecture.
+//
+// These are public workflow DTOs only. They contain no secret, proof,
+// nullifier, package bytes, registry member index, or prover randomness.
+// ---------------------------------------------------------------------------
+
+export type GuiVoterWorkflowStateV1 =
+  | "ReviewRequired"
+  | "CredentialMissing"
+  | "CredentialNotEligible"
+  | "SelectionIncomplete"
+  | "SelectionReady"
+  | "PreparingProof"
+  | "PreparedBallotReady";
+
+export interface GuiVoterElectionBindingV1 {
+  election_id_hex: string;
+  manifest_hash_hex: string;
+  registry_commitment_hex: string;
+  candidate_set_commitment_hex: string;
+}
+
+export interface GuiVoterSelectionStatusV1 {
+  selection_loaded: boolean;
+  selected_option_ids_hex: string[];
+  selected_display_labels: string[];
+  selected_count: number;
+  approval_min: number;
+  approval_max: number;
+  abstention_allowed: boolean;
+  abstaining: boolean;
+  valid: boolean;
+  lifecycle_state: string;
+  can_prepare_ballot: boolean;
+  selection_revision: number;
+  message: string;
+}
+
+export interface GuiPreparedBallotStatusV1 {
+  state: string;
+  operation_id: number | null;
+  ready_to_export: boolean;
+  message: string;
+}
+
+export interface GuiVoterWorkflowStatusV1 {
+  election_binding: GuiVoterElectionBindingV1;
+  credential: GuiVoterCredentialStatusV1;
+  selection: GuiVoterSelectionStatusV1;
+  prepared_ballot: GuiPreparedBallotStatusV1;
+  workflow_state: GuiVoterWorkflowStateV1;
+  can_prepare_ballot: boolean;
+  credential_generation: number;
+  selection_revision: number;
+  preparation_generation: number;
+  preparation_notice: string;
+}

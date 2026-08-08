@@ -18,15 +18,16 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
-    GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
-    GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotIntakeResultV1,
-    GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1, GuiElectionCreationResultV1,
-    GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportResultV1, GuiElectionSessionV1,
-    GuiElectionSummaryV1, GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1,
-    GuiParticipationSummaryV1, GuiTallySummaryV1, GuiVoterCredentialSessionV1,
-    GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, inspect_anchor_config_v1,
-    inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, verify_archive_directory_v1,
-    write_archive_directory_v1, write_election_artifacts_v1,
+    ElectionLifecycleStateV1, GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1,
+    GuiAnchorSnapshotInspectionV1, GuiArchiveVerificationV1, GuiArchiveWriteResultV1,
+    GuiBallotIntakeResultV1, GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
+    GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
+    GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
+    GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1,
+    GuiTallySummaryV1, GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1,
+    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
+    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
+    verify_archive_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
 };
 
 /// Serializable command error: a bounded copy of the gui-core error model.
@@ -68,6 +69,14 @@ impl CommandError {
         )
     }
 
+    fn no_voter_session() -> Self {
+        Self::new(
+            "GUI_NO_VOTER_SESSION",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "no voter workflow session is active in this shell",
+        )
+    }
+
     fn state_poisoned() -> Self {
         Self::new(
             "GUI_STATE_UNAVAILABLE",
@@ -97,17 +106,18 @@ impl From<GuiCoreError> for CommandError {
 }
 
 /// Shell-owned application state: at most one organizer election session and
-/// at most one Rust-side voter governance credential.
+/// at most one Rust-side voter workflow session.
 ///
-/// The election session and voter credential session are owned by gui-core and
+/// The election session and voter workflow session are owned by gui-core and
 /// are never persisted by the shell (ADR-0007: no new canonical format, no
-/// credential persistence). Loading or unloading an election clears the voter
-/// credential so eligibility cannot silently carry across elections.
+/// credential persistence). Loading or unloading an election replaces/clears
+/// the voter workflow so eligibility, selection, and future preparation tokens
+/// cannot silently carry across elections.
 #[derive(Default)]
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
-    voter_credential: Mutex<Option<GuiVoterCredentialSessionV1>>,
+    voter: Mutex<Option<GuiVoterSessionV1>>,
 }
 
 impl AppState {
@@ -190,21 +200,22 @@ fn load_election(
         Path::new(&option_set_path),
     )?;
     let session = GuiElectionSessionV1::new(artifacts)?;
+    let voter = GuiVoterSessionV1::new(session.artifacts());
     let summary = session.summary();
     let mut guard = state
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *guard = Some(session);
-    let mut credential_guard = state
-        .voter_credential
+    let mut voter_guard = state
+        .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *credential_guard = None;
+    *voter_guard = Some(voter);
     Ok(summary)
 }
 
-/// Drops the active election session and any Rust-side voter credential.
+/// Drops the active election session and any Rust-side voter workflow state.
 #[tauri::command]
 fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
     let mut guard = state
@@ -212,11 +223,11 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *guard = None;
-    let mut credential_guard = state
-        .voter_credential
+    let mut voter_guard = state
+        .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *credential_guard = None;
+    *voter_guard = None;
     Ok(())
 }
 
@@ -245,19 +256,23 @@ fn open_voting(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1
 /// Closes ballot acceptance permanently (lifecycle delegation).
 #[tauri::command]
 fn close_voting(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1, CommandError> {
-    state.with_session_mut(|session| {
+    let (summary, lifecycle_state) = state.with_session_mut(|session| {
         session.close()?;
-        Ok(session.summary())
-    })
+        Ok((session.summary(), session.lifecycle_state_v1()))
+    })?;
+    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    Ok(summary)
 }
 
 /// Records completion of public verification (lifecycle delegation).
 #[tauri::command]
 fn mark_verified(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1, CommandError> {
-    state.with_session_mut(|session| {
+    let (summary, lifecycle_state) = state.with_session_mut(|session| {
         session.mark_verified()?;
-        Ok(session.summary())
-    })
+        Ok((session.summary(), session.lifecycle_state_v1()))
+    })?;
+    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    Ok(summary)
 }
 
 /// Finalizes the verified result and archive commitments (lifecycle
@@ -266,10 +281,26 @@ fn mark_verified(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummary
 fn finalize_election(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
-    state.with_session_mut(|session| {
+    let (summary, lifecycle_state) = state.with_session_mut(|session| {
         session.finalize()?;
-        Ok(session.summary())
-    })
+        Ok((session.summary(), session.lifecycle_state_v1()))
+    })?;
+    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    Ok(summary)
+}
+
+fn invalidate_voter_for_lifecycle(
+    state: &tauri::State<'_, AppState>,
+    lifecycle_state: ElectionLifecycleStateV1,
+) -> Result<(), CommandError> {
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    if let Some(voter) = voter_guard.as_mut() {
+        voter.invalidate_for_lifecycle_change(lifecycle_state);
+    }
+    Ok(())
 }
 
 /// Ingests one canonical ballot package file through the gui-core intake
@@ -471,16 +502,17 @@ fn freeze_election(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionCreationResultV1, CommandError> {
     let (result, session) = state.with_draft_mut(|draft| Ok(draft.freeze()?))?;
+    let voter = GuiVoterSessionV1::new(session.artifacts());
     let mut guard = state
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *guard = Some(session);
-    let mut credential_guard = state
-        .voter_credential
+    let mut voter_guard = state
+        .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *credential_guard = None;
+    *voter_guard = Some(voter);
     Ok(result)
 }
 
@@ -618,12 +650,12 @@ fn voter_governance_credential_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
     let guard = state
-        .voter_credential
+        .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     Ok(guard
         .as_ref()
-        .map(GuiVoterCredentialSessionV1::status)
+        .map(GuiVoterSessionV1::credential_status)
         .unwrap_or_else(GuiVoterCredentialStatusV1::unloaded))
 }
 
@@ -634,23 +666,21 @@ fn voter_governance_credential_status(
 fn generate_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let credential_session = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
-            return Err(CommandError::no_session());
-        };
-        GuiVoterCredentialSessionV1::generate_for(session.artifacts())?
-    };
-    let status = credential_session.status();
-    let mut credential_guard = state
-        .voter_credential
+    let session_guard = state
+        .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *credential_guard = Some(credential_session);
-    Ok(status)
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.generate_credential(session.artifacts())?)
 }
 
 /// Explicitly clears the Rust-side voter governance credential.
@@ -659,11 +689,140 @@ fn reset_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
     let mut guard = state
-        .voter_credential
+        .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *guard = None;
-    Ok(GuiVoterCredentialStatusV1::unloaded())
+    Ok(guard
+        .as_mut()
+        .map(GuiVoterSessionV1::reset_credential)
+        .unwrap_or_else(GuiVoterCredentialStatusV1::unloaded))
+}
+
+/// Returns the complete safe voter workflow status. The frontend supplies
+/// whether the voter has checked the local review box; Rust supplies every
+/// protocol/state gate.
+#[tauri::command]
+fn voter_workflow_status(
+    review_confirmed: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_ref() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.workflow_status(
+        session.artifacts(),
+        session.lifecycle_state_v1(),
+        review_confirmed,
+    ))
+}
+
+/// Returns the public Rust-authoritative ballot selection status.
+#[tauri::command]
+fn voter_ballot_selection_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterSelectionStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_ref() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.selection_status(session.artifacts(), session.lifecycle_state_v1()))
+}
+
+/// Sets one Rust-authoritative ballot selection from public option machine
+/// IDs. This validates through the existing canonical ballot payload rules.
+#[tauri::command]
+fn set_voter_ballot_selection(
+    selected_option_ids_hex: Vec<String>,
+    abstain: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterSelectionStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.set_selection(
+        session.artifacts(),
+        session.lifecycle_state_v1(),
+        selected_option_ids_hex,
+        abstain,
+    )?)
+}
+
+/// Clears the Rust-authoritative ballot selection and invalidates future
+/// prepared-ballot state.
+#[tauri::command]
+fn clear_voter_ballot_selection(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterSelectionStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.clear_selection(session.artifacts(), session.lifecycle_state_v1())?)
+}
+
+/// Resets the whole voter workflow for the current election.
+#[tauri::command]
+fn reset_voter_workflow(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    voter.reset_workflow();
+    Ok(voter.workflow_status(session.artifacts(), session.lifecycle_state_v1(), false))
 }
 
 /// Writes the complete offline archive directory, optionally including a
@@ -742,6 +901,11 @@ pub fn run() {
             voter_governance_credential_status,
             generate_voter_governance_credential,
             reset_voter_governance_credential,
+            voter_workflow_status,
+            voter_ballot_selection_status,
+            set_voter_ballot_selection,
+            clear_voter_ballot_selection,
+            reset_voter_workflow,
             write_archive_with_governance_document,
         ])
         .run(tauri::generate_context!())

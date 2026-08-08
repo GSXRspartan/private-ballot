@@ -48,6 +48,7 @@ pub mod summary;
 pub mod tally;
 pub mod voter_confirmation;
 pub mod voter_credential;
+pub mod voter_session;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, verify_archive_directory_v1,
@@ -82,6 +83,7 @@ pub use participation::{
 pub use session::GuiElectionSessionV1;
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
+pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 pub use voter_confirmation::{
     GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,
     VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,
@@ -90,4 +92,9 @@ pub use voter_credential::{
     GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE, GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
     GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
     GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
+};
+pub use voter_session::{
+    GuiPreparedBallotStatusV1, GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1,
+    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStateV1,
+    GuiVoterWorkflowStatusV1, PROOF_GENERATION_DEFERRED_NOTICE, voter_selectable_options,
 };

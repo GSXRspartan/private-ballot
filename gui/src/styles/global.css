@@ -959,6 +959,54 @@ table.data th {
   gap: 0.5rem;
   font-size: 0.9375rem;
 }
+.selection-fieldset {
+  margin: 0.75rem 0;
+  padding: 0;
+  border: 0;
+}
+.selection-fieldset legend {
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+.selection-options {
+  display: grid;
+  gap: 0.5rem;
+}
+.selection-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(8rem, auto);
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.selection-option:focus-within {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.selection-option-label,
+.selection-option-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.selection-option-id {
+  color: var(--text-secondary);
+  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-size: 0.75rem;
+}
+.selection-abstain {
+  display: inline-flex;
+  margin-top: 0.75rem;
+}
+.selection-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
 .voters-header,
 .options-header {
   display: flex;

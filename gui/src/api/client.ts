@@ -29,6 +29,8 @@ import type {
   GuiTallySummaryV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
+  GuiVoterSelectionStatusV1,
+  GuiVoterWorkflowStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
 } from "./types";
@@ -172,6 +174,18 @@ export const api = {
     call<GuiVoterCredentialStatusV1>("generate_voter_governance_credential"),
   resetVoterGovernanceCredential: () =>
     call<GuiVoterCredentialStatusV1>("reset_voter_governance_credential"),
+  voterWorkflowStatus: (reviewConfirmed: boolean) =>
+    call<GuiVoterWorkflowStatusV1>("voter_workflow_status", { reviewConfirmed }),
+  voterBallotSelectionStatus: () =>
+    call<GuiVoterSelectionStatusV1>("voter_ballot_selection_status"),
+  setVoterBallotSelection: (selectedOptionIdsHex: string[], abstain: boolean) =>
+    call<GuiVoterSelectionStatusV1>("set_voter_ballot_selection", {
+      selectedOptionIdsHex,
+      abstain,
+    }),
+  clearVoterBallotSelection: () =>
+    call<GuiVoterSelectionStatusV1>("clear_voter_ballot_selection"),
+  resetVoterWorkflow: () => call<GuiVoterWorkflowStatusV1>("reset_voter_workflow"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,
     governanceDocumentPath: string | null,

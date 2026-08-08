@@ -141,7 +141,7 @@ impl VoterGovernanceCredentialV1 {
     /// fixtures. This is not exposed as a Tauri import API because the project
     /// has no reviewed private credential file format.
     #[cfg(test)]
-    fn from_test_canonical_scalar(
+    pub(crate) fn from_test_canonical_scalar(
         bytes: [u8; RISTRETTO_COMPRESSED_POINT_BYTES],
     ) -> Result<Self, GuiCoreError> {
         let secret_key = TariTriptychSecretKeyV1::from_canonical_bytes(bytes)

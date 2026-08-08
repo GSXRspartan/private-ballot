@@ -1,6 +1,6 @@
 # Phase Status
 
-- Last updated: 2026-08-07
+- Last updated: 2026-08-08
 - Current branch: `phase5/gui-core-foundation`
 - Current project state: Phase 4 harmless non-binding Ootle testnet anchor
   prototype complete at tag `phase4-release-build-2026-08-06`
@@ -95,6 +95,27 @@
 > Slice 5A9 is documented as CONDITIONAL READY: focused Rust/frontend checks
 > passed, the Tauri release executable built, and MSI bundling failed at WiX
 > `light.exe` without a captured detailed diagnostic. No commit was created.
+> Phase 5 Slice 5A10A added the safe voter ballot-session architecture needed
+> before real proof generation: a Rust-owned `GuiVoterSessionV1` bound to the
+> active election fingerprint, Rust-authoritative approval selection through
+> the existing `ApprovalBallotPayload` validator, non-secret credential
+> generation / selection revision / preparation operation identifiers, stale
+> operation rejection tests using only `#[cfg(test)]` synthetic markers, Tauri
+> voter workflow and selection commands, and a real Vote-screen ballot
+> selection stage. It also zeroizes transient key-generation bytes in the
+> existing Triptych credential primitive. No Triptych proof, nullifier,
+> canonical ballot package, export bytes, canonical format change, walletd,
+> indexer, Ootle submission, HTTP, telemetry, or vote submission was added. See
+> `docs/reviews/PHASE5_SLICE5A10A_VOTER_SESSION_ARCHITECTURE_2026-08-08.md`.
+> Focused Rust checks/tests/clippy, root workspace check/clippy, detached
+> Tauri checks/clippy, frontend tests, and frontend build passed. Full root
+> workspace tests passed in the final pre-commit repair pass. Native Tauri
+> build previously produced the release `.exe` and failed at WiX `light.exe`
+> MSI bundling. The final pre-commit repair fixed the reviewed F1 lifecycle DTO
+> defect in `set_selection`, added non-open lifecycle and stale preparation
+> operation tests, added narrow frontend request-generation hardening, and
+> documented 5A10B secret ownership and ready-after-close policy decisions. No
+> commit was created.
 
 ## Phase 2 assessment
 

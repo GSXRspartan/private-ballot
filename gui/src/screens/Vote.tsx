@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
 import { pickGovernanceDocument } from "../api/dialog";
@@ -7,7 +7,10 @@ import type {
   GuiGovernanceDocumentDigestV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
+  GuiVoterSelectionStatusV1,
+  GuiVoterWorkflowStatusV1,
 } from "../api/types";
+import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import {
   ADVANCED_DETAILS_LABEL,
   BOUND_SECTION_LABEL,
@@ -26,6 +29,11 @@ import {
   publicKeyDisplay,
   WALLET_SEED_WARNING,
 } from "../voterCredential";
+import {
+  selectionAtApprovalMax,
+  selectionSummaryText,
+  workflowTone,
+} from "../voterWorkflow";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -56,19 +64,31 @@ export function Vote() {
   const [confirmation, setConfirmation] = useState<GuiVoterElectionConfirmationV1 | null>(null);
   const [govDocDigest, setGovDocDigest] = useState<GuiGovernanceDocumentDigestV1 | null>(null);
   const [credential, setCredential] = useState<GuiVoterCredentialStatusV1 | null>(null);
+  const [selection, setSelection] = useState<GuiVoterSelectionStatusV1 | null>(null);
+  const [workflow, setWorkflow] = useState<GuiVoterWorkflowStatusV1 | null>(null);
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [abstaining, setAbstaining] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
   const [credentialStage, setCredentialStage] = useState(false);
-  const [advanced, setAdvanced] = useState(false);
+  const [selectionStage, setSelectionStage] = useState(false);
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
+  const selectionDraftIdsRef = useRef<string[]>([]);
+  const selectionRequestGenerationRef = useRef(0);
 
   useEffect(() => {
     setConfirmation(null);
     setGovDocDigest(null);
     setCredential(null);
+    setSelection(null);
+    setWorkflow(null);
+    setSelectedOptionIds([]);
+    setAbstaining(false);
+    selectionDraftIdsRef.current = [];
+    selectionRequestGenerationRef.current += 1;
     setConfirmed(false);
     setCredentialStage(false);
-    setAdvanced(false);
+    setSelectionStage(false);
   }, [election]);
 
   function captureError(err: unknown) {
@@ -131,7 +151,7 @@ export function Vote() {
     try {
       const status = await api.generateVoterGovernanceCredential();
       setCredential(status);
-      setAdvanced(false);
+      if (selectionStage) await refreshWorkflow(true);
     } catch (err) {
       captureError(err);
     } finally {
@@ -142,7 +162,7 @@ export function Vote() {
   async function onResetCredential() {
     if (!shellAvailable) {
       setCredential(null);
-      setAdvanced(false);
+      setWorkflow(null);
       return;
     }
     setBusy(true);
@@ -150,7 +170,7 @@ export function Vote() {
     try {
       const status = await api.resetVoterGovernanceCredential();
       setCredential(status);
-      setAdvanced(false);
+      if (selectionStage) await refreshWorkflow(true);
     } catch (err) {
       captureError(err);
     } finally {
@@ -158,9 +178,87 @@ export function Vote() {
     }
   }
 
+  async function refreshWorkflow(reviewConfirmed = confirmed) {
+    if (!election || !shellAvailable) return;
+    const status = await api.voterWorkflowStatus(reviewConfirmed);
+    setWorkflow(status);
+    setCredential(status.credential);
+    setSelection(status.selection);
+    setSelectedOptionIds(status.selection.selected_option_ids_hex);
+    setAbstaining(status.selection.abstaining);
+    selectionDraftIdsRef.current = status.selection.selected_option_ids_hex;
+  }
+
+  async function refreshSelection() {
+    if (!election || !shellAvailable) return;
+    const status = await api.voterBallotSelectionStatus();
+    setSelection(status);
+    setSelectedOptionIds(status.selected_option_ids_hex);
+    setAbstaining(status.abstaining);
+    selectionDraftIdsRef.current = status.selected_option_ids_hex;
+  }
+
+  async function onEnterSelectionStage() {
+    setSelectionStage(true);
+    setBusy(true);
+    setError(null);
+    try {
+      await refreshSelection();
+      await refreshWorkflow(true);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setBackendSelection(nextIds: string[], nextAbstaining: boolean) {
+    const requestGeneration = selectionRequestGenerationRef.current + 1;
+    selectionRequestGenerationRef.current = requestGeneration;
+    setBusy(true);
+    setError(null);
+    try {
+      const status =
+        nextIds.length === 0 && !nextAbstaining
+          ? await api.clearVoterBallotSelection()
+          : await api.setVoterBallotSelection(nextIds, nextAbstaining);
+      if (requestGeneration !== selectionRequestGenerationRef.current) return;
+      setSelection(status);
+      setSelectedOptionIds(status.selected_option_ids_hex);
+      setAbstaining(status.abstaining);
+      selectionDraftIdsRef.current = status.selected_option_ids_hex;
+      await refreshWorkflow(true);
+    } catch (err) {
+      if (requestGeneration === selectionRequestGenerationRef.current) captureError(err);
+    } finally {
+      if (requestGeneration === selectionRequestGenerationRef.current) setBusy(false);
+    }
+  }
+
+  async function onToggleOption(optionId: string, checked: boolean) {
+    const set = new Set(selectionDraftIdsRef.current);
+    if (checked) set.add(optionId);
+    else set.delete(optionId);
+    const nextIds = [...set];
+    selectionDraftIdsRef.current = nextIds;
+    setSelectedOptionIds(nextIds);
+    setAbstaining(false);
+    await setBackendSelection(nextIds, false);
+  }
+
+  async function onToggleAbstain(checked: boolean) {
+    selectionDraftIdsRef.current = [];
+    setSelectedOptionIds([]);
+    setAbstaining(checked);
+    await setBackendSelection([], checked);
+  }
+
   const docStatus = confirmation?.governance_document_status ?? null;
   const matchTone = documentMatchTone(docStatus?.status);
   const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
+  const presentation = presentationFor(election);
+  const selectionLiveText = selectionSummaryText(selection);
+  const selectionAtMax = selectionAtApprovalMax(selection);
 
   return (
     <>
@@ -427,18 +525,99 @@ export function Vote() {
                     type="button"
                     className="btn btn-primary"
                     disabled={!canProceedAfterCredential(credential) || busy}
-                    onClick={() => setAdvanced(true)}
+                    onClick={() => void onEnterSelectionStage()}
                   >
                     Continue
                   </button>
                 </div>
-                {advanced && (
-                  <Placeholder>
-                    Ballot selection, Triptych proof generation, ballot export, and confirmation
-                    are deferred to later reviewed slices.
-                  </Placeholder>
-                )}
               </Card>
+
+              {selectionStage && confirmation && (
+                <>
+                  <Card title="Ballot selection">
+                    <p className="form-hint">{election ? approvalRuleText(election) : ""}</p>
+                    <fieldset className="selection-fieldset" disabled={busy || abstaining}>
+                      <legend>{presentation.selectionHeading}</legend>
+                      <div className="selection-options">
+                        {confirmation.candidates.map((option) => {
+                          const checked = selectedOptionIds.includes(option.machine_id_hex);
+                          const disabled = !checked && selectionAtMax;
+                          return (
+                            <label className="selection-option" key={option.machine_id_hex}>
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={busy || abstaining || disabled}
+                                onChange={(e) =>
+                                  void onToggleOption(option.machine_id_hex, e.target.checked)
+                                }
+                              />
+                              <span className="selection-option-label">
+                                {option.display_name}
+                              </span>
+                              <span className="selection-option-id">
+                                {option.machine_id_text ?? option.machine_id_hex}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </fieldset>
+                    {selection?.abstention_allowed && (
+                      <label className="selection-option selection-abstain">
+                        <input
+                          type="checkbox"
+                          checked={abstaining}
+                          disabled={busy}
+                          onChange={(e) => void onToggleAbstain(e.target.checked)}
+                        />
+                        Abstain
+                      </label>
+                    )}
+                    <div className="selection-status" aria-live="polite">
+                      <Pill tone={selection?.valid ? "ok" : "neutral"}>{selectionLiveText}</Pill>
+                      {selection && (
+                        <span>
+                          Required: {selection.approval_min}-{selection.approval_max}; lifecycle{" "}
+                          {selection.lifecycle_state}
+                        </span>
+                      )}
+                    </div>
+                    {selection && !selection.valid && (
+                      <Notice tone="warn">{selection.message}</Notice>
+                    )}
+                    <div className="action-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={busy || !selection?.selection_loaded}
+                        onClick={() => void setBackendSelection([], false)}
+                      >
+                        Clear selection
+                      </button>
+                    </div>
+                  </Card>
+
+                  <Card title="Privacy proof">
+                    <div className="field-list">
+                      <Field label="Workflow">
+                        <Pill tone={workflowTone(workflow?.workflow_state)}>
+                          {workflow?.workflow_state ?? "SelectionIncomplete"}
+                        </Pill>
+                      </Field>
+                      <Field label="Preparation">
+                        <span className="field-value">
+                          {workflow?.prepared_ballot.message ?? "No ballot has been prepared."}
+                        </span>
+                      </Field>
+                    </div>
+                    <Placeholder>
+                      {workflow?.preparation_notice ??
+                        "Privacy proof generation will be enabled after this voter session has been validated."}
+                    </Placeholder>
+                  </Card>
+                </>
+              )}
             </>
           )}
         </>

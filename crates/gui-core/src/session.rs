@@ -31,8 +31,8 @@ use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
 use crate::intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
 use crate::participation::{
-    GuiParticipationSummaryV1, ParticipationVisibility, participation_basis_points,
-    participation_visibility_for, result_visibility_for, SMALL_ELECTORATE_THRESHOLD,
+    GuiParticipationSummaryV1, ParticipationVisibility, SMALL_ELECTORATE_THRESHOLD,
+    participation_basis_points, participation_visibility_for, result_visibility_for,
 };
 use crate::summary::GuiElectionSummaryV1;
 use crate::tally::{GuiTallySummaryV1, summarize_tally};
@@ -335,8 +335,7 @@ impl GuiElectionSessionV1 {
         // (which the saturating arithmetic below bounds back to a safe value).
         let eligible = u64::try_from(self.artifacts.registry().len()).unwrap_or(u64::MAX);
         let accepted = u64::try_from(self.accepted_count()).unwrap_or(u64::MAX);
-        let small_electorate =
-            self.artifacts.registry().len() < SMALL_ELECTORATE_THRESHOLD;
+        let small_electorate = self.artifacts.registry().len() < SMALL_ELECTORATE_THRESHOLD;
 
         let (accepted_opt, bps_opt, remaining_opt, coarse_opt) = match visibility {
             ParticipationVisibility::Live => {
@@ -346,7 +345,8 @@ impl GuiElectionSessionV1 {
             }
             ParticipationVisibility::Coarse => {
                 let bps = participation_basis_points(accepted, eligible);
-                let bucket = crate::participation::CoarseParticipationBucket::from_basis_points(bps);
+                let bucket =
+                    crate::participation::CoarseParticipationBucket::from_basis_points(bps);
                 (None, None, None, Some(bucket))
             }
             ParticipationVisibility::SealedUntilClose => (None, None, None, None),
@@ -399,6 +399,13 @@ impl GuiElectionSessionV1 {
     #[must_use]
     pub const fn lifecycle_state(&self) -> &'static str {
         self.lifecycle.state().as_str()
+    }
+
+    /// Returns the current lifecycle state enum for Rust-side facades that
+    /// must gate behavior without parsing the display code.
+    #[must_use]
+    pub const fn lifecycle_state_v1(&self) -> ElectionLifecycleStateV1 {
+        self.lifecycle.state()
     }
 
     /// Returns the replay transcript.
