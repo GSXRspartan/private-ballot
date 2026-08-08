@@ -1,14 +1,16 @@
-//! Rust-owned voter workflow state for ballot selection and future proof work.
-//!
-//! This facade is intentionally architectural for Slice 5A10A. It validates
-//! voter selections against the existing canonical approval payload rules,
-//! tracks non-secret session generations for stale-operation rejection, and
-//! exposes only safe public DTOs. It does not invoke the Triptych prover, does
-//! not construct a nullifier/linking tag, and does not build a ballot package.
+//! Rust-owned voter workflow state and local canonical ballot preparation.
 
 use serde::Serialize;
-use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, CandidateId, ElectionLifecycleStateV1};
-use tari_cc_private_ballot_protocol::ValidationCode;
+use tari_cc_private_ballot_ballot::{
+    ApprovalBallotPayload, BallotPackageV1, BallotPackageV1Input, CandidateId,
+    ElectionLifecycleStateV1,
+};
+use tari_cc_private_ballot_crypto::prove_tari_triptych_prototype_v1;
+use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, PROTOCOL_VERSION_V1, ValidationCode};
+use tari_cc_private_ballot_verifier::{
+    build_tari_triptych_verifier_from_registry_v1, reconstruct_approval_proof_statement,
+    verify_approval_proof,
+};
 
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::{GuiCoreError, GuiErrorCategory};
@@ -18,9 +20,9 @@ use crate::voter_credential::{
     GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1, GuiVoterEligibilityV1,
 };
 
-/// Message shown while proof generation remains intentionally disabled.
+/// Public notice about the local-only proof workflow.
 pub const PROOF_GENERATION_DEFERRED_NOTICE: &str =
-    "Privacy proof generation will be enabled after this voter session has been validated.";
+    "Proof construction is local; no ballot is submitted by this application.";
 
 /// Stable public workflow-state code derived from Rust-owned voter state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -143,17 +145,43 @@ impl GuiVoterSelectionStatusV1 {
     }
 }
 
-/// Public prepared-ballot state. No ready canonical bytes exist in 5A10A.
+/// Public prepared-ballot state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuiPreparedBallotStatusV1 {
     /// Stable state code.
     pub state: &'static str,
-    /// Current synthetic operation id, if preparation was begun by tests.
+    /// Current operation id while preparation is in progress.
     pub operation_id: Option<u64>,
-    /// Always false in production for 5A10A.
+    /// True only for a verified package while the election remains open.
     pub ready_to_export: bool,
+    /// Safe public prepared-ballot details, present only after verification.
+    pub summary: Option<GuiPreparedBallotSummaryV1>,
     /// Bounded display message.
     pub message: &'static str,
+}
+
+/// Safe public description of a locally verified canonical ballot package.
+/// Raw proof bytes and all secret/witness material remain Rust-owned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiPreparedBallotSummaryV1 {
+    pub election_id_hex: String,
+    pub manifest_hash_hex: String,
+    pub selected_option_ids_hex: Vec<String>,
+    pub selected_display_labels: Vec<String>,
+    pub abstaining: bool,
+    pub proof_suite_id: String,
+    pub linkability_hex: String,
+    pub canonical_package_bytes: usize,
+    pub package_digest_hex: String,
+    pub locally_verified: bool,
+    pub ready_to_export: bool,
+}
+
+/// Safe metadata returned after successful export and read-back verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiPreparedBallotExportV1 {
+    pub canonical_package_bytes: usize,
+    pub package_digest_hex: String,
 }
 
 /// Safe public summary of the whole Rust-owned voter workflow.
@@ -165,7 +193,7 @@ pub struct GuiVoterWorkflowStatusV1 {
     pub credential: GuiVoterCredentialStatusV1,
     /// Public selection status. No proof/nullifier/member index.
     pub selection: GuiVoterSelectionStatusV1,
-    /// Public prepared-ballot placeholder status.
+    /// Public prepared-ballot status.
     pub prepared_ballot: GuiPreparedBallotStatusV1,
     /// Stable workflow state.
     pub workflow_state: GuiVoterWorkflowStateV1,
@@ -177,7 +205,7 @@ pub struct GuiVoterWorkflowStatusV1 {
     pub selection_revision: u64,
     /// Non-secret preparation generation id.
     pub preparation_generation: u64,
-    /// Fixed notice that no proof is generated in this slice.
+    /// Fixed notice about local-only proof preparation.
     pub preparation_notice: &'static str,
 }
 
@@ -207,6 +235,10 @@ enum PreparedBallotStateV1 {
     Invalidated {
         reason: &'static str,
     },
+    Ready {
+        canonical_bytes: Vec<u8>,
+        summary: GuiPreparedBallotSummaryV1,
+    },
     #[cfg(test)]
     TestReady {
         marker: &'static str,
@@ -214,31 +246,49 @@ enum PreparedBallotStateV1 {
 }
 
 impl PreparedBallotStateV1 {
-    fn status(&self) -> GuiPreparedBallotStatusV1 {
+    fn status(&self, lifecycle_state: ElectionLifecycleStateV1) -> GuiPreparedBallotStatusV1 {
         match self {
             Self::None => GuiPreparedBallotStatusV1 {
                 state: "None",
                 operation_id: None,
                 ready_to_export: false,
+                summary: None,
                 message: "No ballot has been prepared.",
             },
             Self::Preparing { operation_id } => GuiPreparedBallotStatusV1 {
                 state: "Preparing",
                 operation_id: Some(*operation_id),
                 ready_to_export: false,
+                summary: None,
                 message: "A future proof preparation operation is in progress.",
             },
             Self::Invalidated { reason } => GuiPreparedBallotStatusV1 {
                 state: "Invalidated",
                 operation_id: None,
                 ready_to_export: false,
+                summary: None,
                 message: reason,
+            },
+            Self::Ready { summary, .. } => GuiPreparedBallotStatusV1 {
+                state: "Ready",
+                operation_id: None,
+                ready_to_export: matches!(lifecycle_state, ElectionLifecycleStateV1::Open),
+                summary: Some(GuiPreparedBallotSummaryV1 {
+                    ready_to_export: matches!(lifecycle_state, ElectionLifecycleStateV1::Open),
+                    ..summary.clone()
+                }),
+                message: if matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+                    "Canonical ballot package is locally verified and ready to export."
+                } else {
+                    "Election is no longer open; this prepared ballot is not exportable."
+                },
             },
             #[cfg(test)]
             Self::TestReady { .. } => GuiPreparedBallotStatusV1 {
                 state: "TestReady",
                 operation_id: None,
                 ready_to_export: false,
+                summary: None,
                 message: "Synthetic non-crypto marker installed by a test.",
             },
         }
@@ -475,7 +525,7 @@ impl GuiVoterSessionV1 {
             election_binding: self.election_binding.clone(),
             credential,
             selection,
-            prepared_ballot: self.prepared_ballot.status(),
+            prepared_ballot: self.prepared_ballot.status(lifecycle_state),
             workflow_state,
             can_prepare_ballot,
             credential_generation: self.credential_generation,
@@ -518,6 +568,235 @@ impl GuiVoterSessionV1 {
         {
             self.invalidate_prepared("Lifecycle changed; prepared ballot state was cleared.");
         }
+    }
+
+    /// Constructs, encodes, decodes, and independently verifies one real
+    /// Triptych ballot package. The caller holds the voter-session mutex for
+    /// this whole method, so the credential is borrowed without cloning.
+    pub fn prepare_ballot(
+        &mut self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+    ) -> Result<GuiPreparedBallotStatusV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        let token = self.begin_preparation_operation(lifecycle_state)?;
+        let result = (|| {
+            let credential = self.credential.as_ref().ok_or_else(|| {
+                GuiCoreError::new(
+                    "GUI_NO_VOTER_CREDENTIAL",
+                    GuiErrorCategory::InvalidInput,
+                    Some("prepare-ballot"),
+                    "a voter credential is required before preparing a ballot",
+                )
+            })?;
+            let selection = self.selection.as_ref().ok_or_else(|| {
+                GuiCoreError::new(
+                    "GUI_NO_BALLOT_SELECTION",
+                    GuiErrorCategory::InvalidInput,
+                    Some("prepare-ballot"),
+                    "a valid ballot selection is required before preparing a ballot",
+                )
+            })?;
+            let provider = Blake3HashProviderV1;
+            let verifier =
+                build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
+                    .map_err(|error| GuiCoreError::from_protocol(&error, "registry"))?;
+            let statement = reconstruct_approval_proof_statement(
+                artifacts.manifest(),
+                &selection.payload,
+                &provider,
+            )
+            .map_err(|error| GuiCoreError::from_protocol(&error, "proof-statement"))?;
+            let proof = prove_tari_triptych_prototype_v1(
+                &statement,
+                &verifier,
+                credential.credential().secret_key(),
+            )
+            .map_err(|error| GuiCoreError::from_protocol(&error, "proof"))?;
+            let package = BallotPackageV1::new(BallotPackageV1Input {
+                protocol_version: PROTOCOL_VERSION_V1,
+                manifest_hash: artifacts.manifest_hash(),
+                proof_suite_id: artifacts.manifest().proof_suite_id().to_owned(),
+                proof,
+                payload: selection.payload.clone(),
+            })
+            .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
+            let canonical_bytes = package
+                .to_canonical_cbor()
+                .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
+            let decoded = BallotPackageV1::from_canonical_cbor(
+                &canonical_bytes,
+                artifacts.candidates(),
+                artifacts.manifest().approval_limits(),
+            )
+            .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
+            decoded
+                .validate_manifest_binding(
+                    artifacts.manifest_hash(),
+                    artifacts.manifest().proof_suite_id(),
+                )
+                .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
+            let verified = verify_approval_proof(
+                artifacts.manifest(),
+                decoded.payload(),
+                decoded.proof(),
+                &provider,
+                &verifier,
+            )
+            .map_err(|error| GuiCoreError::from_protocol(&error, "proof"))?;
+            let digest = decoded
+                .canonical_hash(&provider)
+                .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
+            let selection_status =
+                selection.status(artifacts, lifecycle_state, true, self.selection_revision);
+            Ok::<_, GuiCoreError>((
+                canonical_bytes.clone(),
+                GuiPreparedBallotSummaryV1 {
+                    election_id_hex: self.election_binding.election_id_hex.clone(),
+                    manifest_hash_hex: self.election_binding.manifest_hash_hex.clone(),
+                    selected_option_ids_hex: selection_status.selected_option_ids_hex,
+                    selected_display_labels: selection_status.selected_display_labels,
+                    abstaining: selection.payload.is_abstention(),
+                    proof_suite_id: artifacts.manifest().proof_suite_id().to_owned(),
+                    linkability_hex: to_lower_hex(verified.nullifier().as_bytes()),
+                    canonical_package_bytes: canonical_bytes.len(),
+                    package_digest_hex: to_lower_hex(&digest),
+                    locally_verified: true,
+                    ready_to_export: true,
+                },
+            ))
+        })();
+        match result {
+            Ok((canonical_bytes, summary)) if self.matches_token(lifecycle_state, &token) => {
+                self.prepared_ballot = PreparedBallotStateV1::Ready {
+                    canonical_bytes,
+                    summary,
+                };
+                Ok(self.prepared_ballot.status(lifecycle_state))
+            }
+            Ok(_) => {
+                self.invalidate_prepared(
+                    "Prepared ballot became stale before it could be installed.",
+                );
+                Err(GuiCoreError::new(
+                    "GUI_STALE_PREPARATION",
+                    GuiErrorCategory::InvalidLifecycleTransition,
+                    Some("prepare-ballot"),
+                    "the ballot preparation result is no longer current",
+                ))
+            }
+            Err(error) => {
+                self.invalidate_prepared(
+                    "Ballot preparation failed; no prepared ballot is available.",
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// Writes a verified package without overwrite, then verifies exact bytes
+    /// read back from disk through the existing verifier path.
+    pub fn export_prepared_ballot(
+        &self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+        path: &std::path::Path,
+    ) -> Result<GuiPreparedBallotExportV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+            return Err(GuiCoreError::new(
+                "GUI_PREPARED_BALLOT_NOT_EXPORTABLE",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("export-ballot"),
+                "a prepared ballot can be exported only while the election is open",
+            ));
+        }
+        let PreparedBallotStateV1::Ready {
+            canonical_bytes,
+            summary,
+        } = &self.prepared_ballot
+        else {
+            return Err(GuiCoreError::new(
+                "GUI_NO_PREPARED_BALLOT",
+                GuiErrorCategory::InvalidInput,
+                Some("export-ballot"),
+                "no locally verified ballot package is available",
+            ));
+        };
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    GuiCoreError::new(
+                        "GUI_BALLOT_EXPORT_COLLISION",
+                        GuiErrorCategory::FileIo,
+                        Some("export-ballot"),
+                        "the selected ballot package file already exists",
+                    )
+                } else {
+                    GuiCoreError::io_failure("export-ballot")
+                }
+            })?;
+        file.write_all(canonical_bytes)
+            .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+        file.sync_all()
+            .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+        let read_back =
+            std::fs::read(path).map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+        if read_back != *canonical_bytes {
+            return Err(GuiCoreError::new(
+                "GUI_BALLOT_EXPORT_READBACK_FAILED",
+                GuiErrorCategory::FileIo,
+                Some("export-ballot"),
+                "ballot package read-back did not match the prepared bytes",
+            ));
+        }
+        let provider = Blake3HashProviderV1;
+        let verifier =
+            build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
+                .map_err(|_| {
+                    GuiCoreError::new(
+                        "GUI_BALLOT_EXPORT_READBACK_FAILED",
+                        GuiErrorCategory::ProofFailure,
+                        Some("export-ballot"),
+                        "ballot package read-back verification failed",
+                    )
+                })?;
+        let package = BallotPackageV1::from_canonical_cbor(
+            &read_back,
+            artifacts.candidates(),
+            artifacts.manifest().approval_limits(),
+        )
+        .map_err(|_| {
+            GuiCoreError::new(
+                "GUI_BALLOT_EXPORT_READBACK_FAILED",
+                GuiErrorCategory::ProofFailure,
+                Some("export-ballot"),
+                "ballot package read-back verification failed",
+            )
+        })?;
+        verify_approval_proof(
+            artifacts.manifest(),
+            package.payload(),
+            package.proof(),
+            &provider,
+            &verifier,
+        )
+        .map_err(|_| {
+            GuiCoreError::new(
+                "GUI_BALLOT_EXPORT_READBACK_FAILED",
+                GuiErrorCategory::ProofFailure,
+                Some("export-ballot"),
+                "ballot package read-back verification failed",
+            )
+        })?;
+        Ok(GuiPreparedBallotExportV1 {
+            canonical_package_bytes: read_back.len(),
+            package_digest_hex: summary.package_digest_hex.clone(),
+        })
     }
 
     #[cfg(test)]
@@ -566,6 +845,8 @@ impl GuiVoterSessionV1 {
                     GuiVoterWorkflowStateV1::SelectionIncomplete
                 } else if self.prepared_ballot.is_preparing() {
                     GuiVoterWorkflowStateV1::PreparingProof
+                } else if matches!(self.prepared_ballot, PreparedBallotStateV1::Ready { .. }) {
+                    GuiVoterWorkflowStateV1::PreparedBallotReady
                 } else if self.can_prepare_ballot(lifecycle_state) {
                     GuiVoterWorkflowStateV1::SelectionReady
                 } else {
@@ -584,7 +865,6 @@ impl GuiVoterSessionV1 {
             && self.selection.is_some()
     }
 
-    #[cfg(test)]
     fn matches_token(
         &self,
         lifecycle_state: ElectionLifecycleStateV1,
@@ -817,7 +1097,10 @@ mod tests {
         ));
 
         assert!(status.selection_loaded);
-        assert_eq!(status.lifecycle_state, ElectionLifecycleStateV1::Frozen.as_str());
+        assert_eq!(
+            status.lifecycle_state,
+            ElectionLifecycleStateV1::Frozen.as_str()
+        );
         assert!(!status.can_prepare_ballot);
     }
 
@@ -832,7 +1115,10 @@ mod tests {
             ElectionLifecycleStateV1::Open,
         ));
 
-        assert_eq!(status.lifecycle_state, ElectionLifecycleStateV1::Open.as_str());
+        assert_eq!(
+            status.lifecycle_state,
+            ElectionLifecycleStateV1::Open.as_str()
+        );
         assert!(status.can_prepare_ballot);
     }
 
@@ -848,7 +1134,10 @@ mod tests {
         ));
 
         assert!(status.selection_loaded);
-        assert_eq!(status.lifecycle_state, ElectionLifecycleStateV1::Closed.as_str());
+        assert_eq!(
+            status.lifecycle_state,
+            ElectionLifecycleStateV1::Closed.as_str()
+        );
         assert!(!status.can_prepare_ballot);
     }
 
@@ -862,10 +1151,17 @@ mod tests {
             ElectionLifecycleStateV1::Finalized,
         ] {
             let mut session = eligible_session(&artifacts);
-            let status = ok(select_candidate_a(&mut session, &artifacts, lifecycle_state));
+            let status = ok(select_candidate_a(
+                &mut session,
+                &artifacts,
+                lifecycle_state,
+            ));
 
             assert_eq!(status.lifecycle_state, lifecycle_state.as_str());
-            assert_ne!(status.lifecycle_state, ElectionLifecycleStateV1::Open.as_str());
+            assert_ne!(
+                status.lifecycle_state,
+                ElectionLifecycleStateV1::Open.as_str()
+            );
             assert!(!status.can_prepare_ballot);
         }
     }
@@ -941,7 +1237,9 @@ mod tests {
     fn competing_preparation_operation_rejects_first_token_as_stale() {
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         let mut session = eligible_session(&artifacts);
-        assert!(select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Open).is_ok());
+        assert!(
+            select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Open).is_ok()
+        );
 
         let first = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
         let second = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
@@ -1067,6 +1365,93 @@ mod tests {
             &token,
             "old",
         )));
+    }
+
+    #[test]
+    fn eligible_credential_selection_and_real_proof_prepare_a_verified_package() {
+        let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
+        let mut session = eligible_session(&artifacts);
+        ok(select_candidate_a(
+            &mut session,
+            &artifacts,
+            ElectionLifecycleStateV1::Open,
+        ));
+
+        let prepared = ok(session.prepare_ballot(&artifacts, ElectionLifecycleStateV1::Open));
+        let summary = match prepared.summary {
+            Some(summary) => summary,
+            None => panic!("real proof preparation must return a safe summary"),
+        };
+
+        assert_eq!(prepared.state, "Ready");
+        assert!(prepared.ready_to_export);
+        assert!(summary.locally_verified);
+        assert_eq!(
+            summary.selected_option_ids_hex,
+            vec![hex_id(b"candidate-a")]
+        );
+        assert!(!summary.linkability_hex.is_empty());
+    }
+
+    #[test]
+    fn generated_credential_prepares_exports_and_intakes_once() {
+        let credential = ok(VoterGovernanceCredentialV1::generate());
+        let public_key = ok(credential.public_key_bytes());
+        let registry = registry_from_keys(&[public_key]);
+        let artifacts = artifacts_for_registry(registry, limits(1, 2, false), b"bridge-election");
+        let credential_session = ok(GuiVoterCredentialSessionV1::from_credential(
+            credential,
+            GuiVoterCredentialOriginV1::Generated,
+            artifacts.registry(),
+        ));
+        assert_eq!(
+            credential_session.status().eligibility,
+            GuiVoterEligibilityV1::Eligible
+        );
+
+        let mut voter = GuiVoterSessionV1::new(&artifacts);
+        voter.credential = Some(credential_session);
+        voter.credential_generation = 1;
+        ok(select_candidate_a(
+            &mut voter,
+            &artifacts,
+            ElectionLifecycleStateV1::Open,
+        ));
+        let prepared = ok(voter.prepare_ballot(&artifacts, ElectionLifecycleStateV1::Open));
+        assert!(prepared.ready_to_export);
+
+        let path = std::env::temp_dir().join(format!(
+            "tari-cc-private-ballot-5a10b-{}.cbor",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let exported =
+            ok(voter.export_prepared_ballot(&artifacts, ElectionLifecycleStateV1::Open, &path));
+        let bytes = ok(std::fs::read(&path));
+        assert_eq!(bytes.len(), exported.canonical_package_bytes);
+        assert!(
+            BallotPackageV1::from_canonical_cbor(
+                &bytes,
+                artifacts.candidates(),
+                artifacts.manifest().approval_limits(),
+            )
+            .is_ok()
+        );
+
+        let mut organizer = ok(crate::session::GuiElectionSessionV1::new(artifacts.clone()));
+        ok(organizer.open());
+        assert!(ok(organizer.intake_ballot(&bytes)).accepted);
+        let duplicate = ok(organizer.intake_ballot(&bytes));
+        assert!(!duplicate.accepted);
+        assert_eq!(duplicate.code, "DUPLICATE_NULLIFIER");
+
+        let mut altered = bytes.clone();
+        let last = altered.len().saturating_sub(1);
+        altered[last] ^= 0x01;
+        let mut mutated_organizer = ok(crate::session::GuiElectionSessionV1::new(artifacts));
+        ok(mutated_organizer.open());
+        assert!(!ok(mutated_organizer.intake_ballot(&altered)).accepted);
+        ok(std::fs::remove_file(path));
     }
 
     #[test]
@@ -1204,6 +1589,31 @@ mod tests {
         ))
     }
 
+    fn artifacts_for_registry(
+        registry: RegistrySnapshot,
+        approval_limits: ApprovalLimits,
+        election_id: &[u8],
+    ) -> GuiElectionArtifactsV1 {
+        let provider = Blake3HashProviderV1;
+        let candidates = candidates();
+        let manifest = ok(ElectionManifestV1::new(ElectionManifestV1Input {
+            protocol_version: PROTOCOL_VERSION_V1,
+            election_id: ok(ElectionId::new(election_id.to_vec())),
+            ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+            ballot_confidentiality: BallotConfidentialityV1::Public,
+            registry_commitment: ok(registry.canonical_commitment(&provider)),
+            candidate_set_commitment: ok(candidates.canonical_commitment(&provider)),
+            proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+            approval_limits,
+            governance_source_revision: "voter-session-test".to_owned(),
+        }));
+        ok(GuiElectionArtifactsV1::from_bytes(
+            &ok(manifest.to_canonical_cbor()),
+            &ok(registry.to_canonical_cbor()),
+            &ok(candidates.to_canonical_cbor()),
+        ))
+    }
+
     fn candidates() -> CandidateSet {
         let defs = vec![
             ok(CandidateDefinition::new(
@@ -1232,6 +1642,17 @@ mod tests {
         let mut writer = tari_cc_private_ballot_protocol::CanonicalCborWriter::new();
         assert!(writer.write_array_len(keys.len()).is_ok());
         for key in keys {
+            assert!(writer.write_byte_string(&key).is_ok());
+        }
+        ok(RegistrySnapshot::from_canonical_cbor(&writer.into_bytes()))
+    }
+
+    fn registry_from_keys(keys: &[[u8; 32]]) -> RegistrySnapshot {
+        let mut sorted = keys.to_vec();
+        sorted.sort_unstable();
+        let mut writer = tari_cc_private_ballot_protocol::CanonicalCborWriter::new();
+        assert!(writer.write_array_len(sorted.len()).is_ok());
+        for key in sorted {
             assert!(writer.write_byte_string(&key).is_ok());
         }
         ok(RegistrySnapshot::from_canonical_cbor(&writer.into_bytes()))

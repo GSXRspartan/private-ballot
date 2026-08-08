@@ -8,7 +8,7 @@
  * resolves to `null` and screens render their neutral states.
  */
 
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 import { isDesktopShell } from "./client";
 
@@ -46,6 +46,17 @@ export async function pickDirectory(title: string): Promise<string | null> {
   });
   if (Array.isArray(selected)) return selected[0] ?? null;
   return selected ?? null;
+}
+
+/** Opens the native save dialog for a new canonical ballot package. Rust,
+ * not JavaScript, writes and verifies the selected file. */
+export async function pickBallotPackagePath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  return await save({
+    title: "Export canonical ballot package",
+    defaultPath: "ballot-package.cbor",
+    filters: [{ name: "Canonical ballot package", extensions: ["cbor"] }],
+  });
 }
 
 /**

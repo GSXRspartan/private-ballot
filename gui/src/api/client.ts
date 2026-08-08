@@ -26,6 +26,8 @@ import type {
   GuiGovernanceDocumentDigestV1,
   GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
+  GuiPreparedBallotExportV1,
+  GuiPreparedBallotStatusV1,
   GuiTallySummaryV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
@@ -185,6 +187,9 @@ export const api = {
     }),
   clearVoterBallotSelection: () =>
     call<GuiVoterSelectionStatusV1>("clear_voter_ballot_selection"),
+  prepareVoterBallot: () => call<GuiPreparedBallotStatusV1>("prepare_voter_ballot"),
+  exportPreparedVoterBallot: (packagePath: string) =>
+    call<GuiPreparedBallotExportV1>("export_prepared_voter_ballot", { packagePath }),
   resetVoterWorkflow: () => call<GuiVoterWorkflowStatusV1>("reset_voter_workflow"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,

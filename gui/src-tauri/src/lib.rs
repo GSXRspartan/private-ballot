@@ -24,8 +24,9 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1,
-    GuiTallySummaryV1, GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1,
-    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
+    GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiTallySummaryV1,
+    GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
+    GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
     inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
     verify_archive_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
 };
@@ -802,6 +803,58 @@ fn clear_voter_ballot_selection(
     Ok(voter.clear_selection(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
+/// Generates a real local Triptych proof and canonical ballot package while
+/// holding the Rust voter-session mutex. The result contains safe metadata
+/// only; neither proof bytes nor credential material cross to TypeScript.
+#[tauri::command]
+fn prepare_voter_ballot(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.prepare_ballot(session.artifacts(), session.lifecycle_state_v1())?)
+}
+
+/// Writes a prepared canonical ballot package to the user-selected new path.
+/// Rust performs the no-overwrite write and full read-back verification.
+#[tauri::command]
+fn export_prepared_voter_ballot(
+    package_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPreparedBallotExportV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_ref() else {
+        return Err(CommandError::no_voter_session());
+    };
+    Ok(voter.export_prepared_ballot(
+        session.artifacts(),
+        session.lifecycle_state_v1(),
+        Path::new(&package_path),
+    )?)
+}
+
 /// Resets the whole voter workflow for the current election.
 #[tauri::command]
 fn reset_voter_workflow(
@@ -905,6 +958,8 @@ pub fn run() {
             voter_ballot_selection_status,
             set_voter_ballot_selection,
             clear_voter_ballot_selection,
+            prepare_voter_ballot,
+            export_prepared_voter_ballot,
             reset_voter_workflow,
             write_archive_with_governance_document,
         ])

@@ -206,6 +206,12 @@ impl GuiVoterCredentialSessionV1 {
         self.eligibility = eligibility_for_public_key(registry, &self.public_key);
     }
 
+    /// Borrows the Rust-owned credential for in-process proof construction.
+    /// This stays crate-private so no caller can export the secret scalar.
+    pub(crate) const fn credential(&self) -> &VoterGovernanceCredentialV1 {
+        &self.credential
+    }
+
     /// Returns public status only.
     #[must_use]
     pub fn status(&self) -> GuiVoterCredentialStatusV1 {
@@ -223,6 +229,13 @@ impl GuiVoterCredentialSessionV1 {
             wallet_key_warning: GOVERNANCE_KEY_WARNING,
             enrollment_notice: GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
         }
+    }
+}
+
+impl VoterGovernanceCredentialV1 {
+    /// Borrows the underlying secret only for gui-core's proof operation.
+    pub(crate) const fn secret_key(&self) -> &TariTriptychSecretKeyV1 {
+        &self.secret_key
     }
 }
 

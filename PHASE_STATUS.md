@@ -116,6 +116,14 @@
 > operation tests, added narrow frontend request-generation hardening, and
 > documented 5A10B secret ownership and ready-after-close policy decisions. No
 > commit was created.
+> Phase 5 Slice 5A10B now adds local real Triptych proof preparation, canonical
+> ballot packaging, independent self-verification, Rust-only prepared bytes,
+> and no-overwrite export with read-back verification. The Vote UI exposes only
+> safe prepared metadata and explicitly reports local export rather than vote
+> submission. No canonical format, vendored Triptych code, or network path was
+> changed. Focused gui-core check and frontend build passed; the focused test
+> binary timed out during compilation, so this slice remains CONDITIONAL READY
+> pending the wider offline test and performance matrix. No commit was created.
 
 ## Phase 2 assessment
 

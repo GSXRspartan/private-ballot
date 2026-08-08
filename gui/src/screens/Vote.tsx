@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickGovernanceDocument } from "../api/dialog";
+import { pickBallotPackagePath, pickGovernanceDocument } from "../api/dialog";
 import type {
   GuiCommandError,
   GuiGovernanceDocumentDigestV1,
@@ -45,7 +45,6 @@ import {
   LifecyclePill,
   Notice,
   Pill,
-  Placeholder,
 } from "../components/ui";
 
 /**
@@ -73,6 +72,7 @@ export function Vote() {
   const [selectionStage, setSelectionStage] = useState(false);
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [exported, setExported] = useState(false);
   const selectionDraftIdsRef = useRef<string[]>([]);
   const selectionRequestGenerationRef = useRef(0);
 
@@ -89,6 +89,7 @@ export function Vote() {
     setConfirmed(false);
     setCredentialStage(false);
     setSelectionStage(false);
+    setExported(false);
   }, [election]);
 
   function captureError(err: unknown) {
@@ -253,6 +254,45 @@ export function Vote() {
     await setBackendSelection([], checked);
   }
 
+  async function onGenerateProof() {
+    if (!shellAvailable) return;
+    setBusy(true);
+    setError(null);
+    setExported(false);
+    try {
+      const prepared = await api.prepareVoterBallot();
+      await refreshWorkflow(true);
+      if (prepared.state !== "Ready") {
+        setError({
+          code: "GUI_PROOF_VERIFICATION_FAILED",
+          category: "PROOF_FAILURE",
+          context: "prepare-ballot",
+          message: "the ballot package was not prepared",
+        });
+      }
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onExportBallot() {
+    const path = await pickBallotPackagePath();
+    if (!path) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.exportPreparedVoterBallot(path);
+      setExported(true);
+      await refreshWorkflow(true);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const docStatus = confirmation?.governance_document_status ?? null;
   const matchTone = documentMatchTone(docStatus?.status);
   const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
@@ -266,7 +306,7 @@ export function Vote() {
       <p className="screen-lede">
         Review the cryptographically bound election details before voting. This is the confirmation
         boundary before the session-only governance credential and eligibility check. Proof
-        construction, ballot packaging, and vote submission are still deferred.
+        construction and package export remain local; this screen never submits a vote.
       </p>
 
       {!election && (
@@ -611,10 +651,55 @@ export function Vote() {
                         </span>
                       </Field>
                     </div>
-                    <Placeholder>
-                      {workflow?.preparation_notice ??
-                        "Privacy proof generation will be enabled after this voter session has been validated."}
-                    </Placeholder>
+                    {busy && <Notice tone="info">Generating privacy proof…</Notice>}
+                    <div className="action-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={
+                          busy ||
+                          !workflow?.can_prepare_ballot ||
+                          workflow?.prepared_ballot.state === "Ready"
+                        }
+                        onClick={() => void onGenerateProof()}
+                      >
+                        Generate privacy proof
+                      </button>
+                    </div>
+                    {workflow?.prepared_ballot.summary && (
+                      <>
+                        <Card title="Review prepared ballot">
+                          <div className="field-list">
+                            <Field label="Selected options">
+                              <span className="field-value">
+                                {workflow.prepared_ballot.summary.selected_display_labels.join(", ") || "Abstention"}
+                              </span>
+                            </Field>
+                            <Field label="Package digest">
+                              <HashValue value={workflow.prepared_ballot.summary.package_digest_hex} />
+                            </Field>
+                            <Field label="Local verification">
+                              <Pill tone="ok">Verified</Pill>
+                            </Field>
+                          </div>
+                          <div className="action-row">
+                            <button
+                              type="button"
+                              className="btn btn-primary"
+                              disabled={busy || !workflow.prepared_ballot.ready_to_export}
+                              onClick={() => void onExportBallot()}
+                            >
+                              Export ballot package
+                            </button>
+                          </div>
+                        </Card>
+                        {exported && (
+                          <Notice tone="ok">
+                            Ballot package exported. Deliver this canonical ballot package through the approved election intake process.
+                          </Notice>
+                        )}
+                      </>
+                    )}
                   </Card>
                 </>
               )}

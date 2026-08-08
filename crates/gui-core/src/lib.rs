@@ -94,7 +94,8 @@ pub use voter_credential::{
     GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
 };
 pub use voter_session::{
-    GuiPreparedBallotStatusV1, GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1,
-    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStateV1,
-    GuiVoterWorkflowStatusV1, PROOF_GENERATION_DEFERRED_NOTICE, voter_selectable_options,
+    GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiPreparedBallotSummaryV1,
+    GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1, GuiVoterSelectionStatusV1,
+    GuiVoterSessionV1, GuiVoterWorkflowStateV1, GuiVoterWorkflowStatusV1,
+    PROOF_GENERATION_DEFERRED_NOTICE, voter_selectable_options,
 };

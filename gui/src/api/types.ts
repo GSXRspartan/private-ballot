@@ -491,7 +491,27 @@ export interface GuiPreparedBallotStatusV1 {
   state: string;
   operation_id: number | null;
   ready_to_export: boolean;
+  summary: GuiPreparedBallotSummaryV1 | null;
   message: string;
+}
+
+export interface GuiPreparedBallotSummaryV1 {
+  election_id_hex: string;
+  manifest_hash_hex: string;
+  selected_option_ids_hex: string[];
+  selected_display_labels: string[];
+  abstaining: boolean;
+  proof_suite_id: string;
+  linkability_hex: string;
+  canonical_package_bytes: number;
+  package_digest_hex: string;
+  locally_verified: boolean;
+  ready_to_export: boolean;
+}
+
+export interface GuiPreparedBallotExportV1 {
+  canonical_package_bytes: number;
+  package_digest_hex: string;
 }
 
 export interface GuiVoterWorkflowStatusV1 {
