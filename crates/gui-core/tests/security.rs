@@ -33,17 +33,18 @@ fn collect_source() -> String {
 #[test]
 fn gui_core_sources_contain_no_secret_bearing_api() {
     let sources = collect_source();
-    // Code-level identifiers of secret-bearing APIs. Prose words such as
-    // "mnemonic" legitimately appear in documentation comments that state
-    // the boundary, so only API identifiers are scanned.
+    // Slice 5A9 intentionally introduces one Rust-only governance credential
+    // holder. This scan still bans wallet, persistence, and broad secret-store
+    // APIs in gui-core.
     for forbidden in [
-        "TariTriptychSecretKeyV1",
         "WalletdAuthSecret",
         "with_walletd_auth",
         "seed_phrase",
         "private_key",
         "secret_scalar",
         "RistrettoSecretKey",
+        "import_voter_governance_credential",
+        "export_voter_governance_credential",
     ] {
         assert!(
             !sources.contains(forbidden),

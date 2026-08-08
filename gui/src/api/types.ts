@@ -418,3 +418,32 @@ export interface GuiVoterElectionConfirmationV1 {
   next_stage_placeholder: string;
   no_proposal_question_notice: string;
 }
+
+// ---------------------------------------------------------------------------
+// Slice 5A9: voter governance credential boundary.
+//
+// These are public status DTOs only. There is intentionally no field for a
+// private scalar, credential bytes, seed, mnemonic, wallet key, proof,
+// nullifier, ballot package, or registry index.
+// ---------------------------------------------------------------------------
+
+export type GuiVoterCredentialOriginV1 = "Generated";
+
+export type GuiVoterEligibilityV1 =
+  | "NotChecked"
+  | "Eligible"
+  | "NotEligible";
+
+export interface GuiVoterCredentialStatusV1 {
+  credential_loaded: boolean;
+  credential_origin: GuiVoterCredentialOriginV1 | null;
+  public_governance_key_hex: string | null;
+  public_governance_key_abbrev: string | null;
+  eligibility: GuiVoterEligibilityV1;
+  eligibility_label: string;
+  can_continue: boolean;
+  session_only: boolean;
+  session_notice: string;
+  wallet_key_warning: string;
+  enrollment_notice: string;
+}

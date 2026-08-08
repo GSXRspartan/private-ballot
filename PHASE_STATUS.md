@@ -79,6 +79,22 @@
 > FOLLOW-UPS); the one MEDIUM finding (M1) and LOW/INFO follow-ups are resolved
 > by the final hardening pass. READY TO COMMIT. No commit was created; all
 > changes are staged only.
+> Phase 5 Slice 5A9 added the first Rust-side voter governance credential
+> boundary: session-only generation from the existing Triptych scalar primitive
+> using `rand_core::OsRng`, public-key derivation as compressed Ristretto
+> basepoint multiplication, exact frozen-registry eligibility matching, a
+> Rust-managed Tauri credential slot cleared on election replacement/unload and
+> explicit reset, and a Vote-screen credential/eligibility stage after the 5A8
+> confirmation boundary. No private credential bytes cross into TypeScript; the
+> DTO carries only public metadata and no registry index. No reviewed private
+> credential persistence/import/export format exists, so import/export remains
+> deferred rather than invented. No Triptych proof, nullifier, ballot package,
+> vote submission, walletd/indexer/network contact, or wallet key reuse was
+> added. See
+> `docs/reviews/PHASE5_SLICE5A9_VOTER_CREDENTIAL_BOUNDARY_2026-08-08.md`.
+> Slice 5A9 is documented as CONDITIONAL READY: focused Rust/frontend checks
+> passed, the Tauri release executable built, and MSI bundling failed at WiX
+> `light.exe` without a captured detailed diagnostic. No commit was created.
 
 ## Phase 2 assessment
 

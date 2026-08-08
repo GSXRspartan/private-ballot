@@ -24,13 +24,14 @@
 //!
 //! # What this crate never does
 //!
-//! It holds no voter secret key, no walletd auth secret, no wallet seed, no
-//! mnemonic, and no signing material, and its view models contain no
-//! secret-bearing fields. It performs no network, walletd, or indexer I/O. It
-//! introduces no new canonical format, no new hash provider, no container or
-//! bundle format, no credential persistence, and no async runtime. The
-//! offline archive remains authoritative; Ootle anchoring remains optional
-//! and non-binding.
+//! It holds no walletd auth secret, wallet seed, mnemonic, or wallet signing
+//! material, and its view models contain no secret-bearing fields. Slice 5A9
+//! adds a narrow Rust-only, session-only voter governance credential holder;
+//! the private scalar is never serialized or returned to TypeScript. It
+//! performs no network, walletd, or indexer I/O. It introduces no new
+//! canonical format, no new hash provider, no container or bundle format, no
+//! credential persistence, and no async runtime. The offline archive remains
+//! authoritative; Ootle anchoring remains optional and non-binding.
 
 pub mod archive_verify;
 pub mod archive_writer;
@@ -46,6 +47,7 @@ pub mod session;
 pub mod summary;
 pub mod tally;
 pub mod voter_confirmation;
+pub mod voter_credential;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, verify_archive_directory_v1,
@@ -62,10 +64,10 @@ pub use creation::{
 pub use error::{GuiCoreError, GuiErrorCategory};
 pub use governance::{
     GOVERNANCE_DOCUMENT_ARCHIVE_PATH, GOVERNANCE_PIN_PREFIX_BLAKE3, GOVERNANCE_PIN_PREFIX_GIT,
-    GuiGovernanceArchivePinFactV1, MAX_GOVERNANCE_DOCUMENT_BYTES,
+    GuiGovernanceArchivePinFactV1, GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1,
+    GuiGovernanceMatchStatusV1, GuiGovernanceSourcePinV1, MAX_GOVERNANCE_DOCUMENT_BYTES,
     compute_governance_document_digest, content_digest_pin_for_bytes, match_governance_document,
-    read_governance_document, validate_governance_source_pin, GuiGovernanceDocumentDigestV1,
-    GuiGovernanceDocumentStatusV1, GuiGovernanceMatchStatusV1, GuiGovernanceSourcePinV1,
+    read_governance_document, validate_governance_source_pin,
 };
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
@@ -81,6 +83,11 @@ pub use session::GuiElectionSessionV1;
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use voter_confirmation::{
-    build_voter_election_confirmation, GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1,
-    GuiVoterElectionConfirmationV1, VOTER_NEXT_STAGE_PLACEHOLDER,
+    GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,
+    VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,
+};
+pub use voter_credential::{
+    GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE, GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
+    GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
+    GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
 };

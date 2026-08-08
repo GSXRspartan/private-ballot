@@ -5,6 +5,7 @@ import { pickGovernanceDocument } from "../api/dialog";
 import type {
   GuiCommandError,
   GuiGovernanceDocumentDigestV1,
+  GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
 } from "../api/types";
 import {
@@ -18,6 +19,13 @@ import {
   formatByteSize,
   isCryptographicallyMatched,
 } from "../governance";
+import {
+  canProceedAfterCredential,
+  credentialEligibilityTone,
+  credentialStatusText,
+  publicKeyDisplay,
+  WALLET_SEED_WARNING,
+} from "../voterCredential";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -47,7 +55,9 @@ export function Vote() {
   const { election, shellAvailable } = useAppState();
   const [confirmation, setConfirmation] = useState<GuiVoterElectionConfirmationV1 | null>(null);
   const [govDocDigest, setGovDocDigest] = useState<GuiGovernanceDocumentDigestV1 | null>(null);
+  const [credential, setCredential] = useState<GuiVoterCredentialStatusV1 | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [credentialStage, setCredentialStage] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
@@ -55,7 +65,9 @@ export function Vote() {
   useEffect(() => {
     setConfirmation(null);
     setGovDocDigest(null);
+    setCredential(null);
     setConfirmed(false);
+    setCredentialStage(false);
     setAdvanced(false);
   }, [election]);
 
@@ -112,16 +124,51 @@ export function Vote() {
     await loadConfirmation(null);
   }
 
+  async function onGenerateCredential() {
+    if (!election || !shellAvailable) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const status = await api.generateVoterGovernanceCredential();
+      setCredential(status);
+      setAdvanced(false);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onResetCredential() {
+    if (!shellAvailable) {
+      setCredential(null);
+      setAdvanced(false);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const status = await api.resetVoterGovernanceCredential();
+      setCredential(status);
+      setAdvanced(false);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const docStatus = confirmation?.governance_document_status ?? null;
   const matchTone = documentMatchTone(docStatus?.status);
+  const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
 
   return (
     <>
       <h1 className="screen-header">Vote</h1>
       <p className="screen-lede">
         Review the cryptographically bound election details before voting. This is the confirmation
-        boundary: credential import and proof construction are not yet enabled and are never
-        simulated. Voter key generation is a separately reviewed change.
+        boundary before the session-only governance credential and eligibility check. Proof
+        construction, ballot packaging, and vote submission are still deferred.
       </p>
 
       {!election && (
@@ -295,21 +342,105 @@ export function Vote() {
                 type="button"
                 className="btn btn-primary"
                 disabled={!confirmed || !confirmationContinueAvailable(confirmation) || busy}
-                onClick={() => setAdvanced(true)}
+                onClick={() => setCredentialStage(true)}
               >
                 Continue
               </button>
             </div>
-            {advanced && (
-              <Placeholder>
-                {confirmation.next_stage_placeholder}
-              </Placeholder>
-            )}
             <p className="form-hint">
-              Continuing does not start credential handling or proof generation, and does not
-              accept a ballot selection.
+              Continuing does not generate a proof, create a nullifier, accept a ballot selection,
+              or submit a vote.
             </p>
           </Card>
+
+          {credentialStage && (
+            <>
+              <Card title="Governance credential">
+                <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
+                <div className="field-list">
+                  <Field label="Credential">
+                    <span className="field-value">{credentialStatusText(credential)}</span>
+                  </Field>
+                  <Field label="Storage">
+                    <span className="field-value">
+                      {credential?.session_notice ??
+                        "Governance credentials are session-only in this build."}
+                    </span>
+                  </Field>
+                  <Field label="Import / export">
+                    <span className="field-value">
+                      Deferred until a reviewed private credential format exists.
+                    </span>
+                  </Field>
+                </div>
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={onGenerateCredential}
+                    disabled={busy}
+                  >
+                    Generate new credential
+                  </button>
+                  {credential?.credential_loaded && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={onResetCredential}
+                      disabled={busy}
+                    >
+                      Clear credential
+                    </button>
+                  )}
+                </div>
+                <p className="form-hint">
+                  {credential?.enrollment_notice ??
+                    "A generated public governance key must be enrolled before the election is frozen."}
+                </p>
+              </Card>
+
+              <Card title="Eligibility">
+                <div className="field-list">
+                  <Field label="Public governance key">
+                    {credential?.public_governance_key_hex ? (
+                      <>
+                        <span className="field-value">{publicKeyDisplay(credential)}</span>
+                        <CopyButton value={credential.public_governance_key_hex} />
+                      </>
+                    ) : (
+                      <span className="field-value">Not loaded</span>
+                    )}
+                  </Field>
+                  <Field label="Registry status">
+                    <Pill tone={eligibilityTone}>
+                      {credential?.eligibility_label ?? "No credential loaded"}
+                    </Pill>
+                  </Field>
+                </div>
+                {credential?.eligibility === "NotEligible" && (
+                  <Notice tone="warn">
+                    This public governance key is not in the frozen voter registry.
+                  </Notice>
+                )}
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!canProceedAfterCredential(credential) || busy}
+                    onClick={() => setAdvanced(true)}
+                  >
+                    Continue
+                  </button>
+                </div>
+                {advanced && (
+                  <Placeholder>
+                    Ballot selection, Triptych proof generation, ballot export, and confirmation
+                    are deferred to later reviewed slices.
+                  </Placeholder>
+                )}
+              </Card>
+            </>
+          )}
         </>
       )}
 

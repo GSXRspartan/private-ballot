@@ -10,16 +10,16 @@
 
 use core::fmt;
 
-use curve25519_dalek_v4::scalar::Scalar;
+use curve25519_dalek_v4::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
 use rand_core::OsRng;
 use tari_cc_private_ballot_protocol::{ProofStatementV1, ProtocolError, ValidationCode};
 use triptych::{TriptychProof, TriptychWitness};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    RISTRETTO_COMPRESSED_POINT_BYTES, TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychProofEnvelopeV1,
-    TariTriptychPrototypeVerifierV1, triptych_prototype::build_triptych_statement_v1,
-    triptych_verifier::triptych_transcript_v1,
+    RISTRETTO_COMPRESSED_POINT_BYTES, RistrettoPublicKeyV1, TARI_TRIPTYCH_PROOF_SUITE_ID_V1,
+    TariTriptychProofEnvelopeV1, TariTriptychPrototypeVerifierV1,
+    triptych_prototype::build_triptych_statement_v1, triptych_verifier::triptych_transcript_v1,
 };
 
 /// Canonical nonzero Triptych signing scalar for prototype proof construction.
@@ -32,6 +32,21 @@ pub struct TariTriptychSecretKeyV1 {
 }
 
 impl TariTriptychSecretKeyV1 {
+    /// Generates one nonzero Triptych signing scalar with operating-system
+    /// randomness.
+    ///
+    /// This is credential/key generation only. It does not construct a proof,
+    /// linking tag, nullifier, or ballot package.
+    pub fn generate_os_rng() -> Result<Self, ProtocolError> {
+        loop {
+            let scalar = Scalar::random(&mut OsRng);
+            if scalar == Scalar::ZERO {
+                continue;
+            }
+            return Self::from_canonical_bytes(scalar.to_bytes());
+        }
+    }
+
     /// Parses one canonical, nonzero scalar encoding.
     pub fn from_canonical_bytes(
         bytes: [u8; RISTRETTO_COMPRESSED_POINT_BYTES],
@@ -47,6 +62,14 @@ impl TariTriptychSecretKeyV1 {
         }
 
         Ok(Self { bytes })
+    }
+
+    /// Derives the canonical governance public key corresponding to this
+    /// secret scalar.
+    pub fn governance_public_key(&self) -> Result<RistrettoPublicKeyV1, ProtocolError> {
+        let scalar = self.scalar()?;
+        let encoded = (RISTRETTO_BASEPOINT_POINT * *scalar).compress().to_bytes();
+        RistrettoPublicKeyV1::from_bytes(&encoded)
     }
 
     fn scalar(&self) -> Result<Zeroizing<Scalar>, ProtocolError> {
@@ -273,6 +296,37 @@ mod tests {
             TariTriptychSecretKeyV1::from_canonical_bytes([0_u8; 32]),
             Err(error) if error.code() == ValidationCode::InvalidData
         ));
+    }
+
+    #[test]
+    fn generation_produces_valid_distinct_public_keys() {
+        let Ok(first) = TariTriptychSecretKeyV1::generate_os_rng() else {
+            panic!("OS RNG generation must succeed");
+        };
+        let Ok(second) = TariTriptychSecretKeyV1::generate_os_rng() else {
+            panic!("OS RNG generation must succeed");
+        };
+        let Ok(first_public) = first.governance_public_key() else {
+            panic!("generated secret must derive a public key");
+        };
+        let Ok(second_public) = second.governance_public_key() else {
+            panic!("generated secret must derive a public key");
+        };
+
+        assert_ne!(first_public, second_public);
+    }
+
+    #[test]
+    fn public_key_derivation_matches_triptych_verification_key() {
+        let secret_key = secret_key();
+        let Ok(public_key) = secret_key.governance_public_key() else {
+            panic!("secret must derive public key");
+        };
+        let expected = (RISTRETTO_BASEPOINT_POINT * Scalar::from(SECRET_SCALAR))
+            .compress()
+            .to_bytes();
+
+        assert_eq!(public_key.as_bytes(), &expected);
     }
 
     #[test]

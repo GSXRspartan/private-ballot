@@ -32,6 +32,14 @@ import {
   resultsAreSealed,
   resultVisibilityLabel,
 } from "../src/lifecycle.ts";
+import {
+  canProceedAfterCredential,
+  credentialEligibilityTone,
+  credentialStatusText,
+  noSecretFieldNames,
+  publicKeyDisplay,
+  WALLET_SEED_WARNING,
+} from "../src/voterCredential.ts";
 
 const sampleSummary = {
   election_id_hex: "ab",
@@ -481,5 +489,49 @@ describe("creation: uncastable approval config", () => {
 describe("creation: quorum statement", () => {
   it("states no quorum field exists", () => {
     assert.match(NO_QUORUM_STATEMENT, /No quorum rule/i);
+  });
+});
+
+describe("voter credential helpers", () => {
+  const eligible = {
+    credential_loaded: true,
+    credential_origin: "Generated" as const,
+    public_governance_key_hex: `${KEY64}${KEY64}`,
+    public_governance_key_abbrev: "6a493210...3e86f2",
+    eligibility: "Eligible" as const,
+    eligibility_label: "Eligible",
+    can_continue: true,
+    session_only: true,
+    session_notice: "Session only",
+    wallet_key_warning: WALLET_SEED_WARNING,
+    enrollment_notice: "Enroll before freeze",
+  };
+
+  it("gates the next stage on eligible backend status", () => {
+    assert.equal(canProceedAfterCredential(eligible), true);
+    assert.equal(
+      canProceedAfterCredential({ ...eligible, eligibility: "NotEligible", can_continue: false }),
+      false,
+    );
+    assert.equal(canProceedAfterCredential(null), false);
+  });
+
+  it("maps status text and key abbreviation", () => {
+    assert.equal(credentialStatusText(eligible), "Loaded");
+    assert.equal(publicKeyDisplay(eligible), "6a493210...3e86f2");
+    assert.equal(credentialStatusText(null), "Not loaded");
+    assert.equal(publicKeyDisplay(null), "Not loaded");
+  });
+
+  it("maps eligibility tone", () => {
+    assert.equal(credentialEligibilityTone("Eligible"), "ok");
+    assert.equal(credentialEligibilityTone("NotEligible"), "warn");
+    assert.equal(credentialEligibilityTone("NotChecked"), "neutral");
+  });
+
+  it("keeps api field names free of secret-bearing material", () => {
+    assert.equal(noSecretFieldNames(Object.keys(eligible)), true);
+    assert.equal(noSecretFieldNames(["secret_scalar"]), false);
+    assert.match(WALLET_SEED_WARNING, /Never enter a wallet seed phrase/);
   });
 });

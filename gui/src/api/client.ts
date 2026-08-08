@@ -27,6 +27,7 @@ import type {
   GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
   GuiTallySummaryV1,
+  GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   PresentationIdentifier,
   ShellInfoV1,
@@ -165,6 +166,12 @@ export const api = {
     }),
   voterConfirmation: (governanceDocumentPath: string | null) =>
     call<GuiVoterElectionConfirmationV1>("voter_confirmation", { governanceDocumentPath }),
+  voterGovernanceCredentialStatus: () =>
+    call<GuiVoterCredentialStatusV1>("voter_governance_credential_status"),
+  generateVoterGovernanceCredential: () =>
+    call<GuiVoterCredentialStatusV1>("generate_voter_governance_credential"),
+  resetVoterGovernanceCredential: () =>
+    call<GuiVoterCredentialStatusV1>("reset_voter_governance_credential"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,
     governanceDocumentPath: string | null,
