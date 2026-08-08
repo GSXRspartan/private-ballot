@@ -19,7 +19,19 @@ import {
   presentationFor,
   BALLOT_PRESENTATIONS,
 } from "../src/ballot/ballotTypes.ts";
-import { canShowTally, resultsAreSealed } from "../src/lifecycle.ts";
+import {
+  approvalBps,
+  approvalLabel,
+  canShowTally,
+  coarseBucketLabel,
+  formatPercent,
+  isMultiApprovalBallot,
+  participationAccessibleText,
+  participationIsDisclosed,
+  participationVisibilityLabel,
+  resultsAreSealed,
+  resultVisibilityLabel,
+} from "../src/lifecycle.ts";
 
 const sampleSummary = {
   election_id_hex: "ab",
@@ -155,5 +167,180 @@ describe("lifecycle tally gate", () => {
     assert.equal(canShowTally(undefined), false);
     assert.equal(canShowTally("UNKNOWN"), false);
     assert.equal(resultsAreSealed(null), true);
+  });
+});
+
+describe("participation percentage formatting", () => {
+  it("formats basis points as a one-decimal percentage (truncated)", () => {
+    assert.equal(formatPercent(6520), "65.2%");
+    assert.equal(formatPercent(3333), "33.3%");
+  });
+
+  it("formats whole percentages without a decimal", () => {
+    assert.equal(formatPercent(0), "0%");
+    assert.equal(formatPercent(5000), "50%");
+    assert.equal(formatPercent(10000), "100%");
+  });
+
+  it("treats null and undefined as 0%", () => {
+    assert.equal(formatPercent(null), "0%");
+    assert.equal(formatPercent(undefined), "0%");
+  });
+
+  it("clamps and truncates out-of-range values", () => {
+    assert.equal(formatPercent(-1), "0%");
+    assert.equal(formatPercent(99999), "100%");
+    assert.equal(formatPercent(6520.9), "65.2%");
+  });
+});
+
+describe("coarse participation buckets", () => {
+  it("maps each bucket to a stable display label", () => {
+    assert.equal(coarseBucketLabel("ZeroToTwentyFour"), "0–24%");
+    assert.equal(coarseBucketLabel("TwentyFiveToFortyNine"), "25–49%");
+    assert.equal(coarseBucketLabel("FiftyToSeventyFour"), "50–74%");
+    assert.equal(coarseBucketLabel("SeventyFiveToNinetyNine"), "75–99%");
+    assert.equal(coarseBucketLabel("OneHundred"), "100%");
+  });
+
+  it("renders an em dash for null/unknown buckets", () => {
+    assert.equal(coarseBucketLabel(null), "—");
+    assert.equal(coarseBucketLabel(undefined), "—");
+  });
+});
+
+describe("participation sealed presentation", () => {
+  const sealedSummary = {
+    lifecycle_state: "OPEN",
+    participation_visibility: "SEALED_UNTIL_CLOSE" as const,
+    result_visibility: "SEALED" as const,
+    eligible_voters: 250,
+    accepted_ballots: null,
+    participation_basis_points: null,
+    remaining_eligible_capacity: null,
+    coarse_bucket: null,
+    small_electorate: false,
+  };
+
+  it("is not disclosed while sealed", () => {
+    assert.equal(participationIsDisclosed(sealedSummary), false);
+  });
+
+  it("produces a sealed accessible text without leaking counts", () => {
+    const text = participationAccessibleText(sealedSummary);
+    assert.match(text, /sealed until voting closes/);
+    assert.doesNotMatch(text, /\d+ of \d+ eligible voters/);
+  });
+
+  it("labels the visibility policy", () => {
+    assert.equal(
+      participationVisibilityLabel("SEALED_UNTIL_CLOSE"),
+      "Sealed until close",
+    );
+    assert.equal(participationVisibilityLabel("LIVE"), "Live");
+    assert.equal(participationVisibilityLabel("COARSE"), "Coarse");
+  });
+
+  it("labels the result visibility", () => {
+    assert.equal(resultVisibilityLabel("SEALED"), "Sealed");
+    assert.equal(resultVisibilityLabel("DISCLOSED"), "Disclosed");
+  });
+});
+
+describe("participation disclosed presentation", () => {
+  const disclosedSummary = {
+    lifecycle_state: "CLOSED",
+    participation_visibility: "LIVE" as const,
+    result_visibility: "DISCLOSED" as const,
+    eligible_voters: 250,
+    accepted_ballots: 163,
+    participation_basis_points: 6520,
+    remaining_eligible_capacity: 87,
+    coarse_bucket: null,
+    small_electorate: false,
+  };
+
+  it("is disclosed after close", () => {
+    assert.equal(participationIsDisclosed(disclosedSummary), true);
+  });
+
+  it("produces an accessible text with exact counts", () => {
+    const text = participationAccessibleText(disclosedSummary);
+    assert.match(text, /Participation 65\.2%, 163 of 250 eligible voters/);
+  });
+});
+
+describe("coarse participation presentation", () => {
+  const coarseSummary = {
+    lifecycle_state: "OPEN",
+    participation_visibility: "COARSE" as const,
+    result_visibility: "SEALED" as const,
+    eligible_voters: 250,
+    accepted_ballots: null,
+    participation_basis_points: null,
+    remaining_eligible_capacity: null,
+    coarse_bucket: "TwentyFiveToFortyNine" as const,
+    small_electorate: false,
+  };
+
+  it("is not disclosed under coarse policy (exact counts hidden)", () => {
+    assert.equal(participationIsDisclosed(coarseSummary), false);
+  });
+
+  it("produces a bucket-only accessible text without exact counts", () => {
+    const text = participationAccessibleText(coarseSummary);
+    assert.match(text, /Participation band: 25–49%/);
+    assert.doesNotMatch(text, /\d+ of \d+ eligible voters/);
+  });
+});
+
+describe("multi-approval result labeling", () => {
+  it("computes approval basis points of accepted ballots", () => {
+    assert.equal(approvalBps(61, 100), 6100);
+    assert.equal(approvalBps(1, 3), 3333);
+  });
+
+  it("returns 0 when there are no accepted ballots", () => {
+    assert.equal(approvalBps(5, 0), 0);
+  });
+
+  it("saturates at 10000 when approvals reach accepted ballots", () => {
+    assert.equal(approvalBps(100, 100), 10000);
+    assert.equal(approvalBps(101, 100), 10000);
+  });
+
+  it("labels approvals as a share of accepted ballots, not the vote", () => {
+    const label = approvalLabel("option", 61, 100);
+    assert.match(label, /Approved by 61% of accepted ballots/);
+    assert.doesNotMatch(label, /of the vote/);
+  });
+
+  it("classifies v1 approval ballots as multi-approval (no pie assumption)", () => {
+    const tally = {
+      accepted_ballots: 3,
+      abstentions: 0,
+      counts: [
+        { candidate_id_hex: "a", candidate_id_text: null, display_name: "A", approvals: 2 },
+        { candidate_id_hex: "b", candidate_id_text: null, display_name: "B", approvals: 2 },
+      ],
+      leading: { Tie: { candidate_ids_hex: ["a", "b"], approvals: 2 } },
+    };
+    assert.equal(isMultiApprovalBallot(tally), true);
+  });
+
+  it("multi-approval bars may each exceed a single-choice share", () => {
+    // 3 accepted ballots, two options each approved by 2 voters: 66.6% each.
+    // Bars sum to 133.2%, which is correct for multi-approval and would be
+    // misleading in a pie chart.
+    assert.equal(approvalBps(2, 3), 6666);
+    const label = approvalLabel("option", 2, 3);
+    assert.match(label, /66\.6% of accepted ballots/);
+  });
+});
+
+describe("no fake trend state", () => {
+  it("returns null for a null participation summary", () => {
+    assert.equal(participationIsDisclosed(null), false);
+    assert.match(participationAccessibleText(null), /No participation data available/);
   });
 });

@@ -19,6 +19,7 @@ import type {
   GuiBallotIntakeResultV1,
   GuiCommandError,
   GuiElectionSummaryV1,
+  GuiParticipationSummaryV1,
   GuiTallySummaryV1,
   ShellInfoV1,
 } from "./types";
@@ -96,6 +97,9 @@ export const api = {
     call<GuiBallotIntakeResultV1>("intake_ballot_package", { packagePath }),
 
   currentTally: () => call<GuiTallySummaryV1>("current_tally"),
+
+  participationSummary: () =>
+    call<GuiParticipationSummaryV1>("participation_summary"),
 
   writeArchive: (targetDir: string) =>
     call<GuiArchiveWriteResultV1>("write_archive", { targetDir }),

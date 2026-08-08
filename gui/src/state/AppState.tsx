@@ -1,7 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import { api, BackendError, isDesktopShell } from "../api/client";
-import type { GuiCommandError, GuiElectionSummaryV1, GuiTallySummaryV1 } from "../api/types";
+import type {
+  GuiCommandError,
+  GuiElectionSummaryV1,
+  GuiParticipationSummaryV1,
+  GuiTallySummaryV1,
+} from "../api/types";
 
 export interface RecentAction {
   at: string;
@@ -26,6 +31,9 @@ interface AppStateValue {
   shellAvailable: boolean;
   election: GuiElectionSummaryV1 | null;
   tally: GuiTallySummaryV1 | null;
+  /** Privacy-aware participation summary (backend-authoritative; cleared on
+   *  unload). Numeric fields are null while sealed. */
+  participation: GuiParticipationSummaryV1 | null;
   recentActions: RecentAction[];
   settings: AppSettings;
   /** Last structured backend error, or null when none is active. */
@@ -34,6 +42,9 @@ interface AppStateValue {
   selectedArtifactPaths: SelectedArtifactPaths | null;
   setSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
   refreshElection: () => Promise<void>;
+  /** Refreshes the participation summary from the backend. Does not disclose
+   *  sealed values; the backend returns null numerics while sealed. */
+  refreshParticipation: () => Promise<void>;
   runLifecycle: (action: "open" | "close" | "verify" | "finalize") => Promise<void>;
   loadElection: (
     manifestPath: string,
@@ -77,6 +88,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [shellAvailable] = useState(isDesktopShell);
   const [election, setElection] = useState<GuiElectionSummaryV1 | null>(null);
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
+  const [participation, setParticipation] =
+    useState<GuiParticipationSummaryV1 | null>(null);
   const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
   const [settings, setSettings] = useState<AppSettings>(readSettings);
   const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
@@ -114,11 +127,28 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     }
   }, [captureError]);
 
+  const refreshParticipation = useCallback(async () => {
+    if (!isDesktopShell()) {
+      setParticipation(null);
+      return;
+    }
+    try {
+      const summary = await api.participationSummary();
+      setParticipation(summary);
+    } catch (error) {
+      // Participation refresh failures are non-fatal: the dashboard falls
+      // back to its neutral state. A structured error is still surfaced.
+      captureError(error);
+      setParticipation(null);
+    }
+  }, [captureError]);
+
   useEffect(() => {
     if (shellAvailable) {
       void refreshElection();
+      void refreshParticipation();
     }
-  }, [shellAvailable, refreshElection]);
+  }, [shellAvailable, refreshElection, refreshParticipation]);
 
   const loadElection = useCallback(
     async (manifestPath: string, registryPath: string, optionSetPath: string) => {
@@ -126,6 +156,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         const summary = await api.loadElection(manifestPath, registryPath, optionSetPath);
         setElection(summary);
         setTally(null);
+        setParticipation(null);
         setBackendError(null);
         setSelectedArtifactPaths({
           manifest: manifestPath,
@@ -133,6 +164,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           optionSet: optionSetPath,
         });
         recordAction(`Loaded election ${summary.election_id_text ?? summary.election_id_hex}`);
+        // Fetch the initial participation summary for the freshly loaded
+        // (FROZEN) session. This cannot associate metrics with the wrong
+        // election because the session was just replaced atomically.
+        void api.participationSummary().then(setParticipation).catch(() => setParticipation(null));
       } catch (error) {
         captureError(error);
         throw error;
@@ -146,6 +181,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       await api.unloadElection();
       setElection(null);
       setTally(null);
+      setParticipation(null);
       setBackendError(null);
       setSelectedArtifactPaths(null);
       recordAction("Unloaded election session");
@@ -172,8 +208,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
                 ? await api.markVerified()
                 : await api.finalizeElection();
         setElection(summary);
+        // Lifecycle transitions change the disclosure policy; refresh the
+        // participation summary so the dashboard reflects the new visibility
+        // state. Tally is cleared because the previous (possibly sealed)
+        // tally is no longer current.
+        setTally(null);
         setBackendError(null);
         recordAction(labels[action]);
+        void api.participationSummary().then(setParticipation).catch(() => setParticipation(null));
       } catch (error) {
         captureError(error);
       }
@@ -201,12 +243,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       shellAvailable,
       election,
       tally,
+      participation,
       recentActions,
       settings,
       backendError,
       selectedArtifactPaths,
       setSetting,
       refreshElection,
+      refreshParticipation,
       runLifecycle,
       loadElection,
       unloadElection,
@@ -217,12 +261,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       shellAvailable,
       election,
       tally,
+      participation,
       recentActions,
       settings,
       backendError,
       selectedArtifactPaths,
       setSetting,
       refreshElection,
+      refreshParticipation,
       runLifecycle,
       loadElection,
       unloadElection,

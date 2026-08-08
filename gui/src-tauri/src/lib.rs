@@ -18,9 +18,9 @@ use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
     GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotIntakeResultV1, GuiCoreError,
-    GuiElectionArtifactsV1, GuiElectionSessionV1, GuiElectionSummaryV1, GuiTallySummaryV1,
-    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    verify_archive_directory_v1, write_archive_directory_v1,
+    GuiElectionArtifactsV1, GuiElectionSessionV1, GuiElectionSummaryV1, GuiParticipationSummaryV1,
+    GuiTallySummaryV1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
+    inspect_anchor_snapshot_v1, verify_archive_directory_v1, write_archive_directory_v1,
 };
 
 /// Serializable command error: a bounded copy of the gui-core error model.
@@ -235,6 +235,18 @@ fn current_tally(state: tauri::State<'_, AppState>) -> Result<GuiTallySummaryV1,
     state.with_session(|session| Ok(session.tally()?))
 }
 
+/// Returns the privacy-aware participation summary for the active session.
+///
+/// Numeric participation fields are `None` while the application-local
+/// visibility policy seals them, so a modified frontend cannot retrieve
+/// sealed counts. The Rust session gate remains authoritative.
+#[tauri::command]
+fn participation_summary(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiParticipationSummaryV1, CommandError> {
+    state.with_session(|session| Ok(session.participation_summary()))
+}
+
 /// Writes the complete offline archive directory for the active session.
 #[tauri::command]
 fn write_archive(
@@ -287,6 +299,7 @@ pub fn run() {
             finalize_election,
             intake_ballot_package,
             current_tally,
+            participation_summary,
             write_archive,
             verify_archive,
             inspect_anchor_config,

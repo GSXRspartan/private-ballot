@@ -1,4 +1,12 @@
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
+import {
+  coarseBucketLabel,
+  formatPercent,
+  participationAccessibleText,
+  participationIsDisclosed,
+  participationVisibilityLabel,
+  resultVisibilityLabel,
+} from "../lifecycle";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -9,16 +17,31 @@ import {
   LifecyclePill,
   Notice,
 } from "../components/ui";
+import { LockIcon } from "../components/icons";
+import { ParticipationTrack } from "../components/ParticipationTrack";
 
 /**
  * Home dashboard. When no election is loaded it shows a calm empty state with a
  * Load Election primary action. When an election is loaded it displays real
  * backend-derived values only — no fabricated participation counts, ballot
- * counts, or dates.
+ * counts, or dates. Participation and results are gated by the backend's
+ * application-local disclosure policy; sealed values are never shown.
  */
 export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void }) {
-  const { election, recentActions, backendError, shellAvailable, dismissError } = useAppState();
+  const {
+    election,
+    participation,
+    recentActions,
+    backendError,
+    shellAvailable,
+    dismissError,
+  } = useAppState();
   const presentation = presentationFor(election);
+  const sealed =
+    participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
+  const resultsSealed =
+    participation !== null && participation.result_visibility === "SEALED";
+  const disclosed = participationIsDisclosed(participation);
 
   return (
     <>
@@ -37,6 +60,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void 
       <BackendErrorNotice error={backendError} onDismiss={dismissError} />
 
       {election ? (
+        <>
         <div className="card-grid">
           <Card title="Current election">
             <div className="card-value">
@@ -102,15 +126,117 @@ export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void 
               Anchoring is optional and non-binding. Inspect a snapshot on the Anchor screen.
             </p>
           </Card>
+        </div>
 
+        <div className="analytics-grid">
           <Card title="Participation">
-            <div className="card-body">Not available</div>
+            {participation ? (
+              <>
+                <div
+                  className="metric-head"
+                  role="img"
+                  aria-label={participationAccessibleText(participation)}
+                >
+                  {sealed ? (
+                    <span className="metric-value metric-sealed">
+                      <LockIcon label="Sealed" />
+                      Sealed
+                    </span>
+                  ) : participation.participation_visibility === "COARSE" ? (
+                    <span className="metric-value">
+                      {coarseBucketLabel(participation.coarse_bucket)}
+                    </span>
+                  ) : (
+                    <span className="metric-value">
+                      {formatPercent(participation.participation_basis_points)}
+                    </span>
+                  )}
+                  {disclosed && participation.accepted_ballots !== null && (
+                    <span className="metric-sub">
+                      {participation.accepted_ballots} of {participation.eligible_voters} eligible voters
+                    </span>
+                  )}
+                </div>
+                <ParticipationTrack summary={participation} />
+                {sealed && (
+                  <p className="card-body">Participation is hidden until voting closes.</p>
+                )}
+                {participation.small_electorate && !sealed && (
+                  <p className="card-body">
+                    Small electorate: live detail is withheld while voting is open.
+                  </p>
+                )}
+                <p className="card-body">
+                  Policy: {participationVisibilityLabel(participation.participation_visibility)}.
+                </p>
+              </>
+            ) : (
+              <p className="card-body">No participation data available in this session.</p>
+            )}
+          </Card>
+
+          <Card title="Accepted ballots">
+            {participation && participation.accepted_ballots !== null ? (
+              <div className="metric-head">
+                <span className="metric-value">{participation.accepted_ballots}</span>
+              </div>
+            ) : (
+              <div className="metric-head">
+                <span className="metric-value metric-sealed">
+                  <LockIcon label="Sealed" />
+                  Sealed
+                </span>
+              </div>
+            )}
             <p className="card-body">
-              Participation and ballot counts are shown only after ballots are ingested and a tally
-              is computed on the Manage Election screen.
+              {sealed
+                ? "Accepted-ballot count is sealed until voting closes."
+                : "Accepted ballots are deduplicated by registry-scoped nullifier."}
             </p>
           </Card>
+
+          <Card title="Eligible voters">
+            {election ? (
+              <div className="metric-head">
+                <span className="metric-value">{election.voter_count}</span>
+                <span className="metric-sub">registered</span>
+              </div>
+            ) : (
+              <p className="card-body">No election loaded.</p>
+            )}
+          </Card>
+
+          <Card title="Lifecycle">
+            <div className="metric-head">
+              <LifecyclePill state={election?.lifecycle_state ?? null} />
+            </div>
+            <p className="card-body">
+              Results: {participation ? resultVisibilityLabel(participation.result_visibility) : "—"}.
+            </p>
+          </Card>
+
+          <Card title="Results">
+            {resultsSealed || !participation ? (
+              <div
+                className="result-bars-sealed"
+                role="img"
+                aria-label="Results are sealed until voting closes."
+              >
+                <div className="result-bars-sealed-label">
+                  <LockIcon label="Sealed" />
+                  Locked
+                </div>
+                <p className="card-body">Results are sealed until voting closes.</p>
+              </div>
+            ) : (
+              <p className="card-body">
+                Results are disclosed. Open Manage Election to compute the tally and view final
+                result bars.
+              </p>
+            )}
+          </Card>
         </div>
+        </>
       ) : (
         <Card title="No election loaded">
           <div className="card-body">

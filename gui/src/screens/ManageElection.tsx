@@ -8,7 +8,14 @@ import type {
   GuiTallySummaryV1,
 } from "../api/types";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
-import { canShowTally } from "../lifecycle";
+import {
+  canShowTally,
+  coarseBucketLabel,
+  formatPercent,
+  participationAccessibleText,
+  participationIsDisclosed,
+  participationVisibilityLabel,
+} from "../lifecycle";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -21,6 +28,9 @@ import {
   Notice,
   Placeholder,
 } from "../components/ui";
+import { LockIcon } from "../components/icons";
+import { ParticipationTrack } from "../components/ParticipationTrack";
+import { ResultBars } from "../components/ResultBars";
 
 function describeLeading(tally: GuiTallySummaryV1): string {
   if ("NoApprovals" in tally.leading) return "No approvals recorded";
@@ -48,6 +58,8 @@ function basename(path: string): string {
 export function ManageElection() {
   const {
     election,
+    participation,
+    refreshParticipation,
     backendError,
     shellAvailable,
     loadElection,
@@ -73,6 +85,9 @@ export function ManageElection() {
   const canAct = shellAvailable && election !== null;
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
   const tallyAvailable = canShowTally(lifecycle);
+  const participationSealed =
+    participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
+  const participationDisclosed = participationIsDisclosed(participation);
 
   const showError = (error: unknown) => {
     setLocalError(
@@ -131,6 +146,10 @@ export function ManageElection() {
           ? `Accepted ballot #${result.sequence}`
           : `Rejected ballot #${result.sequence} (${result.code})`,
       );
+      // Refresh participation so the dashboard reflects the new acceptance
+      // state. While OPEN the backend still returns sealed numerics, so no
+      // sealed value is disclosed by this refresh.
+      await refreshParticipation();
     } catch (error) {
       showError(error);
     }
@@ -293,7 +312,12 @@ export function ManageElection() {
                 <Field label="Governance source">
                   {election.governance_source_revision}
                 </Field>
+                <Field label="Quorum">No quorum rule is represented in this election manifest.</Field>
               </div>
+              <p className="card-body">
+                The version-one manifest carries no quorum, minimum-participation, or passing
+                threshold field. No governance rule is inferred from community conventions.
+              </p>
             </Card>
           </div>
 
@@ -421,6 +445,52 @@ export function ManageElection() {
           </button>
         </Card>
 
+        <Card title="Participation">
+          {participation ? (
+            <>
+              <div
+                className="metric-head"
+                role="img"
+                aria-label={participationAccessibleText(participation)}
+              >
+                {participationSealed ? (
+                  <span className="metric-value metric-sealed">
+                    <LockIcon label="Sealed" />
+                    Sealed
+                  </span>
+                ) : participation.participation_visibility === "COARSE" ? (
+                  <span className="metric-value">
+                    {coarseBucketLabel(participation.coarse_bucket)}
+                  </span>
+                ) : (
+                  <span className="metric-value">
+                    {formatPercent(participation.participation_basis_points)}
+                  </span>
+                )}
+                {participationDisclosed && participation.accepted_ballots !== null && (
+                  <span className="metric-sub">
+                    {participation.accepted_ballots} of {participation.eligible_voters} eligible voters
+                  </span>
+                )}
+              </div>
+              <ParticipationTrack summary={participation} />
+              {participationSealed && lifecycle === "OPEN" && (
+                <p className="card-body">Voting is in progress. Participation is sealed until voting closes.</p>
+              )}
+              {participation.small_electorate && !participationSealed && (
+                <p className="card-body">
+                  Small electorate: live detail is withheld while voting is open.
+                </p>
+              )}
+              <p className="card-body">
+                Policy: {participationVisibilityLabel(participation.participation_visibility)}.
+              </p>
+            </>
+          ) : (
+            <p className="card-body">No participation data available in this session.</p>
+          )}
+        </Card>
+
         <Card title="Tally">
           <p className="card-body">
             Deterministic approval tally over accepted ballots. A tie is reported as a tie.
@@ -441,6 +511,22 @@ export function ManageElection() {
               <Field label="Accepted ballots">{tally.accepted_ballots}</Field>
               <Field label="Abstentions">{tally.abstentions}</Field>
               <Field label="Outcome">{describeLeading(tally)}</Field>
+            </div>
+          )}
+          {tally && tallyAvailable && (
+            <ResultBars tally={tally} election={election} />
+          )}
+          {!tallyAvailable && (
+            <div
+              className="result-bars-sealed"
+              role="img"
+              aria-label="Results are sealed until voting closes."
+            >
+              <div className="result-bars-sealed-label">
+                <LockIcon label="Sealed" />
+                Locked
+              </div>
+              <p className="card-body">Results are sealed until voting closes.</p>
             </div>
           )}
         </Card>

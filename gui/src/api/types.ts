@@ -68,6 +68,40 @@ export interface GuiTallySummaryV1 {
   leading: GuiLeadingResultV1;
 }
 
+/** Participation visibility policy (application-local, non-canonical).
+ *  Mirrors `tari_cc_private_ballot_gui_core::ParticipationVisibility`. */
+export type ParticipationVisibility =
+  | "LIVE"
+  | "COARSE"
+  | "SEALED_UNTIL_CLOSE";
+
+/** Result disclosure state (mirrors the 5A4 tally gate). */
+export type ResultVisibility = "SEALED" | "DISCLOSED";
+
+/** Coarse participation bucket shown when the policy is COARSE. */
+export type CoarseParticipationBucket =
+  | "ZeroToTwentyFour"
+  | "TwentyFiveToFortyNine"
+  | "FiftyToSeventyFour"
+  | "SeventyFiveToNinetyNine"
+  | "OneHundred";
+
+/** Privacy-aware participation summary derived from authoritative backend
+ *  state. Numeric participation fields are null while sealed, so a modified
+ *  frontend cannot retrieve sealed counts. `eligible_voters` is always
+ *  present because it is public registry information. */
+export interface GuiParticipationSummaryV1 {
+  lifecycle_state: string;
+  participation_visibility: ParticipationVisibility;
+  result_visibility: ResultVisibility;
+  eligible_voters: number;
+  accepted_ballots: number | null;
+  participation_basis_points: number | null;
+  remaining_eligible_capacity: number | null;
+  coarse_bucket: CoarseParticipationBucket | null;
+  small_electorate: boolean;
+}
+
 export interface GuiArchiveFileSummaryV1 {
   path: string;
   digest_hex: string;

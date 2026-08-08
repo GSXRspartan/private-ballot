@@ -30,6 +30,10 @@ use tari_cc_private_ballot_verifier::{
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
 use crate::intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
+use crate::participation::{
+    GuiParticipationSummaryV1, ParticipationVisibility, participation_basis_points,
+    participation_visibility_for, result_visibility_for, SMALL_ELECTORATE_THRESHOLD,
+};
 use crate::summary::GuiElectionSummaryV1;
 use crate::tally::{GuiTallySummaryV1, summarize_tally};
 
@@ -305,6 +309,60 @@ impl GuiElectionSessionV1 {
 
         let tally = self.direct_tally()?;
         Ok(summarize_tally(&tally, self.artifacts.candidates()))
+    }
+
+    /// Computes the privacy-aware participation summary from authoritative
+    /// backend state (registry size and acceptance-ledger length).
+    ///
+    /// This method performs no tally arithmetic and never discloses per-option
+    /// results. Numeric participation fields are `None` while the
+    /// application-local visibility policy seals them (by default, while voting
+    /// is open), so a modified frontend cannot retrieve sealed counts by
+    /// calling this method. `eligible_voters` is always present because it is
+    /// public registry information.
+    ///
+    /// The acceptance ledger enforces one acceptance per registry-scoped
+    /// nullifier, so `accepted_ballots` never exceeds `eligible_voters` through
+    /// the public API; remaining capacity is computed with saturating
+    /// arithmetic as a defensive bound.
+    #[must_use]
+    pub fn participation_summary(&self) -> GuiParticipationSummaryV1 {
+        let state = self.lifecycle.state();
+        let visibility = participation_visibility_for(state);
+        let result_visibility = result_visibility_for(state);
+        // `usize` and `u64` share width on the target platform, but the
+        // workspace forbids `expect`/`unwrap`, so fall back to `u64::MAX`
+        // (which the saturating arithmetic below bounds back to a safe value).
+        let eligible = u64::try_from(self.artifacts.registry().len()).unwrap_or(u64::MAX);
+        let accepted = u64::try_from(self.accepted_count()).unwrap_or(u64::MAX);
+        let small_electorate =
+            self.artifacts.registry().len() < SMALL_ELECTORATE_THRESHOLD;
+
+        let (accepted_opt, bps_opt, remaining_opt, coarse_opt) = match visibility {
+            ParticipationVisibility::Live => {
+                let bps = participation_basis_points(accepted, eligible);
+                let remaining = eligible.saturating_sub(accepted);
+                (Some(accepted), Some(bps), Some(remaining), None)
+            }
+            ParticipationVisibility::Coarse => {
+                let bps = participation_basis_points(accepted, eligible);
+                let bucket = crate::participation::CoarseParticipationBucket::from_basis_points(bps);
+                (None, None, None, Some(bucket))
+            }
+            ParticipationVisibility::SealedUntilClose => (None, None, None, None),
+        };
+
+        GuiParticipationSummaryV1 {
+            lifecycle_state: state.as_str(),
+            participation_visibility: visibility,
+            result_visibility,
+            eligible_voters: eligible,
+            accepted_ballots: accepted_opt,
+            participation_basis_points: bps_opt,
+            remaining_eligible_capacity: remaining_opt,
+            coarse_bucket: coarse_opt,
+            small_electorate,
+        }
     }
 
     /// Computes the raw backend tally (used by facade/backend equality tests

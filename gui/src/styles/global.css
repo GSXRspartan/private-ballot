@@ -713,3 +713,160 @@ table.data th {
   color: var(--text-secondary);
   overflow-wrap: anywhere;
 }
+
+/* ------------------------------------------------------------------ */
+/* Analytics dashboard (Slice 5A5)                                     */
+/* ------------------------------------------------------------------ */
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.metric-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+  margin: 0.25rem 0 0.5rem;
+}
+.metric-value {
+  font-size: 1.5rem;
+  font-weight: 600;
+  line-height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  color: var(--text);
+}
+.metric-sealed {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.metric-sub {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+/* Participation progress track (current percentage only; no fabricated
+   trend chart because the archive ingest sequence is not a timestamp). */
+.participation-track {
+  margin: 0.5rem 0;
+}
+.participation-track-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.375rem;
+}
+.participation-track-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.participation-track-sub {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.participation-track-bar {
+  position: relative;
+  width: 100%;
+  height: 0.5rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.participation-track-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 999px;
+  transition: width 200ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .participation-track-fill {
+    transition: none;
+  }
+}
+
+/* Final result bars. Each bar is an independent share of accepted ballots
+   approving one option (multi-approval bars do not sum to 100%). */
+.result-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+.result-bar-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.result-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.result-bar-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.result-bar-pct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.result-bar-track {
+  position: relative;
+  width: 100%;
+  height: 0.625rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.result-bar-fill {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 999px;
+  transition: width 200ms ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .result-bar-fill {
+    transition: none;
+  }
+}
+.result-bar-sub {
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+.result-bar-abstentions .result-bar-track {
+  display: none;
+}
+.result-bars-leading {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.9375rem;
+  color: var(--text);
+}
+
+/* Sealed-results neutral state. No per-option values are rendered. */
+.result-bars-sealed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.5rem 0;
+  padding: 0.75rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+}
+.result-bars-sealed-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}

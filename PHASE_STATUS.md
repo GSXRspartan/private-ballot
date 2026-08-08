@@ -6,8 +6,8 @@
   prototype complete at tag `phase4-release-build-2026-08-06`
   (`05d923da1e552b7fdf2abf1129bf53334620d6f1`); Phase 5 GUI begun
 - Implementation baseline: `05d923da` (Phase 4 release build)
-- Next authorized work: Phase 5 GUI slices following Slice 5A4
-  (real election loading and dashboard integration)
+- Next authorized work: Phase 5 GUI slices following Slice 5A5
+  (participation metrics, sealed disclosure policy, and dashboard analytics)
 
 > Note: the sections below this header were last maintained at the Phase 2
 > closeout (2026-08-01). Phase 3 delivered the reviewed Triptych

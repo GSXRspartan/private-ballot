@@ -39,6 +39,7 @@ pub mod error;
 mod hex;
 pub mod inspect;
 pub mod intake;
+pub mod participation;
 pub mod session;
 pub mod summary;
 pub mod tally;
@@ -57,6 +58,10 @@ pub use inspect::{
     inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
 };
 pub use intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
+pub use participation::{
+    CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
+    ResultVisibility, SMALL_ELECTORATE_THRESHOLD,
+};
 pub use session::GuiElectionSessionV1;
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
