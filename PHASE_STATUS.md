@@ -142,6 +142,12 @@
 > `docs/reviews/PHASE5_SLICE5A11_LOCAL_BALLOT_OFFICE_WORKFLOW_2026-08-08.md`.
 > No canonical format, vendored Triptych code, network, walletd, indexer,
 > Ootle submission, relay, Tor, or OHTTP path was added.
+> Phase 5 Slice 5A12A records the proposed private Internet ballot transport
+> architecture, threat model, privacy-claim discipline, and ADR-0009. It
+> preserves the 5A11 exact-byte intake boundary and adds no production source,
+> canonical-format change, or Internet transport. Online delivery remains
+> deferred pending authenticated transport configuration, implementation, and
+> independent security/privacy review.
 
 ## Phase 2 assessment
 
