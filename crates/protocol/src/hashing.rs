@@ -17,6 +17,9 @@ pub enum HashDomain {
     ArchiveManifestV1,
     TransportDescriptorV1,
     TransportRetryCapabilityV1,
+    TransportBatchLeafV1,
+    TransportBatchNodeV1,
+    TransportBatchSetV1,
 }
 
 impl HashDomain {
@@ -37,6 +40,9 @@ impl HashDomain {
             Self::TransportRetryCapabilityV1 => {
                 "tari-cc-private-ballot/transport-retry-capability/v1"
             }
+            Self::TransportBatchLeafV1 => "tari-cc-private-ballot/transport-batch-leaf/v1",
+            Self::TransportBatchNodeV1 => "tari-cc-private-ballot/transport-batch-node/v1",
+            Self::TransportBatchSetV1 => "tari-cc-private-ballot/transport-batch-set/v1",
         }
     }
 }
@@ -183,6 +189,9 @@ mod tests {
             HashDomain::ArchiveManifestV1,
             HashDomain::TransportDescriptorV1,
             HashDomain::TransportRetryCapabilityV1,
+            HashDomain::TransportBatchLeafV1,
+            HashDomain::TransportBatchNodeV1,
+            HashDomain::TransportBatchSetV1,
         ];
 
         let expected_count = domains.len();

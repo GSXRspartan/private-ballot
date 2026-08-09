@@ -1,7 +1,11 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import type { GuiArchiveVerificationV1, GuiCommandError } from "../api/types";
+import type {
+  GuiArchiveVerificationV1,
+  GuiCommandError,
+  GuiTransportAnchorVerificationV1,
+} from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -22,6 +26,8 @@ export function Archive() {
   const { shellAvailable, settings, recordAction } = useAppState();
   const [directory, setDirectory] = useState(settings.exportDirectory);
   const [result, setResult] = useState<GuiArchiveVerificationV1 | null>(null);
+  const [anchorEvidencePath, setAnchorEvidencePath] = useState("");
+  const [transportAnchor, setTransportAnchor] = useState<GuiTransportAnchorVerificationV1 | null>(null);
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [running, setRunning] = useState(false);
 
@@ -48,6 +54,21 @@ export function Archive() {
       );
     } catch (err) {
       setResult(null);
+      showError(err);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const onVerifyTransportAnchor = async () => {
+    setError(null);
+    setRunning(true);
+    try {
+      const verification = await api.verifyTransportArchiveAnchor(directory, anchorEvidencePath);
+      setTransportAnchor(verification);
+      recordAction(`Transport archive anchor is ${verification.state}`);
+    } catch (err) {
+      setTransportAnchor(null);
       showError(err);
     } finally {
       setRunning(false);
@@ -95,6 +116,44 @@ export function Archive() {
             {running ? "Verifying…" : "Verify archive"}
           </button>
         </div>
+      </Card>
+
+      <Card title="Final transport anchor">
+        <p className="form-hint">
+          Verify an existing finalized Phase 4 evidence record against this completed archive.
+          Submitted or unverified anchors remain INCLUDED, not ANCHORED.
+        </p>
+        <div className="form-row">
+          <label htmlFor="transport-anchor-evidence">Anchor evidence file</label>
+          <input
+            id="transport-anchor-evidence"
+            type="text"
+            value={anchorEvidencePath}
+            onChange={(e) => setAnchorEvidencePath(e.target.value)}
+            placeholder="anchor-evidence.cbor"
+          />
+        </div>
+        <div className="btn-row">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!shellAvailable || !directory || !anchorEvidencePath || running}
+            onClick={() => void onVerifyTransportAnchor()}
+          >
+            Verify final transport anchor
+          </button>
+        </div>
+        {transportAnchor && (
+          <div className="field-list">
+            <Field label="Transport state">
+              <Pill tone={transportAnchor.state === "ANCHORED" ? "ok" : "neutral"}>
+                {transportAnchor.state}
+              </Pill>
+            </Field>
+            <Field label="Archive binding">{transportAnchor.transport_binding_verified ? "verified" : "not verified"}</Field>
+            <Field label="Phase 4 anchor">{transportAnchor.anchor_verified ? "verified" : "not verified"}</Field>
+          </div>
+        )}
       </Card>
 
       {result && (
@@ -169,6 +228,29 @@ export function Archive() {
                     Bound reference is not a recognized immutable pin format; the
                     governance-source cross-check does not apply.
                   </span>
+                </Field>
+              )}
+            </div>
+          </Card>
+
+          <Card title="Transport archive binding">
+            <p className="card-body">
+              A verified binding is a hash-covered archive constituent. It is not, by itself,
+              proof that an Ootle anchor was finalized.
+            </p>
+            <div className="field-list">
+              <Field label="Binding">
+                {result.transport_binding_present ? (
+                  <Pill tone={result.transport_binding_verified ? "ok" : "error"}>
+                    {result.transport_binding_verified ? "Verified" : "Invalid"}
+                  </Pill>
+                ) : (
+                  <Pill tone="neutral">Not present</Pill>
+                )}
+              </Field>
+              {result.transport_batch_set_commitment_hex && (
+                <Field label="Final batch-set commitment">
+                  <HashValue value={result.transport_batch_set_commitment_hex} />
                 </Field>
               )}
             </div>

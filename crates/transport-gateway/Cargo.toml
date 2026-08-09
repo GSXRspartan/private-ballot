@@ -6,9 +6,12 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ed25519-dalek = { version = "=3.0.0", default-features = false }
 hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
 tari-cc-private-ballot-gui-core = { path = "../gui-core" }
+tari-cc-private-ballot-archive = { path = "../archive" }
 tari-cc-private-ballot-protocol = { path = "../protocol" }
+tari-cc-private-ballot-transport-network = { path = "../transport-network" }
 
 [dev-dependencies]
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["rand_core"] }

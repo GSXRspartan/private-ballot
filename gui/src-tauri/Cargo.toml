@@ -25,3 +25,5 @@ tauri-plugin-dialog = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 tari-cc-private-ballot-gui-core = { path = "../../crates/gui-core" }
+tari-cc-private-ballot-transport-gateway = { path = "../../crates/transport-gateway" }
+tari-cc-private-ballot-transport-network = { path = "../../crates/transport-network" }

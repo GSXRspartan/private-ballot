@@ -26,9 +26,13 @@ import type {
   GuiGovernanceDocumentDigestV1,
   GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
+  GuiPrivateRouteV1,
+  GuiPrivateSubmissionResultV1,
+  GuiPrivateTransportAvailabilityV1,
   GuiPreparedBallotExportV1,
   GuiPreparedBallotStatusV1,
   GuiTallySummaryV1,
+  GuiTransportAnchorVerificationV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
@@ -119,6 +123,11 @@ export const api = {
 
   verifyArchive: (directory: string) =>
     call<GuiArchiveVerificationV1>("verify_archive", { directory }),
+  verifyTransportArchiveAnchor: (archiveDirectory: string, anchorEvidencePath: string) =>
+    call<GuiTransportAnchorVerificationV1>("verify_transport_archive_anchor", {
+      archiveDirectory,
+      anchorEvidencePath,
+    }),
 
   inspectAnchorConfig: (path: string) =>
     call<GuiAnchorConfigInspectionV1>("inspect_anchor_config", { path }),
@@ -190,6 +199,10 @@ export const api = {
   prepareVoterBallot: () => call<GuiPreparedBallotStatusV1>("prepare_voter_ballot"),
   exportPreparedVoterBallot: (packagePath: string) =>
     call<GuiPreparedBallotExportV1>("export_prepared_voter_ballot", { packagePath }),
+  privateTransportAvailability: () =>
+    call<GuiPrivateTransportAvailabilityV1>("private_transport_availability"),
+  submitPreparedVoterBallotPrivately: (route: GuiPrivateRouteV1) =>
+    call<GuiPrivateSubmissionResultV1>("submit_prepared_voter_ballot_privately", { route }),
   resetVoterWorkflow: () => call<GuiVoterWorkflowStatusV1>("reset_voter_workflow"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,

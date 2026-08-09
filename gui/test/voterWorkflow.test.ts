@@ -64,3 +64,19 @@ test("voter workflow api field names stay free of secret-bearing material", () =
   assert.equal(noVoterWorkflowSecretFieldNames(["proof_bytes"]), false);
   assert.equal(noVoterWorkflowSecretFieldNames(["member_index"]), false);
 });
+
+test("private submission DTO field names stay voter-safe", () => {
+  assert.equal(
+    noVoterWorkflowSecretFieldNames([
+      "route",
+      "receipt_state",
+      "retry_status",
+      "reduced_anonymity",
+      "managed_tor_available",
+      "offline_export_available",
+    ]),
+    true,
+  );
+  assert.equal(noVoterWorkflowSecretFieldNames(["gateway_receiver_secret"]), false);
+  assert.equal(noVoterWorkflowSecretFieldNames(["duplicate_of_sequence"]), false);
+});

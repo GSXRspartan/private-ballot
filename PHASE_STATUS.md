@@ -154,6 +154,28 @@
 > accepted-unique anonymity counter. The production root remains deliberately
 > unprovisioned and no online transport is enabled; see ADR-0010 and the 5A12B
 > review.
+> Continuation 5A12CDEF adds the first dedicated managed-Tor and opaque relay
+> boundaries plus root-rotation primitives. These remain non-production until
+> the documented persistence, existing-operator-anchor handoff, desktop wiring,
+> packaging, and real-machine rehearsal gates are completed; see
+> `docs/reviews/PHASE5_SLICE5A12CDEF_PRIVATE_TRANSPORT_IMPLEMENTATION_2026-08-09.md`.
+> The authorized archive-binding continuation adds ADR-0011:
+> `TransportArchiveBindingV1` is an ordinary hash-covered archive constituent,
+> finalized before `ArchiveHashV1`; the frozen Phase 4 Ootle record/purpose are
+> unchanged. A read-only Tauri/archive verifier reports `ANCHORED` only after
+> a matching completed archive and existing verified Phase 4 evidence. This
+> does not provide persistence, online submission, production roots, or a live
+> network claim.
+> The gateway now persists a strict versioned privacy-safe transport snapshot:
+> descriptor/election binding, counters, capability commitments, digest/result
+> retry records, and sealed/public batch proof material. Snapshot reload fails
+> closed on corruption, incompatibility, or descriptor mismatch. Retry state is
+> retained only through the active-election and configured verification-grace
+> lifecycle, then deleted; raw capabilities, ballot bytes, identities, IPs,
+> ingress times, headers, credentials, nullifiers, and keys are not persisted.
+> `final_batch_set_commitment` remains a derived transport-level batch-root
+> convenience commitment. The completed canonical archive's `ArchiveHashV1`
+> remains the authoritative Phase 4 Ootle anchor commitment.
 
 ## Phase 2 assessment
 

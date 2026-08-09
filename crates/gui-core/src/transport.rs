@@ -6,7 +6,7 @@
 //! boundary. Production online transport remains disabled until a release
 //! provisions a pinned authority public key.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -95,6 +95,81 @@ impl TransportAuthorityRootV1 {
             return Err(TransportError::UntrustedRoot);
         };
         VerifyingKey::from_bytes(public_key).map_err(|_| TransportError::UntrustedRoot)
+    }
+}
+
+/// Release-pinned root lifecycle. Descriptors select an already-known root by
+/// ID; they can never install a new root. Historical roots remain verification
+/// only, while revoked IDs are rejected before signature processing.
+#[derive(Debug, Clone)]
+pub struct TransportAuthorityRootSetV1 {
+    current: TransportAuthorityRootV1,
+    historical: BTreeMap<String, TransportAuthorityRootV1>,
+    revoked: BTreeSet<String>,
+}
+
+impl TransportAuthorityRootSetV1 {
+    #[must_use]
+    pub fn new(current: TransportAuthorityRootV1) -> Self {
+        Self { current, historical: BTreeMap::new(), revoked: BTreeSet::new() }
+    }
+
+    pub fn add_historical_root(&mut self, root: TransportAuthorityRootV1) -> Result<(), TransportError> {
+        if root.key_id() == self.current.key_id() || self.historical.contains_key(root.key_id()) {
+            return Err(TransportError::InvalidDescriptor);
+        }
+        self.historical.insert(root.key_id().to_owned(), root);
+        Ok(())
+    }
+
+    pub fn revoke_root_id(&mut self, key_id: String) {
+        self.revoked.insert(key_id);
+    }
+
+    #[must_use]
+    pub fn current_root_id(&self) -> &str {
+        self.current.key_id()
+    }
+
+    pub fn verify_descriptor(
+        &self,
+        descriptor: &TransportDescriptorV1,
+        expected_manifest: ManifestHash,
+    ) -> Result<(), TransportError> {
+        let root_id = descriptor.root_key_id();
+        if self.revoked.contains(root_id) {
+            return Err(TransportError::UntrustedRoot);
+        }
+        let root = if root_id == self.current.key_id() {
+            &self.current
+        } else {
+            self.historical.get(root_id).ok_or(TransportError::UntrustedRoot)?
+        };
+        descriptor.verify(root, expected_manifest)
+    }
+
+    /// Verifies a descriptor against an already configured root and records
+    /// its generation/fingerprint consistency. The descriptor is never a
+    /// source of trust: root lookup, revocation, signature verification, and
+    /// manifest binding all happen before its route, endpoints, or gateway
+    /// key may be used.
+    pub fn verify_and_accept_descriptor(
+        &self,
+        descriptor: &TransportDescriptorV1,
+        expected_manifest: ManifestHash,
+        consistency: &mut DescriptorConsistencyStoreV1,
+    ) -> Result<[u8; 32], TransportError> {
+        let root_id = descriptor.root_key_id();
+        if self.revoked.contains(root_id) {
+            return Err(TransportError::UntrustedRoot);
+        }
+        let root = if root_id == self.current.key_id() {
+            &self.current
+        } else {
+            self.historical.get(root_id).ok_or(TransportError::UntrustedRoot)?
+        };
+        descriptor.verify(root, expected_manifest)?;
+        consistency.accept(descriptor, root, expected_manifest)
     }
 }
 
@@ -209,6 +284,11 @@ impl TransportDescriptorV1 {
     pub fn manifest_hash(&self) -> ManifestHash {
         self.manifest_hash
     }
+    /// Canonical election identifier bound by this descriptor.
+    #[must_use]
+    pub fn election_id(&self) -> &[u8] {
+        &self.election_id
+    }
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
@@ -221,13 +301,28 @@ impl TransportDescriptorV1 {
     pub fn gateway_key_id(&self) -> &str {
         &self.gateway_key_id
     }
+    /// Authority root selector, used only to look up a release-pinned root.
+    #[must_use]
+    pub fn root_key_id(&self) -> &str {
+        &self.root_key_id
+    }
     #[must_use]
     pub fn padding(&self) -> &PaddingPolicyV1 {
         &self.padding
     }
     #[must_use]
+    pub fn batch(&self) -> &BatchPolicyV1 {
+        &self.batch
+    }
+    #[must_use]
     pub fn route(&self) -> TransportRoutePolicyV1 {
         self.route
+    }
+    /// Public keys authorized by this signed descriptor to verify receipts.
+    /// They are distinct from voter, Triptych, wallet, and Ootle keys.
+    #[must_use]
+    pub fn receipt_verification_keys(&self) -> &[[u8; 32]] {
+        &self.receipt_verification_keys
     }
     /// The only compiled HPKE suite; no runtime suite negotiation is permitted.
     #[must_use]

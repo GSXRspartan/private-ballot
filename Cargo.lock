@@ -3363,7 +3363,15 @@ dependencies = [
  "tari-cc-private-ballot-ootle-walletd-anchor-adapter",
  "tari-cc-private-ballot-protocol",
  "tari-cc-private-ballot-registry",
+ "tari-cc-private-ballot-transport-network",
  "tari-cc-private-ballot-verifier",
+]
+
+[[package]]
+name = "tari-cc-private-ballot-transport-network"
+version = "0.1.0"
+dependencies = [
+ "tari-cc-private-ballot-gui-core",
 ]
 
 [[package]]

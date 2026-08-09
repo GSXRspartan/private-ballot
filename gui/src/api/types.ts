@@ -143,6 +143,17 @@ export interface GuiArchiveVerificationV1 {
    *  catalog/disk consistency, not governance-source correspondence. The UI
    *  must not collapse these into one ambiguous "Verified" badge. */
   governance_source_matches_pin: GuiGovernanceArchivePinFactV1;
+  transport_binding_present: boolean;
+  transport_binding_verified: boolean;
+  transport_batch_set_commitment_hex: string | null;
+}
+
+export interface GuiTransportAnchorVerificationV1 {
+  state: "INCLUDED" | "ANCHORED";
+  transport_binding_verified: boolean;
+  archive_verified: boolean;
+  anchor_verified: boolean;
+  transport_batch_set_commitment_hex: string | null;
 }
 
 /** Distinct archive-verification fact describing the relationship between the
@@ -512,6 +523,28 @@ export interface GuiPreparedBallotSummaryV1 {
 export interface GuiPreparedBallotExportV1 {
   canonical_package_bytes: number;
   package_digest_hex: string;
+}
+
+/** Safe private-transport availability projection. It intentionally contains
+ * no descriptor, endpoint, key, envelope, or retry material. */
+export interface GuiPrivateTransportAvailabilityV1 {
+  managed_tor_available: boolean;
+  split_trust_relay_available: boolean;
+  offline_export_available: boolean;
+  development_transport: boolean;
+  message: string;
+}
+
+export type GuiPrivateRouteV1 = "ManagedTor" | "SplitTrustRelay" | "OfflineExport";
+
+/** Reduced result from Rust's private-submission coordinator. No intake
+ * sequence, duplicate reference, nullifier, secret, or transport internals
+ * cross the Tauri boundary. */
+export interface GuiPrivateSubmissionResultV1 {
+  route: GuiPrivateRouteV1;
+  receipt_state: string;
+  retry_status: string;
+  reduced_anonymity: boolean;
 }
 
 export interface GuiVoterWorkflowStatusV1 {

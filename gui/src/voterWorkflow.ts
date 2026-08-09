@@ -38,6 +38,8 @@ export function noVoterWorkflowSecretFieldNames(fieldNames: string[]): boolean {
     "member_index",
     "nullifier",
     "proof",
+    "duplicate_of_sequence",
+    "intake_sequence",
   ];
   return fieldNames.every((field) => {
     const normalized = field.toLowerCase();

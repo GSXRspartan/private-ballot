@@ -5,6 +5,9 @@ import { pickBallotPackagePath, pickGovernanceDocument } from "../api/dialog";
 import type {
   GuiCommandError,
   GuiGovernanceDocumentDigestV1,
+  GuiPrivateRouteV1,
+  GuiPrivateSubmissionResultV1,
+  GuiPrivateTransportAvailabilityV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
@@ -73,6 +76,9 @@ export function Vote() {
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
   const [exported, setExported] = useState(false);
+  const [transport, setTransport] = useState<GuiPrivateTransportAvailabilityV1 | null>(null);
+  const [privateRoute, setPrivateRoute] = useState<GuiPrivateRouteV1>("ManagedTor");
+  const [privateResult, setPrivateResult] = useState<GuiPrivateSubmissionResultV1 | null>(null);
   const selectionDraftIdsRef = useRef<string[]>([]);
   const selectionRequestGenerationRef = useRef(0);
 
@@ -90,6 +96,9 @@ export function Vote() {
     setCredentialStage(false);
     setSelectionStage(false);
     setExported(false);
+    setTransport(null);
+    setPrivateRoute("ManagedTor");
+    setPrivateResult(null);
   }, [election]);
 
   function captureError(err: unknown) {
@@ -262,6 +271,7 @@ export function Vote() {
     try {
       const prepared = await api.prepareVoterBallot();
       await refreshWorkflow(true);
+      setTransport(await api.privateTransportAvailability());
       if (prepared.state !== "Ready") {
         setError({
           code: "GUI_PROOF_VERIFICATION_FAILED",
@@ -286,6 +296,24 @@ export function Vote() {
       await api.exportPreparedVoterBallot(path);
       setExported(true);
       await refreshWorkflow(true);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSubmitPrivately() {
+    if (privateRoute === "OfflineExport") {
+      await onExportBallot();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setPrivateResult(null);
+    try {
+      setPrivateResult(await api.submitPreparedVoterBallotPrivately(privateRoute));
+      setTransport(await api.privateTransportAvailability());
     } catch (err) {
       captureError(err);
     } finally {
@@ -692,6 +720,78 @@ export function Vote() {
                               Export ballot package
                             </button>
                           </div>
+                          <div className="field-list">
+                            <Field label="Private submission">
+                              <span className="field-value">
+                                Choose an explicit route. Rust retains the canonical ballot package;
+                                this screen never sends ballot bytes itself.
+                              </span>
+                            </Field>
+                          </div>
+                          {transport && (
+                            <>
+                              <Notice tone={transport.development_transport ? "warn" : "info"}>
+                                {transport.message}
+                              </Notice>
+                              <div className="selection-options" role="radiogroup" aria-label="Private submission route">
+                                <label className="selection-option">
+                                  <input
+                                    type="radio"
+                                    name="private-route"
+                                    checked={privateRoute === "ManagedTor"}
+                                    disabled={busy || !transport.managed_tor_available}
+                                    onChange={() => setPrivateRoute("ManagedTor")}
+                                  />
+                                  <span className="selection-option-label">Managed Tor</span>
+                                  <span className="selection-option-id">Preferred private online route</span>
+                                </label>
+                                <label className="selection-option">
+                                  <input
+                                    type="radio"
+                                    name="private-route"
+                                    checked={privateRoute === "SplitTrustRelay"}
+                                    disabled={busy || !transport.split_trust_relay_available}
+                                    onChange={() => setPrivateRoute("SplitTrustRelay")}
+                                  />
+                                  <span className="selection-option-label">Split-trust relay</span>
+                                  <span className="selection-option-id">Optional alternative privacy route</span>
+                                </label>
+                                <label className="selection-option">
+                                  <input
+                                    type="radio"
+                                    name="private-route"
+                                    checked={privateRoute === "OfflineExport"}
+                                    disabled={busy || !transport.offline_export_available}
+                                    onChange={() => setPrivateRoute("OfflineExport")}
+                                  />
+                                  <span className="selection-option-label">Offline file</span>
+                                  <span className="selection-option-id">No online transmission</span>
+                                </label>
+                              </div>
+                              <div className="action-row">
+                                <button
+                                  type="button"
+                                  className="btn btn-primary"
+                                  disabled={
+                                    busy ||
+                                    (privateRoute === "ManagedTor" && !transport.managed_tor_available) ||
+                                    (privateRoute === "SplitTrustRelay" && !transport.split_trust_relay_available)
+                                  }
+                                  onClick={() => void onSubmitPrivately()}
+                                >
+                                  {privateRoute === "OfflineExport" ? "Export offline ballot file" : "Submit privately"}
+                                </button>
+                              </div>
+                            </>
+                          )}
+                          {privateResult && (
+                            <Notice tone={privateResult.receipt_state === "ACCEPTED" ? "ok" : "info"}>
+                              {privateResult.receipt_state === "ACCEPTED"
+                                ? "ACCEPTED: the exact canonical ballot was accepted by the election intake."
+                                : `Submission status: ${privateResult.receipt_state}.`}
+                              {privateResult.reduced_anonymity && " Reduced anonymity / small population."}
+                            </Notice>
+                          )}
                         </Card>
                         {exported && (
                           <Notice tone="ok">

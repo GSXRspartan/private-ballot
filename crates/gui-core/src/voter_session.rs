@@ -799,6 +799,35 @@ impl GuiVoterSessionV1 {
         })
     }
 
+    /// Borrows the exact, locally verified canonical ballot bytes while the
+    /// election remains open. This is intentionally Rust-only: callers may
+    /// pass the bytes to an authenticated transport coordinator, but must not
+    /// serialize them through a frontend boundary or reconstruct a package.
+    pub fn prepared_canonical_ballot_bytes(
+        &self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+    ) -> Result<&[u8], GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+            return Err(GuiCoreError::new(
+                "GUI_PREPARED_BALLOT_NOT_SUBMITTABLE",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("submit-ballot"),
+                "a prepared ballot can be submitted only while the election is open",
+            ));
+        }
+        let PreparedBallotStateV1::Ready { canonical_bytes, .. } = &self.prepared_ballot else {
+            return Err(GuiCoreError::new(
+                "GUI_NO_PREPARED_BALLOT",
+                GuiErrorCategory::InvalidInput,
+                Some("submit-ballot"),
+                "no locally verified ballot package is available",
+            ));
+        };
+        Ok(canonical_bytes)
+    }
+
     #[cfg(test)]
     pub fn install_test_prepared_marker(
         &mut self,

@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveFileCatalogV1, ArchiveFileEntryV1, ArchiveManifestV1,
-    ArchivePathV1,
+    ArchivePathV1, TransportArchiveBindingV1, TRANSPORT_ARCHIVE_BINDING_PATH_V1,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
@@ -114,6 +114,31 @@ pub fn write_archive_directory_v1_with_governance_document(
     target_dir: &Path,
     governance_document_bytes: Option<&[u8]>,
 ) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        governance_document_bytes,
+        None,
+    )
+}
+
+/// Writes a completed archive which includes a verified public transport
+/// binding before the ordinary archive manifest and hash are produced. The
+/// binding is a hash-covered constituent, never an `ArchiveHashV1` substitute.
+pub fn write_archive_directory_v1_with_transport_binding(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    transport_binding: &TransportArchiveBindingV1,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(session, target_dir, None, Some(transport_binding))
+}
+
+fn write_archive_directory_v1_with_optional_binding(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    governance_document_bytes: Option<&[u8]>,
+    transport_binding: Option<&TransportArchiveBindingV1>,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
     prepare_target_directory(target_dir)?;
 
     let provider = Blake3HashProviderV1;
@@ -141,6 +166,22 @@ pub fn write_archive_directory_v1_with_governance_document(
     }
     if let Some(doc_bytes) = governance_document_bytes {
         files.insert(GOVERNANCE_DOCUMENT_ARCHIVE_PATH.to_owned(), doc_bytes.to_vec());
+    }
+    if let Some(binding) = transport_binding {
+        if binding.manifest_hash() != artifacts.manifest_hash()
+            || binding.election_id() != artifacts.manifest().election_id().as_bytes()
+        {
+            return Err(GuiCoreError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_MISMATCH",
+                crate::error::GuiErrorCategory::InvalidInput,
+                Some("transport-archive-binding"),
+                "transport binding does not belong to the active election",
+            ));
+        }
+        let bytes = binding
+            .to_canonical_cbor()
+            .map_err(|error| GuiCoreError::from_protocol(&error, "transport-archive-binding"))?;
+        files.insert(TRANSPORT_ARCHIVE_BINDING_PATH_V1.to_owned(), bytes);
     }
 
     // ADR-0008 write-time governance pin/document gate (Slice 5A8 hardening,
@@ -200,6 +241,11 @@ pub fn write_archive_directory_v1_with_governance_document(
     if governance_document_bytes.is_some() {
         let governance_dir = target_dir.join("governance");
         std::fs::create_dir(&governance_dir)
+            .map_err(|_| GuiCoreError::io_failure("archive-directory"))?;
+    }
+    if transport_binding.is_some() {
+        let transport_dir = target_dir.join("transport");
+        std::fs::create_dir(&transport_dir)
             .map_err(|_| GuiCoreError::io_failure("archive-directory"))?;
     }
 

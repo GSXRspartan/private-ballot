@@ -28,17 +28,20 @@ use tari_cc_private_ballot_crypto::{
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    AnchorAppConfig, AnchorEvidenceRecordV1, ArchiveProofInputs, TerminalEvidenceInputs,
-    write_evidence_atomic,
+    AnchorAppConfig, AnchorAppDriver, AnchorEvidenceRecordV1, ArchiveProofInputs,
+    DriverRunOutcome, OperatorDecision, TerminalEvidenceInputs, write_evidence_atomic,
 };
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{
     AnchorLifecycleRecoverySnapshot, PollingPolicy, UnifiedAnchorLifecyclePhase,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerEndpoint, NetworkAdapterConfig, WalletdEndpoint,
+    IndexerEndpoint, IndexerReceiptNetworkAdapter, NetworkAdapterConfig,
+    ScriptedIndexerResponse, ScriptedIndexerTransport, ScriptedWalletdResponse,
+    ScriptedWalletdTransport, WalletdAnchorNetworkAdapter, WalletdEndpoint,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptQuerySnapshotV1, AnchorReceiptQueryStateV1, AnchorReceiptQueryV1,
+    receipt_scenarios,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     SubmittedWalletdAnchorRequestV1, WalletdAnchorBindingV1, WalletdAnchorSnapshotV1,
@@ -598,5 +601,68 @@ pub fn write_anchor_evidence(dir: &Path) -> PathBuf {
     if write_evidence_atomic(&path, &record).is_err() {
         panic!("fixture evidence must write");
     }
+    path
+}
+
+/// Creates genuine deterministic `FINALIZED_ACCEPT` Phase 4 evidence for the
+/// supplied exact archive binding. The scripted adapters never contact a
+/// network; they exercise the existing Phase 4 driver and evidence constructor.
+pub fn write_accepted_anchor_evidence_for(
+    dir: &Path,
+    manifest_hash: ManifestHash,
+    archive_hash: ArchiveHashV1,
+) -> PathBuf {
+    let anchor_digest = OotleAnchorRecordV1::new(anchor_network(), manifest_hash, archive_hash)
+        .canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("anchor digest must derive"));
+    let account = AnchorAccountReference::new("fee-account".to_owned())
+        .unwrap_or_else(|_| panic!("anchor account must construct"));
+    let config = AnchorAppConfig::new(
+        network_adapter_config(),
+        account,
+        manifest_hash,
+        archive_hash,
+        anchor_network(),
+        dir.join("accepted-snapshot.cbor"),
+        dir.join("accepted-evidence.cbor"),
+        1,
+        1,
+        None,
+    );
+    let transaction_id = anchor_transaction_id();
+    let mut walletd = ScriptedWalletdTransport::new();
+    walletd.set_create_response(ScriptedWalletdResponse::Create { request_id: 1, expires_at: 0 });
+    walletd.set_approve_response(ScriptedWalletdResponse::Approve {
+        request_id: 1,
+        status: WalletdEffectiveStatusV1::Approved,
+    });
+    walletd.set_reject_response(ScriptedWalletdResponse::Reject {
+        request_id: 1,
+        status: WalletdEffectiveStatusV1::Rejected,
+    });
+    walletd.set_get_response(ScriptedWalletdResponse::Get {
+        request_id: 1,
+        status: WalletdEffectiveStatusV1::Submitted,
+        transaction_id: Some(transaction_id.clone()),
+    });
+    walletd.set_submit_response(ScriptedWalletdResponse::Submit { transaction_id: transaction_id.clone() });
+    let payload = AnchorLogPayloadV1::from_digest(anchor_digest);
+    let mut indexer = ScriptedIndexerTransport::new();
+    indexer.set_response(ScriptedIndexerResponse::Finalized(receipt_scenarios::accepted_receipt(
+        &transaction_id,
+        &anchor_network(),
+        &payload,
+    )));
+    let walletd_adapter = WalletdAnchorNetworkAdapter::new(walletd, anchor_network());
+    let indexer_adapter = IndexerReceiptNetworkAdapter::new(indexer);
+    let mut driver = AnchorAppDriver::new(config, walletd_adapter, indexer_adapter)
+        .unwrap_or_else(|_| panic!("anchor driver must construct"));
+    let evidence = match driver.run(OperatorDecision::Approve) {
+        Ok(DriverRunOutcome::FinalizedAccept(evidence)) => evidence,
+        _ => panic!("scripted accepted anchor must finalize"),
+    };
+    let path = driver.evidence_path().to_owned();
+    write_evidence_atomic(&path, &evidence)
+        .unwrap_or_else(|_| panic!("accepted evidence must write"));
     path
 }

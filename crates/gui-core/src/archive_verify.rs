@@ -16,7 +16,8 @@ use std::path::Path;
 
 use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ARCHIVE_SIGNATURE_PATH_PREFIX, ArchiveFileCatalogV1,
-    ArchiveFileEntryV1, ArchiveManifestV1, ArchivePathV1,
+    ArchiveFileEntryV1, ArchiveManifestV1, ArchivePathV1, TransportArchiveBindingV1,
+    TRANSPORT_ARCHIVE_BINDING_PATH_V1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, MAX_CANONICAL_OBJECT_BYTES};
 
@@ -42,6 +43,8 @@ pub const STAGE_GOVERNANCE_PIN: &str = "GOVERNANCE_PIN";
 pub const STAGE_BALLOT_REPLAY: &str = "BALLOT_REPLAY";
 /// Verification stage: archive manifest rebuild and archive-hash comparison.
 pub const STAGE_ARCHIVE_HASH: &str = "ARCHIVE_HASH";
+/// Verification stage: optional public transport binding artifact.
+pub const STAGE_TRANSPORT_BINDING: &str = "TRANSPORT_BINDING";
 
 /// One hash-covered content file's on-disk check.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -92,6 +95,12 @@ pub struct GuiArchiveVerificationV1 {
     /// content-digest pin this is `Matched`/`Mismatch`/`Missing`; for a `git:`
     /// pin it is `OperatorAttested`; otherwise `NotApplicable`.
     pub governance_source_matches_pin: GuiGovernanceArchivePinFactV1,
+    /// Whether this archive includes the optional transport binding artifact.
+    pub transport_binding_present: bool,
+    /// Whether the included binding decoded canonically and belongs to this election.
+    pub transport_binding_verified: bool,
+    /// Final public transport batch-set commitment when a binding verifies.
+    pub transport_batch_set_commitment_hex: Option<String>,
 }
 
 impl GuiArchiveVerificationV1 {
@@ -112,6 +121,9 @@ impl GuiArchiveVerificationV1 {
             archive_hash_consistent: false,
             election_manifest_hash_hex: None,
             governance_source_matches_pin: GuiGovernanceArchivePinFactV1::NotApplicable,
+            transport_binding_present: false,
+            transport_binding_verified: false,
+            transport_batch_set_commitment_hex: None,
         }
     }
 
@@ -236,6 +248,28 @@ pub fn verify_archive_directory_v1(dir: &Path) -> Result<GuiArchiveVerificationV
     result.election_manifest_hash_hex = Some(crate::hex::to_lower_hex(
         artifacts.manifest_hash().as_bytes(),
     ));
+
+    // A binding becomes relevant only as a canonical election-bound archive
+    // constituent. Presence alone is explicitly not an Ootle anchor claim.
+    if let Some(bytes) = files.get(TRANSPORT_ARCHIVE_BINDING_PATH_V1) {
+        result.transport_binding_present = true;
+        let binding = match TransportArchiveBindingV1::from_canonical_cbor(bytes) {
+            Ok(binding) => binding,
+            Err(error) => return Ok(result.fail(STAGE_TRANSPORT_BINDING, error.code().as_str())),
+        };
+        if binding.manifest_hash() != artifacts.manifest_hash()
+            || binding.election_id() != artifacts.manifest().election_id().as_bytes()
+        {
+            return Ok(result.fail(
+                STAGE_TRANSPORT_BINDING,
+                "GUI_TRANSPORT_ARCHIVE_BINDING_MISMATCH",
+            ));
+        }
+        result.transport_binding_verified = true;
+        result.transport_batch_set_commitment_hex = Some(crate::hex::to_lower_hex(
+            &binding.final_batch_set_commitment(),
+        ));
+    }
 
     // Stage 3b: governance source pin ↔ archived document cross-check
     // (Slice 5A8 hardening, M1). Archive catalog verification proves the on-disk

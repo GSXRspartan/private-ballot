@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
     ElectionLifecycleStateV1, GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1,
     GuiAnchorSnapshotInspectionV1, GuiArchiveVerificationV1, GuiArchiveWriteResultV1,
@@ -25,11 +25,17 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1,
     GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiTallySummaryV1,
+    GuiTransportAnchorVerificationV1,
     GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
     GuiVoterSessionV1, GuiVoterWorkflowStatusV1, inspect_anchor_config_v1,
     inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, verify_archive_directory_v1,
+    verify_transport_archive_anchor_v1,
     write_archive_directory_v1, write_election_artifacts_v1,
 };
+use tari_cc_private_ballot_transport_gateway::{
+    PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
+};
+use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
 
 /// Serializable command error: a bounded copy of the gui-core error model.
 ///
@@ -93,6 +99,14 @@ impl CommandError {
             "the ballot package file could not be read",
         )
     }
+
+    fn private_transport_unavailable() -> Self {
+        Self::new(
+            "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+            "UNAVAILABLE",
+            "private transport unavailable; select offline export or explicitly choose another available route",
+        )
+    }
 }
 
 impl From<GuiCoreError> for CommandError {
@@ -114,11 +128,76 @@ impl From<GuiCoreError> for CommandError {
 /// credential persistence). Loading or unloading an election replaces/clears
 /// the voter workflow so eligibility, selection, and future preparation tokens
 /// cannot silently carry across elections.
-#[derive(Default)]
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
     voter: Mutex<Option<GuiVoterSessionV1>>,
+    transport: Mutex<PrivateSubmissionCoordinatorV1>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            session: Mutex::new(None),
+            draft: Mutex::new(None),
+            voter: Mutex::new(None),
+            transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum GuiPrivateRouteV1 {
+    ManagedTor,
+    SplitTrustRelay,
+    OfflineExport,
+}
+
+impl From<GuiPrivateRouteV1> for VoterPrivateRouteV1 {
+    fn from(route: GuiPrivateRouteV1) -> Self {
+        match route {
+            GuiPrivateRouteV1::ManagedTor => Self::ManagedTor,
+            GuiPrivateRouteV1::SplitTrustRelay => Self::SplitTrustRelay,
+            GuiPrivateRouteV1::OfflineExport => Self::OfflineExport,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GuiPrivateTransportAvailabilityV1 {
+    managed_tor_available: bool,
+    split_trust_relay_available: bool,
+    offline_export_available: bool,
+    development_transport: bool,
+    message: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GuiPrivateSubmissionResultV1 {
+    route: &'static str,
+    receipt_state: &'static str,
+    retry_status: &'static str,
+    reduced_anonymity: bool,
+}
+
+struct ProductionUnavailableCarrier;
+
+impl PrivateSubmissionCarrierV1 for ProductionUnavailableCarrier {
+    fn send_managed_tor(
+        &mut self,
+        _: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+        _: &[u8],
+    ) -> Result<(), tari_cc_private_ballot_gui_core::TransportError> {
+        Err(tari_cc_private_ballot_gui_core::TransportError::Unavailable)
+    }
+
+    fn send_split_trust_relay(
+        &mut self,
+        _: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+        _: &[u8],
+    ) -> Result<(), tari_cc_private_ballot_gui_core::TransportError> {
+        Err(tari_cc_private_ballot_gui_core::TransportError::Unavailable)
+    }
 }
 
 impl AppState {
@@ -350,6 +429,20 @@ fn write_archive(
 #[tauri::command]
 fn verify_archive(directory: String) -> Result<GuiArchiveVerificationV1, CommandError> {
     Ok(verify_archive_directory_v1(Path::new(&directory))?)
+}
+
+/// Verifies the public transport-binding → completed archive → existing Phase
+/// 4 evidence chain. This is inspection only: no walletd/indexer access,
+/// signing, fee payment, ballot package, or transport secret crosses Tauri.
+#[tauri::command]
+fn verify_transport_archive_anchor(
+    archive_directory: String,
+    anchor_evidence_path: String,
+) -> Result<GuiTransportAnchorVerificationV1, CommandError> {
+    Ok(verify_transport_archive_anchor_v1(
+        Path::new(&archive_directory),
+        Path::new(&anchor_evidence_path),
+    )?)
 }
 
 /// Inspects one canonical anchor application config (read-only, no network).
@@ -858,6 +951,93 @@ fn export_prepared_voter_ballot(
     )?)
 }
 
+/// Returns the safe route availability projection. Production deliberately
+/// fails closed until a release provisions a pinned root and authenticated
+/// descriptor; offline export is independent of transport configuration.
+#[tauri::command]
+fn private_transport_availability(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPrivateTransportAvailabilityV1, CommandError> {
+    let transport = state
+        .transport
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let online = transport.online_configured();
+    Ok(GuiPrivateTransportAvailabilityV1 {
+        managed_tor_available: online,
+        split_trust_relay_available: online,
+        offline_export_available: true,
+        development_transport: online,
+        message: if online {
+            "TEST / DEVELOPMENT TRANSPORT is configured."
+        } else {
+            "Production private transport is unavailable until a transport authority root is provisioned. Offline export remains available."
+        },
+    })
+}
+
+/// Submits the existing Rust-owned Ready ballot through one explicit route.
+/// JavaScript supplies no ballot bytes and receives no secret or organizer
+/// intake fields. Offline export stays the separate canonical file command.
+#[tauri::command]
+fn submit_prepared_voter_ballot_privately(
+    route: GuiPrivateRouteV1,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPrivateSubmissionResultV1, CommandError> {
+    let selected: VoterPrivateRouteV1 = route.into();
+    if selected == VoterPrivateRouteV1::OfflineExport {
+        return Ok(GuiPrivateSubmissionResultV1 {
+            route: "OfflineExport",
+            receipt_state: "OFFLINE_EXPORT",
+            retry_status: "NOT_APPLICABLE",
+            reduced_anonymity: false,
+        });
+    }
+    let mut session = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let session = session.as_mut().ok_or_else(CommandError::no_session)?;
+    let voter = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let voter = voter.as_ref().ok_or_else(CommandError::no_voter_session)?;
+    let ballot_bytes = voter.prepared_canonical_ballot_bytes(
+        session.artifacts(),
+        session.lifecycle_state_v1(),
+    )?;
+    let mut transport = state
+        .transport
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let mut carrier = ProductionUnavailableCarrier;
+    let result = transport
+        .submit(selected, ballot_bytes, session, &mut carrier)
+        .map_err(|_| CommandError::private_transport_unavailable())?;
+    Ok(GuiPrivateSubmissionResultV1 {
+        route: match result.route {
+            VoterPrivateRouteV1::ManagedTor => "ManagedTor",
+            VoterPrivateRouteV1::SplitTrustRelay => "SplitTrustRelay",
+            VoterPrivateRouteV1::OfflineExport => "OfflineExport",
+        },
+        receipt_state: match result.receipt.state {
+            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Received => "RECEIVED",
+            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Accepted => "ACCEPTED",
+            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Rejected => "REJECTED",
+            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Included => "INCLUDED",
+            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Anchored => "ANCHORED",
+        },
+        retry_status: match result.receipt.retry_status {
+            tari_cc_private_ballot_gui_core::RetryStatusV1::NewDelivery => "NEW_DELIVERY",
+            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryAccepted => "PREVIOUS_ACCEPTED",
+            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryRejected => "PREVIOUS_REJECTED",
+            tari_cc_private_ballot_gui_core::RetryStatusV1::GenericDuplicate => "GENERIC_DUPLICATE",
+        },
+        reduced_anonymity: result.reduced_anonymity,
+    })
+}
+
 /// Resets the whole voter workflow for the current election.
 #[tauri::command]
 fn reset_voter_workflow(
@@ -933,6 +1113,7 @@ pub fn run() {
             participation_summary,
             write_archive,
             verify_archive,
+            verify_transport_archive_anchor,
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,
@@ -963,6 +1144,8 @@ pub fn run() {
             clear_voter_ballot_selection,
             prepare_voter_ballot,
             export_prepared_voter_ballot,
+            private_transport_availability,
+            submit_prepared_voter_ballot_privately,
             reset_voter_workflow,
             write_archive_with_governance_document,
         ])

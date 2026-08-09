@@ -47,15 +47,18 @@ pub mod session;
 pub mod summary;
 pub mod tally;
 pub mod transport;
+pub mod transport_anchor;
 pub mod voter_confirmation;
 pub mod voter_credential;
 pub mod voter_session;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, verify_archive_directory_v1,
+    STAGE_TRANSPORT_BINDING,
 };
 pub use archive_writer::{
     GuiArchiveFileSummaryV1, GuiArchiveWriteResultV1, write_archive_directory_v1,
+    write_archive_directory_v1_with_transport_binding,
 };
 pub use artifacts::GuiElectionArtifactsV1;
 pub use creation::{
@@ -87,9 +90,13 @@ pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 pub use transport::{
     BatchPolicyV1, DescriptorConsistencyStoreV1, EnvelopeOpeningMaterialV1, PaddingPolicyV1,
-    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootSetV1,
+    TransportAuthorityRootV1, TransportDescriptorV1,
     TransportError, TransportRoutePolicyV1, VoterReceiptStateV1, VoterTransportReceiptV1,
     production_transport_authority_root_v1,
+};
+pub use transport_anchor::{
+    GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1,
 };
 pub use voter_confirmation::{
     GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,

@@ -10,6 +10,7 @@
 mod file_entry;
 mod manifest;
 mod replay;
+mod transport_binding;
 
 pub use file_entry::{
     ArchiveFileCatalogV1, ArchiveFileDigestV1, ArchiveFileEntryV1, ArchivePathV1,
@@ -21,6 +22,10 @@ pub use manifest::{
 pub use replay::{
     BallotDecisionOutcomeV1, BallotDecisionV1, BallotPackageDigestV1, IngestSequenceV1,
     SubmissionRecordV1, VerificationTranscriptV1,
+};
+pub use transport_binding::{
+    TRANSPORT_ARCHIVE_BINDING_PATH_V1, TRANSPORT_ARCHIVE_BINDING_TYPE_ID_V1,
+    TRANSPORT_BATCH_SET_ALGORITHM_ID_V1, TransportArchiveBatchV1, TransportArchiveBindingV1,
 };
 
 /// First metadata-minimized archive replay-model version.
