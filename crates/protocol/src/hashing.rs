@@ -15,6 +15,8 @@ pub enum HashDomain {
     ProofStatementV1,
     ArchiveFileV1,
     ArchiveManifestV1,
+    TransportDescriptorV1,
+    TransportRetryCapabilityV1,
 }
 
 impl HashDomain {
@@ -31,6 +33,10 @@ impl HashDomain {
             Self::ProofStatementV1 => "tari-cc-private-ballot/proof-statement/v1",
             Self::ArchiveFileV1 => "tari-cc-private-ballot/archive-file/v1",
             Self::ArchiveManifestV1 => "tari-cc-private-ballot/archive-manifest/v1",
+            Self::TransportDescriptorV1 => "tari-cc-private-ballot/transport-descriptor/v1",
+            Self::TransportRetryCapabilityV1 => {
+                "tari-cc-private-ballot/transport-retry-capability/v1"
+            }
         }
     }
 }
@@ -175,6 +181,8 @@ mod tests {
             HashDomain::ProofStatementV1,
             HashDomain::ArchiveFileV1,
             HashDomain::ArchiveManifestV1,
+            HashDomain::TransportDescriptorV1,
+            HashDomain::TransportRetryCapabilityV1,
         ];
 
         let expected_count = domains.len();

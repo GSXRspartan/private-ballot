@@ -46,6 +46,7 @@ pub mod participation;
 pub mod session;
 pub mod summary;
 pub mod tally;
+pub mod transport;
 pub mod voter_confirmation;
 pub mod voter_credential;
 pub mod voter_session;
@@ -84,6 +85,12 @@ pub use session::GuiElectionSessionV1;
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
+pub use transport::{
+    BatchPolicyV1, DescriptorConsistencyStoreV1, EnvelopeOpeningMaterialV1, PaddingPolicyV1,
+    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    TransportError, TransportRoutePolicyV1, VoterReceiptStateV1, VoterTransportReceiptV1,
+    production_transport_authority_root_v1,
+};
 pub use voter_confirmation::{
     GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,
     VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,

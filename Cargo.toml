@@ -8,6 +8,7 @@ members = [
     "crates/cli",
     "crates/crypto",
     "crates/gui-core",
+    "crates/transport-gateway",
     "crates/ootle-anchor-lifecycle",
     "crates/ootle-anchor-adapter",
     "crates/ootle-anchor-network-adapters",

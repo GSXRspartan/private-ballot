@@ -1,0 +1,31 @@
+[package]
+name = "tari-cc-private-ballot-transport-gateway"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hpke = { version = "=0.14.0", default-features = false, features = ["alloc", "getrandom", "x25519", "chacha"] }
+tari-cc-private-ballot-gui-core = { path = "../gui-core" }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["rand_core"] }
+tari-cc-private-ballot-anchor = { path = "../anchor" }
+tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
+tari-cc-private-ballot-archive = { path = "../archive" }
+tari-cc-private-ballot-ballot = { path = "../ballot" }
+tari-cc-private-ballot-crypto = { path = "../crypto" }
+tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
+tari-cc-private-ballot-ootle-anchor-app = { path = "../ootle-anchor-app" }
+tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator = { path = "../ootle-anchor-lifecycle" }
+tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../ootle-anchor-network-adapters" }
+tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
+tari-cc-private-ballot-ootle-walletd-anchor-adapter = { path = "../ootle-walletd-anchor-adapter" }
+tari-cc-private-ballot-registry = { path = "../registry" }
+tari-cc-private-ballot-verifier = { path = "../verifier" }
+curve25519-dalek-v4 = { package = "curve25519-dalek", version = "=4.1.3", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

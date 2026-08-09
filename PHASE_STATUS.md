@@ -148,6 +148,12 @@
 > canonical-format change, or Internet transport. Online delivery remains
 > deferred pending authenticated transport configuration, implementation, and
 > independent security/privacy review.
+> Phase 5 Slice 5A12B adds a local-only, release-root-gated transport
+> foundation: separate signed descriptor, RFC 9180 HPKE envelope, exact-byte
+> gateway boundary, wire-safe receipt DTO, retry commitments, and
+> accepted-unique anonymity counter. The production root remains deliberately
+> unprovisioned and no online transport is enabled; see ADR-0010 and the 5A12B
+> review.
 
 ## Phase 2 assessment
 
