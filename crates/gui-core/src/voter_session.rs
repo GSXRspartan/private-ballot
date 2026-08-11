@@ -170,7 +170,6 @@ pub struct GuiPreparedBallotSummaryV1 {
     pub selected_display_labels: Vec<String>,
     pub abstaining: bool,
     pub proof_suite_id: String,
-    pub linkability_hex: String,
     pub canonical_package_bytes: usize,
     pub package_digest_hex: String,
     pub locally_verified: bool,
@@ -376,6 +375,36 @@ impl GuiVoterSessionV1 {
             preparation_generation: 0,
             prepared_ballot: PreparedBallotStateV1::None,
         }
+    }
+
+    /// Installs a Rust-owned pending credential after binding it to the
+    /// currently loaded frozen registry. The credential never crosses a DTO.
+    pub fn install_credential(
+        &mut self,
+        credential: crate::voter_credential::VoterGovernanceCredentialV1,
+        artifacts: &GuiElectionArtifactsV1,
+    ) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        let credential = GuiVoterCredentialSessionV1::from_credential(
+            credential,
+            crate::voter_credential::GuiVoterCredentialOriginV1::Generated,
+            artifacts.registry(),
+        )?;
+        let status = credential.status();
+        self.credential = Some(credential);
+        self.credential_generation = self.credential_generation.saturating_add(1);
+        self.invalidate_prepared("Credential changed; prepared ballot state was cleared.");
+        Ok(status)
+    }
+
+    /// Returns the private credential to the shell-owned pending slot when an
+    /// election is unloaded. This preserves the current-process bootstrap
+    /// workflow without retaining any election-specific eligibility state.
+    pub fn take_credential(&mut self) -> Option<crate::voter_credential::VoterGovernanceCredentialV1> {
+        let credential = self.credential.take()?.into_credential();
+        self.credential_generation = self.credential_generation.saturating_add(1);
+        self.invalidate_prepared("Election changed; prepared ballot state was cleared.");
+        Some(credential)
     }
 
     /// Returns whether this session still belongs to the supplied artifacts.
@@ -636,7 +665,7 @@ impl GuiVoterSessionV1 {
                     artifacts.manifest().proof_suite_id(),
                 )
                 .map_err(|error| GuiCoreError::from_protocol(&error, "ballot-package"))?;
-            let verified = verify_approval_proof(
+            verify_approval_proof(
                 artifacts.manifest(),
                 decoded.payload(),
                 decoded.proof(),
@@ -658,7 +687,6 @@ impl GuiVoterSessionV1 {
                     selected_display_labels: selection_status.selected_display_labels,
                     abstaining: selection.payload.is_abstention(),
                     proof_suite_id: artifacts.manifest().proof_suite_id().to_owned(),
-                    linkability_hex: to_lower_hex(verified.nullifier().as_bytes()),
                     canonical_package_bytes: canonical_bytes.len(),
                     package_digest_hex: to_lower_hex(&digest),
                     locally_verified: true,
@@ -1419,7 +1447,11 @@ mod tests {
             summary.selected_option_ids_hex,
             vec![hex_id(b"candidate-a")]
         );
-        assert!(!summary.linkability_hex.is_empty());
+        let json = match serde_json::to_string(&summary) {
+            Ok(json) => json,
+            Err(_) => panic!("prepared summary must serialize"),
+        };
+        assert!(!json.contains("linkability"));
     }
 
     #[test]
@@ -1428,19 +1460,9 @@ mod tests {
         let public_key = ok(credential.public_key_bytes());
         let registry = registry_from_keys(&[public_key]);
         let artifacts = artifacts_for_registry(registry, limits(1, 2, false), b"bridge-election");
-        let credential_session = ok(GuiVoterCredentialSessionV1::from_credential(
-            credential,
-            GuiVoterCredentialOriginV1::Generated,
-            artifacts.registry(),
-        ));
-        assert_eq!(
-            credential_session.status().eligibility,
-            GuiVoterEligibilityV1::Eligible
-        );
-
         let mut voter = GuiVoterSessionV1::new(&artifacts);
-        voter.credential = Some(credential_session);
-        voter.credential_generation = 1;
+        let status = ok(voter.install_credential(credential, &artifacts));
+        assert_eq!(status.eligibility, GuiVoterEligibilityV1::Eligible);
         ok(select_candidate_a(
             &mut voter,
             &artifacts,
@@ -1472,7 +1494,12 @@ mod tests {
         assert!(ok(organizer.intake_ballot(&bytes)).accepted);
         let duplicate = ok(organizer.intake_ballot(&bytes));
         assert!(!duplicate.accepted);
-        assert_eq!(duplicate.code, "DUPLICATE_NULLIFIER");
+        assert_eq!(duplicate.code, "DUPLICATE_BALLOT");
+        // The public status is redacted, but the authoritative ledger and
+        // transcript still record one acceptance and one duplicate rejection.
+        assert_eq!(organizer.accepted_count(), 1);
+        assert_eq!(organizer.transcript().accepted_count(), 1);
+        assert_eq!(organizer.transcript().rejected_count(), 1);
 
         let mut altered = bytes.clone();
         let last = altered.len().saturating_sub(1);

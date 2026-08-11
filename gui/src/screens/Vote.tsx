@@ -44,6 +44,7 @@ import {
   workflowTone,
 } from "../voterWorkflow";
 import { useAppState } from "../state/AppState";
+import { RequestGenerationGate } from "../requestGeneration";
 import {
   BackendErrorNotice,
   Card,
@@ -91,6 +92,7 @@ export function Vote() {
   const [privateResult, setPrivateResult] = useState<GuiPrivateSubmissionResultV1 | null>(null);
   const selectionDraftIdsRef = useRef<string[]>([]);
   const selectionRequestGenerationRef = useRef(0);
+  const confirmationRequestGenerationRef = useRef(new RequestGenerationGate());
 
   useEffect(() => {
     setConfirmation(null);
@@ -102,6 +104,7 @@ export function Vote() {
     setAbstaining(false);
     selectionDraftIdsRef.current = [];
     selectionRequestGenerationRef.current += 1;
+    confirmationRequestGenerationRef.current.invalidate();
     setConfirmed(false);
     setCredentialStage(false);
     setSelectionStage(false);
@@ -151,16 +154,19 @@ export function Vote() {
 
   async function loadConfirmation(path: string | null) {
     if (!election || !shellAvailable) return;
+    const requestGeneration = confirmationRequestGenerationRef.current.begin();
     setBusy(true);
     setError(null);
     try {
       const c = await api.voterConfirmation(path);
-      setConfirmation(c);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) setConfirmation(c);
     } catch (err) {
-      captureError(err);
-      setConfirmation(null);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) {
+        captureError(err);
+        setConfirmation(null);
+      }
     } finally {
-      setBusy(false);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) setBusy(false);
     }
   }
 
@@ -174,15 +180,17 @@ export function Vote() {
     if (!path) return;
     setBusy(true);
     setError(null);
+    const requestGeneration = confirmationRequestGenerationRef.current.begin();
     try {
       const digest = await api.computeGovernanceDocumentDigest(path);
+      if (!confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) return;
       setGovDocDigest(digest);
       const c = await api.voterConfirmation(path);
-      setConfirmation(c);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) setConfirmation(c);
     } catch (err) {
-      captureError(err);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) captureError(err);
     } finally {
-      setBusy(false);
+      if (confirmationRequestGenerationRef.current.isCurrent(requestGeneration)) setBusy(false);
     }
   }
 

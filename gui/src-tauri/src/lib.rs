@@ -30,7 +30,7 @@ use tari_cc_private_ballot_gui_core::{
     GuiVoterSessionV1, GuiVoterWorkflowStatusV1, inspect_anchor_config_v1,
     inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, verify_archive_directory_v1,
     verify_transport_archive_anchor_v1,
-    write_archive_directory_v1, write_election_artifacts_v1,
+    write_archive_directory_v1, write_election_artifacts_v1, VoterGovernanceCredentialV1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
@@ -121,17 +121,18 @@ impl From<GuiCoreError> for CommandError {
 }
 
 /// Shell-owned application state: at most one organizer election session and
-/// at most one Rust-side voter workflow session.
+/// at most one Rust-side voter workflow session. A pending credential is
+/// Rust-owned separately so a voter may create it before the registry freezes.
 ///
 /// The election session and voter workflow session are owned by gui-core and
 /// are never persisted by the shell (ADR-0007: no new canonical format, no
-/// credential persistence). Loading or unloading an election replaces/clears
-/// the voter workflow so eligibility, selection, and future preparation tokens
-/// cannot silently carry across elections.
+/// credential persistence). Election replacement clears workflow state, while
+/// the Rust-only pending credential survives for same-process membership checks.
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
     voter: Mutex<Option<GuiVoterSessionV1>>,
+    pending_voter_credential: Mutex<Option<VoterGovernanceCredentialV1>>,
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
 }
 
@@ -141,6 +142,7 @@ impl Default for AppState {
             session: Mutex::new(None),
             draft: Mutex::new(None),
             voter: Mutex::new(None),
+            pending_voter_credential: Mutex::new(None),
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
         }
     }
@@ -280,7 +282,24 @@ fn load_election(
         Path::new(&option_set_path),
     )?;
     let session = GuiElectionSessionV1::new(artifacts)?;
-    let voter = GuiVoterSessionV1::new(session.artifacts());
+    // Preserve a same-process credential across an explicit reload. Its
+    // eligibility is recomputed only after the new canonical registry loads.
+    let carried_credential = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .as_mut()
+        .and_then(GuiVoterSessionV1::take_credential);
+    let pending_credential = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .take()
+        .or(carried_credential);
+    let mut voter = GuiVoterSessionV1::new(session.artifacts());
+    if let Some(credential) = pending_credential {
+        voter.install_credential(credential, session.artifacts())?;
+    }
     let summary = session.summary();
     let mut guard = state
         .session
@@ -295,7 +314,9 @@ fn load_election(
     Ok(summary)
 }
 
-/// Drops the active election session and any Rust-side voter workflow state.
+/// Drops the active election session and workflow state. A deliberately
+/// generated credential returns to the Rust-only pending slot so navigation
+/// and reloads do not destroy it during this application session.
 #[tauri::command]
 fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
     let mut guard = state
@@ -307,7 +328,15 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
+    let credential = voter_guard.as_mut().and_then(GuiVoterSessionV1::take_credential);
     *voter_guard = None;
+    if let Some(credential) = credential {
+        let mut pending_guard = state
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *pending_guard = Some(credential);
+    }
     Ok(())
 }
 
@@ -596,7 +625,15 @@ fn freeze_election(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionCreationResultV1, CommandError> {
     let (result, session) = state.with_draft_mut(|draft| Ok(draft.freeze()?))?;
-    let voter = GuiVoterSessionV1::new(session.artifacts());
+    let mut voter = GuiVoterSessionV1::new(session.artifacts());
+    let pending_credential = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .take();
+    if let Some(credential) = pending_credential {
+        voter.install_credential(credential, session.artifacts())?;
+    }
     let mut guard = state
         .session
         .lock()
@@ -747,10 +784,19 @@ fn voter_governance_credential_status(
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    Ok(guard
+    if let Some(voter) = guard.as_ref() {
+        return Ok(voter.credential_status());
+    }
+    drop(guard);
+    let pending = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    pending
         .as_ref()
-        .map(GuiVoterSessionV1::credential_status)
-        .unwrap_or_else(GuiVoterCredentialStatusV1::unloaded))
+        .map(VoterGovernanceCredentialV1::pending_status)
+        .transpose()?
+        .ok_or_else(|| CommandError::no_voter_session())
 }
 
 /// Generates one session-only voter governance credential in Rust, derives
@@ -760,21 +806,43 @@ fn voter_governance_credential_status(
 fn generate_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let session_guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
-        return Err(CommandError::no_session());
-    };
-    let mut voter_guard = state
+    let session_guard = state.session.lock().map_err(|_| CommandError::state_poisoned())?;
+    if let Some(session) = session_guard.as_ref() {
+        let mut voter_guard = state
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(voter) = voter_guard.as_mut() else {
-        return Err(CommandError::no_voter_session());
-    };
-    Ok(voter.generate_credential(session.artifacts())?)
+        let Some(voter) = voter_guard.as_mut() else {
+            return Err(CommandError::no_voter_session());
+        };
+        return Ok(voter.generate_credential(session.artifacts())?);
+    }
+    drop(session_guard);
+    let credential = VoterGovernanceCredentialV1::generate()?;
+    let status = credential.pending_status()?;
+    let mut pending = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *pending = Some(credential);
+    Ok(status)
+}
+
+/// Generates a Rust-owned local credential before an election is frozen. This
+/// deliberately does not depend on a loaded election or issue credentials on
+/// behalf of an organizer; the caller receives only the public enrollment key.
+#[tauri::command]
+fn generate_pending_voter_governance_credential(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    let credential = VoterGovernanceCredentialV1::generate()?;
+    let status = credential.pending_status()?;
+    let mut pending = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *pending = Some(credential);
+    Ok(status)
 }
 
 /// Explicitly clears the Rust-side voter governance credential.
@@ -786,10 +854,29 @@ fn reset_voter_governance_credential(
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    Ok(guard
-        .as_mut()
-        .map(GuiVoterSessionV1::reset_credential)
-        .unwrap_or_else(GuiVoterCredentialStatusV1::unloaded))
+    if let Some(voter) = guard.as_mut() {
+        return Ok(voter.reset_credential());
+    }
+    drop(guard);
+    let mut pending = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *pending = None;
+    Ok(GuiVoterCredentialStatusV1::unloaded())
+}
+
+/// Explicitly clears only the Rust-owned pre-freeze pending credential.
+#[tauri::command]
+fn reset_pending_voter_governance_credential(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    let mut pending = state
+        .pending_voter_credential
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *pending = None;
+    Ok(GuiVoterCredentialStatusV1::unloaded())
 }
 
 /// Returns the complete safe voter workflow status. The frontend supplies
@@ -1137,7 +1224,9 @@ pub fn run() {
             voter_confirmation,
             voter_governance_credential_status,
             generate_voter_governance_credential,
+            generate_pending_voter_governance_credential,
             reset_voter_governance_credential,
+            reset_pending_voter_governance_credential,
             voter_workflow_status,
             voter_ballot_selection_status,
             set_voter_ballot_selection,

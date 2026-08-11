@@ -12,7 +12,10 @@
 mod common;
 
 use serde_json::Value;
-use tari_cc_private_ballot_gui_core::{GuiElectionArtifactsV1, GuiElectionSessionV1};
+use tari_cc_private_ballot_gui_core::{
+    GuiBallotIntakeResultV1, GuiElectionArtifactsV1, GuiElectionSessionV1, GuiIntakeCategory,
+    GuiPreparedBallotSummaryV1,
+};
 
 use common::{TestDir, candidate_bytes, manifest_bytes, registry_bytes};
 
@@ -150,4 +153,45 @@ fn serialized_summary_carries_no_secret_field() {
         !json.to_lowercase().contains(&secret_hex),
         "serialized summary must not contain the fixture secret scalar in hex"
     );
+}
+
+/// The public Tauri-facing ballot DTOs must not serialize replay/linkability
+/// internals even though gui-core retains them for verification and archive
+/// replay. This protects the Rust-to-JavaScript boundary, not merely rendering.
+#[test]
+fn public_ballot_dtos_exclude_replay_and_secret_material() {
+    let intake = GuiBallotIntakeResultV1 {
+        accepted: false,
+        code: "DUPLICATE_BALLOT",
+        category: GuiIntakeCategory::Duplicate,
+        package_digest_hex: "a".repeat(64),
+    };
+    let prepared = GuiPreparedBallotSummaryV1 {
+        election_id_hex: "b".repeat(64),
+        manifest_hash_hex: "c".repeat(64),
+        selected_option_ids_hex: vec!["d".repeat(64)],
+        selected_display_labels: vec!["Option".to_owned()],
+        abstaining: false,
+        proof_suite_id: "TARI_TRIPTYCH_PROTOTYPE_V1".to_owned(),
+        canonical_package_bytes: 123,
+        package_digest_hex: "e".repeat(64),
+        locally_verified: true,
+        ready_to_export: true,
+    };
+    let json = serde_json::to_string(&(intake, prepared)).unwrap_or_default();
+    for forbidden in [
+        "nullifier",
+        "linkability",
+        "member_index",
+        "private_scalar",
+        "secret_credential",
+        "credential_bytes",
+        "duplicate_of_sequence",
+        "intake_sequence",
+    ] {
+        assert!(
+            !json.to_lowercase().contains(forbidden),
+            "public DTO JSON must not contain {forbidden}"
+        );
+    }
 }

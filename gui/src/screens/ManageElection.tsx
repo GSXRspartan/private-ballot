@@ -16,6 +16,7 @@ import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
 import {
   canShowTally,
+  canWriteFinalArchive,
   coarseBucketLabel,
   formatPercent,
   participationAccessibleText,
@@ -96,6 +97,7 @@ export function ManageElection() {
   const canImportBallot = canAct && intakeCanImport(shellAvailable, lifecycle);
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
   const tallyAvailable = canShowTally(lifecycle);
+  const finalArchiveAvailable = canWriteFinalArchive(lifecycle);
   const participationSealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
   const participationDisclosed = participationIsDisclosed(participation);
@@ -628,13 +630,16 @@ export function ManageElection() {
           </button>
         </Card>
 
-        <Card title="Archive">
+        <Card title="Final archive">
           <p className="card-body">
             Writes the complete election record to a folder: the election definition, eligible
             voter list, ballot options, and accepted ballots. Anyone can later verify this
             record independently on the Archive screen. Optionally include the governance
             supporting document so its bytes travel with the record.
           </p>
+          {!finalArchiveAvailable && (
+            <Notice tone="info">Close voting before writing the final archive.</Notice>
+          )}
           <DetailsSection summary="Technical details">
             <p className="card-body">
               Writes the canonical offline archive (manifest, registry, option set, submissions,
@@ -697,10 +702,10 @@ export function ManageElection() {
             <button
               type="button"
               className="btn btn-primary"
-              disabled={!canAct || !archiveDir}
+              disabled={!canAct || !archiveDir || !finalArchiveAvailable}
               onClick={() => void onWriteArchive()}
             >
-              Write archive
+              Write final archive
             </button>
             <button
               type="button"

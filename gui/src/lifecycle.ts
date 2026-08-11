@@ -41,6 +41,13 @@ export function canShowTally(state: string | null | undefined): boolean {
   return (TALLY_AVAILABLE_LIFECYCLE_STATES as ReadonlyArray<string>).includes(state);
 }
 
+/** A final archive must describe a completed voting lifecycle. The Rust
+ * archive writer remains authoritative; this only prevents misleading UI
+ * wording and actions while voting is still open. */
+export function canWriteFinalArchive(state: string | null | undefined): boolean {
+  return canShowTally(state);
+}
+
 /** Returns true while results are sealed (DRAFT, FROZEN, OPEN, or unknown). */
 export function resultsAreSealed(state: string | null | undefined): boolean {
   return !canShowTally(state);

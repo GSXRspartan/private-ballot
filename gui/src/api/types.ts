@@ -44,9 +44,6 @@ export interface GuiBallotIntakeResultV1 {
   code: string;
   category: GuiIntakeCategory;
   package_digest_hex: string;
-  sequence: number;
-  nullifier_hex: string | null;
-  duplicate_of_sequence: number | null;
 }
 
 export interface GuiTallyCountV1 {
@@ -513,7 +510,6 @@ export interface GuiPreparedBallotSummaryV1 {
   selected_display_labels: string[];
   abstaining: boolean;
   proof_suite_id: string;
-  linkability_hex: string;
   canonical_package_bytes: number;
   package_digest_hex: string;
   locally_verified: boolean;

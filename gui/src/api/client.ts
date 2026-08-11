@@ -183,8 +183,12 @@ export const api = {
     call<GuiVoterCredentialStatusV1>("voter_governance_credential_status"),
   generateVoterGovernanceCredential: () =>
     call<GuiVoterCredentialStatusV1>("generate_voter_governance_credential"),
+  generatePendingVoterGovernanceCredential: () =>
+    call<GuiVoterCredentialStatusV1>("generate_pending_voter_governance_credential"),
   resetVoterGovernanceCredential: () =>
     call<GuiVoterCredentialStatusV1>("reset_voter_governance_credential"),
+  resetPendingVoterGovernanceCredential: () =>
+    call<GuiVoterCredentialStatusV1>("reset_pending_voter_governance_credential"),
   voterWorkflowStatus: (reviewConfirmed: boolean) =>
     call<GuiVoterWorkflowStatusV1>("voter_workflow_status", { reviewConfirmed }),
   voterBallotSelectionStatus: () =>

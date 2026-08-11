@@ -1,7 +1,7 @@
 import type { GuiBallotIntakeResultV1 } from "./api/types";
 
 const REJECTION_LABELS: Record<string, string> = {
-  DUPLICATE_NULLIFIER: "Duplicate ballot for this election.",
+  DUPLICATE_BALLOT: "Duplicate ballot for this election.",
   WRONG_MANIFEST_HASH: "Ballot package is for a different election.",
   LIFECYCLE_COMMITMENT_MISMATCH: "Ballot package is for a different election.",
   CANDIDATE_SET_COMMITMENT_MISMATCH: "Ballot package is for a different election.",

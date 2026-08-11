@@ -195,3 +195,29 @@ export function isUncastableApprovalConfig(
   if (min === null || max === null) return false;
   return !abstention && max === 0;
 }
+
+/** State of the authoritative Rust-side election-draft setup. */
+export type DraftInitializationState = "initializing" | "ready" | "failed";
+
+/** Only a successfully started Rust draft may be edited by the wizard. */
+export function draftIsReady(state: DraftInitializationState): boolean {
+  return state === "ready";
+}
+
+/**
+ * Starts a fresh authoritative election draft and reports its lifecycle to the
+ * caller. This deliberately does not create or retain a TypeScript draft.
+ */
+export async function initializeElectionDraft(
+  startElectionDraft: () => Promise<void>,
+  setState: (state: DraftInitializationState) => void,
+): Promise<void> {
+  setState("initializing");
+  try {
+    await startElectionDraft();
+    setState("ready");
+  } catch (error) {
+    setState("failed");
+    throw error;
+  }
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
 import { pickDirectory, pickGovernanceDocument, pickRegistryCborFile } from "../api/dialog";
@@ -10,12 +10,15 @@ import type {
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
   GuiGovernanceDocumentDigestV1,
+  GuiVoterCredentialStatusV1,
 } from "../api/types";
 import { presentationIdentifier } from "../api/client";
 import { NavSection } from "../components/AppFrame";
 import {
   approvalRulePreview,
+  draftIsReady,
   freezeAvailable,
+  initializeElectionDraft,
   isUncastableApprovalConfig,
   NO_QUORUM_STATEMENT,
   optionNoun,
@@ -24,6 +27,7 @@ import {
   parseVoterHexList,
   presentationLabel,
 } from "../creation";
+import type { DraftInitializationState } from "../creation";
 import {
   ADVANCED_PIN_LABEL,
   RECOMMENDED_PIN_LABEL,
@@ -34,6 +38,7 @@ import {
   pinFormatTone,
   pinKindLabel,
 } from "../governance";
+import { publicKeyDisplay, WALLET_SEED_WARNING } from "../voterCredential";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -91,24 +96,15 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   const [exportResult, setExportResult] = useState<GuiElectionExportResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
+  const [draftInitialization, setDraftInitialization] =
+    useState<DraftInitializationState>("initializing");
+  const draftStartRef = useRef<Promise<boolean> | null>(null);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
   const [governanceDocPath, setGovernanceDocPath] = useState<string | null>(null);
   const [governanceDocDigest, setGovernanceDocDigest] =
     useState<GuiGovernanceDocumentDigestV1 | null>(null);
-
-  useEffect(() => {
-    // Automatic draft setup: browser preview without the desktop shell is an
-    // environment state, not a failure — the preview notice covers it, and no
-    // red error should appear before the user has done anything. Errors from
-    // real user operations still surface normally through run().
-    void api.startElectionDraft().catch((error) => {
-      if (error instanceof BackendError && error.payload.code === "GUI_SHELL_UNAVAILABLE") return;
-      captureError(error);
-    });
-    return () => {
-      void api.discardElectionDraft().catch(() => {});
-    };
-  }, []);
+  const [bootstrapCredential, setBootstrapCredential] =
+    useState<GuiVoterCredentialStatusV1 | null>(null);
 
   function captureError(error: unknown) {
     if (error instanceof BackendError) setLocalError(error.payload);
@@ -120,6 +116,31 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         message: "an unexpected frontend/backend boundary error occurred",
       });
   }
+
+  async function startFreshDraft(): Promise<boolean> {
+    if (draftStartRef.current) return draftStartRef.current;
+
+    setBusy(true);
+    setLocalError(null);
+    const request = (async () => {
+      try {
+        await initializeElectionDraft(api.startElectionDraft, setDraftInitialization);
+        return true;
+      } catch (error) {
+        captureError(error);
+        return false;
+      } finally {
+        draftStartRef.current = null;
+        setBusy(false);
+      }
+    })();
+    draftStartRef.current = request;
+    return request;
+  }
+
+  useEffect(() => {
+    void startFreshDraft();
+  }, []);
 
   async function run<T>(fn: () => Promise<T>): Promise<T | null> {
     setBusy(true);
@@ -136,6 +157,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   }
 
   async function commitBasics(): Promise<boolean> {
+    if (!draftIsReady(draftInitialization)) return false;
     const ok = await run(() =>
       api.setDraftBasics(electionIdText, governanceRevision),
     );
@@ -183,6 +205,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
   // ---- Basics ------------------------------------------------------------
   async function onBasicsNext() {
+    if (!draftIsReady(draftInitialization)) return;
     if (electionIdText.trim().length === 0 || governanceRevision.trim().length === 0) {
       setLocalError({
         code: "GUI_DRAFT_INCOMPLETE",
@@ -224,7 +247,20 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   }
 
   async function onGovernanceNext() {
+    const ok = await run(() => api.setDraftGovernanceSourceRevision(governanceRevision));
+    if (ok === null) return;
+    await refreshPreview();
     goNext("voters");
+  }
+
+  async function onGenerateBootstrapCredential() {
+    const status = await run(() => api.generatePendingVoterGovernanceCredential());
+    if (status) setBootstrapCredential(status);
+  }
+
+  async function onResetBootstrapCredential() {
+    const status = await run(() => api.resetPendingVoterGovernanceCredential());
+    if (status) setBootstrapCredential(status);
   }
 
   // ---- Voters ------------------------------------------------------------
@@ -366,8 +402,8 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     });
   }
 
-  function restart() {
-    void api.startElectionDraft();
+  async function restart() {
+    if (!(await startFreshDraft())) return;
     setStep("basics");
     setFrozen(null);
     setExportResult(null);
@@ -380,6 +416,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
   const presentation = ballotType;
   const readOnly = frozen !== null;
+  const ready = draftIsReady(draftInitialization);
 
   return (
     <>
@@ -398,7 +435,61 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         </Notice>
       )}
 
-      <ol className="stepper" aria-label="Creation steps">
+      {!ready && (
+        <Card title="Create election">
+          {draftInitialization === "initializing" ? (
+            <p className="field-value">Preparing a new election...</p>
+          ) : (
+            <>
+              <p className="field-value">
+                A new election draft could not be prepared. Retry to continue.
+              </p>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void startFreshDraft()}
+                disabled={busy}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </Card>
+      )}
+
+      {ready && (
+        <>
+          <Card title="Voter credential bootstrap (local pilot)">
+            <p className="form-hint">
+              A voter can create a credential on this computer before the registry is frozen.
+              Rust keeps the private credential; copy only the public key below into the eligible
+              voter list. This credential survives navigation and election loading during this
+              application session, but is lost when the application restarts.
+            </p>
+            <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
+            <div className="action-row">
+              <button type="button" className="btn btn-secondary" disabled={busy || !shellAvailable}
+                onClick={() => void onGenerateBootstrapCredential()}>
+                Generate voter credential
+              </button>
+              {bootstrapCredential?.credential_loaded && (
+                <button type="button" className="btn btn-secondary" disabled={busy}
+                  onClick={() => void onResetBootstrapCredential()}>
+                  Clear credential
+                </button>
+              )}
+            </div>
+            {bootstrapCredential?.public_governance_key_hex && (
+              <div className="field-list">
+                <Field label="Public enrollment key">
+                  <span className="field-value">{publicKeyDisplay(bootstrapCredential)}</span>
+                  <CopyButton value={bootstrapCredential.public_governance_key_hex} />
+                </Field>
+                <Field label="Eligibility"><span className="field-value">Checked after freeze against the canonical registry.</span></Field>
+              </div>
+            )}
+          </Card>
+          <ol className="stepper" aria-label="Creation steps">
         {STEPS.map((s, i) => {
           const state =
             s.id === step ? "current" : i < stepIndex() || readOnly ? "done" : "todo";
@@ -411,7 +502,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
             </li>
           );
         })}
-      </ol>
+          </ol>
 
       {step === "basics" && (
         <BasicsStep
@@ -514,6 +605,8 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           onConfirm={onFreeze}
           onCancel={() => setConfirmFreeze(false)}
         />
+      )}
+        </>
       )}
     </>
   );

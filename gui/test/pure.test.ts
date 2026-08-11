@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { describeError } from "../src/api/errorDisplay.ts";
+import { RequestGenerationGate } from "../src/requestGeneration.ts";
 import {
   approvalRuleText,
   presentationFor,
@@ -22,6 +23,7 @@ import {
 import {
   approvalBps,
   approvalLabel,
+  canWriteFinalArchive,
   canShowTally,
   coarseBucketLabel,
   formatPercent,
@@ -359,7 +361,9 @@ describe("no fake trend state", () => {
 
 import {
   approvalRulePreview,
+  draftIsReady,
   freezeAvailable,
+  initializeElectionDraft,
   isUncastableApprovalConfig,
   NO_QUORUM_STATEMENT,
   optionNoun,
@@ -368,6 +372,7 @@ import {
   parseVoterHexList,
   presentationLabel,
 } from "../src/creation.ts";
+import type { DraftInitializationState } from "../src/creation.ts";
 import {
   intakeCanImport,
   intakeResultMessage,
@@ -450,6 +455,55 @@ describe("creation: freeze availability", () => {
   });
 });
 
+describe("creation: authoritative draft initialization", () => {
+  it("keeps the wizard blocked until a deferred Rust draft start resolves", async () => {
+    let resolveStart: (() => void) | undefined;
+    const states: DraftInitializationState[] = [];
+    let setBasicsCalls = 0;
+    const start = new Promise<void>((resolve) => {
+      resolveStart = resolve;
+    });
+
+    const initializing = initializeElectionDraft(
+      () => start,
+      (state) => states.push(state),
+    );
+
+    assert.deepEqual(states, ["initializing"]);
+    assert.equal(draftIsReady(states[0] ?? "initializing"), false);
+    if (draftIsReady(states[0] ?? "initializing")) setBasicsCalls += 1;
+    assert.equal(setBasicsCalls, 0);
+
+    resolveStart?.();
+    await initializing;
+    assert.deepEqual(states, ["initializing", "ready"]);
+    assert.equal(draftIsReady(states[1] ?? "initializing"), true);
+    if (draftIsReady(states[1] ?? "initializing")) setBasicsCalls += 1;
+    assert.equal(setBasicsCalls, 1);
+  });
+
+  it("fails closed, retries the authoritative start, and starts fresh on re-entry", async () => {
+    const states: DraftInitializationState[] = [];
+    let starts = 0;
+    const start = async () => {
+      starts += 1;
+      if (starts === 1) throw new Error("shell unavailable");
+    };
+
+    await assert.rejects(initializeElectionDraft(start, (state) => states.push(state)));
+    assert.equal(states.at(-1), "failed");
+    assert.equal(draftIsReady(states.at(-1) ?? "initializing"), false);
+
+    await initializeElectionDraft(start, (state) => states.push(state));
+    assert.equal(starts, 2);
+    assert.equal(states.at(-1), "ready");
+
+    await initializeElectionDraft(start, (state) => states.push(state));
+    assert.equal(starts, 3);
+    assert.deepEqual(states.slice(-2), ["initializing", "ready"]);
+  });
+});
+
 describe("creation: presentation vocabulary", () => {
   it("maps presentation nouns", () => {
     assert.equal(presentationLabel("Candidate"), "Candidate election");
@@ -470,6 +524,45 @@ describe("creation: approval rule preview", () => {
   });
 });
 
+describe("final archive lifecycle gate", () => {
+  it("permits a final archive only after voting has closed", () => {
+    assert.equal(canWriteFinalArchive("FROZEN"), false);
+    assert.equal(canWriteFinalArchive("OPEN"), false);
+    assert.equal(canWriteFinalArchive("CLOSED"), true);
+    assert.equal(canWriteFinalArchive("VERIFIED"), true);
+    assert.equal(canWriteFinalArchive("FINALIZED"), true);
+  });
+});
+
+describe("stale presentation response guards", () => {
+  it("ignores a late participation response after a newer lifecycle refresh", async () => {
+    const gate = new RequestGenerationGate();
+    let resolveOld!: (value: string) => void;
+    const old = new Promise<string>((resolve) => { resolveOld = resolve; });
+    const oldToken = gate.begin();
+    const applied: string[] = [];
+    void old.then((value) => { if (gate.isCurrent(oldToken)) applied.push(value); });
+    const newToken = gate.begin();
+    if (gate.isCurrent(newToken)) applied.push("new");
+    resolveOld("old");
+    await old;
+    assert.deepEqual(applied, ["new"]);
+  });
+
+  it("ignores a late voter confirmation after election replacement", async () => {
+    const gate = new RequestGenerationGate();
+    let resolveOld!: (value: string) => void;
+    const old = new Promise<string>((resolve) => { resolveOld = resolve; });
+    const oldToken = gate.begin();
+    let confirmation: string | null = null;
+    void old.then((value) => { if (gate.isCurrent(oldToken)) confirmation = value; });
+    gate.invalidate();
+    resolveOld("old-election");
+    await old;
+    assert.equal(confirmation, null);
+  });
+});
+
 describe("ballot office intake helpers", () => {
   it("uses safe accepted and duplicate messages without sequence or nullifier display", () => {
     const accepted = {
@@ -477,23 +570,18 @@ describe("ballot office intake helpers", () => {
       code: "ACCEPTED",
       category: "Accepted",
       package_digest_hex: "a".repeat(64),
-      sequence: 12,
-      nullifier_hex: "b".repeat(64),
-      duplicate_of_sequence: null,
     } as const;
     const duplicate = {
       ...accepted,
       accepted: false,
-      code: "DUPLICATE_NULLIFIER",
+      code: "DUPLICATE_BALLOT",
       category: "Duplicate",
-      sequence: 13,
-      duplicate_of_sequence: 12,
     } as const;
 
     assert.equal(intakeResultTitle(accepted), "Ballot accepted");
     assert.equal(intakeResultMessage(accepted), "Ballot accepted.");
     assert.equal(intakeResultMessage(duplicate), "Duplicate ballot for this election.");
-    assert.doesNotMatch(intakeResultMessage(duplicate), /12|13|bbbb|nullifier/i);
+    assert.doesNotMatch(intakeResultMessage(duplicate), /nullifier/i);
   });
 
   it("gates import to the open lifecycle", () => {

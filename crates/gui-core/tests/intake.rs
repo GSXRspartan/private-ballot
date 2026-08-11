@@ -24,10 +24,7 @@ fn valid_real_triptych_ballot_is_accepted() {
     assert!(result.accepted);
     assert_eq!(result.code, "ACCEPTED");
     assert_eq!(result.category, GuiIntakeCategory::Accepted);
-    assert_eq!(result.sequence, 0);
     assert_eq!(result.package_digest_hex.len(), 64);
-    assert!(result.nullifier_hex.is_some());
-    assert_eq!(result.duplicate_of_sequence, None);
     assert_eq!(session.accepted_count(), 1);
     assert_eq!(session.transcript().accepted_count(), 1);
 }
@@ -50,12 +47,9 @@ fn duplicate_nullifier_is_rejected_with_first_valid_reference() {
     };
 
     assert!(!duplicate_result.accepted);
-    assert_eq!(duplicate_result.code, "DUPLICATE_NULLIFIER");
+    assert_eq!(duplicate_result.code, "DUPLICATE_BALLOT");
     assert_eq!(duplicate_result.category, GuiIntakeCategory::Duplicate);
-    assert_eq!(duplicate_result.sequence, 1);
-    // The duplicate's nullifier is already public through the first ballot.
-    assert_eq!(duplicate_result.nullifier_hex, first_result.nullifier_hex);
-    assert_eq!(duplicate_result.duplicate_of_sequence, Some(0));
+    assert_eq!(first_result.package_digest_hex.len(), 64);
     // The first valid ballot still counts; the ledger was not replaced.
     assert_eq!(session.accepted_count(), 1);
     assert_eq!(session.transcript().rejected_count(), 1);
@@ -77,9 +71,9 @@ fn exact_replay_is_rejected_by_nullifier_not_package_digest_only() {
 
     assert!(first.accepted);
     assert!(!replay.accepted);
-    assert_eq!(replay.code, "DUPLICATE_NULLIFIER");
+    assert_eq!(replay.code, "DUPLICATE_BALLOT");
     assert_eq!(replay.category, GuiIntakeCategory::Duplicate);
-    assert_eq!(replay.nullifier_hex, first.nullifier_hex);
+    assert_eq!(first.package_digest_hex, replay.package_digest_hex);
     assert_eq!(session.accepted_count(), 1);
 }
 
@@ -101,7 +95,6 @@ fn wrong_manifest_ballot_is_rejected() {
     assert!(!result.accepted);
     assert_eq!(result.code, "WRONG_MANIFEST_HASH");
     assert_eq!(result.category, GuiIntakeCategory::WrongElection);
-    assert!(result.nullifier_hex.is_none());
     assert_eq!(session.accepted_count(), 0);
 }
 
@@ -255,7 +248,6 @@ fn malformed_proof_is_rejected() {
         "unexpected code: {}",
         result.code
     );
-    assert!(result.nullifier_hex.is_none());
     assert_eq!(session.accepted_count(), 0);
 }
 
@@ -343,7 +335,12 @@ fn intake_sequence_and_transcript_are_deterministic() {
             Err(_) => panic!("second session intake must succeed"),
         };
         assert_eq!(first_result, second_result);
-        assert_eq!(first_result.sequence, index as u64);
+        let expected = if index == 2 {
+            GuiIntakeCategory::Duplicate
+        } else {
+            GuiIntakeCategory::Accepted
+        };
+        assert_eq!(first_result.category, expected);
     }
 
     assert_eq!(first.transcript(), second.transcript());

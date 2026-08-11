@@ -1,6 +1,7 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, BackendError, isDesktopShell } from "../api/client";
+import { RequestGenerationGate } from "../requestGeneration";
 import type {
   GuiCommandError,
   GuiElectionSummaryV1,
@@ -95,6 +96,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
   const [selectedArtifactPaths, setSelectedArtifactPaths] =
     useState<SelectedArtifactPaths | null>(null);
+  // Monotonic token for non-authoritative presentation refreshes. A late
+  // response must never overwrite a newer election or lifecycle state.
+  const participationRequestGenerationRef = useRef(new RequestGenerationGate());
 
   const recordAction = useCallback((label: string) => {
     setRecentActions((prev) =>
@@ -132,22 +136,25 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setParticipation(null);
       return;
     }
+    const requestGeneration = participationRequestGenerationRef.current.begin();
     try {
       const summary = await api.participationSummary();
-      setParticipation(summary);
+      if (participationRequestGenerationRef.current.isCurrent(requestGeneration)) {
+        setParticipation(summary);
+      }
     } catch (error) {
       // No election loaded is a NORMAL application state, not an error: a
       // fresh startup must never display a red no-active-election error
       // merely because there is nothing loaded yet. Real failures of an
       // actual user operation are still surfaced.
       if (error instanceof BackendError && error.payload.code === "GUI_NO_ACTIVE_ELECTION") {
-        setParticipation(null);
+        if (participationRequestGenerationRef.current.isCurrent(requestGeneration)) setParticipation(null);
         return;
       }
       // Participation refresh failures are non-fatal: the dashboard falls
       // back to its neutral state. A structured error is still surfaced.
       captureError(error);
-      setParticipation(null);
+      if (participationRequestGenerationRef.current.isCurrent(requestGeneration)) setParticipation(null);
     }
   }, [captureError]);
 
@@ -172,20 +179,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           optionSet: optionSetPath,
         });
         recordAction(`Loaded election ${summary.election_id_text ?? summary.election_id_hex}`);
-        // Fetch the initial participation summary for the freshly loaded
-        // (FROZEN) session. This cannot associate metrics with the wrong
-        // election because the session was just replaced atomically.
-        void api.participationSummary().then(setParticipation).catch(() => setParticipation(null));
+        void refreshParticipation();
       } catch (error) {
         captureError(error);
         throw error;
       }
     },
-    [captureError, recordAction],
+    [captureError, recordAction, refreshParticipation],
   );
 
   const unloadElection = useCallback(async () => {
     try {
+      participationRequestGenerationRef.current.invalidate();
       await api.unloadElection();
       setElection(null);
       setTally(null);
@@ -223,12 +228,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         setTally(null);
         setBackendError(null);
         recordAction(labels[action]);
-        void api.participationSummary().then(setParticipation).catch(() => setParticipation(null));
+        void refreshParticipation();
       } catch (error) {
         captureError(error);
       }
     },
-    [captureError, recordAction],
+    [captureError, recordAction, refreshParticipation],
   );
 
   const setSetting = useCallback(

@@ -64,16 +64,4 @@ pub struct GuiBallotIntakeResultV1 {
     pub category: GuiIntakeCategory,
     /// Domain-separated digest of the exact canonical package bytes.
     pub package_digest_hex: String,
-    /// The contiguous ingest sequence assigned to this submission.
-    pub sequence: u64,
-    /// The proof-authenticated election-scoped nullifier (lowercase hex).
-    ///
-    /// Present only after successful proof verification: for an accepted
-    /// ballot, and for a duplicate rejection (where the nullifier is already
-    /// public through the first accepted ballot). Never present for a ballot
-    /// whose proof did not verify.
-    pub nullifier_hex: Option<String>,
-    /// For a duplicate rejection, the ingest sequence of the first accepted
-    /// ballot carrying the same nullifier, when it can be resolved.
-    pub duplicate_of_sequence: Option<u64>,
 }

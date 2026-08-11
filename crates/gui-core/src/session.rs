@@ -14,9 +14,7 @@
 use tari_cc_private_ballot_archive::{
     BallotDecisionOutcomeV1, BallotPackageDigestV1, VerificationTranscriptV1,
 };
-use tari_cc_private_ballot_ballot::{
-    BallotPackageEnvelopeV1, ElectionLifecycleStateV1, ElectionLifecycleV1,
-};
+use tari_cc_private_ballot_ballot::{ElectionLifecycleStateV1, ElectionLifecycleV1};
 use tari_cc_private_ballot_crypto::TariTriptychPrototypeVerifierV1;
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, ValidationCode, hash_domain_separated,
@@ -24,7 +22,7 @@ use tari_cc_private_ballot_protocol::{
 use tari_cc_private_ballot_tally::ApprovalTally;
 use tari_cc_private_ballot_verifier::{
     BallotAcceptanceLedger, build_tari_triptych_verifier_from_registry_v1,
-    ingest_approval_ballot_package_v1, verify_approval_proof,
+    ingest_approval_ballot_package_v1,
 };
 
 use crate::artifacts::GuiElectionArtifactsV1;
@@ -202,13 +200,13 @@ impl GuiElectionSessionV1 {
         self.intake_ballot_package_bytes(package_bytes)
     }
 
-    /// Builds the structured intake result, resolving public post-verification
-    /// identifiers where the existing APIs expose them safely.
+    /// Builds the structured intake result without exposing replay or
+    /// linkability internals over the GUI boundary.
     fn intake_result(
         &self,
-        sequence: tari_cc_private_ballot_archive::IngestSequenceV1,
+        _sequence: tari_cc_private_ballot_archive::IngestSequenceV1,
         digest: BallotPackageDigestV1,
-        package_bytes: &[u8],
+        _package_bytes: &[u8],
         outcome: BallotDecisionOutcomeV1,
     ) -> GuiBallotIntakeResultV1 {
         let mut result = GuiBallotIntakeResultV1 {
@@ -216,81 +214,25 @@ impl GuiElectionSessionV1 {
             code: "ACCEPTED",
             category: GuiIntakeCategory::Accepted,
             package_digest_hex: crate::hex::to_lower_hex(digest.as_bytes()),
-            sequence: sequence.value(),
-            nullifier_hex: None,
-            duplicate_of_sequence: None,
         };
 
         if outcome.is_accepted() {
-            if let Some(accepted) = self.ledger.accepted_ballots().last() {
-                result.nullifier_hex = Some(crate::hex::to_lower_hex(
-                    accepted.election_scoped_nullifier(),
-                ));
-            }
             return result;
         }
 
         let Some(code) = outcome.rejection_code() else {
             return result;
         };
-        result.code = code.as_str();
+        // Keep the protocol validation code internal when it names a replay
+        // primitive. The GUI receives a stable, safe outcome code instead.
+        result.code = if code == ValidationCode::DuplicateNullifier {
+            "DUPLICATE_BALLOT"
+        } else {
+            code.as_str()
+        };
         result.category = GuiIntakeCategory::from_validation(code);
 
-        if code == ValidationCode::DuplicateNullifier {
-            self.resolve_duplicate_reference(package_bytes, &mut result);
-        }
-
         result
-    }
-
-    /// Re-verifies a duplicate ballot read-only to expose its (already public)
-    /// nullifier and the sequence of the first accepted ballot carrying it.
-    ///
-    /// This runs only on the duplicate-rejection path, where proof
-    /// verification already succeeded inside the ingestion pipeline. It
-    /// mutates nothing and ignores any internal failure.
-    fn resolve_duplicate_reference(
-        &self,
-        package_bytes: &[u8],
-        result: &mut GuiBallotIntakeResultV1,
-    ) {
-        let provider = Blake3HashProviderV1;
-        let resolved = (|| {
-            let envelope = BallotPackageEnvelopeV1::from_canonical_cbor(package_bytes).ok()?;
-            let package = envelope
-                .into_ballot_package(
-                    self.artifacts.candidates(),
-                    self.artifacts.manifest().approval_limits(),
-                )
-                .ok()?;
-            let verified = verify_approval_proof(
-                self.artifacts.manifest(),
-                package.payload(),
-                package.proof(),
-                &provider,
-                &self.verifier,
-            )
-            .ok()?;
-            let nullifier_bytes = verified.nullifier().as_bytes().to_vec();
-
-            let accepted_index = self.ledger.accepted_ballots().iter().position(|ballot| {
-                ballot.election_scoped_nullifier() == nullifier_bytes.as_slice()
-            })?;
-            let first_sequence = self
-                .transcript
-                .decisions()
-                .iter()
-                .filter(|decision| decision.outcome().is_accepted())
-                .nth(accepted_index)
-                .map(|decision| decision.sequence().value());
-
-            Some((nullifier_bytes, first_sequence))
-        })();
-
-        if let Some((nullifier_bytes, first_sequence)) = resolved {
-            result.nullifier_hex = Some(crate::hex::to_lower_hex(&nullifier_bytes));
-            result.duplicate_of_sequence = first_sequence;
-        }
     }
 
     /// Computes the deterministic tally over the currently accepted ballots.

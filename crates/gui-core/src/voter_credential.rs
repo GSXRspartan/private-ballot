@@ -157,6 +157,25 @@ impl VoterGovernanceCredentialV1 {
             .map_err(|error| GuiCoreError::from_protocol(&error, "voter-credential"))?;
         Ok(public_key.into_bytes())
     }
+
+    /// Returns public-only pending-bootstrap status before an election is
+    /// frozen and therefore before eligibility can be evaluated.
+    pub fn pending_status(&self) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
+        let public_hex = to_lower_hex(&self.public_key_bytes()?);
+        Ok(GuiVoterCredentialStatusV1 {
+            credential_loaded: true,
+            credential_origin: Some(GuiVoterCredentialOriginV1::Generated),
+            public_governance_key_abbrev: Some(abbreviate_hex(&public_hex, 8, 6)),
+            public_governance_key_hex: Some(public_hex),
+            eligibility: GuiVoterEligibilityV1::NotChecked,
+            eligibility_label: "Eligibility will be checked against the frozen registry.",
+            can_continue: false,
+            session_only: true,
+            session_notice: GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
+            wallet_key_warning: GOVERNANCE_KEY_WARNING,
+            enrollment_notice: GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
+        })
+    }
 }
 
 impl fmt::Debug for VoterGovernanceCredentialV1 {
@@ -204,6 +223,11 @@ impl GuiVoterCredentialSessionV1 {
     /// cloning the secret.
     pub fn recompute_for(&mut self, registry: &RegistrySnapshot) {
         self.eligibility = eligibility_for_public_key(registry, &self.public_key);
+    }
+
+    /// Releases the secret back to the Rust-only pending bootstrap slot.
+    pub fn into_credential(self) -> VoterGovernanceCredentialV1 {
+        self.credential
     }
 
     /// Borrows the Rust-owned credential for in-process proof construction.
