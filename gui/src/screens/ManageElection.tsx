@@ -1,7 +1,12 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickBallotPackageFile, pickElectionArtifact, pickGovernanceDocument } from "../api/dialog";
+import {
+  pickBallotPackageFile,
+  pickDirectory,
+  pickElectionArtifact,
+  pickGovernanceDocument,
+} from "../api/dialog";
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
@@ -21,6 +26,7 @@ import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  ConfirmDialog,
   CopyButton,
   DetailsSection,
   Field,
@@ -81,6 +87,8 @@ export function ManageElection() {
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
   const presentation = presentationFor(election);
   const lifecycle = election?.lifecycle_state ?? null;
@@ -109,17 +117,17 @@ export function ManageElection() {
 
   const onPickManifest = async () => {
     clearLocalError();
-    const picked = await pickElectionArtifact("Choose election manifest");
+    const picked = await pickElectionArtifact("Choose election definition file");
     if (picked !== null) setManifestPath(picked);
   };
   const onPickRegistry = async () => {
     clearLocalError();
-    const picked = await pickElectionArtifact("Choose voter registry");
+    const picked = await pickElectionArtifact("Choose eligible voter list file");
     if (picked !== null) setRegistryPath(picked);
   };
   const onPickOptionSet = async () => {
     clearLocalError();
-    const picked = await pickElectionArtifact("Choose candidate / option set");
+    const picked = await pickElectionArtifact("Choose ballot options file");
     if (picked !== null) setOptionSetPath(picked);
   };
 
@@ -187,13 +195,31 @@ export function ManageElection() {
     setArchiveGovernanceDocPath(path);
   };
 
+  const onPickArchiveDir = async () => {
+    clearLocalError();
+    const picked = await pickDirectory("Choose archive output directory");
+    if (picked !== null) setArchiveDir(picked);
+  };
+
+  // Closing voting is irreversible. The dialog is a presentation safeguard
+  // only; the backend lifecycle state machine remains the authoritative
+  // validation and still rejects an invalid transition.
+  const onConfirmClose = async () => {
+    setConfirmClose(false);
+    setLifecycleBusy(true);
+    try {
+      await runLifecycle("close");
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
   return (
     <>
       <h1 className="screen-header">Manage Election</h1>
       <p className="screen-lede">
-        Load the validated artifact triple, then walk the append-only lifecycle. Every step
-        delegates to gui-core; this screen contains no protocol logic and never edits the frozen
-        canonical artifacts.
+        Organizer tools for one election: load the election files, open and close voting,
+        accept submitted ballots, compute the tally, and write the verifiable election record.
       </p>
 
       <BackendErrorNotice error={backendError} onDismiss={dismissError} />
@@ -206,60 +232,79 @@ export function ManageElection() {
 
       <Card title="Load Election">
         <p className="card-body">
-          Loading validates canonical encodings, recomputes both commitments and the manifest
-          hash, enforces the production proof-suite policy, and freezes the lifecycle. The session
-          starts in FROZEN; review the summary before opening voting. Filenames are shown for
-          convenience only — identity is derived from the decoded bytes.
+          Select the three election files produced when the election was created: the election
+          definition, the eligible voter list, and the ballot options. Loading checks that the
+          files are complete, unaltered, and belong to the same election. After loading, the
+          election is ready to review before voting is opened.
         </p>
+        <DetailsSection summary="Technical details">
+          <p className="card-body">
+            The election definition is the manifest file, the eligible voter list is the
+            registry file, and the ballot options are the candidate/option set file. Loading
+            validates canonical encodings, recomputes both commitments and the manifest hash,
+            enforces the production proof-suite policy, and freezes the lifecycle. The session
+            starts in FROZEN. Filenames are shown for convenience only — identity is derived
+            from the decoded bytes.
+          </p>
+        </DetailsSection>
         <div className="form-row">
-          <label htmlFor="manifest-path">Election manifest</label>
+          <label htmlFor="manifest-path">Election definition</label>
           <div className="file-row">
-            <button
+            <input
               id="manifest-path"
+              type="text"
+              readOnly
+              value={manifestPath ? basename(manifestPath) : ""}
+              placeholder="no file selected"
+            />
+            <button
               type="button"
               className="btn btn-secondary"
               disabled={!shellAvailable}
               onClick={() => void onPickManifest()}
             >
-              Choose file
+              Browse
             </button>
-            <span className="file-name" aria-live="polite">
-              {basename(manifestPath) || "no file selected"}
-            </span>
           </div>
         </div>
         <div className="form-row">
-          <label htmlFor="registry-path">Voter registry</label>
+          <label htmlFor="registry-path">Eligible voter list</label>
           <div className="file-row">
-            <button
+            <input
               id="registry-path"
+              type="text"
+              readOnly
+              value={registryPath ? basename(registryPath) : ""}
+              placeholder="no file selected"
+            />
+            <button
               type="button"
               className="btn btn-secondary"
               disabled={!shellAvailable}
               onClick={() => void onPickRegistry()}
             >
-              Choose file
+              Browse
             </button>
-            <span className="file-name" aria-live="polite">
-              {basename(registryPath) || "no file selected"}
-            </span>
           </div>
         </div>
         <div className="form-row">
-          <label htmlFor="optionset-path">Candidate / option set</label>
+          <label htmlFor="optionset-path">Ballot options</label>
           <div className="file-row">
-            <button
+            <input
               id="optionset-path"
+              type="text"
+              readOnly
+              value={optionSetPath ? basename(optionSetPath) : ""}
+              placeholder="no file selected"
+            />
+            <button
               type="button"
               className="btn btn-secondary"
               disabled={!shellAvailable}
               onClick={() => void onPickOptionSet()}
             >
-              Choose file
+              Browse
             </button>
-            <span className="file-name" aria-live="polite">
-              {basename(optionSetPath) || "no file selected"}
-            </span>
           </div>
         </div>
         <div className="btn-row">
@@ -280,6 +325,9 @@ export function ManageElection() {
             Unload Election
           </button>
         </div>
+        {shellAvailable && !canLoad && (
+          <p className="form-hint">Choose all required election files to continue.</p>
+        )}
       </Card>
 
       {election && (
@@ -404,9 +452,16 @@ export function ManageElection() {
         </>
       )}
 
+      {shellAvailable && !election && (
+        <Notice tone="info">Load an election to enable these controls.</Notice>
+      )}
+
       <div className="card-grid">
         <Card title="Open Voting">
-          <p className="card-body">Opens ballot intake. Append-only; cannot be undone.</p>
+          <p className="card-body">
+            Opening voting means the election starts accepting ballots from eligible voters.
+            The election definition stays locked. Voting stays open until you close it.
+          </p>
           <button
             type="button"
             className="btn btn-primary"
@@ -419,10 +474,17 @@ export function ManageElection() {
 
         <Card title="Ballot office">
           <p className="card-body">
-            Import one local canonical ballot package. The file is only a carrier for exact
-            package bytes; validation, proof verification, lifecycle checks, and duplicate
-            detection happen in Rust.
+            Import submitted ballot files here. Each ballot is checked before it is accepted
+            into the election; a ballot that fails a check is rejected, and a ballot that was
+            already accepted is never counted twice.
           </p>
+          <DetailsSection summary="Technical details">
+            <p className="card-body">
+              The file is only a carrier for exact package bytes; canonical parsing, proof
+              verification, lifecycle checks, and duplicate (nullifier) detection happen in the
+              Rust backend through the authoritative intake path.
+            </p>
+          </DetailsSection>
           <div className="form-row">
             <label htmlFor="package-path">Last selected package</label>
             <input
@@ -451,12 +513,15 @@ export function ManageElection() {
         </Card>
 
         <Card title="Close Voting">
-          <p className="card-body">Closes acceptance permanently; late ballots never count.</p>
+          <p className="card-body">
+            Closing voting is permanent: after voting is closed, no new ballots can be accepted
+            for this election. This cannot be undone.
+          </p>
           <button
             type="button"
-            className="btn btn-primary"
-            disabled={!canAct || lifecycle !== "OPEN"}
-            onClick={() => void runLifecycle("close")}
+            className="btn btn-danger"
+            disabled={!canAct || lifecycle !== "OPEN" || lifecycleBusy}
+            onClick={() => setConfirmClose(true)}
           >
             Close voting
           </button>
@@ -521,7 +586,7 @@ export function ManageElection() {
             Compute tally
           </button>
           {!tallyAvailable && lifecycle !== null && (
-            <p className="card-body">Results are sealed until voting closes.</p>
+            <p className="card-body">The tally becomes available after voting closes.</p>
           )}
           {tally && tallyAvailable && (
             <div className="field-list">
@@ -537,13 +602,13 @@ export function ManageElection() {
             <div
               className="result-bars-sealed"
               role="img"
-              aria-label="Results are sealed until voting closes."
+              aria-label="The tally becomes available after voting closes."
             >
               <div className="result-bars-sealed-label">
                 <LockIcon label="Sealed" />
-                Locked
+                Tally locked
               </div>
-              <p className="card-body">Results are sealed until voting closes.</p>
+              <p className="card-body">The tally becomes available after voting closes.</p>
             </div>
           )}
         </Card>
@@ -565,21 +630,39 @@ export function ManageElection() {
 
         <Card title="Archive">
           <p className="card-body">
-            Writes the canonical offline archive (manifest, registry, option set, submissions,
-            archive manifest) with atomic file writes. Optionally include the governance
-            supporting document (ADR-0008); it is archived at the project-controlled
-            <span className="hash"> governance/source.bin</span> path and covered by the archive
-            hash. It is supporting evidence, not a fourth canonical election artifact.
+            Writes the complete election record to a folder: the election definition, eligible
+            voter list, ballot options, and accepted ballots. Anyone can later verify this
+            record independently on the Archive screen. Optionally include the governance
+            supporting document so its bytes travel with the record.
           </p>
+          <DetailsSection summary="Technical details">
+            <p className="card-body">
+              Writes the canonical offline archive (manifest, registry, option set, submissions,
+              archive manifest) with atomic file writes. The optional governance supporting
+              document (ADR-0008) is archived at the project-controlled
+              <span className="hash"> governance/source.bin</span> path and covered by the
+              archive hash. It is supporting evidence, not a fourth canonical election artifact.
+            </p>
+          </DetailsSection>
           <div className="form-row">
             <label htmlFor="archive-dir">Target directory (new or empty)</label>
-            <input
-              id="archive-dir"
-              type="text"
-              value={archiveDir}
-              onChange={(e) => setArchiveDir(e.target.value)}
-              placeholder="archive output directory"
-            />
+            <div className="file-row">
+              <input
+                id="archive-dir"
+                type="text"
+                value={archiveDir}
+                onChange={(e) => setArchiveDir(e.target.value)}
+                placeholder="archive output directory"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!canAct}
+                onClick={() => void onPickArchiveDir()}
+              >
+                Browse
+              </button>
+            </div>
           </div>
           <div className="form-row">
             <label htmlFor="archive-gov-doc">Governance document (optional)</label>
@@ -647,6 +730,27 @@ export function ManageElection() {
           </Placeholder>
         </Card>
       </div>
+
+      {confirmClose && (
+        <ConfirmDialog
+          title="Close voting?"
+          body={
+            <>
+              <p>
+                After voting is closed, no new ballots can be accepted for this election.
+              </p>
+              <p>
+                <strong>This cannot be undone.</strong>
+              </p>
+            </>
+          }
+          confirmLabel="Close Voting"
+          confirmTone="danger"
+          busy={lifecycleBusy}
+          onConfirm={() => void onConfirmClose()}
+          onCancel={() => setConfirmClose(false)}
+        />
+      )}
     </>
   );
 }

@@ -119,7 +119,7 @@ export function confirmationContinueAvailable(
 }
 
 /** Label for the cryptographically bound section. */
-export const BOUND_SECTION_LABEL = "Cryptographically bound";
+export const BOUND_SECTION_LABEL = "Verified election details";
 /** Label for the non-canonical presentation section. */
 export const PRESENTATION_SECTION_LABEL = "Presentation";
 /** Label for the informational notice under the presentation label. */

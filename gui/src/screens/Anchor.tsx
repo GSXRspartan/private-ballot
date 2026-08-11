@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
+import { pickCborFile } from "../api/dialog";
 import type {
   GuiAnchorConfigInspectionV1,
   GuiAnchorSnapshotInspectionV1,
@@ -48,6 +49,16 @@ export function Anchor() {
           },
     );
 
+  const onPickConfig = async () => {
+    const picked = await pickCborFile("Choose anchor config file");
+    if (picked !== null) setConfigPath(picked);
+  };
+
+  const onPickSnapshot = async () => {
+    const picked = await pickCborFile("Choose anchor snapshot file");
+    if (picked !== null) setSnapshotPath(picked);
+  };
+
   const onInspectConfig = async () => {
     setError(null);
     try {
@@ -75,8 +86,9 @@ export function Anchor() {
     <>
       <h1 className="screen-header">Anchor</h1>
       <p className="screen-lede">
-        Optional, non-binding Ootle anchoring of the election archive. Inspection is read-only
-        and offline; the offline archive remains authoritative regardless of anchor state.
+        Ootle anchoring records the election commitment. It never determines the election
+        result — the independently verified offline archive remains authoritative. This screen
+        inspects anchor files offline; nothing here contacts the network.
       </p>
 
       {!shellAvailable && (
@@ -87,13 +99,23 @@ export function Anchor() {
       <Card title="Anchor configuration">
         <div className="form-row">
           <label htmlFor="anchor-config-path">Config file path</label>
-          <input
-            id="anchor-config-path"
-            type="text"
-            value={configPath}
-            onChange={(e) => setConfigPath(e.target.value)}
-            placeholder="anchor-config.cbor"
-          />
+          <div className="file-row">
+            <input
+              id="anchor-config-path"
+              type="text"
+              value={configPath}
+              onChange={(e) => setConfigPath(e.target.value)}
+              placeholder="anchor-config.cbor"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable}
+              onClick={() => void onPickConfig()}
+            >
+              Browse
+            </button>
+          </div>
         </div>
         <div className="btn-row">
           <button
@@ -105,6 +127,9 @@ export function Anchor() {
             Inspect config
           </button>
         </div>
+        {shellAvailable && !configPath && (
+          <p className="form-hint">Choose an anchor config file to continue.</p>
+        )}
         {config && (
           <div className="field-list">
             <Field label="Network">{config.network}</Field>
@@ -125,16 +150,29 @@ export function Anchor() {
         )}
       </Card>
 
-      <Card title="Lifecycle snapshot">
+      <Card title="Election snapshot">
+        <p className="form-hint">
+          The saved election snapshot records the anchor status for this election.
+        </p>
         <div className="form-row">
           <label htmlFor="anchor-snapshot-path">Snapshot file path</label>
-          <input
-            id="anchor-snapshot-path"
-            type="text"
-            value={snapshotPath}
-            onChange={(e) => setSnapshotPath(e.target.value)}
-            placeholder="anchor-snapshot.cbor"
-          />
+          <div className="file-row">
+            <input
+              id="anchor-snapshot-path"
+              type="text"
+              value={snapshotPath}
+              onChange={(e) => setSnapshotPath(e.target.value)}
+              placeholder="anchor-snapshot.cbor"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable}
+              onClick={() => void onPickSnapshot()}
+            >
+              Browse
+            </button>
+          </div>
         </div>
         <div className="btn-row">
           <button
@@ -146,6 +184,9 @@ export function Anchor() {
             Inspect snapshot
           </button>
         </div>
+        {shellAvailable && !snapshotPath && (
+          <p className="form-hint">Choose an election snapshot file to continue.</p>
+        )}
 
         {snapshot && (
           <>
@@ -234,8 +275,9 @@ export function Anchor() {
       </Card>
 
       <Notice tone="info">
-        The anchor proves commitment existence on Ootle; it never decides the election. Evidence
-        records are inspected on the Evidence screen.
+        Anchoring is optional and non-binding: it records the election commitment and never
+        determines the election result. Election outcomes come from the independently verified
+        election archive. Evidence records are inspected on the Evidence screen.
       </Notice>
     </>
   );

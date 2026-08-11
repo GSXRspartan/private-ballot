@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
+import { pickCborFile, pickDirectory } from "../api/dialog";
 import type {
   GuiArchiveVerificationV1,
   GuiCommandError,
@@ -10,6 +11,7 @@ import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  DetailsSection,
   Field,
   HashValue,
   Notice,
@@ -42,6 +44,16 @@ export function Archive() {
             message: "an unexpected frontend/backend boundary error occurred",
           },
     );
+
+  const onPickDirectory = async () => {
+    const picked = await pickDirectory("Choose archive directory");
+    if (picked !== null) setDirectory(picked);
+  };
+
+  const onPickAnchorEvidence = async () => {
+    const picked = await pickCborFile("Choose anchor evidence file");
+    if (picked !== null) setAnchorEvidencePath(picked);
+  };
 
   const onVerify = async () => {
     setError(null);
@@ -79,9 +91,9 @@ export function Archive() {
     <>
       <h1 className="screen-header">Archive</h1>
       <p className="screen-lede">
-        Verify a complete offline election archive. Every file digest is checked, every ballot
-        proof is replayed through the real ingestion pipeline, the tally is recomputed, and the
-        archive hash is rebuilt from the bytes on disk.
+        Archive verification independently checks the saved election record: it rechecks the
+        accepted ballots, rebuilds the tally, and confirms that the files agree with the
+        election data. Anyone with the archive folder can run this check.
       </p>
 
       {!shellAvailable && (
@@ -94,15 +106,26 @@ export function Archive() {
       <Card title="Verify archive directory">
         <div className="form-row">
           <label htmlFor="archive-path">Archive directory</label>
-          <input
-            id="archive-path"
-            type="text"
-            value={directory}
-            onChange={(e) => setDirectory(e.target.value)}
-            placeholder="path to an archive directory"
-          />
+          <div className="file-row">
+            <input
+              id="archive-path"
+              type="text"
+              value={directory}
+              onChange={(e) => setDirectory(e.target.value)}
+              placeholder="path to an archive directory"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable || running}
+              onClick={() => void onPickDirectory()}
+            >
+              Browse
+            </button>
+          </div>
           <span className="form-hint">
-            Must contain election-manifest.cbor, candidate-set.cbor, voter-registry.cbor,
+            The folder saved when the election record was written. Technical details: it must
+            contain election-manifest.cbor, candidate-set.cbor, voter-registry.cbor,
             submissions/, and archive-manifest.cbor.
           </span>
         </div>
@@ -116,22 +139,42 @@ export function Archive() {
             {running ? "Verifying…" : "Verify archive"}
           </button>
         </div>
+        {shellAvailable && !directory && (
+          <p className="form-hint">Choose an archive directory to continue.</p>
+        )}
       </Card>
 
-      <Card title="Final transport anchor">
+      <Card title="Check final anchor record">
         <p className="form-hint">
-          Verify an existing finalized Phase 4 evidence record against this completed archive.
-          Submitted or unverified anchors remain INCLUDED, not ANCHORED.
+          If this election was optionally anchored on Ootle, you can check here whether the
+          saved anchor record matches this archive. This check is informational only and does
+          not change the election result.
         </p>
+        <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            Verifies an existing finalized Phase 4 evidence record against this completed
+            archive. Submitted or unverified anchors remain INCLUDED, not ANCHORED.
+          </p>
+        </DetailsSection>
         <div className="form-row">
           <label htmlFor="transport-anchor-evidence">Anchor evidence file</label>
-          <input
-            id="transport-anchor-evidence"
-            type="text"
-            value={anchorEvidencePath}
-            onChange={(e) => setAnchorEvidencePath(e.target.value)}
-            placeholder="anchor-evidence.cbor"
-          />
+          <div className="file-row">
+            <input
+              id="transport-anchor-evidence"
+              type="text"
+              value={anchorEvidencePath}
+              onChange={(e) => setAnchorEvidencePath(e.target.value)}
+              placeholder="anchor-evidence.cbor"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable || running}
+              onClick={() => void onPickAnchorEvidence()}
+            >
+              Browse
+            </button>
+          </div>
         </div>
         <div className="btn-row">
           <button
@@ -140,9 +183,14 @@ export function Archive() {
             disabled={!shellAvailable || !directory || !anchorEvidencePath || running}
             onClick={() => void onVerifyTransportAnchor()}
           >
-            Verify final transport anchor
+            Check final anchor record
           </button>
         </div>
+        {shellAvailable && (!directory || !anchorEvidencePath) && (
+          <p className="form-hint">
+            Choose an archive directory and an anchor evidence file to continue.
+          </p>
+        )}
         {transportAnchor && (
           <div className="field-list">
             <Field label="Transport state">

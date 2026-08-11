@@ -145,7 +145,7 @@ describe("confirmation boundary", () => {
   });
 
   it("exposes stable section labels", () => {
-    assert.equal(BOUND_SECTION_LABEL, "Cryptographically bound");
+    assert.equal(BOUND_SECTION_LABEL, "Verified election details");
     assert.equal(PRESENTATION_SECTION_LABEL, "Presentation");
     assert.equal(INFORMATIONAL_LABEL, "Informational");
     assert.equal(ADVANCED_DETAILS_LABEL, "Advanced details");

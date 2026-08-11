@@ -38,6 +38,7 @@ import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  ConfirmDialog,
   CopyButton,
   DetailsSection,
   Field,
@@ -73,7 +74,7 @@ interface DraftOption {
  * immutable (enforced by the backend) and a frozen session is loaded.
  */
 export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => void }) {
-  const { refreshElection, refreshParticipation, recordAction } = useAppState();
+  const { refreshElection, refreshParticipation, recordAction, shellAvailable } = useAppState();
 
   const [step, setStep] = useState<Step>("basics");
   const [ballotType, setBallotType] = useState<GuiBallotPresentationType>("BallotMeasure");
@@ -96,7 +97,14 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     useState<GuiGovernanceDocumentDigestV1 | null>(null);
 
   useEffect(() => {
-    void api.startElectionDraft().catch((error) => captureError(error));
+    // Automatic draft setup: browser preview without the desktop shell is an
+    // environment state, not a failure — the preview notice covers it, and no
+    // red error should appear before the user has done anything. Errors from
+    // real user operations still surface normally through run().
+    void api.startElectionDraft().catch((error) => {
+      if (error instanceof BackendError && error.payload.code === "GUI_SHELL_UNAVAILABLE") return;
+      captureError(error);
+    });
     return () => {
       void api.discardElectionDraft().catch(() => {});
     };
@@ -377,12 +385,18 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     <>
       <h1 className="screen-header">Create Election</h1>
       <p className="screen-lede">
-        Define a new election package: election manifest, voter registry, and the canonical
-        option set. The three artifacts stay separate canonical files; there is no single-file
-        container. The organizer never possesses voter credentials — only public governance keys.
+        Set up a new election step by step: name it, record what is being voted on, list the
+        eligible voters and ballot options, set the voting rules, then review and freeze
+        everything. Freezing locks the election and produces the files voters and verifiers use.
+        You only ever handle voters&rsquo; public keys here — never their private credentials.
       </p>
 
       <BackendErrorNotice error={localError ?? null} onDismiss={() => setLocalError(null)} />
+      {!shellAvailable && (
+        <Notice tone="info">
+          Browser preview: creating an election requires the desktop application.
+        </Notice>
+      )}
 
       <ol className="stepper" aria-label="Creation steps">
         {STEPS.map((s, i) => {
@@ -535,10 +549,15 @@ function BasicsStep(props: {
           ))}
         </div>
         <p className="form-hint">
-          This label controls application presentation. The current canonical protocol does not
-          encode a candidate/governance/measure distinction; the underlying option set is identical
-          in every case.
+          Choose how this election should be presented. This changes the wording voters see;
+          the voting and verification rules stay the same.
         </p>
+        <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            Current ballot types use the same underlying V1 voting protocol; the choice changes
+            the presentation wording, not the cryptography.
+          </p>
+        </DetailsSection>
       </Card>
 
       <Card title="Election identifier">
@@ -553,7 +572,8 @@ function BasicsStep(props: {
           placeholder="e.g. pilot-election-001"
         />
         <p className="form-hint">
-          A stable, human-chosen identifier bound into the manifest. Keep it short and unique.
+          A short, unique name for this election. It becomes part of the locked election
+          definition, so voters can check they are voting in the right election.
         </p>
       </Card>
 
@@ -569,14 +589,22 @@ function BasicsStep(props: {
           placeholder="e.g. rfc-pr-185:f9e86cca"
         />
         <p className="form-hint">
-          The only cryptographically bound governance text. This should pin the authoritative
-          source (e.g. a proposal PR or document revision) voters should consult.
+          Records the source material that defines what is being voted on (for example, a
+          proposal document revision), so voters and verifiers can confirm they are using the
+          same information. You can refine this on the next step.
         </p>
         <Notice tone="info">
-          The version-one manifest has no title, description, or proposal-question field. Do not
-          present unbound text to voters as the signed question; the governance source revision
-          and the option display names are the binding.
+          The election files are the source of truth. Review the governance source and ballot
+          options carefully before freezing the election, because voters will use the frozen
+          information.
         </Notice>
+        <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            The current election format has no separate title, description, or proposal-question
+            field. Do not present unbound text to voters as the signed question; the governance
+            source revision and the option display names are the binding.
+          </p>
+        </DetailsSection>
       </Card>
 
       <StepNav busy={props.busy} onNext={props.onNext} nextLabel="Continue" />
@@ -610,10 +638,18 @@ function GovernanceStep(props: {
     <>
       <Card title="Governance source pin">
         <p className="form-hint">
-          {RECOMMENDED_PIN_LABEL}. {ADVANCED_PIN_LABEL}. The bound reference must be immutable; a
-          mutable phrase such as <em>latest</em> or <em>main</em> is not accepted as a recognized
-          immutable pin.
+          This records exactly which source material defines what is being voted on, so voters
+          and verifiers can confirm they are using the same proposal or election information.
+          The reference must be permanent: a moving target such as <em>latest</em> or
+          <em> main</em> cannot be pinned.
         </p>
+        <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            {RECOMMENDED_PIN_LABEL}. {ADVANCED_PIN_LABEL}. The bound reference must be immutable;
+            a mutable phrase such as <em>latest</em> or <em>main</em> is not accepted as a
+            recognized immutable pin.
+          </p>
+        </DetailsSection>
         <label className="field-label" htmlFor="governance-source-revision">
           Governance source revision
         </label>
@@ -757,6 +793,12 @@ function VotersStep(props: {
   return (
     <>
       <Card title="Eligible voters">
+        <p className="form-hint">
+          The election defines who is eligible to vote. Add each eligible voter&rsquo;s public
+          voting key, one per line. When voting, each voter&rsquo;s app creates an anonymous
+          proof that they belong to this eligible set — the proof does not reveal which eligible
+          member they are. You only ever handle public keys here, never private credentials.
+        </p>
         <div className="voters-header">
           <span className="field-value">
             {props.parsed.keys.length} eligible voter{props.parsed.keys.length === 1 ? "" : "s"}
@@ -785,9 +827,9 @@ function VotersStep(props: {
           }
         />
         <p className="form-hint">
-          Add one 32-byte governance public key per line (64 hex characters). This is a
-          non-canonical convenience input; the canonical output remains registry CBOR. The
-          organizer never handles voter credentials.
+          Add one public voting key per line (64 hexadecimal characters). This text box is a
+          convenience input; the exported voter list is produced in the verified election file
+          format. The organizer never handles voter credentials.
         </p>
         {props.parsed.errors.length > 0 && (
           <Notice tone="warn">{props.parsed.errors[0]}</Notice>
@@ -826,8 +868,9 @@ function OptionsStep(props: {
           </button>
         </div>
         <p className="form-hint">
-          Options are sorted by machine ID in the canonical option set, so display order here is
-          cosmetic. Each option has a stable machine ID (text) and a human-facing display label.
+          Add everything voters can approve. Each option has a short stable ID (used by the
+          software) and a display label (what voters see). Display order here is cosmetic; the
+          saved option list is sorted by ID.
         </p>
         <div className="option-editor">
           {props.options.map((option, index) => (
@@ -884,6 +927,10 @@ function RulesStep(props: {
   return (
     <>
       <Card title="Voting rules">
+        <p className="form-hint">
+          Decide how many options each ballot may approve, and whether voters may abstain
+          (submit an empty selection). These rules are locked in when the election is frozen.
+        </p>
         <div className="field-list">
           <Field label="Minimum approvals">
             <input
@@ -920,10 +967,12 @@ function RulesStep(props: {
           {approvalRulePreview(props.approvalMin, props.approvalMax, props.allowAbstention)}
         </p>
         <Notice tone="info">{NO_QUORUM_STATEMENT}</Notice>
-        <p className="form-hint">
-          Proof suite: the production Triptych prototype suite is used by default and is not
-          selectable.
-        </p>
+        <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            Proof suite: the production Triptych prototype suite is used by default and is not
+            selectable.
+          </p>
+        </DetailsSection>
       </Card>
 
       <StepNav busy={props.busy} onNext={props.onNext} onBack={props.onBack} nextLabel="Review" />
@@ -1136,7 +1185,8 @@ function FrozenView(props: {
 
       <Card title="Export">
         <p className="field-value">
-          Export the three canonical artifacts before opening voting.
+          Save the election files before opening voting. Voters load these files to vote, and
+          verifiers use them to check the election record.
         </p>
         <button
           type="button"
@@ -1164,8 +1214,8 @@ function FrozenView(props: {
 
       <Card title="Open voting">
         <p className="field-value">
-          Opening voting is a separate deliberate action. Voter proof generation is not enabled in
-          this slice.
+          Opening voting is a separate deliberate action: it means the election starts accepting
+          ballots from eligible voters. You can also do this later from Manage Election.
         </p>
         <div className="action-row">
           <button
@@ -1201,40 +1251,26 @@ function FreezeConfirmation(props: {
   onCancel: () => void;
 }) {
   return (
-    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="freeze-title">
-      <div className="modal">
-        <h3 id="freeze-title" className="modal-title">
-          Freeze election?
-        </h3>
-        <p className="modal-body">
-          Freezing locks the election definition, eligible voter registry, and ballot options.
-          Changes become impossible without creating a new election.
-        </p>
-        {props.preview?.manifest_hash_hex && (
-          <p className="modal-body">
-            Manifest hash: <span className="hash">{props.preview.manifest_hash_hex}</span>
+    <ConfirmDialog
+      title="Freeze election?"
+      body={
+        <>
+          <p>
+            Freezing locks the election definition, eligible voter registry, and ballot options.
+            Changes become impossible without creating a new election.
           </p>
-        )}
-        <div className="modal-actions">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={props.onCancel}
-            disabled={props.busy}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={props.onConfirm}
-            disabled={props.busy}
-          >
-            Freeze Election
-          </button>
-        </div>
-      </div>
-    </div>
+          {props.preview?.manifest_hash_hex && (
+            <p>
+              Manifest hash: <span className="hash">{props.preview.manifest_hash_hex}</span>
+            </p>
+          )}
+        </>
+      }
+      confirmLabel="Freeze Election"
+      busy={props.busy}
+      onConfirm={props.onConfirm}
+      onCancel={props.onCancel}
+    />
   );
 }
 

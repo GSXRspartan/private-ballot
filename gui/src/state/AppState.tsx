@@ -136,6 +136,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       const summary = await api.participationSummary();
       setParticipation(summary);
     } catch (error) {
+      // No election loaded is a NORMAL application state, not an error: a
+      // fresh startup must never display a red no-active-election error
+      // merely because there is nothing loaded yet. Real failures of an
+      // actual user operation are still surfaced.
+      if (error instanceof BackendError && error.payload.code === "GUI_NO_ACTIVE_ELECTION") {
+        setParticipation(null);
+        return;
+      }
       // Participation refresh failures are non-fatal: the dashboard falls
       // back to its neutral state. A structured error is still surfaced.
       captureError(error);

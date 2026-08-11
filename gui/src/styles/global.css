@@ -1,18 +1,24 @@
 /*
- * Tari Private Ballot design system (Phase 5, Slice 5A3).
+ * Tari Private Ballot design system (Phase 5, Slice 5A3; community branding
+ * pass pre-5A13).
  *
- * Color tokens are the official Tari brand scales, taken verbatim from the
+ * Color tokens are the Tari brand scales, taken verbatim from the
  * official Tari Ootle "theming" package (tari-project/tari-ootle,
  * applications/theming/lib/theme/colors.ts, BSD-3-Clause, The Tari Project):
  *   - tariPurple (primary brand scale)
  *   - tariBg     (application background scale)
  *   - grey, green, orange, red, blue (neutral + status scales)
- * The official Tari logo asset is used unmodified (see src/branding).
+ *
+ * Application identity: the official Tari logo is NOT used as the app
+ * identity. The application emblem is the community artwork in
+ * src/branding (11-node ring, ballot envelope, purple check), recreated as
+ * deterministic vector artwork from the approved design reference. This is
+ * an independent community project for the Tari ecosystem.
  *
  * Branding restraint: Tari purple is used for application branding, primary
  * buttons, selected navigation, and accent highlights only. Semantic status
- * colors use contrast-checked scale steps (WCAG-friendly against their
- * backgrounds).
+ * colors use scale steps chosen to remain readable against their
+ * backgrounds in both themes.
  */
 
 :root {
@@ -72,14 +78,23 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: var(--tari-bg-100);
-  --surface: var(--tari-bg-50);
-  --surface-sunken: var(--tari-bg-100);
+  /* Surfaces: a slightly cooler, darker lavender-gray page background with
+     near-white cards, so cards, header, and sidebar read as distinct
+     surfaces instead of one washed-out field. The sidebar gets its own
+     subtly recessed surface between the page and the cards. */
+  --bg: #e7e9f2;
+  --surface: #fcfcfe;
+  --surface-sunken: #eef0f6;
+  --nav-surface: #f0f1f8;
   --text: var(--tari-grey-950);
-  --text-secondary: var(--tari-grey-600);
-  --text-disabled: var(--tari-grey-400);
-  --border: rgba(0, 0, 0, 0.1);
-  --border-strong: rgba(0, 0, 0, 0.22);
+  /* Secondary text one step darker than grey-600 for comfortable reading
+     contrast on near-white cards. */
+  --text-secondary: #4c4e60;
+  --text-disabled: var(--tari-grey-500);
+  --placeholder: var(--tari-grey-500);
+  /* Cool-tinted borders (based on grey-950) with modestly more contrast. */
+  --border: rgba(9, 7, 25, 0.18);
+  --border-strong: rgba(9, 7, 25, 0.36);
 
   /* Brand accents. */
   --primary: var(--tari-purple-500);
@@ -112,11 +127,14 @@
   --bg: var(--tari-bg-950);
   --surface: var(--tari-bg-900);
   --surface-sunken: var(--tari-bg-950);
+  /* Dark theme keeps the sidebar on the same surface as the cards. */
+  --nav-surface: var(--surface);
   --text: #ffffff;
   --text-secondary: var(--tari-grey-100);
-  --text-disabled: rgba(255, 255, 255, 0.4);
-  --border: rgba(255, 255, 255, 0.14);
-  --border-strong: rgba(255, 255, 255, 0.32);
+  --text-disabled: rgba(255, 255, 255, 0.5);
+  --placeholder: rgba(255, 255, 255, 0.45);
+  --border: rgba(255, 255, 255, 0.16);
+  --border-strong: rgba(255, 255, 255, 0.34);
 
   /* Brand accents: official dark-theme primary step (tariPurple 400/500). */
   --primary: var(--tari-purple-500);
@@ -265,10 +283,17 @@ a {
   gap: 0.625rem;
   min-width: 0;
 }
-.brand svg {
-  height: 1.75rem;
+.brand-emblem {
+  height: 2rem;
   width: auto;
   flex: none;
+  border-radius: 0.375rem;
+}
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  min-width: 0;
 }
 .brand-name {
   font-weight: 600;
@@ -277,6 +302,16 @@ a {
 }
 .brand-name .brand-name-accent {
   color: var(--accent-text);
+}
+/* "Community Project" subtitle: always smaller and subordinate to the
+   product name, never appended to it. */
+.brand-subtitle {
+  color: var(--accent-text);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 .toolbar-spacer {
   flex: 1;
@@ -299,7 +334,7 @@ a {
   grid-area: nav;
   overflow-y: auto;
   padding: 0.75rem 0.5rem;
-  background: var(--surface);
+  background: var(--nav-surface);
   border-right: 1px solid var(--border);
 }
 .nav ul {
@@ -309,6 +344,10 @@ a {
   display: flex;
   flex-direction: column;
   gap: 0.125rem;
+}
+/* Modest vertical spacing before each new section. */
+.nav > div + div {
+  margin-top: 1.25rem;
 }
 .nav-item {
   display: flex;
@@ -326,18 +365,25 @@ a {
 .nav-item:hover {
   background: var(--accent-bg-hover);
 }
+/* Selected state: background + weight + left accent bar, so the active
+   item never relies on color alone. */
 .nav-item[aria-current="page"] {
   background: var(--accent-bg);
   color: var(--accent-text);
   font-weight: 600;
+  box-shadow: inset 3px 0 0 0 var(--accent-text);
 }
+/* Section headings: small, muted, letter-spaced labels that are clearly
+   not clickable navigation items. */
 .nav-group {
-  margin: 0.875rem 0.75rem 0.25rem;
-  font-size: 0.75rem;
+  margin: 0 0.75rem 0.375rem;
+  font-size: 0.6875rem;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
   color: var(--text-secondary);
+  cursor: default;
+  user-select: none;
 }
 
 .main {
@@ -415,7 +461,8 @@ a {
   cursor: pointer;
 }
 .btn:disabled {
-  opacity: 0.55;
+  opacity: 0.45;
+  filter: saturate(0.35);
   cursor: not-allowed;
 }
 .btn-primary {
@@ -435,6 +482,21 @@ a {
 }
 .btn-secondary:hover:not(:disabled) {
   background: var(--accent-bg-hover);
+}
+/* Destructive/irreversible actions (e.g. Close Voting). Always paired with
+   a confirmation dialog; the backend lifecycle remains authoritative. */
+.btn-danger {
+  background: var(--error);
+  color: #ffffff;
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--tari-red-500);
+}
+:root[data-theme="dark"] .btn-danger {
+  background: var(--tari-red-700);
+}
+:root[data-theme="dark"] .btn-danger:hover:not(:disabled) {
+  background: var(--tari-red-500);
 }
 .btn-row {
   display: flex;
@@ -576,6 +638,10 @@ input[type="text"]:focus-visible {
   outline-offset: 1px;
   border-color: var(--focus-ring);
 }
+::placeholder {
+  color: var(--placeholder);
+  opacity: 1;
+}
 
 .radio-group {
   display: flex;
@@ -641,7 +707,49 @@ table.data th {
 }
 .screen-lede {
   color: var(--text-secondary);
-  max-width: 46rem;
+}
+
+/* Voter-facing "How voting works" guide (Vote screen): a compact
+   collapsible card, collapsed by default, written for nontechnical
+   voters. Technical vocabulary stays under its Technical details
+   disclosure. */
+.voter-guide {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+.voter-guide-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+.voter-guide-steps {
+  margin: 0.625rem 0 0;
+  padding-left: 1.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  color: var(--text-secondary);
+}
+.voter-guide-steps strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* Voter-facing privacy notice (Vote screen): calm, visually distinct,
+   always visible before any ballot is created or submitted. */
+.privacy-notice-title {
+  margin: 0 0 0.375rem;
+  font-size: 1rem;
+}
+.privacy-notice-list {
+  margin: 0;
+  padding-left: 1.375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 /* ------------------------------------------------------------------ */
@@ -670,6 +778,12 @@ table.data th {
 .error-card-message {
   color: var(--text);
   font-size: 0.9375rem;
+  overflow-wrap: anywhere;
+}
+.error-card-next {
+  color: var(--text);
+  font-size: 0.9375rem;
+  margin-top: 0.375rem;
   overflow-wrap: anywhere;
 }
 .error-card-dismiss {
@@ -707,11 +821,47 @@ table.data th {
   gap: 0.625rem;
   flex-wrap: wrap;
 }
-.file-name {
-  font-family: var(--font-mono);
+.file-row input[type="text"] {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+/* Empty state (Home): focuses on the next task; the full product branding
+   lives in the app header and on the About screen. */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.25rem;
+}
+
+/* Identity lockup text (About): emblem beside the product name with the
+   subordinate "Community Project" subtitle. */
+.identity-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+.identity-name {
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+.identity-subtitle {
+  color: var(--accent-text);
   font-size: 0.8125rem;
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* About screen emblem. */
+.about-brand {
+  margin: 0.25rem 0 0.75rem;
+}
+.about-emblem {
+  height: 11rem;
+  width: auto;
+  border-radius: 0.5rem;
 }
 
 /* ------------------------------------------------------------------ */
@@ -996,6 +1146,12 @@ table.data th {
   font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
   font-size: 0.75rem;
 }
+.selection-option-desc {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .selection-abstain {
   display: inline-flex;
   margin-top: 0.75rem;
@@ -1085,4 +1241,152 @@ table.data th {
 }
 .export-result .field-value {
   font-size: 0.8125rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Donation section (About): voluntary, visually subordinate to the    */
+/* project identity/architecture/scope content above it. Static public */
+/* constants only — no wallet connection or payment behavior.          */
+/* ------------------------------------------------------------------ */
+.donate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+  margin-top: 0.25rem;
+}
+.donate-method {
+  min-width: 0;
+  padding: 0.875rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.donate-method-title {
+  margin: 0 0 0.25rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+/* Full XTM address in readable monospace, wrapping cleanly on smaller
+   windows — never truncated. */
+.donate-address {
+  margin: 0.375rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: var(--text);
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+.donate-method .btn-row {
+  margin: 0.5rem 0;
+}
+.donate-method .btn-copy {
+  margin-left: 0;
+  padding: 0.5rem 1rem;
+  font-size: inherit;
+}
+
+/* Locally generated QR: white surface with proper quiet zone (drawn in
+   the SVG viewBox) and dark modules, scannable in both themes. Colors
+   are never inverted. Sized generously for comfortable phone scanning,
+   centered in the donation card, and capped so narrow windows shrink it
+   gracefully instead of overflowing. */
+.donate-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.75rem auto 0.375rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.qr-code {
+  display: block;
+  width: 12rem;
+  max-width: 100%;
+  height: auto;
+  background: #ffffff;
+  border-radius: 0.375rem;
+}
+.donate-qr-caption {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+/* Yat: polished identity element, centered on a subtle purple treatment
+   that matches the application brand in both themes. The exact Unicode
+   emoji sequence is rendered as native text — never an image. */
+.yat-display {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0.375rem 0 0.25rem;
+  padding: 1rem 0.75rem;
+  font-size: 1.9rem;
+  line-height: 1.35;
+  letter-spacing: 0.3em;
+  text-indent: 0.3em;
+  border-radius: var(--radius);
+  border: 1px solid var(--tari-purple-300);
+  background: linear-gradient(135deg, var(--tari-purple-100), var(--tari-purple-200));
+}
+:root[data-theme="dark"] .yat-display {
+  border-color: var(--tari-purple-700);
+  background: linear-gradient(135deg, var(--tari-purple-900), var(--tari-bg-800));
+  box-shadow: 0 0 1.5rem rgba(129, 59, 245, 0.35);
+}
+.donate-yat-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Narrow desktop windows (down to the ~840px minimum window width).   */
+/* Kept at the end of the stylesheet so these rules win over the base  */
+/* component rules above at equal specificity. The sidebar stays       */
+/* readable but slimmer, the header controls never crowd, long option  */
+/* editor rows wrap, and three-column selection rows stack — no        */
+/* horizontal page scrolling is ever needed. Card/donation grids and   */
+/* QR codes already reflow via auto-fill/auto-fit and max-width caps.  */
+/* ------------------------------------------------------------------ */
+@media (max-width: 56rem) {
+  :root {
+    --nav-width: 11rem;
+  }
+  .main {
+    padding: 1rem 1rem 1.5rem;
+  }
+  .toolbar {
+    flex-wrap: wrap;
+    row-gap: 0.375rem;
+  }
+  .toolbar-election {
+    max-width: 9rem;
+  }
+  .selection-option {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .selection-option-id,
+  .selection-option-desc {
+    grid-column: 2;
+  }
+  .option-edit-row {
+    flex-wrap: wrap;
+  }
+  .option-edit-id {
+    flex: 1 1 9rem;
+  }
+  .option-edit-label {
+    flex: 1 1 12rem;
+  }
 }

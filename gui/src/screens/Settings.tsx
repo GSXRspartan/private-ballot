@@ -1,3 +1,4 @@
+import { pickDirectory } from "../api/dialog";
 import { useAppState } from "../state/AppState";
 import { useTheme, ThemeMode } from "../theme/ThemeProvider";
 import { Card } from "../components/ui";
@@ -15,7 +16,12 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; hint: string }[] = [
  */
 export function Settings() {
   const { mode, setMode } = useTheme();
-  const { settings, setSetting } = useAppState();
+  const { settings, setSetting, shellAvailable } = useAppState();
+
+  const onBrowse = async (key: "dataDirectory" | "exportDirectory", title: string) => {
+    const picked = await pickDirectory(title);
+    if (picked !== null) setSetting(key, picked);
+  };
 
   return (
     <>
@@ -42,30 +48,50 @@ export function Settings() {
         </div>
         <p className="form-hint">
           Automatic mode follows the OS and updates live when the OS theme changes. Both themes
-          use the official Tari palette with contrast-checked combinations.
+          use the same navy and purple community palette.
         </p>
       </Card>
 
       <Card title="Directories">
         <div className="form-row">
           <label htmlFor="data-dir">Data directory</label>
-          <input
-            id="data-dir"
-            type="text"
-            value={settings.dataDirectory}
-            onChange={(e) => setSetting("dataDirectory", e.target.value)}
-            placeholder="where election artifacts are kept"
-          />
+          <div className="file-row">
+            <input
+              id="data-dir"
+              type="text"
+              value={settings.dataDirectory}
+              onChange={(e) => setSetting("dataDirectory", e.target.value)}
+              placeholder="where election artifacts are kept"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable}
+              onClick={() => void onBrowse("dataDirectory", "Choose data directory")}
+            >
+              Browse
+            </button>
+          </div>
         </div>
         <div className="form-row">
           <label htmlFor="export-dir">Default export directory</label>
-          <input
-            id="export-dir"
-            type="text"
-            value={settings.exportDirectory}
-            onChange={(e) => setSetting("exportDirectory", e.target.value)}
-            placeholder="default target for archives and ballot packages"
-          />
+          <div className="file-row">
+            <input
+              id="export-dir"
+              type="text"
+              value={settings.exportDirectory}
+              onChange={(e) => setSetting("exportDirectory", e.target.value)}
+              placeholder="default target for archives and ballot packages"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable}
+              onClick={() => void onBrowse("exportDirectory", "Choose default export directory")}
+            >
+              Browse
+            </button>
+          </div>
         </div>
       </Card>
 
@@ -79,8 +105,9 @@ export function Settings() {
           Enable developer diagnostics
         </label>
         <p className="form-hint">
-          Shows additional boundary detail (command codes and categories) on error surfaces.
-          Diagnostics never expose secret material — none exists in the frontend.
+          Shows additional technical detail for troubleshooting, such as backend, network, and
+          data-directory information in the footer. Diagnostics never expose secret material —
+          none exists in the frontend.
         </p>
       </Card>
     </>

@@ -1,4 +1,5 @@
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
+import { NavSection } from "../components/AppFrame";
 import {
   coarseBucketLabel,
   formatPercent,
@@ -21,13 +22,15 @@ import { LockIcon } from "../components/icons";
 import { ParticipationTrack } from "../components/ParticipationTrack";
 
 /**
- * Home dashboard. When no election is loaded it shows a calm empty state with a
- * Load Election primary action. When an election is loaded it displays real
- * backend-derived values only — no fabricated participation counts, ballot
- * counts, or dates. Participation and results are gated by the backend's
- * application-local disclosure policy; sealed values are never shown.
+ * Home dashboard. When no election is loaded it shows a calm empty state with
+ * Load Election and Create Election actions — no election loaded is a NORMAL
+ * application state, never an error. When an election is loaded it displays
+ * real backend-derived values only — no fabricated participation counts,
+ * ballot counts, or dates. Participation and results are gated by the
+ * backend's application-local disclosure policy; sealed values are never
+ * shown.
  */
-export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void }) {
+export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => void }) {
   const {
     election,
     participation,
@@ -47,8 +50,9 @@ export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void 
     <>
       <h1 className="screen-header">Home</h1>
       <p className="screen-lede">
-        Offline-first private ballot client. The offline archive is authoritative; Ootle
-        anchoring is optional and non-binding.
+        Tari Private Ballot lets eligible community members vote without revealing which voter
+        cast a ballot. The saved election archive can be independently verified. Optional Ootle
+        anchoring does not determine the result.
       </p>
 
       {!shellAvailable && (
@@ -82,7 +86,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void 
             </div>
           </Card>
 
-          <Card title="Election bindings">
+          <Card title="Election fingerprints">
             <div className="field-list">
               <Field label="Manifest hash">
                 <HashValue value={election.manifest_hash_hex} />
@@ -239,18 +243,27 @@ export function Home({ onNavigate }: { onNavigate?: (section: "manage") => void 
         </>
       ) : (
         <Card title="No election loaded">
-          <div className="card-body">
-            Load the three canonical election artifacts (manifest, voter registry, and
-            candidate/option set) to inspect a real election.
-          </div>
-          <div className="btn-row">
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => onNavigate?.("manage")}
-            >
-              Load Election
-            </button>
+          <div className="empty-state">
+            <div className="card-body">
+              Load an election shared by an organizer, or create a new election to get
+              started.
+            </div>
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => onNavigate?.("manage")}
+              >
+                Load Election
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => onNavigate?.("create")}
+              >
+                Create Election
+              </button>
+            </div>
           </div>
         </Card>
       )}

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
-import { pickBallotPackagePath, pickGovernanceDocument } from "../api/dialog";
+import {
+  pickBallotPackagePath,
+  pickElectionArtifact,
+  pickGovernanceDocument,
+} from "../api/dialog";
 import type {
   GuiCommandError,
   GuiGovernanceDocumentDigestV1,
@@ -33,6 +37,8 @@ import {
   WALLET_SEED_WARNING,
 } from "../voterCredential";
 import {
+  receiptStateIsAccepted,
+  receiptStateText,
   selectionAtApprovalMax,
   selectionSummaryText,
   workflowTone,
@@ -51,18 +57,22 @@ import {
 } from "../components/ui";
 
 /**
- * Vote (voter) — confirmation boundary (Slice 5A8).
+ * Vote (voter) — the voter journey in plain terms:
  *
- * This is read-only confirmation only. When an election is loaded, the screen
- * shows exactly the values that are cryptographically bound by the election
- * manifest, clearly labels the application-local presentation type as
- * non-canonical, and reports governance document status honestly. The
- * "Continue" action advances only to a deferred placeholder — credential
- * handling and proof generation are NOT enabled in this slice and are never
- * simulated.
+ *   Load election → review the election → confirm the governance source →
+ *   confirm eligibility → choose a vote → create an anonymous eligibility
+ *   proof → submit privately or save a ballot file → review submission
+ *   status.
+ *
+ * All proof construction, ballot packaging, and verification happen in the
+ * Rust backend; this screen never implements protocol logic, never holds
+ * secret material, and never submits ballot bytes itself.
  */
 export function Vote() {
-  const { election, shellAvailable } = useAppState();
+  const { election, shellAvailable, loadElection } = useAppState();
+  const [loadManifestPath, setLoadManifestPath] = useState("");
+  const [loadRegistryPath, setLoadRegistryPath] = useState("");
+  const [loadOptionSetPath, setLoadOptionSetPath] = useState("");
   const [confirmation, setConfirmation] = useState<GuiVoterElectionConfirmationV1 | null>(null);
   const [govDocDigest, setGovDocDigest] = useState<GuiGovernanceDocumentDigestV1 | null>(null);
   const [credential, setCredential] = useState<GuiVoterCredentialStatusV1 | null>(null);
@@ -110,6 +120,33 @@ export function Vote() {
         context: null,
         message: "an unexpected frontend/backend boundary error occurred",
       });
+  }
+
+  // Voter-facing Load Election. Reuses the same safe backend loading path
+  // as the organizer screens; no parallel protocol implementation.
+  async function onPickLoadArtifact(which: "manifest" | "registry" | "optionSet") {
+    const titles = {
+      manifest: "Choose election definition file",
+      registry: "Choose eligible voter list file",
+      optionSet: "Choose ballot options file",
+    } as const;
+    const picked = await pickElectionArtifact(titles[which]);
+    if (picked === null) return;
+    if (which === "manifest") setLoadManifestPath(picked);
+    else if (which === "registry") setLoadRegistryPath(picked);
+    else setLoadOptionSetPath(picked);
+  }
+
+  async function onVoterLoadElection() {
+    setBusy(true);
+    setError(null);
+    try {
+      await loadElection(loadManifestPath, loadRegistryPath, loadOptionSetPath);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function loadConfirmation(path: string | null) {
@@ -332,24 +369,175 @@ export function Vote() {
     <>
       <h1 className="screen-header">Vote</h1>
       <p className="screen-lede">
-        Review the cryptographically bound election details before voting. This is the confirmation
-        boundary before the session-only governance credential and eligibility check. Proof
-        construction and package export remain local; this screen never submits a vote.
+        Cast your ballot in a few steps: load the election, review what you are voting on,
+        confirm you are eligible, choose your vote, then create an anonymous eligibility proof
+        and submit privately or save a ballot file for the organizer.
       </p>
 
-      {!election && (
-        <Notice tone="info">
-          No election is loaded. Load one from the Manage Election screen to review its ballot.
-        </Notice>
-      )}
+      <details className="voter-guide">
+        <summary className="voter-guide-summary">How voting works</summary>
+        <ol className="voter-guide-steps">
+          <li>
+            <strong>Load the election.</strong> You receive the election files from the
+            organizer. The app checks that the files belong together and have not been
+            altered.
+          </li>
+          <li>
+            <strong>Review the election.</strong> Confirm what is being voted on, the
+            governance source, and the available choices before continuing.
+          </li>
+          <li>
+            <strong>Prove you are eligible privately.</strong> Your voter credential lets the
+            app prove that you belong to the approved voter list without revealing which
+            eligible voter you are.
+          </li>
+          <li>
+            <strong>Choose your vote.</strong> Your ballot is tied to this specific election,
+            so it cannot be reused for a different election.
+          </li>
+          <li>
+            <strong>Submit your ballot.</strong> You can submit through the private online
+            route or save the ballot file and transfer it separately.
+          </li>
+          <li>
+            <strong>Check its status.</strong> The app shows whether your ballot was received,
+            accepted, included in the final election record, and, where applicable, anchored.
+          </li>
+        </ol>
+        <DetailsSection summary="Technical details">
+          <p className="card-body">
+            Eligibility is proven with the Tari Triptych implementation using an
+            election-bound proof. After submission, receipt states (received, accepted,
+            included, and, where applicable, anchored) describe how far your ballot has
+            progressed.
+          </p>
+        </DetailsSection>
+      </details>
+
+      <div className="notice notice-info privacy-notice" role="note">
+        <h2 className="privacy-notice-title">What privacy does this provide?</h2>
+        <ul className="privacy-notice-list">
+          <li>
+            <strong>Eligibility stays anonymous.</strong> Your eligibility proof shows that an
+            approved voter participated without revealing which eligible voter you are.
+          </li>
+          <li>
+            <strong>Your vote choice is not permanently sealed.</strong> It may become visible
+            as part of the final verifiable election record.
+          </li>
+          <li>
+            <strong>Keep your voter credential private.</strong> Never send it to the
+            organizer or another voter.
+          </li>
+        </ul>
+      </div>
 
       <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
+
+      {!election && (
+        <Card title="Load Election">
+          <p className="card-body">
+            To vote, load the election files shared by the election organizer: the election
+            definition, the eligible voter list, and the ballot options. The app checks that
+            the files are complete and unaltered before continuing.
+          </p>
+          <DetailsSection summary="Technical details">
+            <p className="card-body">
+              The election definition is the manifest file, the eligible voter list is the
+              registry file, and the ballot options are the candidate/option set file.
+            </p>
+          </DetailsSection>
+          <div className="form-row">
+            <label htmlFor="vote-manifest">Election definition</label>
+            <div className="file-row">
+              <input
+                id="vote-manifest"
+                type="text"
+                readOnly
+                value={loadManifestPath ? loadManifestPath.split(/[\\/]/).pop() : ""}
+                placeholder="no file selected"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!shellAvailable || busy}
+                onClick={() => void onPickLoadArtifact("manifest")}
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+          <div className="form-row">
+            <label htmlFor="vote-registry">Eligible voter list</label>
+            <div className="file-row">
+              <input
+                id="vote-registry"
+                type="text"
+                readOnly
+                value={loadRegistryPath ? loadRegistryPath.split(/[\\/]/).pop() : ""}
+                placeholder="no file selected"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!shellAvailable || busy}
+                onClick={() => void onPickLoadArtifact("registry")}
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+          <div className="form-row">
+            <label htmlFor="vote-optionset">Ballot options</label>
+            <div className="file-row">
+              <input
+                id="vote-optionset"
+                type="text"
+                readOnly
+                value={loadOptionSetPath ? loadOptionSetPath.split(/[\\/]/).pop() : ""}
+                placeholder="no file selected"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!shellAvailable || busy}
+                onClick={() => void onPickLoadArtifact("optionSet")}
+              >
+                Browse
+              </button>
+            </div>
+          </div>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={
+                !shellAvailable ||
+                busy ||
+                loadManifestPath === "" ||
+                loadRegistryPath === "" ||
+                loadOptionSetPath === ""
+              }
+              onClick={() => void onVoterLoadElection()}
+            >
+              Load Election
+            </button>
+          </div>
+          {shellAvailable &&
+            (loadManifestPath === "" ||
+              loadRegistryPath === "" ||
+              loadOptionSetPath === "") && (
+              <p className="form-hint">Choose all required election files to continue.</p>
+            )}
+        </Card>
+      )}
 
       {confirmation && (
         <>
           <Card title={BOUND_SECTION_LABEL}>
             <Notice tone="info">
-              These values are cryptographically bound by the election manifest.
+              These details come straight from the election definition and cannot be changed by
+              anyone, including this app.
             </Notice>
             <div className="field-list">
               <Field label="Election ID">
@@ -394,9 +582,11 @@ export function Vote() {
 
           <Card title="Governance document">
             <p className="form-hint">
-              Optionally select the local governance document to check whether its digest matches the
-              bound governance source. This is read-only; no document content is parsed or
-              transmitted.
+              This records the source material that defines what is being voted on, so voters
+              and verifiers can confirm they are using the same proposal or election
+              information. Optionally select your local copy of the document to check that it
+              matches what the election definition records. Nothing is uploaded; the check
+              happens on this computer.
             </p>
             {govDocDigest ? (
               <div className="field-list">
@@ -501,7 +691,7 @@ export function Vote() {
                 checked={confirmed}
                 onChange={(e) => setConfirmed(e.target.checked)}
               />
-              I reviewed the cryptographically bound election details.
+              I have reviewed the election details above and confirmed what I am voting on.
             </label>
             <div className="action-row">
               <button
@@ -514,14 +704,18 @@ export function Vote() {
               </button>
             </div>
             <p className="form-hint">
-              Continuing does not generate a proof, create a nullifier, accept a ballot selection,
-              or submit a vote.
+              Continuing does not create a proof, cast a vote, or send anything anywhere.
             </p>
           </Card>
 
           {credentialStage && (
             <>
-              <Card title="Governance credential">
+              <Card title="Your voter credential">
+                <p className="form-hint">
+                  A voter credential is a fresh voting key created on this computer. It lets the
+                  app prove you are on the eligible voter list — without revealing which eligible
+                  voter you are. It exists only for this session and is never stored.
+                </p>
                 <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
                 <div className="field-list">
                   <Field label="Credential">
@@ -566,8 +760,12 @@ export function Vote() {
               </Card>
 
               <Card title="Eligibility">
+                <p className="form-hint">
+                  The election defines who is eligible to vote. The app checks your public voting
+                  key against the election&rsquo;s eligible voter list.
+                </p>
                 <div className="field-list">
-                  <Field label="Public governance key">
+                  <Field label="Your public voting key">
                     {credential?.public_governance_key_hex ? (
                       <>
                         <span className="field-value">{publicKeyDisplay(credential)}</span>
@@ -577,7 +775,7 @@ export function Vote() {
                       <span className="field-value">Not loaded</span>
                     )}
                   </Field>
-                  <Field label="Registry status">
+                  <Field label="Eligibility status">
                     <Pill tone={eligibilityTone}>
                       {credential?.eligibility_label ?? "No credential loaded"}
                     </Pill>
@@ -585,7 +783,8 @@ export function Vote() {
                 </div>
                 {credential?.eligibility === "NotEligible" && (
                   <Notice tone="warn">
-                    This public governance key is not in the frozen voter registry.
+                    This voting key is not on the election&rsquo;s eligible voter list. Check that
+                    the organizer enrolled your key before the election was finalized.
                   </Notice>
                 )}
                 <div className="action-row">
@@ -666,7 +865,12 @@ export function Vote() {
                     </div>
                   </Card>
 
-                  <Card title="Privacy proof">
+                  <Card title="Anonymous eligibility proof">
+                    <Notice tone="info">
+                      Your eligibility proof hides which eligible voter you are. Your ballot
+                      choice is not permanently sealed and may become public as part of the
+                      verifiable election record.
+                    </Notice>
                     <div className="field-list">
                       <Field label="Workflow">
                         <Pill tone={workflowTone(workflow?.workflow_state)}>
@@ -679,7 +883,7 @@ export function Vote() {
                         </span>
                       </Field>
                     </div>
-                    {busy && <Notice tone="info">Generating privacy proof…</Notice>}
+                    {busy && <Notice tone="info">Creating anonymous eligibility proof…</Notice>}
                     <div className="action-row">
                       <button
                         type="button"
@@ -691,9 +895,18 @@ export function Vote() {
                         }
                         onClick={() => void onGenerateProof()}
                       >
-                        Generate privacy proof
+                        Create anonymous eligibility proof
                       </button>
                     </div>
+                    <DetailsSection summary="Technical details">
+                      <p className="card-body">
+                        Eligibility is proven with the Tari Triptych implementation. The proof is
+                        bound to this election and carries a unique election-scoped linking tag,
+                        so a second ballot from the same voter is detected and rejected — without
+                        revealing which eligible voter cast it. The proof is constructed and
+                        verified in the Rust backend; this screen never sees secret material.
+                      </p>
+                    </DetailsSection>
                     {workflow?.prepared_ballot.summary && (
                       <>
                         <Card title="Review prepared ballot">
@@ -717,14 +930,14 @@ export function Vote() {
                               disabled={busy || !workflow.prepared_ballot.ready_to_export}
                               onClick={() => void onExportBallot()}
                             >
-                              Export ballot package
+                              Save ballot file
                             </button>
                           </div>
                           <div className="field-list">
-                            <Field label="Private submission">
+                            <Field label="Submission">
                               <span className="field-value">
-                                Choose an explicit route. Rust retains the canonical ballot package;
-                                this screen never sends ballot bytes itself.
+                                Choose how to submit. The verified ballot package stays in the
+                                Rust backend; this screen never sends ballot bytes itself.
                               </span>
                             </Field>
                           </div>
@@ -733,7 +946,7 @@ export function Vote() {
                               <Notice tone={transport.development_transport ? "warn" : "info"}>
                                 {transport.message}
                               </Notice>
-                              <div className="selection-options" role="radiogroup" aria-label="Private submission route">
+                              <div className="selection-options" role="radiogroup" aria-label="Submission options">
                                 <label className="selection-option">
                                   <input
                                     type="radio"
@@ -742,8 +955,8 @@ export function Vote() {
                                     disabled={busy || !transport.managed_tor_available}
                                     onChange={() => setPrivateRoute("ManagedTor")}
                                   />
-                                  <span className="selection-option-label">Managed Tor</span>
-                                  <span className="selection-option-id">Preferred private online route</span>
+                                  <span className="selection-option-label">Private online submission</span>
+                                  <span className="selection-option-desc">Uses Tor to help separate your network identity from your ballot submission.</span>
                                 </label>
                                 <label className="selection-option">
                                   <input
@@ -754,7 +967,7 @@ export function Vote() {
                                     onChange={() => setPrivateRoute("SplitTrustRelay")}
                                   />
                                   <span className="selection-option-label">Split-trust relay</span>
-                                  <span className="selection-option-id">Optional alternative privacy route</span>
+                                  <span className="selection-option-desc">An alternative private route that splits trust between independent relays.</span>
                                 </label>
                                 <label className="selection-option">
                                   <input
@@ -764,8 +977,8 @@ export function Vote() {
                                     disabled={busy || !transport.offline_export_available}
                                     onChange={() => setPrivateRoute("OfflineExport")}
                                   />
-                                  <span className="selection-option-label">Offline file</span>
-                                  <span className="selection-option-id">No online transmission</span>
+                                  <span className="selection-option-label">Offline ballot file</span>
+                                  <span className="selection-option-desc">Save the verified ballot package and transfer it separately to the election organizer.</span>
                                 </label>
                               </div>
                               <div className="action-row">
@@ -779,23 +992,22 @@ export function Vote() {
                                   }
                                   onClick={() => void onSubmitPrivately()}
                                 >
-                                  {privateRoute === "OfflineExport" ? "Export offline ballot file" : "Submit privately"}
+                                  {privateRoute === "OfflineExport" ? "Save ballot file" : "Submit privately"}
                                 </button>
                               </div>
                             </>
                           )}
                           {privateResult && (
-                            <Notice tone={privateResult.receipt_state === "ACCEPTED" ? "ok" : "info"}>
-                              {privateResult.receipt_state === "ACCEPTED"
-                                ? "ACCEPTED: the exact canonical ballot was accepted by the election intake."
-                                : `Submission status: ${privateResult.receipt_state}.`}
+                            <Notice tone={receiptStateIsAccepted(privateResult.receipt_state) ? "ok" : "info"}>
+                              {receiptStateText(privateResult.receipt_state)}
                               {privateResult.reduced_anonymity && " Reduced anonymity / small population."}
                             </Notice>
                           )}
                         </Card>
                         {exported && (
                           <Notice tone="ok">
-                            Ballot package exported. Deliver this canonical ballot package through the approved election intake process.
+                            Ballot file saved. Deliver this ballot file to the election organizer
+                            through the approved intake process.
                           </Notice>
                         )}
                       </>

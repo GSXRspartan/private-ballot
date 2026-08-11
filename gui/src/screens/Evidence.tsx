@@ -1,11 +1,13 @@
 import { useState } from "react";
 
 import { api, BackendError } from "../api/client";
+import { pickCborFile } from "../api/dialog";
 import type { GuiAnchorEvidenceInspectionV1, GuiCommandError } from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  DetailsSection,
   Field,
   HashValue,
   Notice,
@@ -22,6 +24,11 @@ export function Evidence() {
   const [path, setPath] = useState("");
   const [evidence, setEvidence] = useState<GuiAnchorEvidenceInspectionV1 | null>(null);
   const [error, setError] = useState<GuiCommandError | null>(null);
+
+  const onPickEvidence = async () => {
+    const picked = await pickCborFile("Choose anchor evidence file");
+    if (picked !== null) setPath(picked);
+  };
 
   const onInspect = async () => {
     setError(null);
@@ -48,10 +55,17 @@ export function Evidence() {
     <>
       <h1 className="screen-header">Evidence</h1>
       <p className="screen-lede">
-        An evidence record binds the election manifest hash, archive hash, anchor digest,
-        transaction id, and ledger position into one canonical, digest-verified artifact for
-        human review.
+        Review the saved evidence that links this election archive to its Ootle anchor record.
+        This evidence does not determine or change the election result.
       </p>
+
+      <DetailsSection summary="Technical details">
+        <p className="card-body">
+          An evidence record binds the election manifest hash, archive hash, anchor digest,
+          transaction id, and ledger position into one canonical, digest-verified artifact for
+          human review.
+        </p>
+      </DetailsSection>
 
       {!shellAvailable && (
         <Notice tone="info">Browser preview: inspection requires the desktop shell.</Notice>
@@ -61,13 +75,23 @@ export function Evidence() {
       <Card title="Anchor evidence record">
         <div className="form-row">
           <label htmlFor="evidence-path">Evidence file path</label>
-          <input
-            id="evidence-path"
-            type="text"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="anchor-evidence.cbor"
-          />
+          <div className="file-row">
+            <input
+              id="evidence-path"
+              type="text"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="anchor-evidence.cbor"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!shellAvailable}
+              onClick={() => void onPickEvidence()}
+            >
+              Browse
+            </button>
+          </div>
         </div>
         <div className="btn-row">
           <button
@@ -79,6 +103,9 @@ export function Evidence() {
             Inspect evidence
           </button>
         </div>
+        {shellAvailable && !path && (
+          <p className="form-hint">Choose an evidence file to continue.</p>
+        )}
 
         {evidence && (
           <>
@@ -118,8 +145,8 @@ export function Evidence() {
       </Card>
 
       <Notice tone="warn">
-        Anchor evidence is a non-binding commitment proof. Election outcomes derive from the
-        offline archive only.
+        Anchor evidence is a non-binding record of the archive commitment. Election outcomes
+        come from the independently verified election archive.
       </Notice>
     </>
   );

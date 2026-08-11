@@ -1,6 +1,12 @@
 import React from "react";
 
-import TariLogo from "../branding/TariLogo";
+import PrivateBallotEmblem from "../branding/PrivateBallotEmblem";
+import {
+  APP_IDENTITY_TAG,
+  APP_NAME,
+  APP_STATUS_LABEL,
+  APP_VERSION,
+} from "../branding/identity";
 import { useAppState } from "../state/AppState";
 import { useTheme } from "../theme/ThemeProvider";
 import { LifecyclePill, Pill } from "./ui";
@@ -35,9 +41,13 @@ export const NAV_ITEMS: NavItem[] = [
 ];
 
 /**
- * Application frame: left navigation, top toolbar (official Tari logo +
- * "Private Ballot" identity, lifecycle state, theme toggle), main content
- * region, and a status bar. Fully keyboard navigable.
+ * Application frame: left navigation, top toolbar (community project emblem
+ * + "Tari Private Ballot" identity, lifecycle state, theme toggle), main
+ * content region, and a status bar. Fully keyboard navigable.
+ *
+ * The community emblem replaces the official Tari logo as the application
+ * identity; this is an independent community project, not an official
+ * Tari Labs application.
  */
 export function AppFrame({
   section,
@@ -66,20 +76,25 @@ export function AppFrame({
 
       <header className="toolbar">
         <div className="brand">
-          <TariLogo />
-          <span className="brand-name">
-            Private <span className="brand-name-accent">Ballot</span>
+          <PrivateBallotEmblem variant="compact" className="brand-emblem" decorative />
+          <span className="brand-text">
+            <span className="brand-name">{APP_NAME}</span>
+            <span className="brand-subtitle">{APP_IDENTITY_TAG}</span>
           </span>
         </div>
         <div className="toolbar-spacer" />
         <div className="toolbar-state">
-          <Pill tone="brand">Governance Pilot</Pill>
-          <span className="toolbar-election" title={election?.election_id_hex ?? undefined}>
-            {election
-              ? election.election_id_text ?? `${election.election_id_hex.slice(0, 10)}…`
-              : "No election loaded"}
-          </span>
-          <LifecyclePill state={election?.lifecycle_state ?? null} />
+          <Pill tone="brand">{APP_STATUS_LABEL}</Pill>
+          {election ? (
+            <>
+              <span className="toolbar-election" title={election.election_id_hex}>
+                {election.election_id_text ?? `${election.election_id_hex.slice(0, 10)}…`}
+              </span>
+              <LifecyclePill state={election.lifecycle_state} />
+            </>
+          ) : (
+            <span className="toolbar-election">No election loaded</span>
+          )}
           <button
             type="button"
             className="btn btn-secondary"
@@ -93,7 +108,7 @@ export function AppFrame({
                 : "Theme override active; click to switch"
             }
           >
-            {resolved === "dark" ? "Light theme" : "Dark theme"}
+            {resolved === "dark" ? "Switch to light" : "Switch to dark"}
           </button>
         </div>
       </header>
@@ -127,21 +142,28 @@ export function AppFrame({
       </main>
 
       <footer className="statusbar">
-        <span>
-          <span className="status-label">Backend:</span>{" "}
-          {shellAvailable ? "gui-core (in process)" : "not connected (browser preview)"}
-        </span>
-        <span>
-          <span className="status-label">Network:</span> Esmeralda Testnet
-        </span>
-        <span>
-          <span className="status-label">Lifecycle:</span>{" "}
-          {election?.lifecycle_state ?? "no election"}
-        </span>
-        <span>
-          <span className="status-label">Data directory:</span>{" "}
-          {settings.dataDirectory || "not configured"}
-        </span>
+        <span>v{APP_VERSION}</span>
+        <span>{APP_STATUS_LABEL}</span>
+        <span>{APP_IDENTITY_TAG}</span>
+        {settings.devDiagnostics && (
+          <>
+            <span>
+              <span className="status-label">Backend:</span>{" "}
+              {shellAvailable ? "gui-core (in process)" : "not connected (browser preview)"}
+            </span>
+            <span>
+              <span className="status-label">Network:</span> Esmeralda Testnet
+            </span>
+            <span>
+              <span className="status-label">Lifecycle:</span>{" "}
+              {election?.lifecycle_state ?? "no election"}
+            </span>
+            <span>
+              <span className="status-label">Data directory:</span>{" "}
+              {settings.dataDirectory || "not configured"}
+            </span>
+          </>
+        )}
       </footer>
     </div>
   );

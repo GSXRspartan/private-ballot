@@ -101,6 +101,26 @@ export async function pickRegistryCborFile(title: string): Promise<string | null
 }
 
 /**
+ * Opens a native single-file picker for a canonical CBOR artifact (archive
+ * manifest, anchor config, snapshot, or evidence record). Reading and
+ * validation happen in the Rust shell; this only returns a path.
+ */
+export async function pickCborFile(title: string): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const selected = await open({
+    title,
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Canonical CBOR", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return selected ?? null;
+}
+
+/**
  * Opens a native single-file picker for a governance document (Slice 5A8). The
  * document is treated as immutable raw bytes; no semantic parsing happens in
  * the frontend. Reading, size-checking, and digesting happen in Rust; this

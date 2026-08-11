@@ -16,7 +16,7 @@
         "title": "Tari Private Ballot",
         "width": 1280,
         "height": 800,
-        "minWidth": 960,
+        "minWidth": 840,
         "minHeight": 600,
         "resizable": true,
         "fullscreen": false
@@ -32,8 +32,8 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Tari Private Ballot desktop client",
-    "longDescription": "Offline-first desktop client for organizing and verifying Tari community private ballots, with optional non-binding Ootle anchoring.",
+    "shortDescription": "Tari Private Ballot desktop client (community project)",
+    "longDescription": "Community-built offline-first desktop client for organizing and verifying Tari community private ballots, with optional non-binding Ootle anchoring. Not endorsed by or affiliated with Tari Labs.",
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

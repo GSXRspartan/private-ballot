@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 import { describeError } from "../api/errorDisplay";
 import type { GuiCommandError } from "../api/types";
@@ -123,9 +123,12 @@ export function DetailsSection({
 export function CopyButton({
   value,
   label = "Copy",
+  ariaLabel,
 }: {
   value: string;
   label?: string;
+  /** Accessible name override. Defaults to `"${label}: ${value}"`. */
+  ariaLabel?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const onClick = async () => {
@@ -142,16 +145,17 @@ export function CopyButton({
       type="button"
       className="btn btn-secondary btn-copy"
       onClick={() => void onClick()}
-      aria-label={`${label}: ${value}`}
+      aria-label={ariaLabel ?? `${label}: ${value}`}
     >
       {copied ? "Copied" : label}
     </button>
   );
 }
 
-/** Renders a structured backend error as an alert card with a concise title,
- *  the safe bounded message, and the stable machine code under an Advanced
- *  details disclosure. Keyboard-accessible dismissal when `onDismiss` is set. */
+/** Renders a structured backend error as an alert card in plain-language
+ *  order: what happened, what the user can do next, then the diagnostic
+ *  codes under a Technical details disclosure. Keyboard-accessible
+ *  dismissal when `onDismiss` is set. */
 export function ErrorCard({
   error,
   onDismiss,
@@ -165,9 +169,10 @@ export function ErrorCard({
       <div className="error-card-main">
         <div className="error-card-title">{display.title}</div>
         <div className="error-card-message">{display.message}</div>
-        <DetailsSection summary="Advanced details">
+        <div className="error-card-next">{display.nextStep}</div>
+        <DetailsSection summary="Technical details">
           <div className="field-list">
-            <Field label="Machine code">
+            <Field label="Error code">
               <span className="hash">{display.code}</span>
             </Field>
             <Field label="Category">
@@ -205,4 +210,78 @@ export function BackendErrorNotice({
 }) {
   if (!error) return null;
   return <ErrorCard error={error} onDismiss={onDismiss} />;
+}
+
+/**
+ * Modal confirmation dialog for irreversible or destructive actions.
+ *
+ * Keyboard behavior: focus moves to the Cancel button when the dialog opens,
+ * Escape cancels, and focus returns to the element that opened the dialog
+ * when it closes. The caller decides whether the confirm action is styled as
+ * destructive (`danger`).
+ */
+export function ConfirmDialog({
+  title,
+  body,
+  confirmLabel,
+  confirmTone = "primary",
+  busy = false,
+  onConfirm,
+  onCancel,
+}: {
+  title: string;
+  body: React.ReactNode;
+  confirmLabel: string;
+  confirmTone?: "primary" | "danger";
+  busy?: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const titleId = useRef(`confirm-title-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [onCancel]);
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby={titleId.current}>
+      <div className="modal">
+        <h3 id={titleId.current} className="modal-title">
+          {title}
+        </h3>
+        <div className="modal-body">{body}</div>
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onCancel}
+            disabled={busy}
+            ref={cancelRef}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className={`btn ${confirmTone === "danger" ? "btn-danger" : "btn-primary"}`}
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }

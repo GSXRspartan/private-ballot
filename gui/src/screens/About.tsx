@@ -2,14 +2,25 @@ import { useEffect, useState } from "react";
 
 import { api, isDesktopShell } from "../api/client";
 import type { ShellInfoV1 } from "../api/types";
-import TariLogo from "../branding/TariLogo";
-import { Card, Field, Notice, Pill } from "../components/ui";
+import PrivateBallotEmblem from "../branding/PrivateBallotEmblem";
+import {
+  DONATION_DISCLAIMER,
+  DONATION_XTM_ADDRESS,
+  DONATION_YAT,
+} from "../branding/donation";
+import {
+  APP_IDENTITY_TAG,
+  APP_NAME,
+  APP_STATUS_LABEL,
+  APP_VERSION,
+  COMMUNITY_DISCLAIMER,
+} from "../branding/identity";
+import { QrCode } from "../components/QrCode";
+import { Card, CopyButton, DetailsSection, Field, Notice, Pill } from "../components/ui";
 
 /**
- * About: application identity, branding attribution, and the single fuller scope
- * notice. The compact product-status label "Governance Pilot" lives here as a
- * field and in the toolbar; this screen is the only place the longer scope
- * statement appears.
+ * About: community project identity, open-source acknowledgements, plain
+ * architecture explanation, and the single fuller scope notice.
  */
 export function About() {
   const [info, setInfo] = useState<ShellInfoV1 | null>(null);
@@ -27,40 +38,50 @@ export function About() {
     <>
       <h1 className="screen-header">About</h1>
 
-      <Card title="Application">
-        <div className="brand">
-          <TariLogo />
-          <span className="brand-name">
-            Private <span className="brand-name-accent">Ballot</span>
+      <Card title="Project identity">
+        <div className="brand about-brand">
+          <PrivateBallotEmblem variant="full" className="about-emblem" />
+          <span className="identity-text">
+            <span className="identity-name">{APP_NAME}</span>
+            <span className="identity-subtitle">{APP_IDENTITY_TAG}</span>
           </span>
         </div>
         <div className="field-list">
           <Field label="Status">
-            <Pill tone="brand">Governance Pilot</Pill>
+            <Pill tone="brand">{APP_STATUS_LABEL}</Pill>
           </Field>
-          <Field label="Version">{info?.shell_version ?? "0.1.0 (browser preview)"}</Field>
-          <Field label="Backend boundary">
-            {info?.gui_core_boundary ?? "gui-core typed commands (in process, no server)"}
-          </Field>
-          <Field label="Stack">Tauri 2 · React · TypeScript · Vite (system WebView)</Field>
+          <Field label="Version">{info?.shell_version ?? `${APP_VERSION} (browser preview)`}</Field>
         </div>
+        <Notice tone="info">{COMMUNITY_DISCLAIMER}</Notice>
       </Card>
 
-      <Card title="Branding attribution">
+      <Card title="Open-source acknowledgements">
         <p className="card-body">
-          The Tari logo and the Tari color scales are official assets of the Tari Project,
-          taken unmodified from the official Tari Ootle repository (BSD-3-Clause, The Tari
-          Project). The logo artwork is not redrawn or approximated. Typography references
-          Poppins, the official Tari interface typeface, via the operating system.
+          This community project builds on open-source technology from the Tari ecosystem,
+          including the Tari Triptych implementation (BSD-3-Clause, The Tari Project), and on
+          Tari Ootle for optional anchoring. These are licence acknowledgements only: they do
+          not make this an official Tari Labs application, and they imply no endorsement of
+          this community project.
         </p>
+        <div className="field-list">
+          <Field label="Stack">Tauri 2 · React · TypeScript · Vite (system WebView)</Field>
+        </div>
+        <DetailsSection summary="Technical details">
+          <div className="field-list">
+            <Field label="Backend boundary">
+              {info?.gui_core_boundary ?? "typed commands (in process, no server)"}
+            </Field>
+          </div>
+        </DetailsSection>
       </Card>
 
       <Card title="Architecture">
         <p className="card-body">
-          All cryptography, canonical encoding, hashing, proof verification, tallying, archive
-          construction, replay verification, and anchor lifecycle logic live in the Rust
-          backend and are reached only through gui-core typed commands. This frontend contains
-          no protocol logic and holds no secrets.
+          Everything security-sensitive — the eligibility proofs, the checks that a ballot is
+          valid, the tally, and the saved election record — is implemented in the Rust backend.
+          This window is only an interface: it does not perform cryptographic verification
+          itself. Private keys, voter credentials, and other secret material stay behind the
+          backend boundary; this interface never receives them.
         </p>
       </Card>
 
@@ -69,6 +90,87 @@ export function About() {
         {info?.binding_notice ??
           "This release is intended for governance pilots. Binding governance use requires the applicable review and authorization process."}
       </Notice>
+
+      <Card title="Donate to the dev">
+        <p className="card-body">{DONATION_DISCLAIMER}</p>
+        <div className="donate-grid">
+          <section className="donate-method" aria-label="XTM donation">
+            <h4 className="donate-method-title">XTM</h4>
+            <p className="donate-address">{DONATION_XTM_ADDRESS}</p>
+            <DonateActions
+              value={DONATION_XTM_ADDRESS}
+              copyLabel="Copy address"
+              copyAriaLabel="Copy XTM donation address"
+              qrToggleLabel="XTM QR code"
+              qrRegionId="donate-xtm-qr"
+              qrLabel="QR code encoding the XTM donation address"
+              qrCaption="XTM receive address"
+            />
+          </section>
+          <section className="donate-method" aria-label="Yat donation">
+            <h4 className="donate-method-title">Yat</h4>
+            <p className="yat-display">{DONATION_YAT}</p>
+            <DonateActions
+              value={DONATION_YAT}
+              copyLabel="Copy Yat"
+              copyAriaLabel="Copy Yat"
+              qrToggleLabel="Yat QR code"
+              qrRegionId="donate-yat-qr"
+              qrLabel="QR code encoding the Yat"
+              qrCaption="Yat"
+            />
+            <p className="donate-yat-note">
+              Other supported donation addresses are available through the Yat.
+            </p>
+          </section>
+        </div>
+      </Card>
+    </>
+  );
+}
+
+/** Copy + locally-expandable QR actions for one public donation
+ *  destination. No wallet connection or payment behavior — these are
+ *  static public constants only. */
+function DonateActions({
+  value,
+  copyLabel,
+  copyAriaLabel,
+  qrToggleLabel,
+  qrRegionId,
+  qrLabel,
+  qrCaption,
+}: {
+  value: string;
+  copyLabel: string;
+  copyAriaLabel: string;
+  qrToggleLabel: string;
+  qrRegionId: string;
+  qrLabel: string;
+  qrCaption: string;
+}) {
+  const [showQr, setShowQr] = useState(false);
+  return (
+    <>
+      <div className="btn-row">
+        <CopyButton value={value} label={copyLabel} ariaLabel={copyAriaLabel} />
+        <button
+          type="button"
+          className="btn btn-secondary"
+          aria-expanded={showQr}
+          aria-controls={qrRegionId}
+          aria-label={showQr ? `Hide ${qrToggleLabel}` : `Show ${qrToggleLabel}`}
+          onClick={() => setShowQr((current) => !current)}
+        >
+          {showQr ? "Hide QR" : "Show QR"}
+        </button>
+      </div>
+      {showQr && (
+        <div className="donate-qr" id={qrRegionId}>
+          <QrCode value={value} label={qrLabel} />
+          <span className="donate-qr-caption">{qrCaption}</span>
+        </div>
+      )}
     </>
   );
 }
