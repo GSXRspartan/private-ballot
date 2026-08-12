@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveFileCatalogV1, ArchiveFileEntryV1, ArchiveManifestV1,
-    ArchivePathV1, TransportArchiveBindingV1, TRANSPORT_ARCHIVE_BINDING_PATH_V1,
+    ArchivePathV1, TRANSPORT_ARCHIVE_BINDING_PATH_V1, TransportArchiveBindingV1,
 };
+use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
 use crate::error::GuiCoreError;
@@ -44,7 +45,9 @@ pub const SUBMISSIONS_ARCHIVE_DIR: &str = "submissions";
 #[must_use]
 pub fn submission_archive_path(index: usize) -> String {
     format!("{SUBMISSIONS_ARCHIVE_DIR}/{index:08}.cbor")
-}/// One written archive content file.
+}
+
+/// One written archive content file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiArchiveFileSummaryV1 {
     /// Canonical archive-relative path.
@@ -68,6 +71,12 @@ pub struct GuiArchiveWriteResultV1 {
     pub files: Vec<GuiArchiveFileSummaryV1>,
     /// The path of the archive manifest file itself (not hash-covered).
     pub archive_manifest_path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveFinalityMode {
+    Legacy,
+    Finalized,
 }
 
 /// Writes one complete election archive from a session.
@@ -119,6 +128,7 @@ pub fn write_archive_directory_v1_with_governance_document(
         target_dir,
         governance_document_bytes,
         None,
+        ArchiveFinalityMode::Legacy,
     )
 }
 
@@ -130,7 +140,47 @@ pub fn write_archive_directory_v1_with_transport_binding(
     target_dir: &Path,
     transport_binding: &TransportArchiveBindingV1,
 ) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
-    write_archive_directory_v1_with_optional_binding(session, target_dir, None, Some(transport_binding))
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        None,
+        Some(transport_binding),
+        ArchiveFinalityMode::Legacy,
+    )
+}
+
+/// Writes one finalized election archive.
+///
+/// Unlike [`write_archive_directory_v1`], this refuses any session that has not
+/// reached the authoritative `FINALIZED` lifecycle state and emits a version-two
+/// archive manifest whose archive hash covers that exact finality value.
+pub fn write_finalized_archive_v1(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        None,
+        None,
+        ArchiveFinalityMode::Finalized,
+    )
+}
+
+/// Writes one finalized election archive with a hash-covered public transport
+/// binding artifact.
+pub fn write_finalized_archive_v1_with_transport_binding(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    transport_binding: &TransportArchiveBindingV1,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        None,
+        Some(transport_binding),
+        ArchiveFinalityMode::Finalized,
+    )
 }
 
 fn write_archive_directory_v1_with_optional_binding(
@@ -138,7 +188,14 @@ fn write_archive_directory_v1_with_optional_binding(
     target_dir: &Path,
     governance_document_bytes: Option<&[u8]>,
     transport_binding: Option<&TransportArchiveBindingV1>,
+    finality: ArchiveFinalityMode,
 ) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    if finality == ArchiveFinalityMode::Finalized
+        && session.lifecycle_state_v1() != ElectionLifecycleStateV1::Finalized
+    {
+        return Err(GuiCoreError::archive_not_finalized());
+    }
+
     prepare_target_directory(target_dir)?;
 
     let provider = Blake3HashProviderV1;
@@ -165,7 +222,10 @@ fn write_archive_directory_v1_with_optional_binding(
         files.insert(submission_archive_path(index), package.clone());
     }
     if let Some(doc_bytes) = governance_document_bytes {
-        files.insert(GOVERNANCE_DOCUMENT_ARCHIVE_PATH.to_owned(), doc_bytes.to_vec());
+        files.insert(
+            GOVERNANCE_DOCUMENT_ARCHIVE_PATH.to_owned(),
+            doc_bytes.to_vec(),
+        );
     }
     if let Some(binding) = transport_binding {
         if binding.manifest_hash() != artifacts.manifest_hash()
@@ -223,9 +283,15 @@ fn write_archive_directory_v1_with_optional_binding(
         .collect::<Result<Vec<_>, GuiCoreError>>()?;
     let catalog = ArchiveFileCatalogV1::new(entries)
         .map_err(|error| GuiCoreError::from_protocol(&error, "archive-catalog"))?;
-    let archive_manifest =
-        ArchiveManifestV1::for_provider(artifacts.manifest_hash(), catalog, &provider)
-            .map_err(|error| GuiCoreError::from_protocol(&error, "archive-manifest"))?;
+    let archive_manifest = match finality {
+        ArchiveFinalityMode::Legacy => {
+            ArchiveManifestV1::for_provider(artifacts.manifest_hash(), catalog, &provider)
+        }
+        ArchiveFinalityMode::Finalized => {
+            ArchiveManifestV1::finalized_for_provider(artifacts.manifest_hash(), catalog, &provider)
+        }
+    }
+    .map_err(|error| GuiCoreError::from_protocol(&error, "archive-manifest"))?;
     let archive_hash = archive_manifest
         .canonical_hash(&provider)
         .map_err(|error| GuiCoreError::from_protocol(&error, "archive-manifest"))?;

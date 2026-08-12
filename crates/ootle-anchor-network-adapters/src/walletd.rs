@@ -11,37 +11,33 @@
 //! digest/payload/fee/fingerprint bindings and exposes no private key, mnemonic,
 //! or signing API.
 //!
-//! # Fingerprint caching
+//! # Fingerprint recovery
 //!
 //! The [`WalletdAnchorClient::get_transaction_request`] method returns an
 //! `observed_fingerprint` that the 4A6 coordinator checks against the frozen
 //! binding. The fingerprint is a domain-separated BLAKE3 digest of the unsigned
 //! transaction's canonical CBOR encoding, computed by the 4A5 inspector. The
-//! `fingerprint_unsigned` function is private to the 4A5 crate, so the adapter
-//! cannot re-compute it from the returned `UnsignedTransaction` without
-//! duplicating the logic. Instead, the adapter caches the fingerprint at
-//! creation time (from `WalletdCreateAnchorRequestV1::fingerprint()`) keyed by
-//! the returned `walletd_request_id` — the same approach the 4A6 fake uses.
-//! After a restart the cache is empty and `observed_fingerprint` is `None`,
-//! which the coordinator handles by skipping the fingerprint check (the
-//! transaction was already verified at creation time and walletd stores it
-//! frozen).
+//! adapter keeps the same-process cache from creation time as a fast path, and
+//! after a restart recomputes the fingerprint from walletd's returned frozen
+//! unsigned transaction instead of skipping the comparison.
 
 use std::collections::BTreeMap;
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::AnchorTransactionId;
-use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
+use tari_cc_private_ballot_ootle_anchor_adapter::{
+    OotleAnchorInspectionFingerprintV1, fingerprint_unsigned_anchor_transaction,
+};
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     WalletdAnchorClient, WalletdCreateAnchorRequestV1, WalletdCreateOutcomeV1,
     WalletdDecisionCommandV1, WalletdDecisionOutcomeV1, WalletdEffectiveStatusV1, WalletdRequestId,
     WalletdRequestStatusV1, WalletdSubmitCommandV1, WalletdSubmitOutcomeV1,
     canonicalize_transaction_id,
 };
-use tari_ootle_transaction::{Network, TransactionBuilder, TransactionId};
+use tari_ootle_transaction::{Network, TransactionBuilder, TransactionId, UnsignedTransaction};
 use tari_ootle_wallet_sdk::models::{KeyBranch, KeyId};
 use tari_ootle_walletd_client::WalletDaemonClient;
-use tari_ootle_walletd_client::types::{
+pub use tari_ootle_walletd_client::types::{
     TransactionRequestCreateRequest, TransactionRequestCreateResponse,
     TransactionRequestDecisionRequest, TransactionRequestDecisionResponse,
     TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestInfo,
@@ -281,7 +277,7 @@ fn status_to_wire(
 /// The adapter never reads the `transaction` field from a `get` response (it
 /// only reads `request_id`, `status`, and `transaction_id`), so a minimal
 /// empty transaction suffices.
-fn minimal_unsigned_transaction() -> tari_ootle_transaction::UnsignedTransaction {
+fn minimal_unsigned_transaction() -> UnsignedTransaction {
     TransactionBuilder::new(Network::LocalNet).build_unsigned()
 }
 
@@ -290,10 +286,11 @@ fn scripted_request_info(
     request_id: i32,
     status: WalletdEffectiveStatusV1,
     transaction_id: Option<TransactionId>,
+    transaction: UnsignedTransaction,
 ) -> TransactionRequestInfo {
     TransactionRequestInfo {
         request_id,
-        transaction: minimal_unsigned_transaction(),
+        transaction,
         seal_signer: KeyId::derived(KeyBranch::Account, 0),
         other_signers: Vec::new(),
         requested_by: None,
@@ -322,6 +319,7 @@ pub struct ScriptedWalletdTransport {
     captured_reject: Option<TransactionRequestDecisionRequest>,
     captured_get: Option<TransactionRequestGetRequest>,
     captured_submit: Option<TransactionRequestSubmitRequest>,
+    get_transaction: Option<UnsignedTransaction>,
     create_calls: u64,
     approve_calls: u64,
     reject_calls: u64,
@@ -360,6 +358,7 @@ impl ScriptedWalletdTransport {
             captured_reject: None,
             captured_get: None,
             captured_submit: None,
+            get_transaction: None,
             create_calls: 0,
             approve_calls: 0,
             reject_calls: 0,
@@ -391,6 +390,11 @@ impl ScriptedWalletdTransport {
     /// Sets the scripted response for `submit_transaction_request`.
     pub fn set_submit_response(&mut self, response: ScriptedWalletdResponse) {
         self.submit_response = response;
+    }
+
+    /// Sets the frozen transaction returned by scripted status lookups.
+    pub fn set_get_transaction(&mut self, transaction: UnsignedTransaction) {
+        self.get_transaction = Some(transaction);
     }
 
     /// Returns the captured create request, if one was sent.
@@ -537,8 +541,13 @@ impl WalletdWireTransport for ScriptedWalletdTransport {
                 transaction_id,
             } => {
                 let wire_tx_id = transaction_id.as_ref().map(transaction_id_to_wire);
+                let transaction = self
+                    .get_transaction
+                    .clone()
+                    .or_else(|| self.captured_create.as_ref().map(|r| r.transaction.clone()))
+                    .unwrap_or_else(minimal_unsigned_transaction);
                 Ok(TransactionRequestGetResponse {
-                    request: scripted_request_info(*request_id, *status, wire_tx_id),
+                    request: scripted_request_info(*request_id, *status, wire_tx_id, transaction),
                 })
             }
             ScriptedWalletdResponse::GetError(error) => Err(error.clone()),
@@ -741,7 +750,14 @@ impl<T: WalletdWireTransport> WalletdAnchorClient for WalletdAnchorNetworkAdapte
         let transaction_id = info
             .transaction_id
             .map(|id| canonicalize_transaction_id(&id));
-        let observed_fingerprint = self.fingerprint_cache.get(&info.request_id).copied();
+        let observed_fingerprint = match self.fingerprint_cache.get(&info.request_id).copied() {
+            Some(fingerprint) => Some(fingerprint),
+            None => Some(
+                fingerprint_unsigned_anchor_transaction(&info.transaction).map_err(
+                    tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError::UnsafeUnsignedTransaction,
+                )?,
+            ),
+        };
         Ok(WalletdRequestStatusV1::new(
             WalletdRequestId::from_walletd(info.request_id),
             WalletdEffectiveStatusV1::from_wire(info.status),

@@ -18,6 +18,10 @@ tari-cc-private-ballot-archive = { path = "../archive" }
 
 tokio = { version = "1", default-features = false, features = ["rt"] }
 
+[features]
+default = []
+offline-test-raw-hashes = []
+
 [lib]
 name = "tari_cc_private_ballot_ootle_anchor_app"
 

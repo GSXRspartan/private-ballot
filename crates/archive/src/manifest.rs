@@ -10,6 +10,10 @@ use crate::{ArchiveFileCatalogV1, ArchiveFileDigestV1, ArchiveFileEntryV1, Archi
 
 /// First top-level archive-manifest schema version.
 pub const ARCHIVE_MANIFEST_VERSION_V1: u16 = 1;
+/// Archive-manifest schema version that binds finalized election lifecycle.
+pub const ARCHIVE_MANIFEST_VERSION_V2: u16 = 2;
+/// Canonical lifecycle value required by finalized archive manifests.
+pub const ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1: &str = "FINALIZED";
 
 /// Canonical path reserved for the archive manifest itself.
 ///
@@ -22,6 +26,7 @@ pub const ARCHIVE_MANIFEST_CANONICAL_PATH: &str = "archive-manifest.cbor";
 pub const ARCHIVE_SIGNATURE_PATH_PREFIX: &str = "archive-signatures/";
 
 const ARCHIVE_MANIFEST_FIELD_COUNT_V1: usize = 4;
+const ARCHIVE_MANIFEST_FIELD_COUNT_V2: usize = 5;
 const ARCHIVE_FILE_ENTRY_FIELD_COUNT_V1: usize = 2;
 
 /// Final domain-separated hash of one canonical archive manifest.
@@ -64,6 +69,7 @@ pub struct ArchiveManifestV1 {
     archive_manifest_version: u16,
     election_manifest_hash: ManifestHash,
     hash_algorithm_id: String,
+    final_lifecycle_state: Option<String>,
     files: ArchiveFileCatalogV1,
 }
 
@@ -75,11 +81,47 @@ impl ArchiveManifestV1 {
         hash_algorithm_id: String,
         files: ArchiveFileCatalogV1,
     ) -> Result<Self, ProtocolError> {
-        if archive_manifest_version != ARCHIVE_MANIFEST_VERSION_V1 {
-            return Err(ProtocolError::new(
-                ValidationCode::UnsupportedProtocolVersion,
-                "archive manifest does not use version one",
-            ));
+        Self::new_with_lifecycle(
+            archive_manifest_version,
+            election_manifest_hash,
+            hash_algorithm_id,
+            None,
+            files,
+        )
+    }
+
+    fn new_with_lifecycle(
+        archive_manifest_version: u16,
+        election_manifest_hash: ManifestHash,
+        hash_algorithm_id: String,
+        final_lifecycle_state: Option<String>,
+        files: ArchiveFileCatalogV1,
+    ) -> Result<Self, ProtocolError> {
+        match archive_manifest_version {
+            ARCHIVE_MANIFEST_VERSION_V1 => {
+                if final_lifecycle_state.is_some() {
+                    return Err(ProtocolError::new(
+                        ValidationCode::InvalidArchiveManifest,
+                        "archive manifest version one cannot carry final lifecycle state",
+                    ));
+                }
+            }
+            ARCHIVE_MANIFEST_VERSION_V2 => {
+                if final_lifecycle_state.as_deref()
+                    != Some(ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1)
+                {
+                    return Err(ProtocolError::new(
+                        ValidationCode::InvalidArchiveManifest,
+                        "archive manifest version two must bind FINALIZED lifecycle state",
+                    ));
+                }
+            }
+            _ => {
+                return Err(ProtocolError::new(
+                    ValidationCode::UnsupportedProtocolVersion,
+                    "archive manifest uses an unsupported version",
+                ));
+            }
         }
 
         if hash_algorithm_id.trim().is_empty() {
@@ -102,6 +144,7 @@ impl ArchiveManifestV1 {
             archive_manifest_version,
             election_manifest_hash,
             hash_algorithm_id,
+            final_lifecycle_state,
             files,
         })
     }
@@ -116,6 +159,24 @@ impl ArchiveManifestV1 {
             ARCHIVE_MANIFEST_VERSION_V1,
             election_manifest_hash,
             provider.algorithm_id().to_owned(),
+            files,
+        )
+    }
+
+    /// Creates a finalized archive manifest using the selected hash provider.
+    ///
+    /// The resulting top-level archive hash covers both the exact file catalog
+    /// and the explicit `FINALIZED` lifecycle value.
+    pub fn finalized_for_provider<H: HashProvider>(
+        election_manifest_hash: ManifestHash,
+        files: ArchiveFileCatalogV1,
+        provider: &H,
+    ) -> Result<Self, ProtocolError> {
+        Self::new_with_lifecycle(
+            ARCHIVE_MANIFEST_VERSION_V2,
+            election_manifest_hash,
+            provider.algorithm_id().to_owned(),
+            Some(ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1.to_owned()),
             files,
         )
     }
@@ -138,6 +199,20 @@ impl ArchiveManifestV1 {
         &self.hash_algorithm_id
     }
 
+    /// Returns the final lifecycle state bound into a version-two archive
+    /// manifest, when present.
+    #[must_use]
+    pub fn final_lifecycle_state(&self) -> Option<&str> {
+        self.final_lifecycle_state.as_deref()
+    }
+
+    /// Returns whether this manifest cryptographically binds FINALIZED state.
+    #[must_use]
+    pub fn is_finalized_archive_manifest(&self) -> bool {
+        self.archive_manifest_version == ARCHIVE_MANIFEST_VERSION_V2
+            && self.final_lifecycle_state() == Some(ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1)
+    }
+
     /// Returns hash-covered content files in canonical archive-path order.
     #[must_use]
     pub const fn files(&self) -> &ArchiveFileCatalogV1 {
@@ -148,10 +223,22 @@ impl ArchiveManifestV1 {
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, ProtocolError> {
         let mut writer = CanonicalCborWriter::new();
 
-        writer.write_array_len(ARCHIVE_MANIFEST_FIELD_COUNT_V1)?;
+        let field_count = if self.archive_manifest_version == ARCHIVE_MANIFEST_VERSION_V2 {
+            ARCHIVE_MANIFEST_FIELD_COUNT_V2
+        } else {
+            ARCHIVE_MANIFEST_FIELD_COUNT_V1
+        };
+        writer.write_array_len(field_count)?;
         writer.write_unsigned(u64::from(self.archive_manifest_version));
         writer.write_byte_string(self.election_manifest_hash.as_bytes())?;
         writer.write_text_string(&self.hash_algorithm_id)?;
+        if self.archive_manifest_version == ARCHIVE_MANIFEST_VERSION_V2 {
+            writer.write_text_string(
+                self.final_lifecycle_state
+                    .as_deref()
+                    .unwrap_or(ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1),
+            )?;
+        }
         writer.write_array_len(self.files.len())?;
 
         for entry in self.files.entries() {
@@ -183,20 +270,36 @@ impl ArchiveManifestV1 {
 
         let mut reader = CanonicalCborReader::new(encoded);
 
-        if reader.read_array_len()? != ARCHIVE_MANIFEST_FIELD_COUNT_V1 {
+        let field_count = reader.read_array_len()?;
+        if field_count != ARCHIVE_MANIFEST_FIELD_COUNT_V1
+            && field_count != ARCHIVE_MANIFEST_FIELD_COUNT_V2
+        {
             return Err(invalid_cbor(
-                "archive manifest must contain exactly four fields",
+                "archive manifest must contain a supported field count",
             ));
         }
 
         let archive_manifest_version = u16::try_from(reader.read_unsigned()?)
             .map_err(|_| invalid_cbor("archive-manifest version exceeds the integer limit"))?;
 
-        if archive_manifest_version != ARCHIVE_MANIFEST_VERSION_V1 {
-            return Err(ProtocolError::new(
-                ValidationCode::UnsupportedProtocolVersion,
-                "archive manifest does not use version one",
-            ));
+        match archive_manifest_version {
+            ARCHIVE_MANIFEST_VERSION_V1 if field_count != ARCHIVE_MANIFEST_FIELD_COUNT_V1 => {
+                return Err(invalid_cbor(
+                    "archive manifest version one has the wrong field count",
+                ));
+            }
+            ARCHIVE_MANIFEST_VERSION_V2 if field_count != ARCHIVE_MANIFEST_FIELD_COUNT_V2 => {
+                return Err(invalid_cbor(
+                    "archive manifest version two has the wrong field count",
+                ));
+            }
+            ARCHIVE_MANIFEST_VERSION_V1 | ARCHIVE_MANIFEST_VERSION_V2 => {}
+            _ => {
+                return Err(ProtocolError::new(
+                    ValidationCode::UnsupportedProtocolVersion,
+                    "archive manifest uses an unsupported version",
+                ));
+            }
         }
 
         let election_manifest_hash = ManifestHash::new(read_digest(
@@ -219,6 +322,19 @@ impl ArchiveManifestV1 {
                 "archive hash-algorithm identifier exceeds the protocol limit",
             ));
         }
+
+        let final_lifecycle_state = if archive_manifest_version == ARCHIVE_MANIFEST_VERSION_V2 {
+            let state = reader.read_text_string()?.to_owned();
+            if state != ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1 {
+                return Err(ProtocolError::new(
+                    ValidationCode::InvalidArchiveManifest,
+                    "archive manifest version two does not bind FINALIZED state",
+                ));
+            }
+            Some(state)
+        } else {
+            None
+        };
 
         let file_count = reader.read_array_len()?;
 
@@ -268,10 +384,11 @@ impl ArchiveManifestV1 {
 
         let files = ArchiveFileCatalogV1::new(entries)?;
 
-        Self::new(
+        Self::new_with_lifecycle(
             archive_manifest_version,
             election_manifest_hash,
             hash_algorithm_id,
+            final_lifecycle_state,
             files,
         )
     }
@@ -593,13 +710,70 @@ mod tests {
 
     #[test]
     fn unsupported_archive_manifest_version_is_rejected() {
-        let encoded = encoded_manifest(2, &[1_u8; 32], "h", &[("manifest.cbor", vec![2_u8; 32])]);
+        let encoded = encoded_manifest(3, &[1_u8; 32], "h", &[("manifest.cbor", vec![2_u8; 32])]);
 
         assert!(matches!(
             ArchiveManifestV1::from_canonical_cbor(&encoded),
             Err(error)
                 if error.code()
                     == ValidationCode::UnsupportedProtocolVersion
+        ));
+    }
+
+    #[test]
+    fn finalized_manifest_binds_v2_and_finalized_state() {
+        let provider = TestOnlyDeterministicHasher;
+        let Ok(manifest) = ArchiveManifestV1::finalized_for_provider(
+            ManifestHash::new([1_u8; 32]),
+            catalog(&[("manifest.cbor", 2)]),
+            &provider,
+        ) else {
+            panic!("finalized archive manifest must construct");
+        };
+
+        assert_eq!(
+            manifest.archive_manifest_version(),
+            ARCHIVE_MANIFEST_VERSION_V2
+        );
+        assert_eq!(
+            manifest.final_lifecycle_state(),
+            Some(ARCHIVE_FINAL_LIFECYCLE_STATE_FINALIZED_V1)
+        );
+        assert!(manifest.is_finalized_archive_manifest());
+
+        let Ok(encoded) = manifest.to_canonical_cbor() else {
+            panic!("finalized archive manifest must encode");
+        };
+        let Ok(decoded) = ArchiveManifestV1::from_canonical_cbor(&encoded) else {
+            panic!("finalized archive manifest must decode");
+        };
+        assert_eq!(decoded, manifest);
+    }
+
+    #[test]
+    fn finalized_manifest_rejects_non_final_lifecycle_value() {
+        let mut writer = CanonicalCborWriter::new();
+        assert!(
+            writer
+                .write_array_len(ARCHIVE_MANIFEST_FIELD_COUNT_V2)
+                .is_ok()
+        );
+        writer.write_unsigned(u64::from(ARCHIVE_MANIFEST_VERSION_V2));
+        assert!(writer.write_byte_string(&[1_u8; 32]).is_ok());
+        assert!(writer.write_text_string("h").is_ok());
+        assert!(writer.write_text_string("VERIFIED").is_ok());
+        assert!(writer.write_array_len(1).is_ok());
+        assert!(
+            writer
+                .write_array_len(ARCHIVE_FILE_ENTRY_FIELD_COUNT_V1)
+                .is_ok()
+        );
+        assert!(writer.write_text_string("manifest.cbor").is_ok());
+        assert!(writer.write_byte_string(&[2_u8; 32]).is_ok());
+
+        assert!(matches!(
+            ArchiveManifestV1::from_canonical_cbor(&writer.into_bytes()),
+            Err(error) if error.code() == ValidationCode::InvalidArchiveManifest
         ));
     }
 

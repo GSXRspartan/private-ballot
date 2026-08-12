@@ -264,7 +264,7 @@ fn classify_anchor_mismatch(
 
 /// Derives the adapter-owned inspection fingerprint over the canonical CBOR
 /// encoding of the unsigned transaction.
-fn fingerprint_unsigned(
+pub fn fingerprint_unsigned_anchor_transaction(
     unsigned: &UnsignedTransaction,
 ) -> Result<OotleAnchorInspectionFingerprintV1, OotleAnchorAdapterError> {
     let canonical =
@@ -420,7 +420,7 @@ fn inspect_core(
     }
 
     // Exactly one instruction remains: the anchor log with the exact payload.
-    let fingerprint = fingerprint_unsigned(unsigned)?;
+    let fingerprint = fingerprint_unsigned_anchor_transaction(unsigned)?;
 
     Ok(OotleUnsignedAnchorTransactionEvidenceV1 {
         network: expectation.project_network().clone(),

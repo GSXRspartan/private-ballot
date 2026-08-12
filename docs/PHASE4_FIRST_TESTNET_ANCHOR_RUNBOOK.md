@@ -1,112 +1,148 @@
 # Phase 4 First Testnet Anchor Runbook
 
-This runbook provides exact PowerShell command templates for the first
-controlled Ootle testnet anchor run using the committed Phase 4 application.
+This is CONTROLLED TESTNET VALIDATION, not production certification.
 
-All paths must be absolute. All placeholders `<...>` must be replaced before
-execution. Never paste secrets into the command line.
+The first live Ootle anchor is organizer-side only. Voters never use walletd,
+never sign Ootle transactions, and never place voter wallet addresses, voting
+keys, credentials, nullifiers, ballot bodies, ballot choices, or per-voter
+substates on Ootle.
+
+All paths must be absolute. Never paste walletd secrets into command history.
 
 ## Prerequisites
 
-- **Repository:** `C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot`
-- **Branch:** `phase4/ootle-testnet-anchor-prototype`
-- **HEAD:** `506e232f5b19d354d307a68eee32ea204c8ea34e`
-- **Tag:** `phase4-pretestnet-ready-2026-08-06`
-- **Rust:** `stable-x86_64-pc-windows-msvc` (1.97.1)
+- Repository: `C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot`
+- Branch: `phase5/gui-core-foundation`
+- Baseline tag: `single-pc-smoke-pass-2026-08-11`
+- Rust: `stable-x86_64-pc-windows-msvc`
+- Dedicated organizer-only walletd profile: required
+- Accepted-ballot floor: explicit operator value, greater than zero
+- Final archive: independently verified with `verified=true` and `finalized=true`
 
-## 1. Verify repository state
+## Lifecycle Order
+
+1. Create/open/vote.
+2. Close.
+3. Compute tally.
+4. Mark verified.
+5. Finalize.
+6. Write FINAL archive.
+7. Independently verify archive: `verified=true`, `finalized=true`.
+8. Generate live anchor config from the verified finalized archive.
+9. Inspect/dry prepare.
+10. Approve.
+11. Submit.
+12. Verify evidence.
+13. Verify aggregate archive as `ANCHORED`.
+
+## Build
 
 ```powershell
 git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot rev-parse --abbrev-ref HEAD
-git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot rev-parse HEAD
-git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot describe --tags --exact-match 506e232f5b19d354d307a68eee32ea204c8ea34e
 git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot status --porcelain
-```
-
-Expected: `phase4/ootle-testnet-anchor-prototype`, `506e232...`, `phase4-pretestnet-ready-2026-08-06`, clean tree.
-
-## 2. Build release
-
-```powershell
 cargo +stable-x86_64-pc-windows-msvc build --release --locked --offline --package tari-cc-private-ballot-ootle-anchor-app
 ```
 
-## 3. Locate and hash the executable
+Do not add `--features offline-test-raw-hashes` to the release build.
 
 ```powershell
 $exe = "C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot\target\release\tari-cc-private-ballot-anchor.exe"
 Get-FileHash -LiteralPath $exe -Algorithm SHA256
-Get-Item -LiteralPath $exe | Select-Object Length, FullName
 ```
 
-## 4. Write the canonical config
+## Verify Final Archive
 
-Replace every `<...>` placeholder with the operator's actual values.
+Use the Rust archive verifier before generating any live config. The verifier
+must derive the manifest hash, archive hash, finality, accepted count, transport
+accepted count, and reduced-anonymity state from archive bytes.
 
-```powershell
-& $exe --write-config `
-  --output <CONFIG_PATH> `
-  --network <TESTNET_NETWORK> `
-  --walletd-endpoint <WALLETD_ENDPOINT> `
-  --indexer-endpoint <INDEXER_ENDPOINT> `
-  --account-reference <FEE_ACCOUNT_REFERENCE> `
-  --fee-component <FEE_COMPONENT_ADDRESS> `
-  --seal-signer-kind <account|transaction|imported> `
-  --seal-signer-id <SEAL_SIGNER_ID> `
-  --max-fee <MAX_FEE> `
-  --manifest-hash <MANIFEST_HASH_64HEX> `
-  --archive-hash <ARCHIVE_HASH_64HEX> `
-  --snapshot-path <SNAPSHOT_PATH> `
-  --evidence-path <EVIDENCE_PATH> `
-  --backoff-base-secs <BACKOFF_BASE_SECS> `
-  --backoff-cap-secs <BACKOFF_CAP_SECS> `
-  --receipt-query-attempts <RECEIPT_QUERY_ATTEMPTS>
-```
+Required result:
 
-| Placeholder | Source | Format |
-|-------------|--------|--------|
-| `<CONFIG_PATH>` | Operator-chosen output path | Absolute, e.g. `C:\anchor\config.cbor` |
-| `<TESTNET_NETWORK>` | Selected testnet | `esmeralda`, `igor`, or `localnet` |
-| `<WALLETD_ENDPOINT>` | walletd JSON-RPC URL | `http(s)://host:port` |
-| `<INDEXER_ENDPOINT>` | indexer REST URL | `http(s)://host:port` |
-| `<FEE_ACCOUNT_REFERENCE>` | Project account label | Non-empty, no whitespace |
-| `<FEE_COMPONENT_ADDRESS>` | walletd-printed component address | `component_<hex>` or bare hex |
-| `<SEAL_SIGNER_ID>` | walletd key derivation index or imported key id | Unsigned integer (u64) |
-| `<MAX_FEE>` | Max fee ceiling | Integer > 0 |
-| `<MANIFEST_HASH_64HEX>` | Election manifest hash | 64 lowercase hex chars |
-| `<ARCHIVE_HASH_64HEX>` | Completed archive hash | 64 lowercase hex chars |
-| `<SNAPSHOT_PATH>` | Operator-chosen snapshot path | Absolute |
-| `<EVIDENCE_PATH>` | Operator-chosen evidence path | Absolute |
-| `<BACKOFF_BASE_SECS>` | Poll backoff base | Integer > 0 |
-| `<BACKOFF_CAP_SECS>` | Poll backoff cap | Integer >= base |
-| `<RECEIPT_QUERY_ATTEMPTS>` | Max poll attempts | Integer > 0 |
+- `verified=true`
+- `finalized=true`
+- transport binding verified
+- `accepted_count >= <REQUIRED_ACCEPTED_BALLOT_FLOOR>`
+- transport accepted count equals replay accepted count
+- if `reduced_anonymity=true`, explicit operator acknowledgement is required
 
-Expected output: `machine_code=ANCHOR_APP_CONFIG_WRITTEN` + config details + `config_file_blake3_256=<64-lowercase-hex>` + `config_file_bytes=<int>`.
+Do not continue from a legacy/pre-finality archive, even if ordinary offline
+verification succeeds.
 
-The `config_file_blake3_256` field is a **BLAKE3-256** whole-file hash emitted by the application using the project's existing BLAKE3 provider. The separate `Get-FileHash -Algorithm SHA256` in step 5 produces a **different** SHA-256 value for external preservation. Both values are intentional; record both.
+## Generate Live Config
 
-## 5. Verify config file hash
+Default builds must not use raw `--write-config`; raw hash config creation is
+test-only behind `offline-test-raw-hashes` and is not live-approved.
 
-```powershell
-Get-FileHash -LiteralPath <CONFIG_PATH> -Algorithm SHA256
-Get-Item -LiteralPath <CONFIG_PATH> | Select-Object Length, FullName
-```
+Generate config through the Rust/Tauri command:
+`write_live_anchor_config_from_verified_archive`.
 
-Record the SHA-256 hash and byte count.
+Frontend/operator input may provide only public/operator values:
 
-## 6. Dry-run (no network, no transport)
+- archive directory
+- output config path
+- walletd/indexer/network locators
+- fee account and exact fee component
+- declared public seal key
+- dedicated organizer wallet attestation
+- max fee and polling/backoff values
+- explicit accepted-ballot floor
+- reduced-anonymity acknowledgement
+- snapshot and evidence paths
+
+Frontend/operator input must not provide authoritative manifest hash, archive
+hash, finality, or accepted count. Rust derives those from the verified final
+archive.
+
+Record the producer result:
+
+- input provenance: `ArchiveVerified`
+- derived manifest hash
+- derived archive hash
+- anchor digest
+- accepted ballot count
+- required accepted-ballot floor
+- reduced anonymity and acknowledgement
+- fee component
+- declared seal public key
+- seal assurance: `ATTESTED`
+- dedicated organizer wallet attestation
+- config file BLAKE3-256 and byte count
+
+## Dry Prepare And Review
 
 ```powershell
 & $exe --dry-run --config <CONFIG_PATH>
 ```
 
-Record: `network`, `manifest_hash`, `archive_hash`, `anchor_digest`, `snapshot_path`, `evidence_path`.
+Record and compare:
 
-## 7. No-decision Prepared run (stops at Prepared, contacts walletd)
+- input provenance is `ArchiveVerified`
+- manifest hash and archive hash equal the verifier output
+- anchor digest recomputes locally
+- snapshot path and evidence path are absolute
+- fee component is the reviewed component
+- max fee is the reviewed ceiling
 
-Set walletd auth without printing or persisting the credential. The following
-sequence is compatible with Windows PowerShell 5.1 (it does not use the
-PowerShell 7-only `-AsPlainText` parameter):
+Before approval, inspect the prepared walletd request/allowlist:
+
+- exactly one canonical `pay_fee`
+- exactly one anchor `EmitLog`
+- no other instructions
+- no inputs
+- no stealth input
+- no confidential input
+- no resource transfer
+- no bucket
+- no blob
+- no workspace operation
+- no project component call
+- no extra signer
+- no voter data
+
+The fee component is VERIFIABLE from the frozen unsigned transaction. The
+declared seal public key is ATTESTED only, not verified.
+
+## Walletd Auth
 
 ```powershell
 $secure = Read-Host "Walletd bearer token" -AsSecureString
@@ -119,120 +155,123 @@ finally {
 }
 ```
 
-The managed environment-variable string remains in process memory until
-removed. A proper secret store is preferable where available. Never echo the
-token or place it in command history.
-
-Run with no approval or rejection flag:
+Remove the variable after each run:
 
 ```powershell
-& $exe --config <CONFIG_PATH> --auth-env WALLETD_JWT
+Remove-Item Env:WALLETD_JWT
 ```
 
-Expected: `machine_code=ANCHOR_APP_PREPARED`, `phase=PREPARED`, `transaction_id=none`, `no_evidence_non_terminal`. **Exit non-zero.**
+## No-Decision Prepare
 
-This expected non-zero exit is **not a crash**. It is the normal behaviour for
-a no-decision Prepared run because `NotYetFinalized` is intentionally
-non-success. Proceed to step 8 **only** when the output is exactly:
-
+```powershell
+& $exe --config <CONFIG_PATH> --archive <FINALIZED_ARCHIVE_DIR> --auth-env WALLETD_JWT
 ```
+
+Expected non-success checkpoint:
+
+```text
 machine_code=ANCHOR_APP_PREPARED
 phase=PREPARED
 transaction_id=none
 no_evidence_non_terminal
 ```
 
-After the run, remove the auth environment variable:
+This is not a crash. It is the mandatory review pause.
+
+## Approve And Submit
 
 ```powershell
-Remove-Item Env:WALLETD_JWT
+& $exe --config <CONFIG_PATH> --archive <FINALIZED_ARCHIVE_DIR> --auth-env WALLETD_JWT --approve
 ```
 
-## 8. Inspect the prepared snapshot
+Success requires:
+
+- `machine_code=ANCHOR_APP_FINALIZED_ACCEPT`
+- `phase=FINALIZED_ACCEPT`
+- real `transaction_id=...`
+- evidence block present
+- exit code 0
+
+## Terminal Index Checks
+
+The live app stores a manifest-scoped terminal index under the user's durable
+application state, independent of the executable, snapshot, and evidence paths.
+On Windows the default root is:
 
 ```powershell
-& $exe --inspect-snapshot <SNAPSHOT_PATH>
+$terminalIndexRoot = Join-Path $env:LOCALAPPDATA "Tari Private Ballot\anchor-state\terminal-index-v1"
 ```
 
-Record all walletd snapshot fields:
-- `project_request_id`, `walletd_request_id`
-- `network`, `account_reference`, `anchor_digest`, `anchor_payload`
-- `max_fee`, `transaction_fingerprint`
-- `decision` (must be `PREPARED`), `submission_state` (must be `NOT_SUBMITTED`)
-- `transaction_id` (none at this stage), `effective_status`
-- `retry_count`, `sequence`, `diagnostic`
+On macOS the equivalent root is
+`$HOME/Library/Application Support/Tari Private Ballot/anchor-state/terminal-index-v1`.
+On Linux/Unix it is
+`$XDG_STATE_HOME/tari-private-ballot/anchor-state/terminal-index-v1`, or
+`$HOME/.local/state/tari-private-ballot/anchor-state/terminal-index-v1` when
+`XDG_STATE_HOME` is unset.
 
-## 9. Mandatory operator review checkpoint
+For the same election and same accepted anchor digest, rerunning with changed
+evidence, snapshot, or config-output paths must return idempotent success and
+must not prepare, approve, or submit a new transaction.
 
-Before approving, confirm ALL immutable values match expectations:
+For the same election/manifest and a different archive hash or anchor digest,
+the app must fail closed before preparation with a terminal-index conflict.
 
-- `<TESTNET_NETWORK>` is `esmeralda`, `igor`, or `localnet`
-- `manifest_hash` matches the committed election manifest
-- `archive_hash` matches the completed archive
-- `anchor_digest` matches the dry-run output
-- `anchor_payload` derived from the digest
-- `fee account` = `<FEE_ACCOUNT_REFERENCE>`
-- `fee component` = `<FEE_COMPONENT_ADDRESS>`
-- `max_fee` = `<MAX_FEE>`
-- unsigned transaction `fingerprint`
-- `walletd_request_id`
+If the terminal index is corrupted or its referenced evidence no longer matches,
+the app must fail closed before preparation.
 
-**Do not approve if any value is unexpected.** Use `--reject` instead, or stop.
+Interrupted nonterminal snapshots for the same intended anchor remain
+recoverable when no terminal index exists yet.
 
-## 10. Approve (exactly one explicit --approve)
+This terminal index is a supported-app durability guard within this
+application's durable anchor state for the same user/host profile. It is not a
+global cryptographic impossibility proof against a separate machine, separate
+user profile, modified software, or independent wallet implementation.
 
-```powershell
-& $exe --config <CONFIG_PATH> --auth-env WALLETD_JWT --approve
-```
-
-Uses the same config and same `<SNAPSHOT_PATH>`. Success only if:
-`machine_code=ANCHOR_APP_FINALIZED_ACCEPT`, `phase=FINALIZED_ACCEPT`,
-real `transaction_id=`, evidence block present, exit 0.
-
-## 11. Resume after interruption
-
-All recovery uses the same `<CONFIG_PATH>` and same `<SNAPSHOT_PATH>`. Never
-delete an Unknown/Submitted snapshot. Never run two instances concurrently.
-
-```powershell
-& $exe --config <CONFIG_PATH> --auth-env WALLETD_JWT --approve
-```
-
-The driver restores the snapshot and continues from the current phase.
-
-## 12. Verify evidence
+## Verify Evidence And Archive Anchoring
 
 ```powershell
 & $exe --verify-evidence <EVIDENCE_PATH>
 ```
 
-Expected: `machine_code=ANCHOR_APP_EVIDENCE_VERIFIED` + all decoded fields +
-`human_review_summary=...` (contains the non-binding pilot disclaimer).
+Then verify the aggregate archive as `ANCHORED` only when the finalized archive
+and Phase 4 evidence independently prove the exact archive hash and anchor
+digest. Organizer aggregate verification may report `INCLUDED` or `ANCHORED`;
+voter transport receipts are limited to `RECEIVED`, `ACCEPTED`, and `REJECTED`.
 
-## Stop conditions
+## Capture Checklist
 
-STOP immediately if:
-- Branch/HEAD/tag/tree mismatch.
-- Build fails.
-- Dry-run returns unexpected locators.
-- Prepared identifiers do not match expectations.
-- Snapshot phase is `Unknown`/`Submitted` and you are tempted to delete or resubmit.
-- Poll exhaustion recurs after one resume.
-- Any terminal non-success code.
-- The no-decision Prepared run produces output **other** than exactly `ANCHOR_APP_PREPARED` / `phase=PREPARED` / `transaction_id=none` / `no_evidence_non_terminal`.
-- The final live run produces any code other than `ANCHOR_APP_FINALIZED_ACCEPT` with exit code 0.
+- multiple accepted ballots
+- explicit accepted-ballot floor
+- dedicated organizer-only walletd profile
+- fee component displayed and verified
+- seal public key displayed as `ATTESTED`
+- dedicated wallet attestation
+- transaction allowlist inspection
+- full receipt/event/substate capture
+- validator/indexer/explorer capture
+- local transaction fingerprint recomputation
+- anchor digest recomputation
+- evidence verification
+- public-data privacy inspection
+- idempotent retry check
+- conflicting-anchor rejection check
 
-**Exception:** the no-decision Prepared run (step 7) is expected to exit
-non-zero. This is not a crash and does not require stopping, **provided** the
-output matches the exact Prepared checkpoint above. All other unexpected
-non-zero exits require stopping.
+## Stop Conditions
 
-## Files to preserve
+Stop immediately on any branch/build/config mismatch, archive verification
+failure, `finalized=false`, missing transport aggregate proof, accepted count
+below floor, unacknowledged reduced anonymity, fee-component mismatch, missing
+dedicated-wallet attestation, unexpected walletd request, terminal-index
+conflict/corruption, or any terminal code other than
+`ANCHOR_APP_FINALIZED_ACCEPT`.
 
-Before any retry or escalation, copy and hash:
-- `<CONFIG_PATH>` — SHA-256
-- `target\release\tari-cc-private-ballot-anchor.exe` — SHA-256
-- `<SNAPSHOT_PATH>` — SHA-256
-- `<EVIDENCE_PATH>` — SHA-256
-- All stdout transcripts
-- The `transaction_id` from the approve/finalize run
+## Preserve
+
+- final archive directory and verifier output
+- generated config and config hashes
+- release executable SHA-256
+- snapshot and evidence files
+- terminal-index file
+- stdout transcripts
+- walletd request id and transaction id
+- validator/indexer/explorer captures

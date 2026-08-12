@@ -40,6 +40,7 @@ pub const MANIFEST_BYTE: u8 = 0x11;
 pub const ARCHIVE_BYTE: u8 = 0x22;
 pub const ANCHOR_BYTE: u8 = 0x33;
 pub const TX_BYTE: u8 = 0x44;
+pub const DECLARED_SEAL_PUBLIC_KEY: &str = "seal-public-key-attested";
 
 #[must_use]
 pub fn network(value: &str) -> OotleNetworkIdV1 {
@@ -196,7 +197,7 @@ pub fn evidence_path() -> PathBuf {
 
 #[must_use]
 pub fn base_config() -> AnchorAppConfig {
-    AnchorAppConfig::new(
+    AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -428,6 +429,52 @@ pub fn unique_id() -> u64 {
     UNIQUE_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
+#[must_use]
+pub fn live_approval_facts() -> tari_cc_private_ballot_ootle_anchor_app::AnchorLiveApprovalFactsV1 {
+    tari_cc_private_ballot_ootle_anchor_app::AnchorLiveApprovalFactsV1::new(
+        2,
+        2,
+        false,
+        false,
+        DECLARED_SEAL_PUBLIC_KEY.to_owned(),
+        true,
+        true,
+    )
+    .unwrap_or_else(|_| panic!("live approval facts must construct"))
+}
+
+#[must_use]
+pub fn reduced_live_approval_facts()
+-> tari_cc_private_ballot_ootle_anchor_app::AnchorLiveApprovalFactsV1 {
+    tari_cc_private_ballot_ootle_anchor_app::AnchorLiveApprovalFactsV1::new(
+        2,
+        2,
+        true,
+        true,
+        DECLARED_SEAL_PUBLIC_KEY.to_owned(),
+        true,
+        true,
+    )
+    .unwrap_or_else(|_| panic!("reduced live approval facts must construct"))
+}
+
+#[must_use]
+pub fn live_config() -> AnchorAppConfig {
+    AnchorAppConfig::new_archive_verified_with_live_approval_facts(
+        network_adapter(),
+        canonical_account(),
+        canonical_manifest_hash(),
+        canonical_archive_hash(),
+        canonical_network(),
+        snapshot_path(),
+        evidence_path(),
+        1,
+        1,
+        None,
+        live_approval_facts(),
+    )
+}
+
 use tari_cc_private_ballot_anchor_transport::AnchorRequestId;
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::PollingPolicy;
@@ -529,6 +576,26 @@ pub fn empty_snapshot() -> AnchorLifecycleRecoverySnapshot {
         None,
         PollingPolicy::new(8),
         UnifiedAnchorLifecyclePhase::NotPrepared,
+        None,
+    )
+}
+
+#[must_use]
+pub fn approved_snapshot() -> AnchorLifecycleRecoverySnapshot {
+    let walletd = walletd_snapshot(
+        WalletdRequestDecisionV1::Approved,
+        WalletdSubmissionStateV1::NotSubmitted,
+        None,
+        Some(WalletdEffectiveStatusV1::Approved),
+        0,
+        1,
+    );
+    AnchorLifecycleRecoverySnapshot::new(
+        vec![walletd],
+        Vec::new(),
+        None,
+        PollingPolicy::new(8),
+        UnifiedAnchorLifecyclePhase::Approved,
         None,
     )
 }

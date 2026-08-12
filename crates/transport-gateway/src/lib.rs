@@ -9,9 +9,7 @@ use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
-use tari_cc_private_ballot_archive::{
-    TransportArchiveBatchV1, TransportArchiveBindingV1,
-};
+use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBindingV1};
 
 use hpke::{
     Deserializable, Kem as KemTrait, OpModeR, Serializable, aead::ChaCha20Poly1305,
@@ -105,7 +103,9 @@ impl PrivateSubmissionCoordinatorV1 {
         persistence_path: Option<std::path::PathBuf>,
     ) -> Result<Self, TransportError> {
         let gateway = match persistence_path.as_deref() {
-            Some(path) if path.exists() => TransportGatewaySimulatorV1::load_durable_state(path, &descriptor)?,
+            Some(path) if path.exists() => {
+                TransportGatewaySimulatorV1::load_durable_state(path, &descriptor)?
+            }
             _ => TransportGatewaySimulatorV1::default(),
         };
         Ok(Self {
@@ -141,8 +141,14 @@ impl PrivateSubmissionCoordinatorV1 {
             return Err(TransportError::Unavailable);
         }
         let retry_capability = self.retry_capability_for(ballot_bytes);
-        let descriptor = self.descriptor.as_ref().ok_or(TransportError::UntrustedRoot)?;
-        let receiver_key = self.receiver_key.as_ref().ok_or(TransportError::UntrustedRoot)?;
+        let descriptor = self
+            .descriptor
+            .as_ref()
+            .ok_or(TransportError::UntrustedRoot)?;
+        let receiver_key = self
+            .receiver_key
+            .as_ref()
+            .ok_or(TransportError::UntrustedRoot)?;
         self.roots.verify_and_accept_descriptor(
             descriptor,
             session.artifacts().manifest_hash(),
@@ -152,18 +158,32 @@ impl PrivateSubmissionCoordinatorV1 {
             return Err(TransportError::WrongElection);
         }
         match (route, descriptor.route()) {
-            (VoterPrivateRouteV1::ManagedTor, tari_cc_private_ballot_gui_core::TransportRoutePolicyV1::ManagedTorOrOffline)
-            | (VoterPrivateRouteV1::SplitTrustRelay, tari_cc_private_ballot_gui_core::TransportRoutePolicyV1::RelayOrOffline) => {}
+            (
+                VoterPrivateRouteV1::ManagedTor,
+                tari_cc_private_ballot_gui_core::TransportRoutePolicyV1::ManagedTorOrOffline,
+            )
+            | (
+                VoterPrivateRouteV1::SplitTrustRelay,
+                tari_cc_private_ballot_gui_core::TransportRoutePolicyV1::RelayOrOffline,
+            ) => {}
             _ => return Err(TransportError::UnsupportedRoute),
         }
         let envelope = PrivateBallotEnvelopeV1::seal(descriptor, ballot_bytes)?;
         let encoded = envelope.to_canonical_cbor()?;
         match route {
             VoterPrivateRouteV1::ManagedTor => carrier.send_managed_tor(descriptor, &encoded)?,
-            VoterPrivateRouteV1::SplitTrustRelay => carrier.send_split_trust_relay(descriptor, &encoded)?,
+            VoterPrivateRouteV1::SplitTrustRelay => {
+                carrier.send_split_trust_relay(descriptor, &encoded)?
+            }
             VoterPrivateRouteV1::OfflineExport => return Err(TransportError::Unavailable),
         }
-        let receipt = self.gateway.deliver(&encoded, descriptor, receiver_key, retry_capability, session)?;
+        let receipt = self.gateway.deliver(
+            &encoded,
+            descriptor,
+            receiver_key,
+            retry_capability,
+            session,
+        )?;
         self.persist_if_configured(descriptor)?;
         Ok(PrivateSubmissionResultV1 {
             route,
@@ -175,7 +195,11 @@ impl PrivateSubmissionCoordinatorV1 {
     }
 
     fn retry_capability_for(&mut self, ballot_bytes: &[u8]) -> [u8; 32] {
-        let digest = hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, ballot_bytes);
+        let digest = hash_domain_separated(
+            &Blake3HashProviderV1,
+            HashDomain::BallotPackageV1,
+            ballot_bytes,
+        );
         if let Some((prior_digest, capability)) = self.retry_memory
             && prior_digest == digest
         {
@@ -186,7 +210,10 @@ impl PrivateSubmissionCoordinatorV1 {
         capability
     }
 
-    fn persist_if_configured(&self, descriptor: &TransportDescriptorV1) -> Result<(), TransportError> {
+    fn persist_if_configured(
+        &self,
+        descriptor: &TransportDescriptorV1,
+    ) -> Result<(), TransportError> {
         if let Some(path) = &self.persistence_path {
             self.gateway.save_durable_state(descriptor, path)?;
         }
@@ -576,7 +603,9 @@ impl TransportGatewaySimulatorV1 {
     ) -> Result<TransportGatewayDurableStateV1, TransportError> {
         let descriptor_fingerprint = descriptor.fingerprint()?;
         let mut writer = CanonicalCborWriter::new();
-        writer.write_array_len(14).map_err(|_| TransportError::InvalidDescriptor)?;
+        writer
+            .write_array_len(14)
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         writer.write_unsigned(DURABLE_STATE_VERSION);
         writer
             .write_text_string(DURABLE_STATE_TYPE_ID)
@@ -600,7 +629,9 @@ impl TransportGatewaySimulatorV1 {
             .write_array_len(self.retries.len())
             .map_err(|_| TransportError::InvalidDescriptor)?;
         for (commitment, record) in &self.retries {
-            writer.write_array_len(3).map_err(|_| TransportError::InvalidDescriptor)?;
+            writer
+                .write_array_len(3)
+                .map_err(|_| TransportError::InvalidDescriptor)?;
             writer
                 .write_byte_string(commitment)
                 .map_err(|_| TransportError::InvalidDescriptor)?;
@@ -624,7 +655,9 @@ impl TransportGatewaySimulatorV1 {
             .write_array_len(self.sealed_batches.len())
             .map_err(|_| TransportError::InvalidDescriptor)?;
         for batch in &self.sealed_batches {
-            writer.write_array_len(5).map_err(|_| TransportError::InvalidDescriptor)?;
+            writer
+                .write_array_len(5)
+                .map_err(|_| TransportError::InvalidDescriptor)?;
             writer.write_unsigned(batch.batch_id);
             writer
                 .write_byte_string(&batch.root)
@@ -640,7 +673,9 @@ impl TransportGatewaySimulatorV1 {
                     .map_err(|_| TransportError::InvalidDescriptor)?;
             }
         }
-        Ok(TransportGatewayDurableStateV1 { bytes: writer.into_bytes() })
+        Ok(TransportGatewayDurableStateV1 {
+            bytes: writer.into_bytes(),
+        })
     }
 
     /// Crash-safe replacement write: build and validate canonical state, flush
@@ -681,18 +716,34 @@ impl TransportGatewaySimulatorV1 {
         Ok(state)
     }
 
-    fn decode_durable_state(bytes: &[u8], descriptor: &TransportDescriptorV1) -> Result<Self, TransportError> {
+    fn decode_durable_state(
+        bytes: &[u8],
+        descriptor: &TransportDescriptorV1,
+    ) -> Result<Self, TransportError> {
         let mut reader = CanonicalCborReader::new(bytes);
-        if reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)? != 14
-            || reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)? != DURABLE_STATE_VERSION
-            || reader.read_text_string().map_err(|_| TransportError::InvalidDescriptor)? != DURABLE_STATE_TYPE_ID
+        if reader
+            .read_array_len()
+            .map_err(|_| TransportError::InvalidDescriptor)?
+            != 14
+            || reader
+                .read_unsigned()
+                .map_err(|_| TransportError::InvalidDescriptor)?
+                != DURABLE_STATE_VERSION
+            || reader
+                .read_text_string()
+                .map_err(|_| TransportError::InvalidDescriptor)?
+                != DURABLE_STATE_TYPE_ID
         {
             return Err(TransportError::InvalidDescriptor);
         }
-        let election_id = reader.read_byte_string().map_err(|_| TransportError::InvalidDescriptor)?;
+        let election_id = reader
+            .read_byte_string()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         let manifest_hash = ManifestHash::new(read_fixed(&mut reader)?);
         let fingerprint = read_fixed(&mut reader)?;
-        let generation = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
+        let generation = reader
+            .read_unsigned()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         if election_id != descriptor.election_id()
             || manifest_hash != descriptor.manifest_hash()
             || fingerprint != descriptor.fingerprint()?
@@ -700,41 +751,67 @@ impl TransportGatewaySimulatorV1 {
         {
             return Err(TransportError::WrongDescriptor);
         }
-        let received_count = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
-        let verified_count = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
-        let accepted_unique_count = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
-        let next_batch_id = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
+        let received_count = reader
+            .read_unsigned()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
+        let verified_count = reader
+            .read_unsigned()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
+        let accepted_unique_count = reader
+            .read_unsigned()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
+        let next_batch_id = reader
+            .read_unsigned()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         let retry_retention = RetryRetentionV1::from_code(
-            reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?,
+            reader
+                .read_unsigned()
+                .map_err(|_| TransportError::InvalidDescriptor)?,
         )?;
-        let retry_count = reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)?;
+        let retry_count = reader
+            .read_array_len()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         if retry_count > MAX_DURABLE_RETRIES {
             return Err(TransportError::InvalidDescriptor);
         }
         let mut retries = BTreeMap::new();
         for _ in 0..retry_count {
-            if reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)? != 3 {
+            if reader
+                .read_array_len()
+                .map_err(|_| TransportError::InvalidDescriptor)?
+                != 3
+            {
                 return Err(TransportError::InvalidDescriptor);
             }
             let commitment = read_fixed(&mut reader)?;
             let package_digest = read_fixed(&mut reader)?;
             let state = receipt_state_from_code(
-                reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?,
+                reader
+                    .read_unsigned()
+                    .map_err(|_| TransportError::InvalidDescriptor)?,
             )?;
-            if retries.insert(
-                commitment,
-                RetryRecordV1 {
-                    package_digest,
-                    receipt: VoterTransportReceiptV1 { state, retry_status: RetryStatusV1::NewDelivery },
-                },
-            ).is_some() {
+            if retries
+                .insert(
+                    commitment,
+                    RetryRecordV1 {
+                        package_digest,
+                        receipt: VoterTransportReceiptV1 {
+                            state,
+                            retry_status: RetryStatusV1::NewDelivery,
+                        },
+                    },
+                )
+                .is_some()
+            {
                 return Err(TransportError::InvalidDescriptor);
             }
         }
         if retry_retention == RetryRetentionV1::Expired && !retries.is_empty() {
             return Err(TransportError::InvalidDescriptor);
         }
-        let pending_count = reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)?;
+        let pending_count = reader
+            .read_array_len()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         if pending_count > MAX_DURABLE_PENDING {
             return Err(TransportError::InvalidDescriptor);
         }
@@ -746,20 +823,34 @@ impl TransportGatewaySimulatorV1 {
         if pending_digests.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(TransportError::InvalidDescriptor);
         }
-        let batch_count = reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)?;
+        let batch_count = reader
+            .read_array_len()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
         if batch_count > MAX_DURABLE_BATCHES {
             return Err(TransportError::InvalidDescriptor);
         }
         let mut sealed_batches = Vec::with_capacity(batch_count);
         for _ in 0..batch_count {
-            if reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)? != 5 {
+            if reader
+                .read_array_len()
+                .map_err(|_| TransportError::InvalidDescriptor)?
+                != 5
+            {
                 return Err(TransportError::InvalidDescriptor);
             }
-            let batch_id = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
+            let batch_id = reader
+                .read_unsigned()
+                .map_err(|_| TransportError::InvalidDescriptor)?;
             let root = read_fixed(&mut reader)?;
-            let batch_accepted_unique_count = reader.read_unsigned().map_err(|_| TransportError::InvalidDescriptor)?;
-            let reduced_anonymity = reader.read_bool().map_err(|_| TransportError::InvalidDescriptor)?;
-            let digest_count = reader.read_array_len().map_err(|_| TransportError::InvalidDescriptor)?;
+            let batch_accepted_unique_count = reader
+                .read_unsigned()
+                .map_err(|_| TransportError::InvalidDescriptor)?;
+            let reduced_anonymity = reader
+                .read_bool()
+                .map_err(|_| TransportError::InvalidDescriptor)?;
+            let digest_count = reader
+                .read_array_len()
+                .map_err(|_| TransportError::InvalidDescriptor)?;
             if digest_count == 0 || digest_count > MAX_DURABLE_PENDING {
                 return Err(TransportError::InvalidDescriptor);
             }
@@ -774,7 +865,13 @@ impl TransportGatewaySimulatorV1 {
             }
             let leaves: Vec<[u8; 32]> = digests
                 .iter()
-                .map(|digest| hash_domain_separated(&Blake3HashProviderV1, HashDomain::TransportBatchLeafV1, digest))
+                .map(|digest| {
+                    hash_domain_separated(
+                        &Blake3HashProviderV1,
+                        HashDomain::TransportBatchLeafV1,
+                        digest,
+                    )
+                })
                 .collect();
             if merkle_root(&leaves) != Some(root) {
                 return Err(TransportError::InvalidDescriptor);
@@ -787,15 +884,27 @@ impl TransportGatewaySimulatorV1 {
                 digests,
             });
         }
-        reader.finish().map_err(|_| TransportError::InvalidDescriptor)?;
-        if sealed_batches.windows(2).any(|pair| pair[0].batch_id >= pair[1].batch_id)
-            || sealed_batches.last().is_some_and(|batch| next_batch_id <= batch.batch_id)
+        reader
+            .finish()
+            .map_err(|_| TransportError::InvalidDescriptor)?;
+        if sealed_batches
+            .windows(2)
+            .any(|pair| pair[0].batch_id >= pair[1].batch_id)
+            || sealed_batches
+                .last()
+                .is_some_and(|batch| next_batch_id <= batch.batch_id)
         {
             return Err(TransportError::InvalidDescriptor);
         }
         let known_accepted = pending_digests.len() as u64
-            + sealed_batches.iter().map(|batch| batch.accepted_unique_count).sum::<u64>();
-        if accepted_unique_count != known_accepted || verified_count < accepted_unique_count || received_count < verified_count {
+            + sealed_batches
+                .iter()
+                .map(|batch| batch.accepted_unique_count)
+                .sum::<u64>();
+        if accepted_unique_count != known_accepted
+            || verified_count < accepted_unique_count
+            || received_count < verified_count
+        {
             return Err(TransportError::InvalidDescriptor);
         }
         Ok(Self {
@@ -930,18 +1039,18 @@ impl TransportGatewaySimulatorV1 {
         session: &mut GuiElectionSessionV1,
     ) -> Result<VoterTransportReceiptV1, TransportError> {
         let admission_generation = self.admission.admit(session)?;
-        let result =
-            self.deliver_admitted(
-                encoded,
-                descriptor,
-                receiver_key,
-                retry_capability,
-                session,
-                admission_generation,
-            );
+        let result = self.deliver_admitted(
+            encoded,
+            descriptor,
+            receiver_key,
+            retry_capability,
+            session,
+            admission_generation,
+        );
         // Completion is intentionally serialized even when delivery failed;
         // close can then advance without a post-close intake bypass.
-        self.admission.finish_admitted(session, admission_generation)?;
+        self.admission
+            .finish_admitted(session, admission_generation)?;
         result
     }
 
@@ -1050,8 +1159,8 @@ fn receipt_state_code(state: VoterReceiptStateV1) -> u64 {
         VoterReceiptStateV1::Accepted => 1,
         VoterReceiptStateV1::Rejected => 2,
         // A persisted retry record is always a terminal intake result. The
-        // remaining receipt states are intentionally not durable retry data.
-        VoterReceiptStateV1::Received | VoterReceiptStateV1::Included | VoterReceiptStateV1::Anchored => 0,
+        // remaining receipt state is intentionally not durable retry data.
+        VoterReceiptStateV1::Received => 0,
     }
 }
 
@@ -1246,16 +1355,35 @@ mod tests {
             .expect("durable state writes");
         let restored = TransportGatewaySimulatorV1::load_durable_state(&path, &descriptor)
             .expect("durable state reloads");
-        assert_eq!(restored.final_batch_set_commitment(), gateway.final_batch_set_commitment());
-        assert!(restored.sealed_batches[0]
-            .inclusion_proof([8; 32])
-            .expect("proof survives reload")
-            .verify());
-        assert_eq!(restored.retries[&[1; 32]].receipt.state, VoterReceiptStateV1::Accepted);
-        assert_eq!(restored.retries[&[3; 32]].receipt.state, VoterReceiptStateV1::Rejected);
+        assert_eq!(
+            restored.final_batch_set_commitment(),
+            gateway.final_batch_set_commitment()
+        );
+        assert!(
+            restored.sealed_batches[0]
+                .inclusion_proof([8; 32])
+                .expect("proof survives reload")
+                .verify()
+        );
+        assert_eq!(
+            restored.retries[&[1; 32]].receipt.state,
+            VoterReceiptStateV1::Accepted
+        );
+        assert_eq!(
+            restored.retries[&[3; 32]].receipt.state,
+            VoterReceiptStateV1::Rejected
+        );
         let bytes = std::fs::read(&path).expect("state readable");
-        assert!(!bytes.windows(b"X-Forwarded-For".len()).any(|v| v == b"X-Forwarded-For"));
-        assert!(!bytes.windows(b"retry-capability".len()).any(|v| v == b"retry-capability"));
+        assert!(
+            !bytes
+                .windows(b"X-Forwarded-For".len())
+                .any(|v| v == b"X-Forwarded-For")
+        );
+        assert!(
+            !bytes
+                .windows(b"retry-capability".len())
+                .any(|v| v == b"retry-capability")
+        );
     }
 
     #[test]
@@ -1268,8 +1396,13 @@ mod tests {
         persisted_gateway()
             .save_durable_state(&descriptor, &path.with_extension("valid"))
             .expect("valid snapshot writes");
-        assert!(TransportGatewaySimulatorV1::load_durable_state(&path.with_extension("valid"), &descriptor)
-            .is_ok());
+        assert!(
+            TransportGatewaySimulatorV1::load_durable_state(
+                &path.with_extension("valid"),
+                &descriptor
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -1279,7 +1412,9 @@ mod tests {
         let mut gateway = persisted_gateway();
         gateway.begin_retry_verification_grace();
         gateway.expire_retry_retention();
-        gateway.save_durable_state(&descriptor, &path).expect("expired state writes");
+        gateway
+            .save_durable_state(&descriptor, &path)
+            .expect("expired state writes");
         let restored = TransportGatewaySimulatorV1::load_durable_state(&path, &descriptor)
             .expect("expired state reloads");
         assert_eq!(restored.retry_retention(), RetryRetentionV1::Expired);

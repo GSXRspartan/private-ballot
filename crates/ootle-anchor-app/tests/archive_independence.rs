@@ -11,7 +11,8 @@ mod common;
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleAnchorRecordV1};
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    AnchorAppDriver, DriverRunOutcome, OperatorDecision, write_evidence_atomic,
+    AnchorAppDriver, DriverRunOutcome, OperatorDecision, VerifiedRuntimeArchiveFactsV1,
+    write_evidence_atomic,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, ScriptedWalletdTransport, WalletdAnchorNetworkAdapter,
@@ -87,11 +88,13 @@ fn run_outcome(
     >,
     DriverRunOutcome,
 ) {
-    let config = base_config();
+    let config = live_config();
+    let runtime = VerifiedRuntimeArchiveFactsV1::matching_config_for_test(&config)
+        .expect("live config must provide runtime facts");
     let walletd_adapter = WalletdAnchorNetworkAdapter::new(walletd, canonical_network());
     let indexer_adapter = IndexerReceiptNetworkAdapter::new(indexer);
     let mut driver = match AnchorAppDriver::new(config, walletd_adapter, indexer_adapter) {
-        Ok(driver) => driver,
+        Ok(driver) => driver.with_runtime_archive_for_test(runtime),
         Err(error) => panic!("driver construction failed: {error}"),
     };
     let outcome = match driver.run(decision) {

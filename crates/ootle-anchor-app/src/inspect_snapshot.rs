@@ -15,7 +15,7 @@ use std::path::Path;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::AnchorLifecycleOrchestrator;
 
 use crate::report::MachineReportCode;
-use crate::snapshot_store::{read_snapshot, snapshot_digest, MAX_SNAPSHOT_FILE_BYTES};
+use crate::snapshot_store::{MAX_SNAPSHOT_FILE_BYTES, read_snapshot, snapshot_digest};
 
 const SNAPSHOT_VERIFIED: &str = "ANCHOR_APP_SNAPSHOT_VERIFIED";
 const SNAPSHOT_VERIFY_FAILED: &str = "ANCHOR_APP_SNAPSHOT_VERIFY_FAILED";

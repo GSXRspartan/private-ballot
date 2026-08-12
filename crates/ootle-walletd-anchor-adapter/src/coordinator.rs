@@ -434,10 +434,14 @@ impl WalletdAnchorCoordinator {
         };
 
         // The frozen request walletd returned must be byte-identical to the one we
-        // prepared: a mismatched binding is a security error, not a warning.
-        if let Some(observed) = status.observed_fingerprint()
-            && observed != view.binding.fingerprint()
-        {
+        // prepared: absence or mismatch is a security error, not a warning.
+        let Some(observed) = status.observed_fingerprint() else {
+            return self.record_and_return(
+                &project_request_id,
+                WalletdAnchorAdapterError::MissingObservedFingerprint,
+            );
+        };
+        if observed != view.binding.fingerprint() {
             return self.record_and_return(
                 &project_request_id,
                 WalletdAnchorAdapterError::FingerprintMismatch,

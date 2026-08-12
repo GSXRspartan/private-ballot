@@ -23,15 +23,20 @@ use std::borrow::Cow;
 use std::path::Path;
 
 use tari_cc_private_ballot_anchor::{
-    OotleAnchorRecordHashV1, OotleNetworkIdV1, OOTLE_ANCHOR_PURPOSE_ID_V1,
+    OOTLE_ANCHOR_PURPOSE_ID_V1, OotleAnchorRecordHashV1, OotleNetworkIdV1,
 };
 use tari_cc_private_ballot_anchor_transport::AnchorTransactionId;
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::UnifiedAnchorLifecyclePhase;
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::VerifiedIndexerAnchorV1;
 use tari_cc_private_ballot_protocol::{
-    Blake3HashProviderV1, CanonicalCborReader, CanonicalCborWriter, HashProvider, ManifestHash,
-    ProtocolError, ValidationCode, BLAKE3_256_HASH_ALGORITHM_ID_V1,
+    BLAKE3_256_HASH_ALGORITHM_ID_V1, Blake3HashProviderV1, CanonicalCborReader,
+    CanonicalCborWriter, HashProvider, ManifestHash, ProtocolError, ValidationCode,
+};
+
+use crate::config::{
+    AnchorConfigInputProvenanceV1, AnchorLiveApprovalFactsV1, FEE_COMPONENT_ASSURANCE_VERIFIED,
+    SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
 };
 
 /// Maximum encoded evidence file size (envelope + body).
@@ -39,6 +44,8 @@ pub const MAX_EVIDENCE_FILE_BYTES: usize = 8_192;
 
 /// Stable record-type / version identifier for the evidence envelope.
 pub const EVIDENCE_RECORD_TYPE_ID_V1: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_EVIDENCE_V1";
+/// Stable record-type / version identifier for live-approval-bound evidence.
+pub const EVIDENCE_RECORD_TYPE_ID_V2: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_EVIDENCE_V2";
 
 /// Hash-algorithm identifier written into the evidence envelope.
 pub const EVIDENCE_HASH_ALGORITHM_ID_V1: &str = BLAKE3_256_HASH_ALGORITHM_ID_V1;
@@ -51,7 +58,9 @@ pub const EVIDENCE_FRAME_PREFIX_V1: &[u8] =
 pub const EVIDENCE_DOMAIN_LABEL_V1: &str = "tari-cc-private-ballot/ootle-anchor-evidence/v1";
 
 const ENVELOPE_FIELD_COUNT: usize = 4;
-const BODY_FIELD_COUNT: usize = 12;
+const BODY_FIELD_COUNT_V1: usize = 12;
+const BODY_FIELD_COUNT_V2: usize = 13;
+const LIVE_EVIDENCE_APPROVAL_FACTS_FIELD_COUNT: usize = 12;
 
 const FINAL_STATUS_ACCEPTED: &str = "ACCEPTED";
 const FINAL_STATUS_FEE_ONLY: &str = "FEE_ONLY_ACCEPTED";
@@ -64,6 +73,127 @@ const FINAL_STATUS_REJECTED_BY_APPROVER: &str = "REJECTED_BY_APPROVER";
 const SOURCE_INDEPENDENT_INDEXER: &str = "INDEPENDENT_INDEXER";
 const SOURCE_WALLETD_AND_INDEXER: &str = "WALLETD_AND_INDEXER";
 const SOURCE_NONE: &str = "NONE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EvidenceRecordVersion {
+    V1,
+    V2,
+}
+
+/// Immutable live approval facts bound into V2 live evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveEvidenceApprovalFactsV1 {
+    input_provenance: AnchorConfigInputProvenanceV1,
+    finalized_archive: bool,
+    accepted_ballot_count: u64,
+    required_accepted_ballot_floor: u64,
+    reduced_anonymity: bool,
+    reduced_anonymity_acknowledged: bool,
+    fee_component: String,
+    declared_seal_public_key: String,
+    dedicated_organizer_wallet_attested: bool,
+    transaction_fingerprint: [u8; 32],
+}
+
+impl LiveEvidenceApprovalFactsV1 {
+    /// Builds immutable live evidence facts from a decoded V3 live config and
+    /// the frozen walletd transaction binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::InvalidData`] if the config is not
+    /// archive-verified live approval data, or if a required acknowledgement
+    /// fact is not present.
+    pub fn from_config(
+        input_provenance: AnchorConfigInputProvenanceV1,
+        facts: &AnchorLiveApprovalFactsV1,
+        fee_component: String,
+        transaction_fingerprint: [u8; 32],
+    ) -> Result<Self, EvidenceError> {
+        if input_provenance != AnchorConfigInputProvenanceV1::ArchiveVerified
+            || !facts.finalized_archive()
+            || facts.required_accepted_ballot_floor() == 0
+            || facts.accepted_ballot_count() < facts.required_accepted_ballot_floor()
+            || (facts.reduced_anonymity() && !facts.reduced_anonymity_acknowledged())
+            || !facts.dedicated_organizer_wallet_attested()
+            || fee_component.is_empty()
+        {
+            return Err(EvidenceError::InvalidData);
+        }
+        Ok(Self {
+            input_provenance,
+            finalized_archive: facts.finalized_archive(),
+            accepted_ballot_count: facts.accepted_ballot_count(),
+            required_accepted_ballot_floor: facts.required_accepted_ballot_floor(),
+            reduced_anonymity: facts.reduced_anonymity(),
+            reduced_anonymity_acknowledged: facts.reduced_anonymity_acknowledged(),
+            fee_component,
+            declared_seal_public_key: facts.declared_seal_public_key().to_owned(),
+            dedicated_organizer_wallet_attested: facts.dedicated_organizer_wallet_attested(),
+            transaction_fingerprint,
+        })
+    }
+
+    #[must_use]
+    pub const fn input_provenance(&self) -> AnchorConfigInputProvenanceV1 {
+        self.input_provenance
+    }
+
+    #[must_use]
+    pub const fn finalized_archive(&self) -> bool {
+        self.finalized_archive
+    }
+
+    #[must_use]
+    pub const fn accepted_ballot_count(&self) -> u64 {
+        self.accepted_ballot_count
+    }
+
+    #[must_use]
+    pub const fn required_accepted_ballot_floor(&self) -> u64 {
+        self.required_accepted_ballot_floor
+    }
+
+    #[must_use]
+    pub const fn reduced_anonymity(&self) -> bool {
+        self.reduced_anonymity
+    }
+
+    #[must_use]
+    pub const fn reduced_anonymity_acknowledged(&self) -> bool {
+        self.reduced_anonymity_acknowledged
+    }
+
+    #[must_use]
+    pub fn fee_component(&self) -> &str {
+        &self.fee_component
+    }
+
+    #[must_use]
+    pub const fn fee_component_assurance(&self) -> &'static str {
+        FEE_COMPONENT_ASSURANCE_VERIFIED
+    }
+
+    #[must_use]
+    pub fn declared_seal_public_key(&self) -> &str {
+        &self.declared_seal_public_key
+    }
+
+    #[must_use]
+    pub const fn seal_public_key_assurance(&self) -> &'static str {
+        SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED
+    }
+
+    #[must_use]
+    pub const fn dedicated_organizer_wallet_attested(&self) -> bool {
+        self.dedicated_organizer_wallet_attested
+    }
+
+    #[must_use]
+    pub const fn transaction_fingerprint(&self) -> [u8; 32] {
+        self.transaction_fingerprint
+    }
+}
 
 /// Public, non-secret archive locator data bundled for evidence construction.
 ///
@@ -333,6 +463,7 @@ pub struct AnchorEvidenceRecordV1 {
     phase: UnifiedAnchorLifecyclePhase,
     snapshot_digest: [u8; 32],
     ledger_position: Option<u64>,
+    live_approval_facts: Option<LiveEvidenceApprovalFactsV1>,
 }
 
 impl AnchorEvidenceRecordV1 {
@@ -363,6 +494,36 @@ impl AnchorEvidenceRecordV1 {
             SOURCE_INDEPENDENT_INDEXER,
             phase,
             *snapshot_digest,
+            None,
+        )
+    }
+
+    /// Builds an ACCEPTED live evidence record with immutable live approval
+    /// facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::ProtocolLimitExceeded`] if the canonical
+    /// envelope exceeds [`MAX_EVIDENCE_FILE_BYTES`].
+    pub fn from_verified_indexer_accept_with_live_approval_facts(
+        archive: &ArchiveProofInputs,
+        verified: &VerifiedIndexerAnchorV1,
+        snapshot_digest: &[u8; 32],
+        phase: UnifiedAnchorLifecyclePhase,
+        live_approval_facts: LiveEvidenceApprovalFactsV1,
+    ) -> Result<Self, EvidenceError> {
+        let evidence = verified.evidence();
+        let transaction_id = evidence.transaction_id().clone();
+        let ledger_position = evidence.ledger_position();
+        Self::assemble(
+            archive,
+            Some(transaction_id),
+            ledger_position,
+            FINAL_STATUS_ACCEPTED,
+            SOURCE_INDEPENDENT_INDEXER,
+            phase,
+            *snapshot_digest,
+            Some(live_approval_facts),
         )
     }
 
@@ -390,6 +551,37 @@ impl AnchorEvidenceRecordV1 {
             receipt_source,
             phase,
             *snapshot_digest,
+            None,
+        )
+    }
+
+    /// Builds a non-success live terminal incident evidence record with
+    /// immutable live approval facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EvidenceError::ProtocolLimitExceeded`] if the canonical
+    /// envelope exceeds [`MAX_EVIDENCE_FILE_BYTES`].
+    pub fn from_terminal_outcome_with_live_approval_facts(
+        archive: &ArchiveProofInputs,
+        terminal: TerminalEvidenceInputs,
+        snapshot_digest: &[u8; 32],
+        live_approval_facts: LiveEvidenceApprovalFactsV1,
+    ) -> Result<Self, EvidenceError> {
+        let transaction_id = terminal.transaction_id().cloned();
+        let ledger_position = terminal.ledger_position();
+        let final_status = terminal.final_status();
+        let receipt_source = terminal.receipt_source();
+        let phase = terminal.phase();
+        Self::assemble(
+            archive,
+            transaction_id,
+            ledger_position,
+            final_status,
+            receipt_source,
+            phase,
+            *snapshot_digest,
+            Some(live_approval_facts),
         )
     }
 
@@ -402,6 +594,7 @@ impl AnchorEvidenceRecordV1 {
         receipt_source: &'static str,
         phase: UnifiedAnchorLifecyclePhase,
         snapshot_digest: [u8; 32],
+        live_approval_facts: Option<LiveEvidenceApprovalFactsV1>,
     ) -> Result<Self, EvidenceError> {
         let body = encode_body(
             archive,
@@ -411,10 +604,16 @@ impl AnchorEvidenceRecordV1 {
             receipt_source,
             phase,
             &snapshot_digest,
+            live_approval_facts.as_ref(),
         )?;
         let framed = evidence_domain_input(&body);
         let body_digest = Blake3HashProviderV1.hash(&framed);
-        let envelope = encode_envelope(&body, &body_digest)?;
+        let record_type = if live_approval_facts.is_some() {
+            EVIDENCE_RECORD_TYPE_ID_V2
+        } else {
+            EVIDENCE_RECORD_TYPE_ID_V1
+        };
+        let envelope = encode_envelope(record_type, &body, &body_digest)?;
         if envelope.len() > MAX_EVIDENCE_FILE_BYTES {
             return Err(EvidenceError::ProtocolLimitExceeded);
         }
@@ -431,6 +630,7 @@ impl AnchorEvidenceRecordV1 {
             phase,
             snapshot_digest,
             ledger_position,
+            live_approval_facts,
         })
     }
 
@@ -521,6 +721,12 @@ impl AnchorEvidenceRecordV1 {
         self.ledger_position
     }
 
+    /// Returns live approval facts if this is a V2 live evidence record.
+    #[must_use]
+    pub fn live_approval_facts(&self) -> Option<&LiveEvidenceApprovalFactsV1> {
+        self.live_approval_facts.as_ref()
+    }
+
     /// Returns the human-review summary.
     ///
     /// The summary states, without caller-supplied prose, the non-binding
@@ -558,6 +764,23 @@ impl AnchorEvidenceRecordV1 {
             "snapshot_digest={}.\n",
             to_lower_hex(&self.snapshot_digest)
         ));
+        if let Some(facts) = &self.live_approval_facts {
+            summary.push_str(&format!(
+                "live_approval: input_provenance={}, finalized_archive={}, accepted_ballot_count={}, required_accepted_ballot_floor={}, reduced_anonymity={}, reduced_anonymity_acknowledged={}, fee_component={}, fee_component_assurance={}, declared_seal_public_key={}, seal_public_key_assurance={}, dedicated_organizer_wallet_attested={}, transaction_fingerprint={}. ",
+                facts.input_provenance().as_str(),
+                facts.finalized_archive(),
+                facts.accepted_ballot_count(),
+                facts.required_accepted_ballot_floor(),
+                facts.reduced_anonymity(),
+                facts.reduced_anonymity_acknowledged(),
+                facts.fee_component(),
+                facts.fee_component_assurance(),
+                facts.declared_seal_public_key(),
+                facts.seal_public_key_assurance(),
+                facts.dedicated_organizer_wallet_attested(),
+                to_lower_hex(&facts.transaction_fingerprint()),
+            ));
+        }
         summary.push_str("It does NOT prove ballot validity, tally correctness, ");
         summary.push_str("organizer honesty, voter anonymity, or archive availability. ");
         summary.push_str("Independent cryptographic and implementation review remains ");
@@ -586,9 +809,12 @@ impl AnchorEvidenceRecordV1 {
         if reader.read_array_len().map_err(from_protocol)? != ENVELOPE_FIELD_COUNT {
             return Err(EvidenceError::InvalidData);
         }
-        if reader.read_text_string().map_err(from_protocol)? != EVIDENCE_RECORD_TYPE_ID_V1 {
-            return Err(EvidenceError::InvalidData);
-        }
+        let record_type = reader.read_text_string().map_err(from_protocol)?;
+        let record_version = match record_type {
+            EVIDENCE_RECORD_TYPE_ID_V1 => EvidenceRecordVersion::V1,
+            EVIDENCE_RECORD_TYPE_ID_V2 => EvidenceRecordVersion::V2,
+            _ => return Err(EvidenceError::InvalidData),
+        };
         if reader.read_text_string().map_err(from_protocol)? != EVIDENCE_HASH_ALGORITHM_ID_V1 {
             return Err(EvidenceError::InvalidData);
         }
@@ -603,9 +829,13 @@ impl AnchorEvidenceRecordV1 {
             return Err(EvidenceError::InvalidData);
         }
 
-        // Decode the 12-element body.
+        // Decode the versioned body.
         let mut body_reader = CanonicalCborReader::new(body);
-        if body_reader.read_array_len().map_err(from_protocol)? != BODY_FIELD_COUNT {
+        let expected_body_count = match record_version {
+            EvidenceRecordVersion::V1 => BODY_FIELD_COUNT_V1,
+            EvidenceRecordVersion::V2 => BODY_FIELD_COUNT_V2,
+        };
+        if body_reader.read_array_len().map_err(from_protocol)? != expected_body_count {
             return Err(EvidenceError::InvalidData);
         }
 
@@ -666,6 +896,14 @@ impl AnchorEvidenceRecordV1 {
             return Err(EvidenceError::InvalidData);
         }
 
+        // 13. live approval facts (V2 only)
+        let live_approval_facts = match record_version {
+            EvidenceRecordVersion::V1 => None,
+            EvidenceRecordVersion::V2 => {
+                Some(decode_live_evidence_approval_facts(&mut body_reader)?)
+            }
+        };
+
         body_reader.finish().map_err(from_protocol)?;
 
         Ok(Self {
@@ -681,6 +919,7 @@ impl AnchorEvidenceRecordV1 {
             phase,
             snapshot_digest,
             ledger_position,
+            live_approval_facts,
         })
     }
 }
@@ -720,13 +959,17 @@ pub fn write_evidence_atomic(
     result
 }
 
-fn encode_envelope(body: &[u8], body_digest: &[u8; 32]) -> Result<Vec<u8>, EvidenceError> {
+fn encode_envelope(
+    record_type: &str,
+    body: &[u8],
+    body_digest: &[u8; 32],
+) -> Result<Vec<u8>, EvidenceError> {
     let mut writer = CanonicalCborWriter::new();
     writer
         .write_array_len(ENVELOPE_FIELD_COUNT)
         .map_err(from_protocol)?;
     writer
-        .write_text_string(EVIDENCE_RECORD_TYPE_ID_V1)
+        .write_text_string(record_type)
         .map_err(from_protocol)?;
     writer
         .write_text_string(EVIDENCE_HASH_ALGORITHM_ID_V1)
@@ -747,10 +990,16 @@ fn encode_body(
     receipt_source: &str,
     phase: UnifiedAnchorLifecyclePhase,
     snapshot_digest: &[u8; 32],
+    live_approval_facts: Option<&LiveEvidenceApprovalFactsV1>,
 ) -> Result<Vec<u8>, EvidenceError> {
     let mut writer = CanonicalCborWriter::new();
+    let body_field_count = if live_approval_facts.is_some() {
+        BODY_FIELD_COUNT_V2
+    } else {
+        BODY_FIELD_COUNT_V1
+    };
     writer
-        .write_array_len(BODY_FIELD_COUNT)
+        .write_array_len(body_field_count)
         .map_err(from_protocol)?;
     writer
         .write_text_string(OOTLE_ANCHOR_PURPOSE_ID_V1)
@@ -784,6 +1033,9 @@ fn encode_body(
     writer
         .write_text_string(BLAKE3_256_HASH_ALGORITHM_ID_V1)
         .map_err(from_protocol)?;
+    if let Some(facts) = live_approval_facts {
+        encode_live_evidence_approval_facts(&mut writer, facts)?;
+    }
     Ok(writer.into_bytes())
 }
 
@@ -800,6 +1052,40 @@ fn encode_option_text(
             writer.write_array_len(0).map_err(from_protocol)?;
         }
     }
+    Ok(())
+}
+
+fn encode_live_evidence_approval_facts(
+    writer: &mut CanonicalCborWriter,
+    facts: &LiveEvidenceApprovalFactsV1,
+) -> Result<(), EvidenceError> {
+    writer
+        .write_array_len(LIVE_EVIDENCE_APPROVAL_FACTS_FIELD_COUNT)
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.input_provenance().as_str())
+        .map_err(from_protocol)?;
+    writer.write_bool(facts.finalized_archive());
+    writer.write_unsigned(facts.accepted_ballot_count());
+    writer.write_unsigned(facts.required_accepted_ballot_floor());
+    writer.write_bool(facts.reduced_anonymity());
+    writer.write_bool(facts.reduced_anonymity_acknowledged());
+    writer
+        .write_text_string(facts.fee_component())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.fee_component_assurance())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.declared_seal_public_key())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.seal_public_key_assurance())
+        .map_err(from_protocol)?;
+    writer.write_bool(facts.dedicated_organizer_wallet_attested());
+    writer
+        .write_byte_string(&facts.transaction_fingerprint())
+        .map_err(from_protocol)?;
     Ok(())
 }
 
@@ -851,6 +1137,48 @@ fn to_lower_hex(bytes: &[u8; 32]) -> String {
 fn read_digest(reader: &mut CanonicalCborReader<'_>) -> Result<[u8; 32], EvidenceError> {
     <[u8; 32]>::try_from(reader.read_byte_string().map_err(from_protocol)?)
         .map_err(|_| EvidenceError::InvalidData)
+}
+
+fn decode_live_evidence_approval_facts(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<LiveEvidenceApprovalFactsV1, EvidenceError> {
+    if reader.read_array_len().map_err(from_protocol)? != LIVE_EVIDENCE_APPROVAL_FACTS_FIELD_COUNT {
+        return Err(EvidenceError::InvalidData);
+    }
+    let input_provenance =
+        AnchorConfigInputProvenanceV1::from_str(reader.read_text_string().map_err(from_protocol)?)
+            .map_err(|_| EvidenceError::InvalidData)?;
+    let finalized_archive = reader.read_bool().map_err(from_protocol)?;
+    let accepted_ballot_count = reader.read_unsigned().map_err(from_protocol)?;
+    let required_accepted_ballot_floor = reader.read_unsigned().map_err(from_protocol)?;
+    let reduced_anonymity = reader.read_bool().map_err(from_protocol)?;
+    let reduced_anonymity_acknowledged = reader.read_bool().map_err(from_protocol)?;
+    let fee_component = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    if reader.read_text_string().map_err(from_protocol)? != FEE_COMPONENT_ASSURANCE_VERIFIED {
+        return Err(EvidenceError::InvalidData);
+    }
+    let declared_seal_public_key = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    if reader.read_text_string().map_err(from_protocol)? != SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED {
+        return Err(EvidenceError::InvalidData);
+    }
+    let dedicated_organizer_wallet_attested = reader.read_bool().map_err(from_protocol)?;
+    let transaction_fingerprint = read_digest(reader)?;
+    let config_facts = AnchorLiveApprovalFactsV1::new(
+        accepted_ballot_count,
+        required_accepted_ballot_floor,
+        reduced_anonymity,
+        reduced_anonymity_acknowledged,
+        declared_seal_public_key,
+        dedicated_organizer_wallet_attested,
+        finalized_archive,
+    )
+    .map_err(|_| EvidenceError::InvalidData)?;
+    LiveEvidenceApprovalFactsV1::from_config(
+        input_provenance,
+        &config_facts,
+        fee_component,
+        transaction_fingerprint,
+    )
 }
 
 fn decode_option_text_value(

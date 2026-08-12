@@ -11,20 +11,28 @@
 //! never loads auth, never creates a runtime, never creates a snapshot, never
 //! creates evidence, and never submits or signs.
 
+#[cfg(feature = "offline-test-raw-hashes")]
 use std::path::PathBuf;
 
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_anchor_transport::{AnchorAccountReference, AnchorMaxFeeV1};
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_archive::ArchiveHashV1;
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, NetworkAdapterConfig, WalletdEndpoint,
 };
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     WalletdFeeComponentRef, WalletdSealSignerRef,
 };
+#[cfg(feature = "offline-test-raw-hashes")]
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider, ManifestHash};
 
 use crate::cli::WriteConfigArgs;
+#[cfg(feature = "offline-test-raw-hashes")]
 use crate::config::AnchorAppConfig;
 use crate::report::MachineReportCode;
 
@@ -45,6 +53,13 @@ const CONFIG_WRITE_FAILED: &str = "ANCHOR_APP_CONFIG_WRITE_FAILED";
 ///    `from_canonical_bytes`) which enforces absolute snapshot/evidence paths,
 ///    backoff ordering, and all decoder invariants;
 /// 4. output-file existence and regular-file checks (with `--force`).
+#[cfg(not(feature = "offline-test-raw-hashes"))]
+pub fn run(_args: &WriteConfigArgs) -> Result<(), String> {
+    Err(CONFIG_WRITE_FAILED.to_owned())
+}
+
+/// Runs the test-only raw-hash `--write-config` mode.
+#[cfg(feature = "offline-test-raw-hashes")]
 pub fn run(args: &WriteConfigArgs) -> Result<(), String> {
     let config = build_config(args).map_err(|_| CONFIG_WRITE_FAILED.to_owned())?;
 
@@ -132,6 +147,7 @@ pub fn run(args: &WriteConfigArgs) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn build_config(args: &WriteConfigArgs) -> Result<AnchorAppConfig, ()> {
     let network = OotleNetworkIdV1::new(args.network.clone()).map_err(|_| ())?;
     let walletd_endpoint = WalletdEndpoint::parse(&args.walletd_endpoint).map_err(|_| ())?;
@@ -174,7 +190,7 @@ fn build_config(args: &WriteConfigArgs) -> Result<AnchorAppConfig, ()> {
     )
     .map_err(|_| ())?;
 
-    Ok(AnchorAppConfig::new(
+    Ok(AnchorAppConfig::new_offline_test_raw_hashes(
         network_adapter,
         account_reference,
         manifest_hash,
@@ -188,6 +204,7 @@ fn build_config(args: &WriteConfigArgs) -> Result<AnchorAppConfig, ()> {
     ))
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn parse_seal_signer(kind: &str, id: &str) -> Result<WalletdSealSignerRef, ()> {
     let index: u64 = id.parse().map_err(|_| ())?;
     match kind {
@@ -200,11 +217,13 @@ fn parse_seal_signer(kind: &str, id: &str) -> Result<WalletdSealSignerRef, ()> {
     }
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn parse_hash(hex: &str) -> Result<[u8; 32], ()> {
     let bytes = hex_to_bytes_32(hex)?;
     Ok(bytes)
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn hex_to_bytes_32(hex: &str) -> Result<[u8; 32], ()> {
     if hex.len() != 64 {
         return Err(());
@@ -221,6 +240,7 @@ fn hex_to_bytes_32(hex: &str) -> Result<[u8; 32], ()> {
     Ok(bytes)
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn hex_nibble(byte: u8) -> Result<u8, ()> {
     match byte {
         b'0'..=b'9' => Ok(byte - b'0'),
@@ -229,8 +249,10 @@ fn hex_nibble(byte: u8) -> Result<u8, ()> {
     }
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn configs_equal(a: &AnchorAppConfig, b: &AnchorAppConfig) -> bool {
-    a.anchor_record_network() == b.anchor_record_network()
+    a.input_provenance() == b.input_provenance()
+        && a.anchor_record_network() == b.anchor_record_network()
         && a.archive_manifest_hash() == b.archive_manifest_hash()
         && a.archive_hash() == b.archive_hash()
         && a.account_reference() == b.account_reference()
@@ -247,12 +269,14 @@ fn configs_equal(a: &AnchorAppConfig, b: &AnchorAppConfig) -> bool {
         && a.backoff_base_secs() == b.backoff_base_secs()
         && a.backoff_cap_secs() == b.backoff_cap_secs()
         && a.ttl_secs() == b.ttl_secs()
+        && a.live_approval_facts() == b.live_approval_facts()
 }
 
 /// Validates that the output path is absolute and pairwise distinct from the
 /// snapshot and evidence paths. Uses lexical normalization only (no filesystem
 /// access), suitable for Windows where `\` and `/` are both valid separators
 /// and paths are case-insensitive.
+#[cfg(feature = "offline-test-raw-hashes")]
 fn validate_output_path(
     output: &str,
     snapshot_path: &str,
@@ -284,12 +308,14 @@ fn validate_output_path(
 /// trims trailing separators, and lowercases (Windows is case-insensitive).
 /// This does not touch the filesystem and does not resolve symlinks or `.`/`..`
 /// components, so it catches only literal path collisions, not semantic ones.
+#[cfg(feature = "offline-test-raw-hashes")]
 fn normalize_path_for_comparison(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let trimmed = normalized.trim_end_matches('/');
     trimmed.to_lowercase()
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn to_lower_hex(bytes: &[u8; 32]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(64);

@@ -28,6 +28,8 @@ use crate::error::GuiCoreError;
 /// Structured inspection of one canonical anchor application config.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiAnchorConfigInspectionV1 {
+    /// Canonical input provenance (`ArchiveVerified` or `OfflineTestRawHashes`).
+    pub input_provenance: String,
     /// Selected network identifier.
     pub network: String,
     /// Configured walletd JSON-RPC endpoint (no credentials).
@@ -216,6 +218,7 @@ pub fn inspect_anchor_config_v1(path: &Path) -> Result<GuiAnchorConfigInspection
     };
 
     Ok(GuiAnchorConfigInspectionV1 {
+        input_provenance: config.input_provenance().as_str().to_owned(),
         network: config.anchor_record_network().as_str().to_owned(),
         walletd_endpoint: adapter.walletd_endpoint().as_str().to_owned(),
         indexer_endpoint: adapter.indexer_endpoint().as_str().to_owned(),

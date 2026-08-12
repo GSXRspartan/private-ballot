@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorAppDriver, DriverError, DriverRunOutcome, OperatorDecision,
-    write_snapshot_atomic,
+    VerifiedRuntimeArchiveFactsV1, write_snapshot_atomic,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, NetworkAdapterConfig, ScriptedIndexerTransport,
@@ -46,7 +46,7 @@ fn adapter_with_max_fee(max_fee_value: u64) -> NetworkAdapterConfig {
 }
 
 fn base_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConfig {
-    AnchorAppConfig::new(
+    AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -60,6 +60,22 @@ fn base_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConf
     )
 }
 
+fn live_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConfig {
+    AnchorAppConfig::new_archive_verified_with_live_approval_facts(
+        network_adapter(),
+        canonical_account(),
+        canonical_manifest_hash(),
+        canonical_archive_hash(),
+        canonical_network(),
+        snap_path,
+        ev_path,
+        1,
+        1,
+        None,
+        live_approval_facts(),
+    )
+}
+
 #[test]
 fn restore_with_different_network_rejected() {
     let snap_path = snapshot_path();
@@ -67,7 +83,7 @@ fn restore_with_different_network_rejected() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -93,7 +109,7 @@ fn restore_with_different_account_rejected() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         account("other-account"),
         canonical_manifest_hash(),
@@ -119,7 +135,7 @@ fn restore_with_different_archive_hash_rejected() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -145,7 +161,7 @@ fn restore_with_different_manifest_hash_rejected() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         manifest_hash(0x99),
@@ -171,7 +187,7 @@ fn restore_with_different_max_fee_rejected() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         adapter_with_max_fee(2_000),
         canonical_account(),
         canonical_manifest_hash(),
@@ -208,13 +224,16 @@ fn restore_produces_byte_identical_evidence() {
     let ev_path = evidence_path();
     let tx = canonical_transaction_id();
 
-    let config = base_config_with_paths(snap_path.clone(), ev_path.clone());
+    let config = live_config_with_paths(snap_path.clone(), ev_path.clone());
+    let runtime = VerifiedRuntimeArchiveFactsV1::matching_config_for_test(&config)
+        .expect("live config must provide runtime facts");
     let walletd = happy_walletd_transport();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
     let walletd_adapter = WalletdAnchorNetworkAdapter::new(walletd, canonical_network());
     let indexer_adapter = IndexerReceiptNetworkAdapter::new(indexer);
     let mut driver = AnchorAppDriver::new(config, walletd_adapter, indexer_adapter)
-        .unwrap_or_else(|e| panic!("driver construction failed: {e}"));
+        .unwrap_or_else(|e| panic!("driver construction failed: {e}"))
+        .with_runtime_archive_for_test(runtime);
     let outcome = driver
         .run(OperatorDecision::Approve)
         .unwrap_or_else(|e| panic!("driver run failed: {e}"));
@@ -223,13 +242,16 @@ fn restore_produces_byte_identical_evidence() {
         _ => panic!("expected FinalizedAccept"),
     };
 
-    let config2 = base_config_with_paths(snap_path, ev_path);
+    let config2 = live_config_with_paths(snap_path, ev_path);
+    let runtime2 = VerifiedRuntimeArchiveFactsV1::matching_config_for_test(&config2)
+        .expect("live config must provide runtime facts");
     let walletd2 = happy_walletd_transport();
     let indexer2 = finalized_indexer_transport(accepted_receipt(&tx));
     let walletd_adapter2 = WalletdAnchorNetworkAdapter::new(walletd2, canonical_network());
     let indexer_adapter2 = IndexerReceiptNetworkAdapter::new(indexer2);
     let mut restored = AnchorAppDriver::restore(config2, walletd_adapter2, indexer_adapter2)
-        .unwrap_or_else(|e| panic!("restore failed: {e}"));
+        .unwrap_or_else(|e| panic!("restore failed: {e}"))
+        .with_runtime_archive_for_test(runtime2);
     let outcome2 = restored
         .run(OperatorDecision::Approve)
         .unwrap_or_else(|e| panic!("restored run failed: {e}"));
@@ -253,7 +275,7 @@ fn mismatch_does_not_mutate_snapshot() {
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
     let bytes_before = std::fs::read(&snap_path).unwrap_or_else(|e| panic!("read: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -281,7 +303,7 @@ fn mismatch_does_not_contact_transport() {
     write_snapshot_atomic(&snap_path, &known_answer_snapshot())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
-    let mismatched = AnchorAppConfig::new(
+    let mismatched = AnchorAppConfig::new_archive_verified(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),

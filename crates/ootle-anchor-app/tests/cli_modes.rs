@@ -10,7 +10,7 @@
 //! modes, duplicate flags, missing values, and unknown arguments, while the
 //! existing lifecycle flags still parse correctly.
 
-use tari_cc_private_ballot_ootle_anchor_app::cli::{parse, CliMode};
+use tari_cc_private_ballot_ootle_anchor_app::cli::{CliMode, parse};
 
 const CONFIG_FAILURE: &str = "ANCHOR_APP_CONFIGURATION_FAILURE";
 
@@ -275,6 +275,13 @@ fn write_config_missing_required_flag_rejected() {
     assert_eq!(parse(&args), Err(CONFIG_FAILURE.to_owned()));
 }
 
+#[cfg(not(feature = "offline-test-raw-hashes"))]
+#[test]
+fn write_config_mode_unavailable_without_offline_test_feature() {
+    let args = valid_write_config_args();
+    assert_eq!(parse(&args), Err(CONFIG_FAILURE.to_owned()));
+}
+
 // --- Unknown arguments ---
 
 #[test]
@@ -371,9 +378,29 @@ fn lifecycle_config_and_auth_env_parse() {
     }
 }
 
+#[test]
+fn lifecycle_archive_path_parses() {
+    let args = vec![
+        prog(),
+        "--config".to_owned(),
+        "c".to_owned(),
+        "--archive".to_owned(),
+        "archive-dir".to_owned(),
+    ];
+    let mode = parse(&args).expect("parse");
+    match mode {
+        CliMode::Lifecycle(l) => {
+            assert_eq!(l.config_path.as_deref(), Some("c"));
+            assert_eq!(l.archive_path.as_deref(), Some("archive-dir"));
+        }
+        _ => panic!("expected lifecycle"),
+    }
+}
+
 // --- Write-config mode parses correctly ---
 
 #[test]
+#[cfg(feature = "offline-test-raw-hashes")]
 fn write_config_mode_parses_with_optional_flags() {
     let mut args = valid_write_config_args();
     args.push("--request-timeout-secs".to_owned());
@@ -391,6 +418,7 @@ fn write_config_mode_parses_with_optional_flags() {
 }
 
 #[test]
+#[cfg(feature = "offline-test-raw-hashes")]
 fn write_config_mode_parses_with_force() {
     let mut args = valid_write_config_args();
     args.push("--force".to_owned());

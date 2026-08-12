@@ -35,20 +35,32 @@ pub mod executor;
 pub mod inspect_snapshot;
 pub mod report;
 pub mod snapshot_store;
+pub mod terminal_index;
 pub mod verify_evidence;
 pub mod write_config;
 
 pub use backoff::{BackoffError, WallClockBackoff};
-pub use config::{AnchorAppConfig, ConfigFileError};
-pub use driver::{AnchorAppDriver, DriverError, DriverRunOutcome, OperatorDecision};
+pub use config::{
+    AnchorAppConfig, AnchorConfigInputProvenanceV1, AnchorLiveApprovalFactsV1, ConfigFileError,
+    FEE_COMPONENT_ASSURANCE_VERIFIED, MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES,
+    SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
+};
+pub use driver::{
+    AnchorAppDriver, DriverError, DriverRunOutcome, OperatorDecision, VerifiedRuntimeArchiveFactsV1,
+};
 pub use evidence::{
-    write_evidence_atomic, AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError,
-    EvidenceFileError, TerminalEvidenceInputs, TerminalIncidentKind,
+    AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError, EvidenceFileError,
+    LiveEvidenceApprovalFactsV1, TerminalEvidenceInputs, TerminalIncidentKind,
+    write_evidence_atomic,
 };
 pub use executor::{TokioBlockingExecutor, TokioRuntimeBuildError};
 pub use report::MachineReportCode;
 pub use snapshot_store::{
-    read_snapshot, snapshot_digest, write_snapshot_atomic, SnapshotFileError,
     MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1,
-    SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1,
+    SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1, SnapshotFileError, read_snapshot,
+    snapshot_digest, write_snapshot_atomic,
+};
+pub use terminal_index::{
+    TerminalAnchorIndexRecordV1, TerminalIndexError, default_terminal_index_root,
+    read_terminal_index, terminal_index_path, write_terminal_index,
 };

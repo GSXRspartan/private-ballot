@@ -19,12 +19,13 @@
 //! nothing.
 
 use std::env;
+use std::path::Path;
 use std::process::ExitCode;
 
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    cli, AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
-    TokioBlockingExecutor,
+    AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
+    TokioBlockingExecutor, cli,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
@@ -71,6 +72,7 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
     let cli::LifecycleArgs {
         config_path,
         auth_env,
+        archive_path,
         approve,
         reject,
         dry_run,
@@ -87,6 +89,10 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
         return print_dry_run(&config)
             .map_err(|_| MachineReportCode::ConfigurationFailure.as_str().to_owned());
     }
+
+    let Some(archive_path) = archive_path else {
+        return Err(MachineReportCode::ConfigurationFailure.as_str().to_owned());
+    };
 
     // Load optional walletd auth from the named environment variable. The
     // auth never enters the canonical config, Debug output, snapshots, or
@@ -127,11 +133,16 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
         OperatorDecision::NoDecision
     };
 
-    let mut driver = AnchorAppDriver::restore(config, walletd_adapter, indexer_adapter)
-        .map_err(|_| MachineReportCode::SnapshotFailure.as_str().to_owned())?;
+    let mut driver = AnchorAppDriver::restore_live(
+        config,
+        walletd_adapter,
+        indexer_adapter,
+        Path::new(&archive_path),
+    )
+    .map_err(|error| error.as_str().to_owned())?;
     let outcome = driver
         .run(decision)
-        .map_err(|_| MachineReportCode::TransportFailure.as_str().to_owned())?;
+        .map_err(|error| error.as_str().to_owned())?;
 
     print_outcome(&outcome, driver.phase(), driver.transaction_id());
     match outcome {

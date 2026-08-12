@@ -23,14 +23,14 @@ use tari_cc_private_ballot_gui_core::{
     GuiBallotIntakeResultV1, GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
     GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
-    GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiParticipationSummaryV1,
-    GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiTallySummaryV1,
-    GuiTransportAnchorVerificationV1,
+    GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
+    GuiLiveAnchorConfigResultV1, GuiParticipationSummaryV1, GuiPreparedBallotExportV1,
+    GuiPreparedBallotStatusV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
     GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
-    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, inspect_anchor_config_v1,
-    inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, verify_archive_directory_v1,
-    verify_transport_archive_anchor_v1,
-    write_archive_directory_v1, write_election_artifacts_v1, VoterGovernanceCredentialV1,
+    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, VoterGovernanceCredentialV1,
+    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
+    verify_archive_directory_v1, verify_transport_archive_anchor_v1, write_archive_directory_v1,
+    write_election_artifacts_v1, write_live_anchor_config_from_verified_archive_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
@@ -423,7 +423,9 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let credential = voter_guard.as_mut().and_then(GuiVoterSessionV1::take_credential);
+    let credential = voter_guard
+        .as_mut()
+        .and_then(GuiVoterSessionV1::take_credential);
     *voter_guard = None;
     if let Some(credential) = credential {
         let mut pending_guard = state
@@ -567,6 +569,18 @@ fn verify_transport_archive_anchor(
         Path::new(&archive_directory),
         Path::new(&anchor_evidence_path),
     )?)
+}
+
+/// Generates a standalone anchor-app config from a verified finalized archive.
+///
+/// The frontend supplies only public operator locators, paths, and policy
+/// acknowledgement fields. Rust derives manifest hash, archive hash,
+/// finalized status, and accepted count from the archive verifier.
+#[tauri::command]
+fn write_live_anchor_config_from_verified_archive(
+    request: GuiLiveAnchorConfigRequestV1,
+) -> Result<GuiLiveAnchorConfigResultV1, CommandError> {
+    Ok(write_live_anchor_config_from_verified_archive_v1(&request)?)
 }
 
 /// Inspects one canonical anchor application config (read-only, no network).
@@ -871,12 +885,15 @@ fn voter_governance_credential_status(
 fn generate_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let session_guard = state.session.lock().map_err(|_| CommandError::state_poisoned())?;
-    if let Some(session) = session_guard.as_ref() {
-        let mut voter_guard = state
-        .voter
+    let session_guard = state
+        .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
+    if let Some(session) = session_guard.as_ref() {
+        let mut voter_guard = state
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
         let Some(voter) = voter_guard.as_mut() else {
             return Err(CommandError::no_voter_session());
         };
@@ -1136,10 +1153,8 @@ fn submit_prepared_voter_ballot_privately(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let voter = voter.as_ref().ok_or_else(CommandError::no_voter_session)?;
-    let ballot_bytes = voter.prepared_canonical_ballot_bytes(
-        session.artifacts(),
-        session.lifecycle_state_v1(),
-    )?;
+    let ballot_bytes =
+        voter.prepared_canonical_ballot_bytes(session.artifacts(), session.lifecycle_state_v1())?;
     let mut transport = state
         .transport
         .lock()
@@ -1158,13 +1173,15 @@ fn submit_prepared_voter_ballot_privately(
             tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Received => "RECEIVED",
             tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Accepted => "ACCEPTED",
             tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Rejected => "REJECTED",
-            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Included => "INCLUDED",
-            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Anchored => "ANCHORED",
         },
         retry_status: match result.receipt.retry_status {
             tari_cc_private_ballot_gui_core::RetryStatusV1::NewDelivery => "NEW_DELIVERY",
-            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryAccepted => "PREVIOUS_ACCEPTED",
-            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryRejected => "PREVIOUS_REJECTED",
+            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryAccepted => {
+                "PREVIOUS_ACCEPTED"
+            }
+            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryRejected => {
+                "PREVIOUS_REJECTED"
+            }
             tari_cc_private_ballot_gui_core::RetryStatusV1::GenericDuplicate => "GENERIC_DUPLICATE",
         },
         reduced_anonymity: result.reduced_anonymity,
@@ -1235,7 +1252,10 @@ mod tests {
         let mut guard = state.draft.lock().expect("draft lock");
         let draft = guard.as_mut().expect("draft exists");
         draft
-            .set_basics("preserved-election".to_owned(), "preserved-revision".to_owned())
+            .set_basics(
+                "preserved-election".to_owned(),
+                "preserved-revision".to_owned(),
+            )
             .expect("valid basics");
         draft
             .set_voters(vec![public_key_hex])
@@ -1269,17 +1289,30 @@ mod tests {
         state.get_or_create_draft_preview().expect("initial draft");
         commit_draft(&state, public_key);
 
-        let preserved = state.get_or_create_draft_preview().expect("preserved preview");
-        assert_eq!(preserved.election_id_text.as_deref(), Some("preserved-election"));
-        assert_eq!(preserved.governance_source_revision.as_deref(), Some("preserved-revision"));
+        let preserved = state
+            .get_or_create_draft_preview()
+            .expect("preserved preview");
+        assert_eq!(
+            preserved.election_id_text.as_deref(),
+            Some("preserved-election")
+        );
+        assert_eq!(
+            preserved.governance_source_revision.as_deref(),
+            Some("preserved-revision")
+        );
         assert_eq!(preserved.voter_count, 1);
         assert_eq!(preserved.options.len(), 1);
         assert_eq!(preserved.approval_min, Some(1));
         assert_eq!(preserved.approval_max, Some(1));
-        assert_eq!(preserved.presentation, GuiBallotPresentationType::GovernanceProposal);
+        assert_eq!(
+            preserved.presentation,
+            GuiBallotPresentationType::GovernanceProposal
+        );
 
         state.start_new_draft().expect("replace draft");
-        let replacement = state.get_or_create_draft_preview().expect("replacement preview");
+        let replacement = state
+            .get_or_create_draft_preview()
+            .expect("replacement preview");
         assert_eq!(replacement.election_id_text, None);
         assert_eq!(replacement.voter_count, 0);
         assert!(replacement.options.is_empty());
@@ -1289,19 +1322,31 @@ mod tests {
     #[test]
     fn pending_credential_generation_fails_closed_until_explicit_reset() {
         let state = AppState::default();
-        let first = state.generate_pending_credential().expect("first credential");
+        let first = state
+            .generate_pending_credential()
+            .expect("first credential");
         let first_key = first.public_governance_key_hex.expect("first public key");
 
-        let duplicate = state.generate_pending_credential().expect_err("duplicate rejected");
+        let duplicate = state
+            .generate_pending_credential()
+            .expect_err("duplicate rejected");
         assert_eq!(duplicate.code, "GUI_PENDING_CREDENTIAL_EXISTS");
         let retained = state.voter_credential_status().expect("retained status");
-        assert_eq!(retained.public_governance_key_hex.as_deref(), Some(first_key.as_str()));
+        assert_eq!(
+            retained.public_governance_key_hex.as_deref(),
+            Some(first_key.as_str())
+        );
 
         let unloaded = state.reset_pending_credential().expect("reset credential");
         assert!(!unloaded.credential_loaded);
-        let second = state.generate_pending_credential().expect("second credential");
+        let second = state
+            .generate_pending_credential()
+            .expect("second credential");
         assert!(second.credential_loaded);
-        assert_ne!(second.public_governance_key_hex.as_deref(), Some(first_key.as_str()));
+        assert_ne!(
+            second.public_governance_key_hex.as_deref(),
+            Some(first_key.as_str())
+        );
     }
 
     fn freeze_draft_into_active_session(state: &AppState) {
@@ -1316,15 +1361,25 @@ mod tests {
     #[test]
     fn carried_credential_remains_eligible_after_freeze_and_open_and_prepares_a_ballot() {
         let state = AppState::default();
-        let pending = state.generate_pending_credential().expect("generate credential");
+        let pending = state
+            .generate_pending_credential()
+            .expect("generate credential");
         let public_key = pending.public_governance_key_hex.expect("public key");
         state.get_or_create_draft_preview().expect("create draft");
         commit_draft(&state, public_key.clone());
 
         freeze_draft_into_active_session(&state);
-        let frozen_status = state.voter_credential_status().expect("frozen credential status");
-        assert_eq!(frozen_status.public_governance_key_hex.as_deref(), Some(public_key.as_str()));
-        assert_eq!(frozen_status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible);
+        let frozen_status = state
+            .voter_credential_status()
+            .expect("frozen credential status");
+        assert_eq!(
+            frozen_status.public_governance_key_hex.as_deref(),
+            Some(public_key.as_str())
+        );
+        assert_eq!(
+            frozen_status.eligibility,
+            tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible
+        );
 
         state
             .with_session_mut(|session| {
@@ -1332,16 +1387,37 @@ mod tests {
                 Ok(())
             })
             .expect("open election");
-        let open_status = state.voter_credential_status().expect("open credential status");
-        assert_eq!(open_status.public_governance_key_hex.as_deref(), Some(public_key.as_str()));
-        assert_eq!(open_status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible);
+        let open_status = state
+            .voter_credential_status()
+            .expect("open credential status");
+        assert_eq!(
+            open_status.public_governance_key_hex.as_deref(),
+            Some(public_key.as_str())
+        );
+        assert_eq!(
+            open_status.eligibility,
+            tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible
+        );
 
         let serialized = serde_json::to_value(&open_status).expect("safe credential status JSON");
         let fields = serialized
             .as_object()
             .expect("credential status should be an object");
-        for marker in ["secret", "scalar", "seed", "mnemonic", "private", "credential_bytes", "nullifier", "proof"] {
-            assert!(fields.keys().all(|field| !field.to_lowercase().contains(marker)));
+        for marker in [
+            "secret",
+            "scalar",
+            "seed",
+            "mnemonic",
+            "private",
+            "credential_bytes",
+            "nullifier",
+            "proof",
+        ] {
+            assert!(
+                fields
+                    .keys()
+                    .all(|field| !field.to_lowercase().contains(marker))
+            );
         }
 
         let session_guard = state.session.lock().expect("session lock");
@@ -1366,8 +1442,12 @@ mod tests {
     #[test]
     fn carried_credential_is_not_eligible_when_the_frozen_registry_excludes_it() {
         let state = AppState::default();
-        let pending = state.generate_pending_credential().expect("generate credential");
-        let pending_key = pending.public_governance_key_hex.expect("pending public key");
+        let pending = state
+            .generate_pending_credential()
+            .expect("generate credential");
+        let pending_key = pending
+            .public_governance_key_hex
+            .expect("pending public key");
         let other_state = AppState::default();
         let enrolled_key = other_state
             .generate_pending_credential()
@@ -1386,8 +1466,14 @@ mod tests {
             })
             .expect("open election");
         let status = state.voter_credential_status().expect("credential status");
-        assert_eq!(status.public_governance_key_hex.as_deref(), Some(pending_key.as_str()));
-        assert_eq!(status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::NotEligible);
+        assert_eq!(
+            status.public_governance_key_hex.as_deref(),
+            Some(pending_key.as_str())
+        );
+        assert_eq!(
+            status.eligibility,
+            tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::NotEligible
+        );
         assert!(!status.can_continue);
     }
 }
@@ -1412,6 +1498,7 @@ pub fn run() {
             write_archive,
             verify_archive,
             verify_transport_archive_anchor,
+            write_live_anchor_config_from_verified_archive,
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,

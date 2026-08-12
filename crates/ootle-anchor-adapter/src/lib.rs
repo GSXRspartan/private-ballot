@@ -46,8 +46,8 @@ pub use constructor::{AnchorTransactionConstructor, PinnedOotleAnchorTransaction
 pub use errors::OotleAnchorAdapterError;
 pub use evidence::{OotleAnchorInspectionFingerprintV1, OotleUnsignedAnchorTransactionEvidenceV1};
 pub use inspect::{
-    AnchorInspectionExpectationV1, inspect_fee_bearing_anchor_transaction,
-    inspect_unsigned_anchor_transaction,
+    AnchorInspectionExpectationV1, fingerprint_unsigned_anchor_transaction,
+    inspect_fee_bearing_anchor_transaction, inspect_unsigned_anchor_transaction,
 };
 pub use log_instruction::{ANCHOR_EMIT_LOG_LEVEL, build_anchor_emit_log};
 pub use network::{map_ootle_network, supported_testnet_network_ids};

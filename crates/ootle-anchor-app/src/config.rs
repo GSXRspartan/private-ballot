@@ -30,8 +30,12 @@ use tari_cc_private_ballot_protocol::{
 /// Maximum encoded config file size (envelope + body).
 pub const MAX_CONFIG_FILE_BYTES: usize = 16_384;
 
-/// Stable record-type / version identifier for the config envelope.
+/// Stable record-type / version identifier for the legacy config envelope.
 pub const CONFIG_RECORD_TYPE_ID_V1: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V1";
+/// Stable record-type / version identifier for the provenance-bearing config envelope.
+pub const CONFIG_RECORD_TYPE_ID_V2: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V2";
+/// Stable record-type / version identifier for the live-approval-facts config envelope.
+pub const CONFIG_RECORD_TYPE_ID_V3: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V3";
 
 /// Hash-algorithm identifier written into the config envelope.
 pub const CONFIG_HASH_ALGORITHM_ID_V1: &str = BLAKE3_256_HASH_ALGORITHM_ID_V1;
@@ -44,8 +48,16 @@ pub const CONFIG_FRAME_PREFIX_V1: &[u8] =
 pub const CONFIG_DOMAIN_LABEL_V1: &str = "tari-cc-private-ballot/ootle-anchor-app-config/v1";
 
 const ENVELOPE_FIELD_COUNT: usize = 4;
-const BODY_FIELD_COUNT: usize = 16;
+const BODY_FIELD_COUNT_V1: usize = 16;
+const BODY_FIELD_COUNT_V2: usize = 17;
+const BODY_FIELD_COUNT_V3: usize = 18;
+const LIVE_APPROVAL_FACTS_FIELD_COUNT: usize = 9;
 const MAX_PATH_BYTES: usize = 4_096;
+pub const MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES: usize = 256;
+pub const FEE_COMPONENT_ASSURANCE_VERIFIED: &str = "VERIFIED";
+pub const SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED: &str = "ATTESTED";
+const INPUT_PROVENANCE_ARCHIVE_VERIFIED: &str = "ArchiveVerified";
+const INPUT_PROVENANCE_OFFLINE_TEST_RAW_HASHES: &str = "OfflineTestRawHashes";
 
 const SEAL_TAG_ACCOUNT_KEY: u64 = 0;
 const SEAL_TAG_TRANSACTION_KEY: u64 = 1;
@@ -150,6 +162,135 @@ fn from_adapter(error: NetworkAdapterConfigError) -> ConfigFileError {
     }
 }
 
+/// The source of the manifest/archive hash pair bound into a config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AnchorConfigInputProvenanceV1 {
+    /// The hashes were derived by the Rust verifier from an archive with
+    /// `verified=true` and `finalized=true`.
+    ArchiveVerified,
+    /// Test-only raw hashes supplied without archive verification.
+    OfflineTestRawHashes,
+}
+
+impl AnchorConfigInputProvenanceV1 {
+    /// Returns the canonical text value encoded in the config body.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ArchiveVerified => INPUT_PROVENANCE_ARCHIVE_VERIFIED,
+            Self::OfflineTestRawHashes => INPUT_PROVENANCE_OFFLINE_TEST_RAW_HASHES,
+        }
+    }
+
+    pub fn from_str(value: &str) -> Result<Self, ConfigFileError> {
+        match value {
+            INPUT_PROVENANCE_ARCHIVE_VERIFIED => Ok(Self::ArchiveVerified),
+            INPUT_PROVENANCE_OFFLINE_TEST_RAW_HASHES => Ok(Self::OfflineTestRawHashes),
+            _ => Err(ConfigFileError::InvalidData),
+        }
+    }
+}
+
+/// Immutable live-approval facts bound into a V3 live config.
+///
+/// These are the public organizer acknowledgements and verifier outputs that
+/// are not already first-class config fields. The exact fee component remains
+/// bound by [`NetworkAdapterConfig`]; this struct binds the assurance level for
+/// that mechanically checked fee component and the operator-attested seal key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorLiveApprovalFactsV1 {
+    finalized_archive: bool,
+    accepted_ballot_count: u64,
+    required_accepted_ballot_floor: u64,
+    reduced_anonymity: bool,
+    reduced_anonymity_acknowledged: bool,
+    declared_seal_public_key: String,
+    dedicated_organizer_wallet_attested: bool,
+}
+
+impl AnchorLiveApprovalFactsV1 {
+    /// Assembles validated live-approval facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigFileError::InvalidData`] if a required live approval
+    /// fact is missing, false, or internally inconsistent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        accepted_ballot_count: u64,
+        required_accepted_ballot_floor: u64,
+        reduced_anonymity: bool,
+        reduced_anonymity_acknowledged: bool,
+        declared_seal_public_key: String,
+        dedicated_organizer_wallet_attested: bool,
+        finalized_archive: bool,
+    ) -> Result<Self, ConfigFileError> {
+        if !finalized_archive
+            || required_accepted_ballot_floor == 0
+            || accepted_ballot_count < required_accepted_ballot_floor
+            || (reduced_anonymity && !reduced_anonymity_acknowledged)
+            || !dedicated_organizer_wallet_attested
+        {
+            return Err(ConfigFileError::InvalidData);
+        }
+        validate_declared_seal_public_key(&declared_seal_public_key)?;
+        Ok(Self {
+            finalized_archive,
+            accepted_ballot_count,
+            required_accepted_ballot_floor,
+            reduced_anonymity,
+            reduced_anonymity_acknowledged,
+            declared_seal_public_key,
+            dedicated_organizer_wallet_attested,
+        })
+    }
+
+    #[must_use]
+    pub const fn finalized_archive(&self) -> bool {
+        self.finalized_archive
+    }
+
+    #[must_use]
+    pub const fn accepted_ballot_count(&self) -> u64 {
+        self.accepted_ballot_count
+    }
+
+    #[must_use]
+    pub const fn required_accepted_ballot_floor(&self) -> u64 {
+        self.required_accepted_ballot_floor
+    }
+
+    #[must_use]
+    pub const fn reduced_anonymity(&self) -> bool {
+        self.reduced_anonymity
+    }
+
+    #[must_use]
+    pub const fn reduced_anonymity_acknowledged(&self) -> bool {
+        self.reduced_anonymity_acknowledged
+    }
+
+    #[must_use]
+    pub fn declared_seal_public_key(&self) -> &str {
+        &self.declared_seal_public_key
+    }
+
+    #[must_use]
+    pub const fn dedicated_organizer_wallet_attested(&self) -> bool {
+        self.dedicated_organizer_wallet_attested
+    }
+
+    #[must_use]
+    pub const fn fee_component_assurance(&self) -> &'static str {
+        FEE_COMPONENT_ASSURANCE_VERIFIED
+    }
+
+    #[must_use]
+    pub const fn seal_public_key_assurance(&self) -> &'static str {
+        SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED
+    }
+}
+
 /// Canonical application configuration.
 ///
 /// The canonical config file carries only public locator data and bounded
@@ -158,6 +299,7 @@ fn from_adapter(error: NetworkAdapterConfigError) -> ConfigFileError {
 /// [`AnchorAppConfig::with_walletd_auth`].
 #[derive(Debug, Clone)]
 pub struct AnchorAppConfig {
+    input_provenance: AnchorConfigInputProvenanceV1,
     network_adapter: NetworkAdapterConfig,
     account_reference: AnchorAccountReference,
     archive_manifest_hash: ManifestHash,
@@ -168,19 +310,107 @@ pub struct AnchorAppConfig {
     backoff_base_secs: u64,
     backoff_cap_secs: u64,
     ttl_secs: Option<u64>,
+    live_approval_facts: Option<AnchorLiveApprovalFactsV1>,
 }
 
 impl AnchorAppConfig {
-    /// Assembles a configuration from its already-validated parts.
-    ///
-    /// This is the programmatic constructor used by tests and tooling; the
-    /// binary loads the canonical file form via [`Self::from_canonical_file`].
-    /// The `network_adapter` must already have been constructed (which
-    /// validates the network, maximum fee, and receipt-query attempts and
-    /// delegates endpoint validation).
+    /// Assembles an archive-verified configuration from already-validated parts.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn new_archive_verified(
+        network_adapter: NetworkAdapterConfig,
+        account_reference: AnchorAccountReference,
+        archive_manifest_hash: ManifestHash,
+        archive_hash: ArchiveHashV1,
+        anchor_record_network: OotleNetworkIdV1,
+        snapshot_path: PathBuf,
+        evidence_path: PathBuf,
+        backoff_base_secs: u64,
+        backoff_cap_secs: u64,
+        ttl_secs: Option<u64>,
+    ) -> Self {
+        Self::new_with_input_provenance(
+            AnchorConfigInputProvenanceV1::ArchiveVerified,
+            network_adapter,
+            account_reference,
+            archive_manifest_hash,
+            archive_hash,
+            anchor_record_network,
+            snapshot_path,
+            evidence_path,
+            backoff_base_secs,
+            backoff_cap_secs,
+            ttl_secs,
+        )
+    }
+
+    /// Assembles an archive-verified live configuration with immutable
+    /// organizer approval facts.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_archive_verified_with_live_approval_facts(
+        network_adapter: NetworkAdapterConfig,
+        account_reference: AnchorAccountReference,
+        archive_manifest_hash: ManifestHash,
+        archive_hash: ArchiveHashV1,
+        anchor_record_network: OotleNetworkIdV1,
+        snapshot_path: PathBuf,
+        evidence_path: PathBuf,
+        backoff_base_secs: u64,
+        backoff_cap_secs: u64,
+        ttl_secs: Option<u64>,
+        live_approval_facts: AnchorLiveApprovalFactsV1,
+    ) -> Self {
+        let mut config = Self::new_archive_verified(
+            network_adapter,
+            account_reference,
+            archive_manifest_hash,
+            archive_hash,
+            anchor_record_network,
+            snapshot_path,
+            evidence_path,
+            backoff_base_secs,
+            backoff_cap_secs,
+            ttl_secs,
+        );
+        config.live_approval_facts = Some(live_approval_facts);
+        config
+    }
+
+    /// Assembles a test-only raw-hash configuration from already-validated parts.
+    #[must_use]
+    #[cfg(feature = "offline-test-raw-hashes")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_offline_test_raw_hashes(
+        network_adapter: NetworkAdapterConfig,
+        account_reference: AnchorAccountReference,
+        archive_manifest_hash: ManifestHash,
+        archive_hash: ArchiveHashV1,
+        anchor_record_network: OotleNetworkIdV1,
+        snapshot_path: PathBuf,
+        evidence_path: PathBuf,
+        backoff_base_secs: u64,
+        backoff_cap_secs: u64,
+        ttl_secs: Option<u64>,
+    ) -> Self {
+        Self::new_with_input_provenance(
+            AnchorConfigInputProvenanceV1::OfflineTestRawHashes,
+            network_adapter,
+            account_reference,
+            archive_manifest_hash,
+            archive_hash,
+            anchor_record_network,
+            snapshot_path,
+            evidence_path,
+            backoff_base_secs,
+            backoff_cap_secs,
+            ttl_secs,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_input_provenance(
+        input_provenance: AnchorConfigInputProvenanceV1,
         network_adapter: NetworkAdapterConfig,
         account_reference: AnchorAccountReference,
         archive_manifest_hash: ManifestHash,
@@ -193,6 +423,7 @@ impl AnchorAppConfig {
         ttl_secs: Option<u64>,
     ) -> Self {
         Self {
+            input_provenance,
             network_adapter,
             account_reference,
             archive_manifest_hash,
@@ -203,6 +434,7 @@ impl AnchorAppConfig {
             backoff_base_secs,
             backoff_cap_secs,
             ttl_secs,
+            live_approval_facts: None,
         }
     }
 
@@ -249,7 +481,12 @@ impl AnchorAppConfig {
         let body = encode_body(self)?;
         let framed = config_domain_input(&body);
         let digest = Blake3HashProviderV1.hash(&framed);
-        let envelope = encode_envelope(&body, &digest)?;
+        let record_type = if self.live_approval_facts.is_some() {
+            CONFIG_RECORD_TYPE_ID_V3
+        } else {
+            CONFIG_RECORD_TYPE_ID_V2
+        };
+        let envelope = encode_envelope(record_type, &body, &digest)?;
         if envelope.len() > MAX_CONFIG_FILE_BYTES {
             return Err(ConfigFileError::ProtocolLimitExceeded);
         }
@@ -315,6 +552,7 @@ impl AnchorAppConfig {
         )
         .map_err(from_adapter)?;
         Ok(Self {
+            input_provenance: self.input_provenance,
             network_adapter: adapter,
             account_reference: self.account_reference,
             archive_manifest_hash: self.archive_manifest_hash,
@@ -325,7 +563,14 @@ impl AnchorAppConfig {
             backoff_base_secs: self.backoff_base_secs,
             backoff_cap_secs: self.backoff_cap_secs,
             ttl_secs: self.ttl_secs,
+            live_approval_facts: self.live_approval_facts,
         })
+    }
+
+    /// Returns the input provenance bound into this config.
+    #[must_use]
+    pub const fn input_provenance(&self) -> AnchorConfigInputProvenanceV1 {
+        self.input_provenance
     }
 
     /// Returns the network adapter configuration.
@@ -387,15 +632,25 @@ impl AnchorAppConfig {
     pub fn ttl_secs(&self) -> Option<u64> {
         self.ttl_secs
     }
+
+    /// Returns immutable live-approval facts when this is a V3 live config.
+    #[must_use]
+    pub fn live_approval_facts(&self) -> Option<&AnchorLiveApprovalFactsV1> {
+        self.live_approval_facts.as_ref()
+    }
 }
 
-fn encode_envelope(body: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, ConfigFileError> {
+fn encode_envelope(
+    record_type: &str,
+    body: &[u8],
+    digest: &[u8; 32],
+) -> Result<Vec<u8>, ConfigFileError> {
     let mut writer = CanonicalCborWriter::new();
     writer
         .write_array_len(ENVELOPE_FIELD_COUNT)
         .map_err(from_protocol)?;
     writer
-        .write_text_string(CONFIG_RECORD_TYPE_ID_V1)
+        .write_text_string(record_type)
         .map_err(from_protocol)?;
     writer
         .write_text_string(CONFIG_HASH_ALGORITHM_ID_V1)
@@ -410,9 +665,13 @@ fn decode_envelope(bytes: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
     if reader.read_array_len().map_err(from_protocol)? != ENVELOPE_FIELD_COUNT {
         return Err(ConfigFileError::InvalidCbor);
     }
-    if reader.read_text_string().map_err(from_protocol)? != CONFIG_RECORD_TYPE_ID_V1 {
-        return Err(ConfigFileError::UnsupportedProtocolVersion);
-    }
+    let record_type = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let record_version = match record_type.as_str() {
+        CONFIG_RECORD_TYPE_ID_V1 => ConfigRecordVersion::V1,
+        CONFIG_RECORD_TYPE_ID_V2 => ConfigRecordVersion::V2,
+        CONFIG_RECORD_TYPE_ID_V3 => ConfigRecordVersion::V3,
+        _ => return Err(ConfigFileError::UnsupportedProtocolVersion),
+    };
     if reader.read_text_string().map_err(from_protocol)? != CONFIG_HASH_ALGORITHM_ID_V1 {
         return Err(ConfigFileError::UnsupportedHashAlgorithm);
     }
@@ -427,72 +686,107 @@ fn decode_envelope(bytes: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
     if recomputed != recorded_digest {
         return Err(ConfigFileError::DigestMismatch);
     }
-    decode_body(body)
+    decode_body(body, record_version)
 }
 
 fn encode_body(config: &AnchorAppConfig) -> Result<Vec<u8>, ConfigFileError> {
     let adapter = config.network_adapter();
     let mut writer = CanonicalCborWriter::new();
-    writer
-        .write_array_len(BODY_FIELD_COUNT)
-        .map_err(from_protocol)?;
+    let field_count = if config.live_approval_facts().is_some() {
+        BODY_FIELD_COUNT_V3
+    } else {
+        BODY_FIELD_COUNT_V2
+    };
+    writer.write_array_len(field_count).map_err(from_protocol)?;
 
-    // 1. network
+    // 1. input provenance
+    writer
+        .write_text_string(config.input_provenance().as_str())
+        .map_err(from_protocol)?;
+    // 2. network
     writer
         .write_text_string(config.anchor_record_network().as_str())
         .map_err(from_protocol)?;
-    // 2. walletd endpoint
+    // 3. walletd endpoint
     writer
         .write_text_string(adapter.walletd_endpoint().as_str())
         .map_err(from_protocol)?;
-    // 3. indexer endpoint
+    // 4. indexer endpoint
     writer
         .write_text_string(adapter.indexer_endpoint().as_str())
         .map_err(from_protocol)?;
-    // 4. fee account reference
+    // 5. fee account reference
     writer
         .write_text_string(config.account_reference().as_str())
         .map_err(from_protocol)?;
-    // 5. fee component address
+    // 6. fee component address
     writer
         .write_text_string(&adapter.fee_component().display_string())
         .map_err(from_protocol)?;
-    // 6. seal signer
+    // 7. seal signer
     encode_seal_signer(&mut writer, adapter.seal_signer())?;
-    // 7. max fee
+    // 8. max fee
     writer.write_unsigned(adapter.max_fee().value());
-    // 8. request timeout (optional u64)
+    // 9. request timeout (optional u64)
     encode_option_u64(&mut writer, adapter.request_timeout_secs())?;
-    // 9. receipt-query attempts
+    // 10. receipt-query attempts
     writer.write_unsigned(u64::from(adapter.receipt_query_max_attempts()));
-    // 10. manifest hash
+    // 11. manifest hash
     writer
         .write_byte_string(config.archive_manifest_hash().as_bytes())
         .map_err(from_protocol)?;
-    // 11. archive hash
+    // 12. archive hash
     writer
         .write_byte_string(config.archive_hash().as_bytes())
         .map_err(from_protocol)?;
-    // 12. snapshot path
+    // 13. snapshot path
     write_path_text(&mut writer, config.snapshot_path())?;
-    // 13. evidence path
+    // 14. evidence path
     write_path_text(&mut writer, config.evidence_path())?;
-    // 14. backoff base
+    // 15. backoff base
     writer.write_unsigned(config.backoff_base_secs());
-    // 15. backoff cap
+    // 16. backoff cap
     writer.write_unsigned(config.backoff_cap_secs());
-    // 16. ttl (optional u64)
+    // 17. ttl (optional u64)
     encode_option_u64(&mut writer, config.ttl_secs())?;
+    // 18. immutable live approval facts (V3 only)
+    if let Some(facts) = config.live_approval_facts() {
+        encode_live_approval_facts(&mut writer, facts)?;
+    }
 
     Ok(writer.into_bytes())
 }
 
-fn decode_body(body: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigRecordVersion {
+    V1,
+    V2,
+    V3,
+}
+
+fn decode_body(
+    body: &[u8],
+    record_version: ConfigRecordVersion,
+) -> Result<AnchorAppConfig, ConfigFileError> {
     let mut reader = CanonicalCborReader::new(body);
-    if reader.read_array_len().map_err(from_protocol)? != BODY_FIELD_COUNT {
+    let field_count = reader.read_array_len().map_err(from_protocol)?;
+    let expected_count = match record_version {
+        ConfigRecordVersion::V1 => BODY_FIELD_COUNT_V1,
+        ConfigRecordVersion::V2 => BODY_FIELD_COUNT_V2,
+        ConfigRecordVersion::V3 => BODY_FIELD_COUNT_V3,
+    };
+    if field_count != expected_count {
         return Err(ConfigFileError::InvalidCbor);
     }
 
+    let input_provenance = match record_version {
+        ConfigRecordVersion::V1 => AnchorConfigInputProvenanceV1::OfflineTestRawHashes,
+        ConfigRecordVersion::V2 | ConfigRecordVersion::V3 => {
+            AnchorConfigInputProvenanceV1::from_str(
+                reader.read_text_string().map_err(from_protocol)?,
+            )?
+        }
+    };
     let network =
         OotleNetworkIdV1::new(reader.read_text_string().map_err(from_protocol)?.to_owned())
             .map_err(|_| ConfigFileError::InvalidData)?;
@@ -519,6 +813,10 @@ fn decode_body(body: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
     let backoff_base_secs = reader.read_unsigned().map_err(from_protocol)?;
     let backoff_cap_secs = reader.read_unsigned().map_err(from_protocol)?;
     let ttl_secs = decode_option_u64(&mut reader)?;
+    let live_approval_facts = match record_version {
+        ConfigRecordVersion::V1 | ConfigRecordVersion::V2 => None,
+        ConfigRecordVersion::V3 => Some(decode_live_approval_facts(&mut reader)?),
+    };
 
     reader.finish().map_err(from_protocol)?;
 
@@ -552,6 +850,7 @@ fn decode_body(body: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
     }
 
     Ok(AnchorAppConfig {
+        input_provenance,
         network_adapter,
         account_reference,
         archive_manifest_hash: manifest_hash,
@@ -562,7 +861,63 @@ fn decode_body(body: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
         backoff_base_secs,
         backoff_cap_secs,
         ttl_secs,
+        live_approval_facts,
     })
+}
+
+fn encode_live_approval_facts(
+    writer: &mut CanonicalCborWriter,
+    facts: &AnchorLiveApprovalFactsV1,
+) -> Result<(), ConfigFileError> {
+    writer
+        .write_array_len(LIVE_APPROVAL_FACTS_FIELD_COUNT)
+        .map_err(from_protocol)?;
+    writer.write_bool(facts.finalized_archive());
+    writer.write_unsigned(facts.accepted_ballot_count());
+    writer.write_unsigned(facts.required_accepted_ballot_floor());
+    writer.write_bool(facts.reduced_anonymity());
+    writer.write_bool(facts.reduced_anonymity_acknowledged());
+    writer
+        .write_text_string(facts.fee_component_assurance())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.declared_seal_public_key())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(facts.seal_public_key_assurance())
+        .map_err(from_protocol)?;
+    writer.write_bool(facts.dedicated_organizer_wallet_attested());
+    Ok(())
+}
+
+fn decode_live_approval_facts(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<AnchorLiveApprovalFactsV1, ConfigFileError> {
+    if reader.read_array_len().map_err(from_protocol)? != LIVE_APPROVAL_FACTS_FIELD_COUNT {
+        return Err(ConfigFileError::InvalidCbor);
+    }
+    let finalized_archive = reader.read_bool().map_err(from_protocol)?;
+    let accepted_ballot_count = reader.read_unsigned().map_err(from_protocol)?;
+    let required_accepted_ballot_floor = reader.read_unsigned().map_err(from_protocol)?;
+    let reduced_anonymity = reader.read_bool().map_err(from_protocol)?;
+    let reduced_anonymity_acknowledged = reader.read_bool().map_err(from_protocol)?;
+    if reader.read_text_string().map_err(from_protocol)? != FEE_COMPONENT_ASSURANCE_VERIFIED {
+        return Err(ConfigFileError::InvalidData);
+    }
+    let declared_seal_public_key = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    if reader.read_text_string().map_err(from_protocol)? != SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED {
+        return Err(ConfigFileError::InvalidData);
+    }
+    let dedicated_organizer_wallet_attested = reader.read_bool().map_err(from_protocol)?;
+    AnchorLiveApprovalFactsV1::new(
+        accepted_ballot_count,
+        required_accepted_ballot_floor,
+        reduced_anonymity,
+        reduced_anonymity_acknowledged,
+        declared_seal_public_key,
+        dedicated_organizer_wallet_attested,
+        finalized_archive,
+    )
 }
 
 fn encode_seal_signer(
@@ -650,6 +1005,16 @@ fn validate_path(path: &Path) -> Result<(), ConfigFileError> {
         }
     } else {
         return Err(ConfigFileError::InvalidPath);
+    }
+    Ok(())
+}
+
+fn validate_declared_seal_public_key(value: &str) -> Result<(), ConfigFileError> {
+    if value.is_empty()
+        || value.len() > MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES
+        || value.bytes().any(|byte| byte.is_ascii_whitespace())
+    {
+        return Err(ConfigFileError::InvalidData);
     }
     Ok(())
 }

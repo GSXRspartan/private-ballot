@@ -28,16 +28,17 @@ use tari_cc_private_ballot_crypto::{
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    AnchorAppConfig, AnchorAppDriver, AnchorEvidenceRecordV1, ArchiveProofInputs,
-    DriverRunOutcome, OperatorDecision, TerminalEvidenceInputs, write_evidence_atomic,
+    AnchorAppConfig, AnchorAppDriver, AnchorEvidenceRecordV1, AnchorLiveApprovalFactsV1,
+    ArchiveProofInputs, DriverRunOutcome, OperatorDecision, TerminalEvidenceInputs,
+    VerifiedRuntimeArchiveFactsV1, write_evidence_atomic,
 };
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{
     AnchorLifecycleRecoverySnapshot, PollingPolicy, UnifiedAnchorLifecyclePhase,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerEndpoint, IndexerReceiptNetworkAdapter, NetworkAdapterConfig,
-    ScriptedIndexerResponse, ScriptedIndexerTransport, ScriptedWalletdResponse,
-    ScriptedWalletdTransport, WalletdAnchorNetworkAdapter, WalletdEndpoint,
+    IndexerEndpoint, IndexerReceiptNetworkAdapter, NetworkAdapterConfig, ScriptedIndexerResponse,
+    ScriptedIndexerTransport, ScriptedWalletdResponse, ScriptedWalletdTransport,
+    WalletdAnchorNetworkAdapter, WalletdEndpoint,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptQuerySnapshotV1, AnchorReceiptQueryStateV1, AnchorReceiptQueryV1,
@@ -562,7 +563,7 @@ pub fn write_anchor_config(dir: &Path) -> PathBuf {
         Ok(account) => account,
         Err(_) => panic!("fixture account must be valid"),
     };
-    let config = AnchorAppConfig::new(
+    let config = AnchorAppConfig::new_archive_verified(
         network_adapter_config(),
         account,
         anchor_manifest_hash(),
@@ -611,13 +612,24 @@ pub fn write_accepted_anchor_evidence_for(
     dir: &Path,
     manifest_hash: ManifestHash,
     archive_hash: ArchiveHashV1,
+    accepted_ballot_count: u64,
 ) -> PathBuf {
     let anchor_digest = OotleAnchorRecordV1::new(anchor_network(), manifest_hash, archive_hash)
         .canonical_hash(&Blake3HashProviderV1)
         .unwrap_or_else(|_| panic!("anchor digest must derive"));
     let account = AnchorAccountReference::new("fee-account".to_owned())
         .unwrap_or_else(|_| panic!("anchor account must construct"));
-    let config = AnchorAppConfig::new(
+    let live_approval_facts = AnchorLiveApprovalFactsV1::new(
+        accepted_ballot_count,
+        accepted_ballot_count,
+        false,
+        false,
+        "seal-public-key-attested".to_owned(),
+        true,
+        true,
+    )
+    .unwrap_or_else(|_| panic!("live approval facts must construct"));
+    let config = AnchorAppConfig::new_archive_verified_with_live_approval_facts(
         network_adapter_config(),
         account,
         manifest_hash,
@@ -628,10 +640,16 @@ pub fn write_accepted_anchor_evidence_for(
         1,
         1,
         None,
+        live_approval_facts,
     );
+    let runtime = VerifiedRuntimeArchiveFactsV1::matching_config_for_test(&config)
+        .unwrap_or_else(|_| panic!("runtime archive facts must construct"));
     let transaction_id = anchor_transaction_id();
     let mut walletd = ScriptedWalletdTransport::new();
-    walletd.set_create_response(ScriptedWalletdResponse::Create { request_id: 1, expires_at: 0 });
+    walletd.set_create_response(ScriptedWalletdResponse::Create {
+        request_id: 1,
+        expires_at: 0,
+    });
     walletd.set_approve_response(ScriptedWalletdResponse::Approve {
         request_id: 1,
         status: WalletdEffectiveStatusV1::Approved,
@@ -645,18 +663,19 @@ pub fn write_accepted_anchor_evidence_for(
         status: WalletdEffectiveStatusV1::Submitted,
         transaction_id: Some(transaction_id.clone()),
     });
-    walletd.set_submit_response(ScriptedWalletdResponse::Submit { transaction_id: transaction_id.clone() });
+    walletd.set_submit_response(ScriptedWalletdResponse::Submit {
+        transaction_id: transaction_id.clone(),
+    });
     let payload = AnchorLogPayloadV1::from_digest(anchor_digest);
     let mut indexer = ScriptedIndexerTransport::new();
-    indexer.set_response(ScriptedIndexerResponse::Finalized(receipt_scenarios::accepted_receipt(
-        &transaction_id,
-        &anchor_network(),
-        &payload,
-    )));
+    indexer.set_response(ScriptedIndexerResponse::Finalized(
+        receipt_scenarios::accepted_receipt(&transaction_id, &anchor_network(), &payload),
+    ));
     let walletd_adapter = WalletdAnchorNetworkAdapter::new(walletd, anchor_network());
     let indexer_adapter = IndexerReceiptNetworkAdapter::new(indexer);
     let mut driver = AnchorAppDriver::new(config, walletd_adapter, indexer_adapter)
-        .unwrap_or_else(|_| panic!("anchor driver must construct"));
+        .unwrap_or_else(|_| panic!("anchor driver must construct"))
+        .with_runtime_archive_for_test(runtime);
     let evidence = match driver.run(OperatorDecision::Approve) {
         Ok(DriverRunOutcome::FinalizedAccept(evidence)) => evidence,
         _ => panic!("scripted accepted anchor must finalize"),

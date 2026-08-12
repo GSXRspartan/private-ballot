@@ -5,12 +5,13 @@
 //! `expect`/`unwrap` for concise assertions.
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
+#![cfg(feature = "offline-test-raw-hashes")]
 
 mod common;
 
 use common::*;
 
-use tari_cc_private_ballot_ootle_anchor_app::cli::{parse, CliMode, WriteConfigArgs};
+use tari_cc_private_ballot_ootle_anchor_app::cli::{CliMode, WriteConfigArgs, parse};
 use tari_cc_private_ballot_ootle_anchor_app::write_config;
 
 const CONFIG_WRITE_FAILED: &str = "ANCHOR_APP_CONFIG_WRITE_FAILED";

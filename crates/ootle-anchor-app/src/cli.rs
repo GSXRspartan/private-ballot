@@ -50,6 +50,8 @@ pub struct LifecycleArgs {
     pub config_path: Option<String>,
     /// `--auth-env <name>` value, if supplied.
     pub auth_env: Option<String>,
+    /// `--archive <finalized-archive-dir>` value, required for live lifecycle runs.
+    pub archive_path: Option<String>,
     /// Whether `--approve` was supplied.
     pub approve: bool,
     /// Whether `--reject` was supplied.
@@ -107,6 +109,7 @@ pub struct WriteConfigArgs {
 }
 
 /// Value flags accepted in `--write-config` mode.
+#[cfg(feature = "offline-test-raw-hashes")]
 const WRITE_CONFIG_VALUE_FLAGS: &[&str] = &[
     "--output",
     "--network",
@@ -130,6 +133,7 @@ const WRITE_CONFIG_VALUE_FLAGS: &[&str] = &[
 
 /// Required value flags in `--write-config` mode (must each appear exactly
 /// once).
+#[cfg(feature = "offline-test-raw-hashes")]
 const WRITE_CONFIG_REQUIRED_FLAGS: &[&str] = &[
     "--output",
     "--network",
@@ -153,7 +157,7 @@ const MODE_WRITE_CONFIG: &str = "--write-config";
 const MODE_VERIFY_EVIDENCE: &str = "--verify-evidence";
 const MODE_INSPECT_SNAPSHOT: &str = "--inspect-snapshot";
 
-const LIFECYCLE_VALUE_FLAGS: &[&str] = &["--config", "--auth-env"];
+const LIFECYCLE_VALUE_FLAGS: &[&str] = &["--config", "--auth-env", "--archive"];
 const LIFECYCLE_BARE_FLAGS: &[&str] = &["--approve", "--reject", "--dry-run"];
 
 /// Parses the CLI argument set into a [`CliMode`].
@@ -187,6 +191,11 @@ pub fn parse(args: &[String]) -> Result<CliMode, String> {
     }
 
     if write_config_count == 1 {
+        #[cfg(not(feature = "offline-test-raw-hashes"))]
+        {
+            return Err(CONFIG_FAILURE.to_owned());
+        }
+        #[cfg(feature = "offline-test-raw-hashes")]
         return parse_write_config(args);
     }
     if verify_evidence_count == 1 {
@@ -271,6 +280,7 @@ fn parse_lifecycle(args: &[String]) -> Result<CliMode, String> {
 
     let config_path = find_flag_value(args, "--config");
     let auth_env = find_flag_value(args, "--auth-env");
+    let archive_path = find_flag_value(args, "--archive");
     let approve = args.iter().any(|a| a == "--approve");
     let reject = args.iter().any(|a| a == "--reject");
     let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -278,12 +288,14 @@ fn parse_lifecycle(args: &[String]) -> Result<CliMode, String> {
     Ok(CliMode::Lifecycle(LifecycleArgs {
         config_path,
         auth_env,
+        archive_path,
         approve,
         reject,
         dry_run,
     }))
 }
 
+#[cfg(feature = "offline-test-raw-hashes")]
 fn parse_write_config(args: &[String]) -> Result<CliMode, String> {
     let mut values: Vec<(usize, String)> = Vec::new(); // (flag_index, value)
     let mut force = false;
@@ -402,6 +414,7 @@ mod tests {
         assert!(matches!(mode, CliMode::Lifecycle(_)));
     }
 
+    #[cfg(feature = "offline-test-raw-hashes")]
     #[test]
     fn write_config_mode_detected() {
         let mut args = vec![prog(), "--write-config".to_owned()];

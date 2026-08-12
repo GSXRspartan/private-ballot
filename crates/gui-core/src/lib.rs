@@ -42,6 +42,7 @@ pub mod governance;
 mod hex;
 pub mod inspect;
 pub mod intake;
+pub mod live_anchor_config;
 pub mod participation;
 pub mod session;
 pub mod summary;
@@ -53,12 +54,13 @@ pub mod voter_credential;
 pub mod voter_session;
 
 pub use archive_verify::{
-    GuiArchiveFileCheckV1, GuiArchiveVerificationV1, verify_archive_directory_v1,
-    STAGE_TRANSPORT_BINDING,
+    GuiArchiveFileCheckV1, GuiArchiveVerificationV1, STAGE_TRANSPORT_BINDING,
+    verify_archive_directory_v1,
 };
 pub use archive_writer::{
     GuiArchiveFileSummaryV1, GuiArchiveWriteResultV1, write_archive_directory_v1,
-    write_archive_directory_v1_with_transport_binding,
+    write_archive_directory_v1_with_transport_binding, write_finalized_archive_v1,
+    write_finalized_archive_v1_with_transport_binding,
 };
 pub use artifacts::GuiElectionArtifactsV1;
 pub use creation::{
@@ -80,6 +82,10 @@ pub use inspect::{
     inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
 };
 pub use intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
+pub use live_anchor_config::{
+    GuiLiveAnchorConfigRequestV1, GuiLiveAnchorConfigResultV1,
+    write_live_anchor_config_from_verified_archive_v1,
+};
 pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
     ResultVisibility, SMALL_ELECTORATE_THRESHOLD,
@@ -90,14 +96,11 @@ pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 pub use transport::{
     BatchPolicyV1, DescriptorConsistencyStoreV1, EnvelopeOpeningMaterialV1, PaddingPolicyV1,
-    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootSetV1,
-    TransportAuthorityRootV1, TransportDescriptorV1,
-    TransportError, TransportRoutePolicyV1, VoterReceiptStateV1, VoterTransportReceiptV1,
-    production_transport_authority_root_v1,
+    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
+    TransportDescriptorV1, TransportError, TransportRoutePolicyV1, VoterReceiptStateV1,
+    VoterTransportReceiptV1, production_transport_authority_root_v1,
 };
-pub use transport_anchor::{
-    GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1,
-};
+pub use transport_anchor::{GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1};
 pub use voter_confirmation::{
     GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,
     VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,

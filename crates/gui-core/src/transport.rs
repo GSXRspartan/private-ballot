@@ -111,10 +111,17 @@ pub struct TransportAuthorityRootSetV1 {
 impl TransportAuthorityRootSetV1 {
     #[must_use]
     pub fn new(current: TransportAuthorityRootV1) -> Self {
-        Self { current, historical: BTreeMap::new(), revoked: BTreeSet::new() }
+        Self {
+            current,
+            historical: BTreeMap::new(),
+            revoked: BTreeSet::new(),
+        }
     }
 
-    pub fn add_historical_root(&mut self, root: TransportAuthorityRootV1) -> Result<(), TransportError> {
+    pub fn add_historical_root(
+        &mut self,
+        root: TransportAuthorityRootV1,
+    ) -> Result<(), TransportError> {
         if root.key_id() == self.current.key_id() || self.historical.contains_key(root.key_id()) {
             return Err(TransportError::InvalidDescriptor);
         }
@@ -143,7 +150,9 @@ impl TransportAuthorityRootSetV1 {
         let root = if root_id == self.current.key_id() {
             &self.current
         } else {
-            self.historical.get(root_id).ok_or(TransportError::UntrustedRoot)?
+            self.historical
+                .get(root_id)
+                .ok_or(TransportError::UntrustedRoot)?
         };
         descriptor.verify(root, expected_manifest)
     }
@@ -166,7 +175,9 @@ impl TransportAuthorityRootSetV1 {
         let root = if root_id == self.current.key_id() {
             &self.current
         } else {
-            self.historical.get(root_id).ok_or(TransportError::UntrustedRoot)?
+            self.historical
+                .get(root_id)
+                .ok_or(TransportError::UntrustedRoot)?
         };
         descriptor.verify(root, expected_manifest)?;
         consistency.accept(descriptor, root, expected_manifest)
@@ -756,8 +767,6 @@ pub enum VoterReceiptStateV1 {
     Received,
     Accepted,
     Rejected,
-    Included,
-    Anchored,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum RetryStatusV1 {
@@ -884,6 +893,21 @@ mod tests {
         )
         .expect("test descriptor signs");
         (descriptor, private)
+    }
+
+    #[test]
+    fn voter_receipt_states_are_transport_only() {
+        fn state_name(state: VoterReceiptStateV1) -> &'static str {
+            match state {
+                VoterReceiptStateV1::Received => "RECEIVED",
+                VoterReceiptStateV1::Accepted => "ACCEPTED",
+                VoterReceiptStateV1::Rejected => "REJECTED",
+            }
+        }
+
+        assert_eq!(state_name(VoterReceiptStateV1::Received), "RECEIVED");
+        assert_eq!(state_name(VoterReceiptStateV1::Accepted), "ACCEPTED");
+        assert_eq!(state_name(VoterReceiptStateV1::Rejected), "REJECTED");
     }
 
     #[test]

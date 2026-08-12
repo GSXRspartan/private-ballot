@@ -44,6 +44,8 @@ pub enum WalletdAnchorAdapterError {
     FeeMismatch,
     /// The bound unsigned-transaction fingerprint did not match the stored one.
     FingerprintMismatch,
+    /// Recovery could not observe the frozen transaction fingerprint.
+    MissingObservedFingerprint,
     /// The bound project and walletd request identifiers did not correspond.
     RequestIdMismatch,
     /// The unsigned transaction failed the re-run Slice 4A5 safety inspection.
@@ -104,6 +106,7 @@ impl WalletdAnchorAdapterError {
             Self::PayloadMismatch => "WALLETD_PAYLOAD_MISMATCH",
             Self::FeeMismatch => "WALLETD_FEE_MISMATCH",
             Self::FingerprintMismatch => "WALLETD_FINGERPRINT_MISMATCH",
+            Self::MissingObservedFingerprint => "WALLETD_MISSING_OBSERVED_FINGERPRINT",
             Self::RequestIdMismatch => "WALLETD_REQUEST_ID_MISMATCH",
             Self::UnsafeUnsignedTransaction(_) => "WALLETD_UNSAFE_UNSIGNED_TRANSACTION",
             Self::UnsupportedWalletdApi { .. } => "WALLETD_UNSUPPORTED_API",

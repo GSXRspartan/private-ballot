@@ -169,6 +169,127 @@ impl GuiCoreError {
         )
     }
 
+    /// A finalized archive was requested before the election reached FINALIZED.
+    #[must_use]
+    pub const fn archive_not_finalized() -> Self {
+        Self::new(
+            "GUI_ARCHIVE_NOT_FINALIZED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("archive-finality"),
+            "a finalized archive can only be written from a FINALIZED election",
+        )
+    }
+
+    /// A live anchor config was requested from an archive that did not verify.
+    #[must_use]
+    pub const fn live_anchor_archive_not_verified() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_ARCHIVE_NOT_VERIFIED",
+            GuiErrorCategory::ArchiveIntegrity,
+            Some("live-anchor-config"),
+            "live anchor config generation requires a verified archive",
+        )
+    }
+
+    /// A live anchor config was requested from a non-finalized archive.
+    #[must_use]
+    pub const fn live_anchor_archive_not_finalized() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_ARCHIVE_NOT_FINALIZED",
+            GuiErrorCategory::ArchiveIntegrity,
+            Some("live-anchor-config"),
+            "live anchor config generation requires a finalized archive",
+        )
+    }
+
+    /// A live anchor config was requested without an explicit accepted-ballot floor.
+    #[must_use]
+    pub const fn live_anchor_floor_required() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_ACCEPTED_FLOOR_REQUIRED",
+            GuiErrorCategory::InvalidInput,
+            Some("accepted-ballot-floor"),
+            "live anchor config generation requires an explicit accepted-ballot floor",
+        )
+    }
+
+    /// The verified archive did not meet the requested accepted-ballot floor.
+    #[must_use]
+    pub const fn live_anchor_accepted_floor_not_met() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_ACCEPTED_FLOOR_NOT_MET",
+            GuiErrorCategory::InvalidInput,
+            Some("accepted-ballot-floor"),
+            "the verified archive accepted-ballot count is below the requested floor",
+        )
+    }
+
+    /// A live anchor config requires a verified final transport binding.
+    #[must_use]
+    pub const fn live_anchor_transport_binding_required() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_TRANSPORT_BINDING_REQUIRED",
+            GuiErrorCategory::BindingMismatch,
+            Some("transport-binding"),
+            "live anchor config generation requires a verified final transport binding",
+        )
+    }
+
+    /// The archive replay accepted count does not match the transport binding.
+    #[must_use]
+    pub const fn live_anchor_transport_count_mismatch() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_TRANSPORT_COUNT_MISMATCH",
+            GuiErrorCategory::BindingMismatch,
+            Some("transport-binding"),
+            "the archive replay accepted count does not match the transport binding",
+        )
+    }
+
+    /// The verified final transport binding reports reduced anonymity without acknowledgement.
+    #[must_use]
+    pub const fn live_anchor_reduced_anonymity_ack_required() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_REDUCED_ANONYMITY_ACK_REQUIRED",
+            GuiErrorCategory::InvalidInput,
+            Some("reduced-anonymity"),
+            "reduced anonymity must be explicitly acknowledged before live config generation",
+        )
+    }
+
+    /// The operator did not attest that a dedicated organizer wallet is used.
+    #[must_use]
+    pub const fn live_anchor_dedicated_wallet_required() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_DEDICATED_WALLET_REQUIRED",
+            GuiErrorCategory::InvalidInput,
+            Some("organizer-wallet"),
+            "live anchor config generation requires dedicated organizer wallet attestation",
+        )
+    }
+
+    /// A public operator config field was invalid.
+    #[must_use]
+    pub const fn live_anchor_operator_config_invalid() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_OPERATOR_CONFIG_INVALID",
+            GuiErrorCategory::InvalidInput,
+            Some("live-anchor-config"),
+            "a public live anchor operator configuration value is invalid",
+        )
+    }
+
+    /// The live anchor config output path exists and force was not supplied.
+    #[must_use]
+    pub const fn live_anchor_config_output_exists() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_CONFIG_OUTPUT_EXISTS",
+            GuiErrorCategory::FileIo,
+            Some("live-anchor-config"),
+            "the live anchor config output file already exists",
+        )
+    }
+
     /// An archive content file listed in the catalog is missing on disk.
     #[must_use]
     pub const fn archive_missing_file() -> Self {

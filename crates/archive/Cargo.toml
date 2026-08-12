@@ -7,6 +7,11 @@ publish = false
 
 [dependencies]
 tari-cc-private-ballot-protocol = { path = "../protocol" }
+tari-cc-private-ballot-ballot = { path = "../ballot" }
+tari-cc-private-ballot-crypto = { path = "../crypto" }
+tari-cc-private-ballot-registry = { path = "../registry" }
+tari-cc-private-ballot-tally = { path = "../tally" }
+tari-cc-private-ballot-verifier = { path = "../verifier" }
 
 [lints]
 workspace = true
