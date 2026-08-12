@@ -3160,7 +3160,12 @@ dependencies = [
 name = "tari-cc-private-ballot-archive"
 version = "0.1.0"
 dependencies = [
+ "tari-cc-private-ballot-ballot",
+ "tari-cc-private-ballot-crypto",
  "tari-cc-private-ballot-protocol",
+ "tari-cc-private-ballot-registry",
+ "tari-cc-private-ballot-tally",
+ "tari-cc-private-ballot-verifier",
 ]
 
 [[package]]
