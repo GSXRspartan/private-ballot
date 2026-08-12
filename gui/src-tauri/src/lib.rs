@@ -84,6 +84,14 @@ impl CommandError {
         )
     }
 
+    fn pending_credential_exists() -> Self {
+        Self::new(
+            "GUI_PENDING_CREDENTIAL_EXISTS",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "a local pilot credential already exists; clear it before generating a new one",
+        )
+    }
+
     fn state_poisoned() -> Self {
         Self::new(
             "GUI_STATE_UNAVAILABLE",
@@ -243,6 +251,93 @@ impl AppState {
             Some(draft) => f(draft),
             None => Err(CommandError::no_draft()),
         }
+    }
+
+    fn get_or_create_draft_preview(&self) -> Result<GuiElectionDraftPreviewV1, CommandError> {
+        let mut guard = self
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let draft = guard.get_or_insert_with(GuiElectionDraftV1::new);
+        Ok(draft.preview())
+    }
+
+    fn start_new_draft(&self) -> Result<(), CommandError> {
+        let mut guard = self
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(GuiElectionDraftV1::new());
+        Ok(())
+    }
+
+    fn voter_credential_status(&self) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(voter) = guard.as_ref() {
+            return Ok(voter.credential_status());
+        }
+        drop(guard);
+        let pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        pending
+            .as_ref()
+            .map(VoterGovernanceCredentialV1::pending_status)
+            .transpose()?
+            .map_or_else(|| Ok(GuiVoterCredentialStatusV1::unloaded()), Ok)
+    }
+
+    fn generate_pending_credential(&self) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let mut pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if pending.is_some() {
+            return Err(CommandError::pending_credential_exists());
+        }
+        let credential = VoterGovernanceCredentialV1::generate()?;
+        let status = credential.pending_status()?;
+        *pending = Some(credential);
+        Ok(status)
+    }
+
+    fn reset_pending_credential(&self) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let mut pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *pending = None;
+        Ok(GuiVoterCredentialStatusV1::unloaded())
+    }
+
+    /// Moves a Rust-owned pre-freeze credential, if present, into a voter
+    /// session bound to this exact frozen election. gui-core recomputes
+    /// eligibility from the canonical registry during installation.
+    fn install_frozen_session(&self, session: GuiElectionSessionV1) -> Result<(), CommandError> {
+        let mut voter = GuiVoterSessionV1::new(session.artifacts());
+        let pending_credential = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?
+            .take();
+        if let Some(credential) = pending_credential {
+            voter.install_credential(credential, session.artifacts())?;
+        }
+        let mut session_guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *session_guard = Some(session);
+        let mut voter_guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *voter_guard = Some(voter);
+        Ok(())
     }
 }
 
@@ -502,17 +597,21 @@ fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1
 // separate deliberate action.
 // ---------------------------------------------------------------------------
 
+/// Returns the existing organizer draft preview, creating an empty draft only
+/// when none exists. This is the non-destructive Create Election entry point.
+#[tauri::command]
+fn get_or_create_election_draft(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionDraftPreviewV1, CommandError> {
+    state.get_or_create_draft_preview()
+}
+
 /// Starts a fresh organizer election draft, clearing any existing draft. A
 /// previously loaded frozen session is left intact so the organizer can review
 /// it; calling this discards only the in-progress draft.
 #[tauri::command]
 fn start_election_draft(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
-    let mut guard = state
-        .draft
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *guard = Some(GuiElectionDraftV1::new());
-    Ok(())
+    state.start_new_draft()
 }
 
 /// Discards the in-progress draft. Does not unload a frozen session.
@@ -625,25 +724,7 @@ fn freeze_election(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionCreationResultV1, CommandError> {
     let (result, session) = state.with_draft_mut(|draft| Ok(draft.freeze()?))?;
-    let mut voter = GuiVoterSessionV1::new(session.artifacts());
-    let pending_credential = state
-        .pending_voter_credential
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?
-        .take();
-    if let Some(credential) = pending_credential {
-        voter.install_credential(credential, session.artifacts())?;
-    }
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *guard = Some(session);
-    let mut voter_guard = state
-        .voter
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *voter_guard = Some(voter);
+    state.install_frozen_session(session)?;
     Ok(result)
 }
 
@@ -780,23 +861,7 @@ fn voter_confirmation(
 fn voter_governance_credential_status(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let guard = state
-        .voter
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    if let Some(voter) = guard.as_ref() {
-        return Ok(voter.credential_status());
-    }
-    drop(guard);
-    let pending = state
-        .pending_voter_credential
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    pending
-        .as_ref()
-        .map(VoterGovernanceCredentialV1::pending_status)
-        .transpose()?
-        .ok_or_else(|| CommandError::no_voter_session())
+    state.voter_credential_status()
 }
 
 /// Generates one session-only voter governance credential in Rust, derives
@@ -818,14 +883,7 @@ fn generate_voter_governance_credential(
         return Ok(voter.generate_credential(session.artifacts())?);
     }
     drop(session_guard);
-    let credential = VoterGovernanceCredentialV1::generate()?;
-    let status = credential.pending_status()?;
-    let mut pending = state
-        .pending_voter_credential
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *pending = Some(credential);
-    Ok(status)
+    state.generate_pending_credential()
 }
 
 /// Generates a Rust-owned local credential before an election is frozen. This
@@ -835,14 +893,7 @@ fn generate_voter_governance_credential(
 fn generate_pending_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let credential = VoterGovernanceCredentialV1::generate()?;
-    let status = credential.pending_status()?;
-    let mut pending = state
-        .pending_voter_credential
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *pending = Some(credential);
-    Ok(status)
+    state.generate_pending_credential()
 }
 
 /// Explicitly clears the Rust-side voter governance credential.
@@ -871,12 +922,7 @@ fn reset_voter_governance_credential(
 fn reset_pending_voter_governance_credential(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let mut pending = state
-        .pending_voter_credential
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *pending = None;
-    Ok(GuiVoterCredentialStatusV1::unloaded())
+    state.reset_pending_credential()
 }
 
 /// Returns the complete safe voter workflow status. The frontend supplies
@@ -1181,6 +1227,171 @@ struct DraftOptionInput {
     display_name: String,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commit_draft(state: &AppState, public_key_hex: String) {
+        let mut guard = state.draft.lock().expect("draft lock");
+        let draft = guard.as_mut().expect("draft exists");
+        draft
+            .set_basics("preserved-election".to_owned(), "preserved-revision".to_owned())
+            .expect("valid basics");
+        draft
+            .set_voters(vec![public_key_hex])
+            .expect("valid generated governance key");
+        draft
+            .set_options(vec![("yes".to_owned(), "Yes".to_owned())])
+            .expect("valid option");
+        draft.set_rules(1, 1, false).expect("valid rules");
+        draft
+            .set_presentation(GuiBallotPresentationType::GovernanceProposal)
+            .expect("valid presentation");
+    }
+
+    #[test]
+    fn get_or_create_draft_creates_empty_draft_without_credential_data() {
+        let state = AppState::default();
+        let preview = state.get_or_create_draft_preview().expect("draft preview");
+        assert_eq!(preview.election_id_text, None);
+        assert!(state.draft.lock().expect("draft lock").is_some());
+        let serialized = serde_json::to_string(&preview).expect("safe preview JSON");
+        assert!(!serialized.contains("credential"));
+        assert!(!serialized.contains("nullifier"));
+        assert!(!serialized.contains("secret"));
+    }
+
+    #[test]
+    fn get_or_create_draft_preserves_committed_fields_and_start_new_replaces_them() {
+        let state = AppState::default();
+        let credential = state.generate_pending_credential().expect("credential");
+        let public_key = credential.public_governance_key_hex.expect("public key");
+        state.get_or_create_draft_preview().expect("initial draft");
+        commit_draft(&state, public_key);
+
+        let preserved = state.get_or_create_draft_preview().expect("preserved preview");
+        assert_eq!(preserved.election_id_text.as_deref(), Some("preserved-election"));
+        assert_eq!(preserved.governance_source_revision.as_deref(), Some("preserved-revision"));
+        assert_eq!(preserved.voter_count, 1);
+        assert_eq!(preserved.options.len(), 1);
+        assert_eq!(preserved.approval_min, Some(1));
+        assert_eq!(preserved.approval_max, Some(1));
+        assert_eq!(preserved.presentation, GuiBallotPresentationType::GovernanceProposal);
+
+        state.start_new_draft().expect("replace draft");
+        let replacement = state.get_or_create_draft_preview().expect("replacement preview");
+        assert_eq!(replacement.election_id_text, None);
+        assert_eq!(replacement.voter_count, 0);
+        assert!(replacement.options.is_empty());
+        assert_eq!(replacement.approval_min, None);
+    }
+
+    #[test]
+    fn pending_credential_generation_fails_closed_until_explicit_reset() {
+        let state = AppState::default();
+        let first = state.generate_pending_credential().expect("first credential");
+        let first_key = first.public_governance_key_hex.expect("first public key");
+
+        let duplicate = state.generate_pending_credential().expect_err("duplicate rejected");
+        assert_eq!(duplicate.code, "GUI_PENDING_CREDENTIAL_EXISTS");
+        let retained = state.voter_credential_status().expect("retained status");
+        assert_eq!(retained.public_governance_key_hex.as_deref(), Some(first_key.as_str()));
+
+        let unloaded = state.reset_pending_credential().expect("reset credential");
+        assert!(!unloaded.credential_loaded);
+        let second = state.generate_pending_credential().expect("second credential");
+        assert!(second.credential_loaded);
+        assert_ne!(second.public_governance_key_hex.as_deref(), Some(first_key.as_str()));
+    }
+
+    fn freeze_draft_into_active_session(state: &AppState) {
+        let (_, session) = state
+            .with_draft_mut(|draft| Ok(draft.freeze()?))
+            .expect("freeze draft");
+        state
+            .install_frozen_session(session)
+            .expect("install frozen voter session");
+    }
+
+    #[test]
+    fn carried_credential_remains_eligible_after_freeze_and_open_and_prepares_a_ballot() {
+        let state = AppState::default();
+        let pending = state.generate_pending_credential().expect("generate credential");
+        let public_key = pending.public_governance_key_hex.expect("public key");
+        state.get_or_create_draft_preview().expect("create draft");
+        commit_draft(&state, public_key.clone());
+
+        freeze_draft_into_active_session(&state);
+        let frozen_status = state.voter_credential_status().expect("frozen credential status");
+        assert_eq!(frozen_status.public_governance_key_hex.as_deref(), Some(public_key.as_str()));
+        assert_eq!(frozen_status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible);
+
+        state
+            .with_session_mut(|session| {
+                session.open()?;
+                Ok(())
+            })
+            .expect("open election");
+        let open_status = state.voter_credential_status().expect("open credential status");
+        assert_eq!(open_status.public_governance_key_hex.as_deref(), Some(public_key.as_str()));
+        assert_eq!(open_status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::Eligible);
+
+        let serialized = serde_json::to_value(&open_status).expect("safe credential status JSON");
+        let fields = serialized
+            .as_object()
+            .expect("credential status should be an object");
+        for marker in ["secret", "scalar", "seed", "mnemonic", "private", "credential_bytes", "nullifier", "proof"] {
+            assert!(fields.keys().all(|field| !field.to_lowercase().contains(marker)));
+        }
+
+        let session_guard = state.session.lock().expect("session lock");
+        let session = session_guard.as_ref().expect("active session");
+        let mut voter_guard = state.voter.lock().expect("voter lock");
+        let voter = voter_guard.as_mut().expect("active voter session");
+        let selection = voter
+            .set_selection(
+                session.artifacts(),
+                session.lifecycle_state_v1(),
+                vec!["796573".to_owned()],
+                false,
+            )
+            .expect("select the enrolled election option");
+        assert!(selection.can_prepare_ballot);
+        let prepared = voter
+            .prepare_ballot(session.artifacts(), session.lifecycle_state_v1())
+            .expect("real Triptych preparation with carried credential");
+        assert!(prepared.ready_to_export);
+    }
+
+    #[test]
+    fn carried_credential_is_not_eligible_when_the_frozen_registry_excludes_it() {
+        let state = AppState::default();
+        let pending = state.generate_pending_credential().expect("generate credential");
+        let pending_key = pending.public_governance_key_hex.expect("pending public key");
+        let other_state = AppState::default();
+        let enrolled_key = other_state
+            .generate_pending_credential()
+            .expect("generate different credential")
+            .public_governance_key_hex
+            .expect("different public key");
+        assert_ne!(pending_key, enrolled_key);
+        state.get_or_create_draft_preview().expect("create draft");
+        commit_draft(&state, enrolled_key);
+
+        freeze_draft_into_active_session(&state);
+        state
+            .with_session_mut(|session| {
+                session.open()?;
+                Ok(())
+            })
+            .expect("open election");
+        let status = state.voter_credential_status().expect("credential status");
+        assert_eq!(status.public_governance_key_hex.as_deref(), Some(pending_key.as_str()));
+        assert_eq!(status.eligibility, tari_cc_private_ballot_gui_core::GuiVoterEligibilityV1::NotEligible);
+        assert!(!status.can_continue);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1204,6 +1415,7 @@ pub fn run() {
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,
+            get_or_create_election_draft,
             start_election_draft,
             discard_election_draft,
             set_draft_basics,

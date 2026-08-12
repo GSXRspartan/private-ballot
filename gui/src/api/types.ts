@@ -314,6 +314,7 @@ export interface GuiElectionDraftPreviewV1 {
   complete: boolean;
   missing: string[];
   frozen: boolean;
+  creation_result: GuiElectionCreationResultV1 | null;
   presentation_is_canonical: boolean;
   governance_source_pin: GuiGovernanceSourcePinV1;
   governance_document: GuiGovernanceDocumentDigestV1 | null;

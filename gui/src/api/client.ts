@@ -139,6 +139,8 @@ export const api = {
     call<GuiAnchorEvidenceInspectionV1>("inspect_anchor_evidence", { path }),
 
   // Organizer election creation (Slice 5A6).
+  getOrCreateElectionDraft: () =>
+    call<GuiElectionDraftPreviewV1>("get_or_create_election_draft"),
   startElectionDraft: () => call<void>("start_election_draft"),
   discardElectionDraft: () => call<void>("discard_election_draft"),
   setDraftBasics: (electionIdText: string, governanceSourceRevision: string) =>

@@ -43,6 +43,7 @@ import {
   selectionSummaryText,
   workflowTone,
 } from "../voterWorkflow";
+import { BallotSaveDialogError, requestAndExportPreparedBallot } from "../voterExport";
 import { useAppState } from "../state/AppState";
 import { RequestGenerationGate } from "../requestGeneration";
 import {
@@ -199,14 +200,13 @@ export function Vote() {
     await loadConfirmation(null);
   }
 
-  async function onGenerateCredential() {
+  async function onEnterCredentialStage() {
     if (!election || !shellAvailable) return;
+    setCredentialStage(true);
     setBusy(true);
     setError(null);
     try {
-      const status = await api.generateVoterGovernanceCredential();
-      setCredential(status);
-      if (selectionStage) await refreshWorkflow(true);
+      setCredential(await api.voterGovernanceCredentialStatus());
     } catch (err) {
       captureError(err);
     } finally {
@@ -333,16 +333,28 @@ export function Vote() {
   }
 
   async function onExportBallot() {
-    const path = await pickBallotPackagePath();
-    if (!path) return;
     setBusy(true);
     setError(null);
     try {
-      await api.exportPreparedVoterBallot(path);
+      const saved = await requestAndExportPreparedBallot(
+        pickBallotPackagePath,
+        (path) => api.exportPreparedVoterBallot(path),
+      );
+      if (!saved) return;
       setExported(true);
       await refreshWorkflow(true);
     } catch (err) {
-      captureError(err);
+      if (err instanceof BallotSaveDialogError) {
+        setError({
+          code: "GUI_BALLOT_SAVE_DIALOG_UNAVAILABLE",
+          category: "FILE_IO",
+          context: "export-ballot",
+          message:
+            "The native Save dialog could not open. Check that the desktop app can show save dialogs, then try again.",
+        });
+      } else {
+        captureError(err);
+      }
     } finally {
       setBusy(false);
     }
@@ -706,7 +718,7 @@ export function Vote() {
                 type="button"
                 className="btn btn-primary"
                 disabled={!confirmed || !confirmationContinueAvailable(confirmation) || busy}
-                onClick={() => setCredentialStage(true)}
+                onClick={() => void onEnterCredentialStage()}
               >
                 Continue
               </button>
@@ -720,7 +732,7 @@ export function Vote() {
             <>
               <Card title="Your voter credential">
                 <p className="form-hint">
-                  A voter credential is a fresh voting key created on this computer. It lets the
+                  The local-pilot credential was generated before this election was frozen. It lets the
                   app prove you are on the eligible voter list — without revealing which eligible
                   voter you are. It exists only for this session and is never stored.
                 </p>
@@ -742,14 +754,6 @@ export function Vote() {
                   </Field>
                 </div>
                 <div className="action-row">
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={onGenerateCredential}
-                    disabled={busy}
-                  >
-                    Generate new credential
-                  </button>
                   {credential?.credential_loaded && (
                     <button
                       type="button"
@@ -762,9 +766,17 @@ export function Vote() {
                   )}
                 </div>
                 <p className="form-hint">
-                  {credential?.enrollment_notice ??
-                    "A generated public governance key must be enrolled before the election is frozen."}
+                  {credential
+                    ? credential.enrollment_notice
+                    : "Checking for the Rust-owned local pilot credential."}
                 </p>
+                {!credential?.credential_loaded && (
+                  <Notice tone="warn">
+                    This election is already frozen. Generating a new credential now cannot add
+                    it to the immutable voter registry. The enrolled local credential is required;
+                    credential import is deferred until a reviewed private format exists.
+                  </Notice>
+                )}
               </Card>
 
               <Card title="Eligibility">
@@ -793,6 +805,12 @@ export function Vote() {
                   <Notice tone="warn">
                     This voting key is not on the election&rsquo;s eligible voter list. Check that
                     the organizer enrolled your key before the election was finalized.
+                  </Notice>
+                )}
+                {credential?.eligibility === "NotEligible" && (
+                  <Notice tone="warn">
+                    Generating a replacement cannot change this frozen registry. Credential import
+                    is deferred until a reviewed private format exists.
                   </Notice>
                 )}
                 <div className="action-row">

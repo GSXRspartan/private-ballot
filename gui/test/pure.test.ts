@@ -361,8 +361,10 @@ describe("no fake trend state", () => {
 
 import {
   approvalRulePreview,
+  acquireElectionDraft,
   draftIsReady,
   freezeAvailable,
+  hydrateCreateElectionSession,
   initializeElectionDraft,
   isUncastableApprovalConfig,
   NO_QUORUM_STATEMENT,
@@ -371,6 +373,8 @@ import {
   optionValidationErrors,
   parseVoterHexList,
   presentationLabel,
+  newCreateElectionSession,
+  runAction,
 } from "../src/creation.ts";
 import type { DraftInitializationState } from "../src/creation.ts";
 import {
@@ -501,6 +505,94 @@ describe("creation: authoritative draft initialization", () => {
     await initializeElectionDraft(start, (state) => states.push(state));
     assert.equal(starts, 3);
     assert.deepEqual(states.slice(-2), ["initializing", "ready"]);
+  });
+});
+
+describe("creation: non-destructive draft acquisition and hydration", () => {
+  const preview = {
+    election_id_text: "preserved-election",
+    governance_source_revision: "preserved-revision",
+    presentation: "GovernanceProposal",
+    voters: [{ public_key_hex: KEY64, public_key_abbrev: "6a493210…3e86f2" }],
+    options: [{ machine_id_hex: "796573", machine_id_text: "yes", display_name: "Yes" }],
+    approval_min: 1,
+    approval_max: 1,
+    allow_abstention: false,
+    governance_document: null,
+  } as never;
+
+  it("acquires one safe preview without invoking destructive start-new work", async () => {
+    const states: DraftInitializationState[] = [];
+    const received: unknown[] = [];
+    let getOrCreateCalls = 0;
+
+    const result = await acquireElectionDraft(
+      async () => {
+        getOrCreateCalls += 1;
+        return preview;
+      },
+      (state) => states.push(state),
+      (value) => received.push(value),
+    );
+
+    assert.equal(getOrCreateCalls, 1);
+    assert.equal(result, preview);
+    assert.deepEqual(states, ["initializing", "ready"]);
+    assert.deepEqual(received, [preview]);
+  });
+
+  it("hydrates committed Rust fields while leaving a newer session buffer intact", () => {
+    const hydrated = hydrateCreateElectionSession(preview);
+    assert.equal(hydrated.electionIdText, "preserved-election");
+    assert.equal(hydrated.governanceRevision, "preserved-revision");
+    assert.equal(hydrated.ballotType, "GovernanceProposal");
+    assert.equal(hydrated.voterText, KEY64);
+    assert.deepEqual(hydrated.options, [{ id: "yes", label: "Yes" }]);
+    assert.equal(hydrated.approvalMin, 1);
+    assert.equal(hydrated.approvalMax, 1);
+
+    const unsaved = {
+      ...hydrated,
+      step: "governance" as const,
+      electionIdText: "newer-unsaved-election",
+    };
+    // CreateElection retains this app-session buffer on re-entry rather than
+    // applying an older preview over it.
+    assert.equal(unsaved.step, "governance");
+    assert.equal(unsaved.electionIdText, "newer-unsaved-election");
+    assert.equal(newCreateElectionSession().step, "basics");
+  });
+});
+
+describe("creation: void Tauri actions", () => {
+  it("treats a successful Rust-unit null result as success", async () => {
+    const errors: unknown[] = [];
+    let basicsCalls = 0;
+    let presentationCalls = 0;
+
+    const basicsOk = await runAction(async () => {
+      basicsCalls += 1;
+      return null;
+    }, (error) => errors.push(error));
+    const presentationOk = basicsOk && await runAction(async () => {
+      presentationCalls += 1;
+      return null;
+    }, (error) => errors.push(error));
+
+    assert.equal(basicsOk, true);
+    assert.equal(presentationOk, true);
+    assert.equal(basicsCalls, 1);
+    assert.equal(presentationCalls, 1);
+    assert.deepEqual(errors, []);
+  });
+
+  it("treats only a rejected command as failure and captures its error", async () => {
+    const failure = new Error("backend rejected mutation");
+    const errors: unknown[] = [];
+    const ok = await runAction(async () => Promise.reject(failure), (error) => errors.push(error));
+
+    assert.equal(ok, false);
+    assert.deepEqual(errors, [failure]);
   });
 });
 

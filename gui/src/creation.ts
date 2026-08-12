@@ -10,7 +10,13 @@
  * and display data.
  */
 
-import type { GuiElectionDraftPreviewV1, GuiBallotPresentationType } from "./api/types";
+import type {
+  GuiBallotPresentationType,
+  GuiElectionCreationResultV1,
+  GuiElectionDraftPreviewV1,
+  GuiElectionExportResultV1,
+  GuiGovernanceDocumentDigestV1,
+} from "./api/types";
 
 /** Canonical byte length of one Ristretto255 compressed public key. */
 export const GOVERNANCE_KEY_BYTES = 32;
@@ -199,6 +205,80 @@ export function isUncastableApprovalConfig(
 /** State of the authoritative Rust-side election-draft setup. */
 export type DraftInitializationState = "initializing" | "ready" | "failed";
 
+/** Create-screen-only editing state. It survives navigation, but not an app restart. */
+export type CreateElectionStep =
+  | "basics"
+  | "governance"
+  | "voters"
+  | "options"
+  | "rules"
+  | "review"
+  | "frozen";
+
+export interface CreateDraftOption {
+  id: string;
+  label: string;
+}
+
+export interface CreateElectionSessionState {
+  step: CreateElectionStep;
+  ballotType: GuiBallotPresentationType;
+  electionIdText: string;
+  governanceRevision: string;
+  voterText: string;
+  options: CreateDraftOption[];
+  approvalMin: number;
+  approvalMax: number;
+  allowAbstention: boolean;
+  governanceDocPath: string | null;
+  governanceDocDigest: GuiGovernanceDocumentDigestV1 | null;
+  frozen: GuiElectionCreationResultV1 | null;
+  exportResult: GuiElectionExportResultV1 | null;
+}
+
+export function newCreateElectionSession(): CreateElectionSessionState {
+  return {
+    step: "basics",
+    ballotType: "BallotMeasure",
+    electionIdText: "",
+    governanceRevision: "",
+    voterText: "",
+    options: [],
+    approvalMin: 1,
+    approvalMax: 1,
+    allowAbstention: false,
+    governanceDocPath: null,
+    governanceDocDigest: null,
+    frozen: null,
+    exportResult: null,
+  };
+}
+
+/** Builds presentation/editing state from the safe authoritative Rust preview. */
+export function hydrateCreateElectionSession(
+  preview: GuiElectionDraftPreviewV1,
+): CreateElectionSessionState {
+  const initial = newCreateElectionSession();
+  return {
+    ...initial,
+    ballotType: preview.presentation,
+    electionIdText: preview.election_id_text ?? "",
+    governanceRevision: preview.governance_source_revision ?? "",
+    voterText: preview.voters.map((voter) => voter.public_key_hex).join("\n"),
+    options: preview.options.flatMap((option) =>
+      option.machine_id_text === null
+        ? []
+        : [{ id: option.machine_id_text, label: option.display_name }],
+    ),
+    approvalMin: preview.approval_min ?? initial.approvalMin,
+    approvalMax: preview.approval_max ?? initial.approvalMax,
+    allowAbstention: preview.allow_abstention,
+    governanceDocDigest: preview.governance_document,
+    frozen: preview.creation_result,
+    step: preview.creation_result ? "frozen" : initial.step,
+  };
+}
+
 /** Only a successfully started Rust draft may be edited by the wizard. */
 export function draftIsReady(state: DraftInitializationState): boolean {
   return state === "ready";
@@ -219,5 +299,37 @@ export async function initializeElectionDraft(
   } catch (error) {
     setState("failed");
     throw error;
+  }
+}
+
+/** Acquires the existing Rust draft, creating one only when absent. */
+export async function acquireElectionDraft(
+  getOrCreateElectionDraft: () => Promise<GuiElectionDraftPreviewV1>,
+  setState: (state: DraftInitializationState) => void,
+  onPreview: (preview: GuiElectionDraftPreviewV1) => void,
+): Promise<GuiElectionDraftPreviewV1> {
+  setState("initializing");
+  try {
+    const preview = await getOrCreateElectionDraft();
+    onPreview(preview);
+    setState("ready");
+    return preview;
+  } catch (error) {
+    setState("failed");
+    throw error;
+  }
+}
+
+/** Runs a side-effect-only command without inspecting its resolved unit value. */
+export async function runAction(
+  action: () => Promise<unknown>,
+  onError: (error: unknown) => void,
+): Promise<boolean> {
+  try {
+    await action();
+    return true;
+  } catch (error) {
+    onError(error);
+    return false;
   }
 }

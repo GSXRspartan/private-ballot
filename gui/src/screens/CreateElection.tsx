@@ -16,16 +16,21 @@ import { presentationIdentifier } from "../api/client";
 import { NavSection } from "../components/AppFrame";
 import {
   approvalRulePreview,
+  acquireElectionDraft,
+  type CreateDraftOption,
+  type CreateElectionStep,
   draftIsReady,
   freezeAvailable,
-  initializeElectionDraft,
   isUncastableApprovalConfig,
+  hydrateCreateElectionSession,
+  newCreateElectionSession,
   NO_QUORUM_STATEMENT,
   optionNoun,
   optionSetNoun,
   optionValidationErrors,
   parseVoterHexList,
   presentationLabel,
+  runAction as executeAction,
 } from "../creation";
 import type { DraftInitializationState } from "../creation";
 import {
@@ -53,7 +58,7 @@ import {
   Pill,
 } from "../components/ui";
 
-type Step = "basics" | "governance" | "voters" | "options" | "rules" | "review" | "frozen";
+type Step = CreateElectionStep;
 
 const STEPS: { id: Step; label: string }[] = [
   { id: "basics", label: "Basics" },
@@ -65,11 +70,6 @@ const STEPS: { id: Step; label: string }[] = [
   { id: "frozen", label: "Freeze & Export" },
 ];
 
-interface DraftOption {
-  id: string;
-  label: string;
-}
-
 /**
  * Create Election (organizer): a real wizard for constructing a new election
  * package from non-secret public inputs. The frontend collects ordinary
@@ -79,30 +79,41 @@ interface DraftOption {
  * immutable (enforced by the backend) and a frozen session is loaded.
  */
 export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => void }) {
-  const { refreshElection, refreshParticipation, recordAction, shellAvailable } = useAppState();
-
-  const [step, setStep] = useState<Step>("basics");
-  const [ballotType, setBallotType] = useState<GuiBallotPresentationType>("BallotMeasure");
-  const [electionIdText, setElectionIdText] = useState("");
-  const [governanceRevision, setGovernanceRevision] = useState("");
-  const [voterText, setVoterText] = useState("");
-  const [options, setOptions] = useState<DraftOption[]>([]);
-  const [approvalMin, setApprovalMin] = useState(1);
-  const [approvalMax, setApprovalMax] = useState(1);
-  const [allowAbstention, setAllowAbstention] = useState(false);
+  const {
+    refreshElection,
+    refreshParticipation,
+    recordAction,
+    shellAvailable,
+    createElectionSession,
+    updateCreateElectionSession,
+    replaceCreateElectionSession,
+  } = useAppState();
+  const session = createElectionSession ?? newCreateElectionSession();
+  const {
+    step,
+    ballotType,
+    electionIdText,
+    governanceRevision,
+    voterText,
+    options,
+    approvalMin,
+    approvalMax,
+    allowAbstention,
+    frozen,
+    exportResult,
+    governanceDocPath,
+    governanceDocDigest,
+  } = session;
 
   const [preview, setPreview] = useState<GuiElectionDraftPreviewV1 | null>(null);
-  const [frozen, setFrozen] = useState<GuiElectionCreationResultV1 | null>(null);
-  const [exportResult, setExportResult] = useState<GuiElectionExportResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
   const [draftInitialization, setDraftInitialization] =
     useState<DraftInitializationState>("initializing");
-  const draftStartRef = useRef<Promise<boolean> | null>(null);
+  const draftRequestRef = useRef<Promise<boolean> | null>(null);
+  const errorNoticeRef = useRef<HTMLDivElement | null>(null);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
-  const [governanceDocPath, setGovernanceDocPath] = useState<string | null>(null);
-  const [governanceDocDigest, setGovernanceDocDigest] =
-    useState<GuiGovernanceDocumentDigestV1 | null>(null);
+  const [confirmCredentialReset, setConfirmCredentialReset] = useState(false);
   const [bootstrapCredential, setBootstrapCredential] =
     useState<GuiVoterCredentialStatusV1 | null>(null);
 
@@ -117,29 +128,87 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       });
   }
 
-  async function startFreshDraft(): Promise<boolean> {
-    if (draftStartRef.current) return draftStartRef.current;
+  useEffect(() => {
+    if (localError) {
+      errorNoticeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      errorNoticeRef.current?.focus();
+    }
+  }, [localError]);
+
+  function updateSession(update: (current: typeof session) => typeof session) {
+    updateCreateElectionSession(update);
+  }
+
+  function setDraftNotReadyError() {
+    setLocalError({
+      code: "GUI_DRAFT_NOT_READY",
+      category: "INVALID_LIFECYCLE_TRANSITION",
+      context: "draft",
+      message: "the election draft is still being prepared; wait for it to finish or retry",
+    });
+  }
+
+  async function acquireDraft(): Promise<boolean> {
+    if (draftRequestRef.current) return draftRequestRef.current;
 
     setBusy(true);
     setLocalError(null);
     const request = (async () => {
       try {
-        await initializeElectionDraft(api.startElectionDraft, setDraftInitialization);
+        await acquireElectionDraft(
+          api.getOrCreateElectionDraft,
+          setDraftInitialization,
+          (authoritativePreview) => {
+            setPreview(authoritativePreview);
+            if (!createElectionSession) {
+              replaceCreateElectionSession(hydrateCreateElectionSession(authoritativePreview));
+            }
+          },
+        );
+        const status = await api.voterGovernanceCredentialStatus();
+        setBootstrapCredential(status);
         return true;
       } catch (error) {
         captureError(error);
         return false;
       } finally {
-        draftStartRef.current = null;
+        draftRequestRef.current = null;
         setBusy(false);
       }
     })();
-    draftStartRef.current = request;
+    draftRequestRef.current = request;
+    return request;
+  }
+
+  async function startFreshDraft(): Promise<boolean> {
+    if (draftRequestRef.current) return draftRequestRef.current;
+
+    setBusy(true);
+    setLocalError(null);
+    setDraftInitialization("initializing");
+    const request = (async () => {
+      try {
+        await api.startElectionDraft();
+        const authoritativePreview = await api.getOrCreateElectionDraft();
+        setPreview(authoritativePreview);
+        replaceCreateElectionSession(hydrateCreateElectionSession(authoritativePreview));
+        setDraftInitialization("ready");
+        return true;
+      } catch (error) {
+        setDraftInitialization("failed");
+        captureError(error);
+        return false;
+      } finally {
+        draftRequestRef.current = null;
+        setBusy(false);
+      }
+    })();
+    draftRequestRef.current = request;
     return request;
   }
 
   useEffect(() => {
-    void startFreshDraft();
+    void acquireDraft();
   }, []);
 
   async function run<T>(fn: () => Promise<T>): Promise<T | null> {
@@ -156,21 +225,33 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     }
   }
 
+  async function runAction(fn: () => Promise<unknown>): Promise<boolean> {
+    setBusy(true);
+    setLocalError(null);
+    try {
+      return await executeAction(fn, captureError);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function commitBasics(): Promise<boolean> {
-    if (!draftIsReady(draftInitialization)) return false;
-    const ok = await run(() =>
+    if (!draftIsReady(draftInitialization)) {
+      setDraftNotReadyError();
+      return false;
+    }
+    const ok = await runAction(() =>
       api.setDraftBasics(electionIdText, governanceRevision),
     );
-    if (ok === null) return false;
-    const ok2 = await run(() =>
+    if (!ok) return false;
+    const ok2 = await runAction(() =>
       api.setDraftPresentation(presentationIdentifier(ballotType)),
     );
-    return ok2 !== null;
+    return ok2;
   }
 
   async function commitVoters(keys: string[]): Promise<boolean> {
-    const ok = await run(() => api.setDraftVoters(keys));
-    return ok !== null;
+    return runAction(() => api.setDraftVoters(keys));
   }
 
   async function commitOptions(): Promise<boolean> {
@@ -178,15 +259,13 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       machine_id_text: o.id,
       display_name: o.label,
     }));
-    const ok = await run(() => api.setDraftOptions(payload));
-    return ok !== null;
+    return runAction(() => api.setDraftOptions(payload));
   }
 
   async function commitRules(): Promise<boolean> {
-    const ok = await run(() =>
+    return runAction(() =>
       api.setDraftRules(approvalMin, approvalMax, allowAbstention),
     );
-    return ok !== null;
   }
 
   async function refreshPreview() {
@@ -200,12 +279,15 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   }
 
   function goNext(target: Step) {
-    setStep(target);
+    updateSession((current) => ({ ...current, step: target }));
   }
 
   // ---- Basics ------------------------------------------------------------
   async function onBasicsNext() {
-    if (!draftIsReady(draftInitialization)) return;
+    if (!draftIsReady(draftInitialization)) {
+      setDraftNotReadyError();
+      return;
+    }
     if (electionIdText.trim().length === 0 || governanceRevision.trim().length === 0) {
       setLocalError({
         code: "GUI_DRAFT_INCOMPLETE",
@@ -224,31 +306,32 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     if (!path) return;
     const digest = await run(() => api.setDraftGovernanceDocument(path));
     if (!digest) return;
-    setGovernanceDocPath(path);
-    setGovernanceDocDigest(digest);
+    updateSession((current) => ({ ...current, governanceDocPath: path, governanceDocDigest: digest }));
     await refreshPreview();
   }
 
   async function onClearGovernanceDocument() {
-    const ok = await run(() => api.clearDraftGovernanceDocument());
-    if (ok === null) return;
-    setGovernanceDocPath(null);
-    setGovernanceDocDigest(null);
+    const ok = await runAction(() => api.clearDraftGovernanceDocument());
+    if (!ok) return;
+    updateSession((current) => ({ ...current, governanceDocPath: null, governanceDocDigest: null }));
     await refreshPreview();
   }
 
   async function onUseDocumentDigestAsRevision() {
-    const ok = await run(() => api.useGovernanceDocumentDigestAsRevision());
-    if (ok === null) return;
+    const ok = await runAction(() => api.useGovernanceDocumentDigestAsRevision());
+    if (!ok) return;
     const p = await refreshPreview();
     if (p) {
-      setGovernanceRevision(p.governance_source_revision ?? "");
+      updateSession((current) => ({
+        ...current,
+        governanceRevision: p.governance_source_revision ?? "",
+      }));
     }
   }
 
   async function onGovernanceNext() {
-    const ok = await run(() => api.setDraftGovernanceSourceRevision(governanceRevision));
-    if (ok === null) return;
+    const ok = await runAction(() => api.setDraftGovernanceSourceRevision(governanceRevision));
+    if (!ok) return;
     await refreshPreview();
     goNext("voters");
   }
@@ -259,6 +342,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   }
 
   async function onResetBootstrapCredential() {
+    setConfirmCredentialReset(false);
     const status = await run(() => api.resetPendingVoterGovernanceCredential());
     if (status) setBootstrapCredential(status);
   }
@@ -291,14 +375,17 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   async function onImportRegistryFile() {
     const path = await pickRegistryCborFile("Import canonical voter registry");
     if (!path) return;
-    const ok = await run(() => api.importRegistryToDraft(path));
-    if (ok === null) return;
+    const ok = await runAction(() => api.importRegistryToDraft(path));
+    if (!ok) return;
     // After import, refresh the preview to learn the imported key count and
     // surface them in the textarea (hex, one per line).
     const p = await run(() => api.previewDraft());
     if (p) {
       setPreview(p);
-      setVoterText(p.voters.map((v) => v.public_key_hex).join("\n"));
+      updateSession((current) => ({
+        ...current,
+        voterText: p.voters.map((v) => v.public_key_hex).join("\n"),
+      }));
     }
   }
 
@@ -308,13 +395,21 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   );
 
   function addOption() {
-    setOptions((prev) => [...prev, { id: "", label: "" }]);
+    updateSession((current) => ({ ...current, options: [...current.options, { id: "", label: "" }] }));
   }
-  function updateOption(index: number, patch: Partial<DraftOption>) {
-    setOptions((prev) => prev.map((o, i) => (i === index ? { ...o, ...patch } : o)));
+  function updateOption(index: number, patch: Partial<CreateDraftOption>) {
+    updateSession((current) => ({
+      ...current,
+      options: current.options.map((option, itemIndex) =>
+        itemIndex === index ? { ...option, ...patch } : option,
+      ),
+    }));
   }
   function removeOption(index: number) {
-    setOptions((prev) => prev.filter((_, i) => i !== index));
+    updateSession((current) => ({
+      ...current,
+      options: current.options.filter((_, itemIndex) => itemIndex !== index),
+    }));
   }
 
   async function onOptionsNext() {
@@ -374,8 +469,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     setConfirmFreeze(false);
     const result = await run(() => api.freezeElection());
     if (!result) return;
-    setFrozen(result);
-    setStep("frozen");
+    updateSession((current) => ({ ...current, frozen: result, step: "frozen" }));
     await refreshElection();
     void refreshParticipation();
     recordAction(
@@ -389,13 +483,13 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     if (!dir) return;
     const result = await run(() => api.exportElectionArtifacts(dir));
     if (result) {
-      setExportResult(result);
+      updateSession((current) => ({ ...current, exportResult: result }));
       recordAction("Exported election artifacts");
     }
   }
 
   async function onOpenVoting() {
-    await run(async () => {
+    await runAction(async () => {
       await api.openVoting();
       await refreshElection();
       recordAction("Opened voting");
@@ -404,14 +498,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
   async function restart() {
     if (!(await startFreshDraft())) return;
-    setStep("basics");
-    setFrozen(null);
-    setExportResult(null);
-    setPreview(null);
-    setVoterText("");
-    setOptions([]);
-    setElectionIdText("");
-    setGovernanceRevision("");
   }
 
   const presentation = ballotType;
@@ -428,7 +514,9 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         You only ever handle voters&rsquo; public keys here — never their private credentials.
       </p>
 
-      <BackendErrorNotice error={localError ?? null} onDismiss={() => setLocalError(null)} />
+      <div ref={errorNoticeRef} tabIndex={-1}>
+        <BackendErrorNotice error={localError ?? null} onDismiss={() => setLocalError(null)} />
+      </div>
       {!shellAvailable && (
         <Notice tone="info">
           Browser preview: creating an election requires the desktop application.
@@ -447,7 +535,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={() => void startFreshDraft()}
+                onClick={() => void acquireDraft()}
                 disabled={busy}
               >
                 Retry
@@ -468,13 +556,15 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
             </p>
             <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
             <div className="action-row">
-              <button type="button" className="btn btn-secondary" disabled={busy || !shellAvailable}
-                onClick={() => void onGenerateBootstrapCredential()}>
-                Generate voter credential
-              </button>
+              {!bootstrapCredential?.credential_loaded && (
+                <button type="button" className="btn btn-secondary" disabled={busy || !shellAvailable}
+                  onClick={() => void onGenerateBootstrapCredential()}>
+                  Generate voter credential
+                </button>
+              )}
               {bootstrapCredential?.credential_loaded && (
                 <button type="button" className="btn btn-secondary" disabled={busy}
-                  onClick={() => void onResetBootstrapCredential()}>
+                  onClick={() => setConfirmCredentialReset(true)}>
                   Clear credential
                 </button>
               )}
@@ -507,11 +597,15 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       {step === "basics" && (
         <BasicsStep
           ballotType={ballotType}
-          setBallotType={setBallotType}
+          setBallotType={(ballotType) => updateSession((current) => ({ ...current, ballotType }))}
           electionIdText={electionIdText}
-          setElectionIdText={setElectionIdText}
+          setElectionIdText={(electionIdText) =>
+            updateSession((current) => ({ ...current, electionIdText }))
+          }
           governanceRevision={governanceRevision}
-          setGovernanceRevision={setGovernanceRevision}
+          setGovernanceRevision={(governanceRevision) =>
+            updateSession((current) => ({ ...current, governanceRevision }))
+          }
           busy={busy}
           onNext={onBasicsNext}
         />
@@ -521,7 +615,9 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         <GovernanceStep
           preview={preview}
           governanceRevision={governanceRevision}
-          setGovernanceRevision={setGovernanceRevision}
+          setGovernanceRevision={(governanceRevision) =>
+            updateSession((current) => ({ ...current, governanceRevision }))
+          }
           governanceDocPath={governanceDocPath}
           governanceDocDigest={governanceDocDigest}
           busy={busy}
@@ -529,10 +625,10 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           onClearDocument={onClearGovernanceDocument}
           onUseDigestAsRevision={onUseDocumentDigestAsRevision}
           onApplyRevision={async () => {
-            const ok = await run(() =>
+            const ok = await runAction(() =>
               api.setDraftGovernanceSourceRevision(governanceRevision),
             );
-            if (ok === null) return;
+            if (!ok) return;
             await refreshPreview();
           }}
           onNext={onGovernanceNext}
@@ -543,7 +639,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       {step === "voters" && (
         <VotersStep
           voterText={voterText}
-          setVoterText={setVoterText}
+          setVoterText={(voterText) => updateSession((current) => ({ ...current, voterText }))}
           parsed={parsedVoters}
           busy={busy}
           onImportRegistryFile={onImportRegistryFile}
@@ -569,11 +665,13 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       {step === "rules" && (
         <RulesStep
           approvalMin={approvalMin}
-          setApprovalMin={setApprovalMin}
+          setApprovalMin={(approvalMin) => updateSession((current) => ({ ...current, approvalMin }))}
           approvalMax={approvalMax}
-          setApprovalMax={setApprovalMax}
+          setApprovalMax={(approvalMax) => updateSession((current) => ({ ...current, approvalMax }))}
           allowAbstention={allowAbstention}
-          setAllowAbstention={setAllowAbstention}
+          setAllowAbstention={(allowAbstention) =>
+            updateSession((current) => ({ ...current, allowAbstention }))
+          }
           optionCount={options.length}
           busy={busy}
           onNext={onRulesNext}
@@ -604,6 +702,22 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           busy={busy}
           onConfirm={onFreeze}
           onCancel={() => setConfirmFreeze(false)}
+        />
+      )}
+      {confirmCredentialReset && (
+        <ConfirmDialog
+          title="Clear local voter credential?"
+          body={
+            <p>
+              This removes the Rust-owned local pilot credential for this application session.
+              Generate a replacement only after clearing it deliberately.
+            </p>
+          }
+          confirmLabel="Clear credential"
+          confirmTone="danger"
+          busy={busy}
+          onConfirm={() => void onResetBootstrapCredential()}
+          onCancel={() => setConfirmCredentialReset(false)}
         />
       )}
         </>
@@ -938,9 +1052,9 @@ function VotersStep(props: {
 
 function OptionsStep(props: {
   presentation: GuiBallotPresentationType;
-  options: DraftOption[];
+  options: CreateDraftOption[];
   addOption: () => void;
-  updateOption: (index: number, patch: Partial<DraftOption>) => void;
+  updateOption: (index: number, patch: Partial<CreateDraftOption>) => void;
   removeOption: (index: number) => void;
   optionErrors: string[];
   busy: boolean;

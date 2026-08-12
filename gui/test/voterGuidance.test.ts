@@ -140,7 +140,7 @@ describe("protocol behavior unchanged", () => {
   it("keeps the same backend API calls for the voting workflow", () => {
     for (const call of [
       "api.voterConfirmation(",
-      "api.generateVoterGovernanceCredential(",
+      "api.voterGovernanceCredentialStatus(",
       "api.resetVoterGovernanceCredential(",
       "api.voterWorkflowStatus(",
       "api.voterBallotSelectionStatus(",
@@ -154,6 +154,14 @@ describe("protocol behavior unchanged", () => {
     ]) {
       assert.ok(vote.includes(call), `Vote screen no longer calls ${call}`);
     }
+  });
+
+  it("loads the carried credential after review and never offers post-freeze generation", () => {
+    assert.match(vote, /async function onEnterCredentialStage\(\)/);
+    assert.match(vote, /setCredential\(await api\.voterGovernanceCredentialStatus\(\)\)/);
+    assert.match(vote, /onClick=\{\(\) => void onEnterCredentialStage\(\)\}/);
+    assert.doesNotMatch(vote, /Generate new credential/);
+    assert.match(vote, /This election is already frozen\. Generating a new credential now cannot add/);
   });
 
   it("adds no new backend/API imports for the voter guidance", () => {

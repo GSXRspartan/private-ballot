@@ -1,6 +1,10 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, BackendError, isDesktopShell } from "../api/client";
+import {
+  newCreateElectionSession,
+  type CreateElectionSessionState,
+} from "../creation";
 import { RequestGenerationGate } from "../requestGeneration";
 import type {
   GuiCommandError,
@@ -55,6 +59,12 @@ interface AppStateValue {
   unloadElection: () => Promise<void>;
   dismissError: () => void;
   recordAction: (label: string) => void;
+  /** Session-only Create Election editing buffers; never persisted to disk. */
+  createElectionSession: CreateElectionSessionState | null;
+  updateCreateElectionSession: (
+    update: (current: CreateElectionSessionState) => CreateElectionSessionState,
+  ) => void;
+  replaceCreateElectionSession: (next: CreateElectionSessionState | null) => void;
 }
 
 const AppStateContext = createContext<AppStateValue | null>(null);
@@ -96,6 +106,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
   const [selectedArtifactPaths, setSelectedArtifactPaths] =
     useState<SelectedArtifactPaths | null>(null);
+  const [createElectionSession, setCreateElectionSession] =
+    useState<CreateElectionSessionState | null>(null);
   // Monotonic token for non-authoritative presentation refreshes. A late
   // response must never overwrite a newer election or lifecycle state.
   const participationRequestGenerationRef = useRef(new RequestGenerationGate());
@@ -120,6 +132,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const dismissError = useCallback(() => setBackendError(null), []);
+
+  const updateCreateElectionSession = useCallback(
+    (update: (current: CreateElectionSessionState) => CreateElectionSessionState) => {
+      setCreateElectionSession((current) => update(current ?? newCreateElectionSession()));
+    },
+    [],
+  );
+  const replaceCreateElectionSession = useCallback(
+    (next: CreateElectionSessionState | null) => setCreateElectionSession(next),
+    [],
+  );
 
   const refreshElection = useCallback(async () => {
     try {
@@ -269,6 +292,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       unloadElection,
       dismissError,
       recordAction,
+      createElectionSession,
+      updateCreateElectionSession,
+      replaceCreateElectionSession,
     }),
     [
       shellAvailable,
@@ -287,6 +313,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       unloadElection,
       dismissError,
       recordAction,
+      createElectionSession,
+      updateCreateElectionSession,
+      replaceCreateElectionSession,
     ],
   );
 

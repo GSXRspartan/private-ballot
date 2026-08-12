@@ -150,6 +150,9 @@ pub struct GuiElectionDraftPreviewV1 {
     pub complete: bool,
     pub missing: Vec<&'static str>,
     pub frozen: bool,
+    /// Safe creation result retained by a frozen draft so a remounted
+    /// organizer screen can restore its read-only frozen view.
+    pub creation_result: Option<GuiElectionCreationResultV1>,
     /// Whether the presentation type is part of the canonical manifest. Always
     /// `false` for version one; documented for the frontend.
     pub presentation_is_canonical: bool,
@@ -551,6 +554,7 @@ impl GuiElectionDraftV1 {
             complete,
             missing,
             frozen: self.frozen,
+            creation_result: self.result.clone(),
             presentation_is_canonical: false,
             governance_source_pin: pin,
             governance_document: self.governance_document_digest.clone(),
