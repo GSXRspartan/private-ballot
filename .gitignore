@@ -22,3 +22,6 @@ Thumbs.db
 /gui/dist/
 /gui/src-tauri/target/
 /gui/src-tauri/gen/
+# The detached Tauri workspace needs its lockfile tracked for reproducible
+# --locked builds (overrides the blanket Cargo.lock rule above).
+!/gui/src-tauri/Cargo.lock
