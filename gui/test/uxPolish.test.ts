@@ -296,6 +296,11 @@ describe("built-in guide", () => {
     assert.match(guide, /Finalizing is irreversible/);
   });
 
+  it("explains bound V2 question semantics without overstating legacy V1 files", () => {
+    assert.match(guide, /question and response choices are cryptographically bound/);
+    assert.match(guide, /legacy files honestly say when no canonical question exists/);
+  });
+
   it("states the ballot-content privacy limitation without overclaiming", () => {
     assert.match(guide, /Ballot content is not permanently secret\./);
     assert.match(guide, /Network anonymity depends on the submission route/);
@@ -313,17 +318,18 @@ describe("built-in guide", () => {
 // -------------------------------------------------------------------------
 
 describe("no frontend-only election question", () => {
-  it("adds no title/question field to the bound voter view model", () => {
+  it("adds only the canonical proposal question to the bound voter view model", () => {
     const bound = types.slice(
       types.indexOf("GuiVoterBoundFieldsV1 {"),
       types.indexOf("GuiVoterBoundFieldsV1 {") + 600,
     );
-    assert.doesNotMatch(bound, /question|title/i);
+    assert.match(bound, /proposal_question: string \| null/);
+    assert.doesNotMatch(bound, /\btitle\b/i);
   });
 
-  it("shows only cryptographically bound identity on the Vote screen", () => {
+  it("shows only cryptographically bound question data on the Vote screen", () => {
     assert.match(vote, /confirmation\.bound\.election_id_text \?\? confirmation\.bound\.election_id_hex/);
-    // The bound limitation notice (supplied by the backend) stays visible.
+    assert.match(vote, /confirmation\.bound\.proposal_question/);
     assert.match(vote, /confirmation\.no_proposal_question_notice/);
   });
 });

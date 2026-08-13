@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use tari_cc_private_ballot_ballot::{CandidateSet, ElectionManifestV1};
+use tari_cc_private_ballot_ballot::{CandidateSet, ElectionManifest};
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, CandidateSetCommitment, MAX_CANONICAL_OBJECT_BYTES, ManifestHash,
     RegistryCommitment, ValidationCode,
@@ -30,7 +30,7 @@ use crate::summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 /// 5. the manifest's proof suite passes the production suite policy.
 #[derive(Debug, Clone)]
 pub struct GuiElectionArtifactsV1 {
-    manifest: ElectionManifestV1,
+    manifest: ElectionManifest,
     registry: RegistrySnapshot,
     candidates: CandidateSet,
     manifest_hash: ManifestHash,
@@ -50,7 +50,7 @@ impl GuiElectionArtifactsV1 {
         registry_bytes: &[u8],
         candidate_bytes: &[u8],
     ) -> Result<Self, GuiCoreError> {
-        let manifest = ElectionManifestV1::from_canonical_cbor(manifest_bytes)
+        let manifest = ElectionManifest::from_canonical_cbor(manifest_bytes)
             .map_err(|error| GuiCoreError::from_protocol(&error, "manifest"))?;
         let registry = RegistrySnapshot::from_canonical_cbor(registry_bytes)
             .map_err(|error| GuiCoreError::from_protocol(&error, "registry"))?;
@@ -120,7 +120,7 @@ impl GuiElectionArtifactsV1 {
 
     /// Returns the validated election manifest.
     #[must_use]
-    pub const fn manifest(&self) -> &ElectionManifestV1 {
+    pub const fn manifest(&self) -> &ElectionManifest {
         &self.manifest
     }
 
@@ -169,6 +169,7 @@ impl GuiElectionArtifactsV1 {
     ) -> GuiElectionSummaryV1 {
         let election_id_bytes = self.manifest.election_id().as_bytes();
         GuiElectionSummaryV1 {
+            manifest_schema_version: self.manifest.manifest_schema_version(),
             election_id_hex: crate::hex::to_lower_hex(election_id_bytes),
             election_id_text: core::str::from_utf8(election_id_bytes)
                 .ok()
@@ -187,6 +188,7 @@ impl GuiElectionArtifactsV1 {
             approval_max: self.manifest.approval_limits().maximum(),
             abstention_allowed: self.manifest.approval_limits().allow_abstention(),
             governance_source_revision: self.manifest.governance_source_revision().to_owned(),
+            proposal_question: self.manifest.proposal_question().map(str::to_owned),
             candidates: self
                 .candidates
                 .candidates()

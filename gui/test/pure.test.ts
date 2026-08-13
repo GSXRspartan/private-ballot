@@ -47,6 +47,7 @@ const sampleSummary = {
   election_id_hex: "ab",
   election_id_text: null,
   lifecycle_state: "FROZEN",
+  manifest_schema_version: 2,
   manifest_hash_hex: "cd",
   registry_commitment_hex: "ef",
   candidate_set_commitment_hex: "01",
@@ -58,6 +59,7 @@ const sampleSummary = {
   approval_max: 2,
   abstention_allowed: false,
   governance_source_revision: "rev-1",
+  proposal_question: "Should the sample proposal pass?",
   candidates: [],
 };
 
@@ -511,6 +513,7 @@ describe("creation: authoritative draft initialization", () => {
 describe("creation: non-destructive draft acquisition and hydration", () => {
   const preview = {
     election_id_text: "preserved-election",
+    proposal_question: "Should this preserved election pass?",
     governance_source_revision: "preserved-revision",
     presentation: "GovernanceProposal",
     voters: [{ public_key_hex: KEY64, public_key_abbrev: "6a493210…3e86f2" }],

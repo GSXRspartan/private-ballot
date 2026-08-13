@@ -31,6 +31,9 @@ pub const MAX_CANDIDATE_DISPLAY_NAME_BYTES: usize = 512;
 /// Maximum encoded size of one election identifier.
 pub const MAX_ELECTION_ID_BYTES: usize = 128;
 
+/// Maximum UTF-8 byte length of a canonical human-readable proposal question.
+pub const MAX_PROPOSAL_QUESTION_BYTES: usize = 512;
+
 /// Maximum UTF-8 byte length of a proof-suite identifier.
 pub const MAX_PROOF_SUITE_ID_BYTES: usize = 128;
 

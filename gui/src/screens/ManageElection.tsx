@@ -348,6 +348,12 @@ export function ManageElection() {
               <Field label="Lifecycle">
                 <LifecyclePill state={lifecycle} />
               </Field>
+              <Field label="Manifest schema">
+                ElectionManifestV{election.manifest_schema_version}
+              </Field>
+              {election.proposal_question && (
+                <Field label="Ballot question">{election.proposal_question}</Field>
+              )}
               <Field label="Proof suite">{election.proof_suite_id}</Field>
               <Field label="Ballot kind">{election.ballot_kind}</Field>
               <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
@@ -375,10 +381,13 @@ export function ManageElection() {
                 <Field label="Abstention">
                   {election.abstention_allowed ? "permitted" : "not permitted"}
                 </Field>
-                <Field label="Governance source">
-                  {election.governance_source_revision}
-                </Field>
-                <Field label="Quorum">No quorum rule is represented in this election manifest.</Field>
+              <Field label="Governance source">
+                {election.governance_source_revision}
+              </Field>
+              {election.proposal_question && (
+                <Field label="Ballot question">{election.proposal_question}</Field>
+              )}
+              <Field label="Quorum">No quorum rule is represented in this election manifest.</Field>
               </div>
               <p className="card-body">
                 The version-one manifest carries no quorum, minimum-participation, or passing
@@ -415,6 +424,9 @@ export function ManageElection() {
               <Field label="Manifest hash">
                 <HashValue value={election.manifest_hash_hex} />
                 <CopyButton value={election.manifest_hash_hex} />
+              </Field>
+              <Field label="Manifest schema">
+                ElectionManifestV{election.manifest_schema_version}
               </Field>
               <Field label="Registry commitment">
                 <HashValue value={election.registry_commitment_hex} />

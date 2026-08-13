@@ -11,7 +11,8 @@
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
-    ElectionLifecycleV1, ElectionManifestV1, ElectionManifestV1Input,
+    ElectionLifecycleV1, ElectionManifestV1, ElectionManifestV1Input, ElectionManifestV2,
+    ElectionManifestV2Input,
 };
 use tari_cc_private_ballot_crypto::{
     RISTRETTO_COMPRESSED_POINT_BYTES, TARI_TRIPTYCH_PROOF_ENVELOPE_HEADER_BYTES,
@@ -526,10 +527,84 @@ fn independently_round_tripped_packages_derive_one_election_nullifier() {
     assert_eq!(ledger.len(), 1);
 }
 
+#[test]
+fn real_triptych_v2_question_binds_the_complete_proof_chain() {
+    let fixture = v2_fixture(
+        b"real-triptych-v2-question",
+        "Should the V2 Triptych integration question pass?",
+    );
+    let changed_question = v2_fixture(
+        b"real-triptych-v2-question",
+        "Should the changed V2 Triptych integration question pass?",
+    );
+    let payload = payload(&fixture.candidates, b"candidate-a");
+    let provider = TestOnlyDeterministicHasher;
+
+    let Ok(first_manifest_hash) = fixture.manifest.canonical_hash(&provider) else {
+        panic!("V2 manifest hash must be derivable");
+    };
+    let Ok(changed_manifest_hash) = changed_question.manifest.canonical_hash(&provider) else {
+        panic!("changed V2 manifest hash must be derivable");
+    };
+    let Ok(first_scope) = fixture.manifest.canonical_scope(&provider) else {
+        panic!("V2 election scope must be derivable");
+    };
+    let Ok(changed_scope) = changed_question.manifest.canonical_scope(&provider) else {
+        panic!("changed V2 election scope must be derivable");
+    };
+
+    assert_ne!(first_manifest_hash, changed_manifest_hash);
+    assert_ne!(first_scope, changed_scope);
+
+    let Ok(verifier) = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("registry-bound Triptych verifier must be constructible");
+    };
+    let Ok(statement) =
+        reconstruct_approval_proof_statement(&fixture.manifest, &payload, &provider)
+    else {
+        panic!("V2 proof statement must be reconstructible");
+    };
+    let secret = secret_key();
+    let Ok(proof) = prove_tari_triptych_prototype_v1(&statement, &verifier, &secret) else {
+        panic!("V2 real Triptych proof must be constructible");
+    };
+    let Ok(package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: first_manifest_hash,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        proof: proof.clone(),
+        payload: payload.clone(),
+    }) else {
+        panic!("V2 real Triptych package must be structurally valid");
+    };
+
+    assert_eq!(package.manifest_hash(), first_manifest_hash);
+    assert!(
+        verify_approval_proof(&fixture.manifest, &payload, &proof, &provider, &verifier).is_ok()
+    );
+    assert!(
+        verify_approval_proof(
+            &changed_question.manifest,
+            &payload,
+            &proof,
+            &provider,
+            &verifier,
+        )
+        .is_err()
+    );
+}
+
 struct Fixture {
     registry: RegistrySnapshot,
     candidates: CandidateSet,
     manifest: ElectionManifestV1,
+}
+
+struct V2Fixture {
+    registry: RegistrySnapshot,
+    candidates: CandidateSet,
+    manifest: ElectionManifestV2,
 }
 
 fn fixture(election_id_bytes: &[u8]) -> Fixture {
@@ -561,6 +636,42 @@ fn fixture(election_id_bytes: &[u8]) -> Fixture {
     };
 
     Fixture {
+        registry,
+        candidates,
+        manifest,
+    }
+}
+
+fn v2_fixture(election_id_bytes: &[u8], proposal_question: &str) -> V2Fixture {
+    let provider = TestOnlyDeterministicHasher;
+    let registry = registry();
+    let candidates = candidate_set();
+
+    let Ok(registry_commitment) = registry.canonical_commitment(&provider) else {
+        panic!("test V2 registry commitment must be derivable");
+    };
+    let Ok(candidate_set_commitment) = candidates.canonical_commitment(&provider) else {
+        panic!("test V2 candidate-set commitment must be derivable");
+    };
+    let Ok(election_id) = ElectionId::new(election_id_bytes.to_vec()) else {
+        panic!("test V2 election ID must be valid");
+    };
+    let Ok(manifest) = ElectionManifestV2::new(ElectionManifestV2Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        election_id,
+        ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+        ballot_confidentiality: BallotConfidentialityV1::Public,
+        registry_commitment,
+        candidate_set_commitment,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        approval_limits: approval_limits(),
+        governance_source_revision: "integration-revision-1".to_owned(),
+        proposal_question: proposal_question.to_owned(),
+    }) else {
+        panic!("real Triptych V2 integration manifest must be valid");
+    };
+
+    V2Fixture {
         registry,
         candidates,
         manifest,

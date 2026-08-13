@@ -357,6 +357,14 @@ export function Archive() {
           <div className="card-grid">
             <Card title="Manifest">
               <div className="field-list">
+                <Field label="Manifest schema">
+                  {result.election_manifest_schema_version === null
+                    ? "unknown"
+                    : `ElectionManifestV${result.election_manifest_schema_version}`}
+                </Field>
+                {result.proposal_question && (
+                  <Field label="Ballot question">{result.proposal_question}</Field>
+                )}
                 <Field label="Election manifest hash">
                   <HashValue value={result.election_manifest_hash_hex} />
                 </Field>

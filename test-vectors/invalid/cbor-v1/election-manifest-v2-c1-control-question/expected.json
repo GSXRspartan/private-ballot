@@ -1,0 +1,8 @@
+{
+  "schema": "phase2-invalid-cbor-expected-v1",
+  "vector_id": "election-manifest-v2-c1-control-question",
+  "target": "ElectionManifestV2::from_canonical_cbor",
+  "object_family": "election-manifest-v2",
+  "accepted": false,
+  "expected_rejection_code": "INVALID_PROPOSAL_QUESTION"
+}

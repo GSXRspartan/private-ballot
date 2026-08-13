@@ -10,7 +10,7 @@ mod common;
 use serde_json::Value;
 use tari_cc_private_ballot_ballot::{
     ApprovalLimits, BallotConfidentialityV1, BallotKindV1, CandidateDefinition, CandidateId,
-    CandidateSet, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
+    CandidateSet, ElectionId, ElectionManifestV2, ElectionManifestV2Input,
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
@@ -58,7 +58,11 @@ fn options() -> Vec<(String, String)> {
 fn complete_draft() -> GuiElectionDraftV1 {
     let mut draft = GuiElectionDraftV1::new();
     ok(
-        draft.set_basics("creation-test-election".to_owned(), "creation-rev-1".to_owned()),
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Should the creation test election pass?".to_owned(),
+            "creation-rev-1".to_owned(),
+        ),
         "basics must be valid",
     );
     ok(draft.set_rules(1, 2, true), "rules must be valid");
@@ -86,7 +90,15 @@ fn valid_creation_succeeds_and_freezes() {
     let summary = result.summary;
 
     assert_eq!(summary.lifecycle_state, Some("FROZEN"));
-    assert_eq!(summary.election_id_text.as_deref(), Some("creation-test-election"));
+    assert_eq!(summary.manifest_schema_version, 2);
+    assert_eq!(
+        summary.election_id_text.as_deref(),
+        Some("creation-test-election")
+    );
+    assert_eq!(
+        summary.proposal_question.as_deref(),
+        Some("Should the creation test election pass?")
+    );
     assert_eq!(summary.governance_source_revision, "creation-rev-1");
     assert_eq!(summary.voter_count, 3);
     assert_eq!(summary.candidates.len(), 3);
@@ -135,17 +147,81 @@ fn governance_and_candidate_share_one_approval_ballot_representation() {
 fn malformed_election_id_is_rejected() {
     let mut draft = GuiElectionDraftV1::new();
     let error = err(
-        draft.set_basics(String::new(), "rev-1".to_owned()),
+        draft.set_basics(String::new(), "Question?".to_owned(), "rev-1".to_owned()),
         "empty election id must fail",
     );
     assert_eq!(error.code(), "EMPTY_ELECTION_ID");
 }
 
 #[test]
+fn invalid_proposal_question_blocks_freeze() {
+    let mut draft = complete_draft();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            " leading whitespace".to_owned(),
+            "creation-rev-1".to_owned(),
+        ),
+        "draft stores ordinary frontend strings before canonical construction",
+    );
+    let error = err(draft.freeze(), "invalid question must block freeze");
+    assert_eq!(error.code(), "INVALID_PROPOSAL_QUESTION");
+}
+
+#[test]
+fn preview_is_incomplete_when_proposal_question_is_empty() {
+    let mut draft = complete_draft();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            String::new(),
+            "creation-rev-1".to_owned(),
+        ),
+        "draft stores an empty question before canonical construction",
+    );
+
+    let preview = draft.preview();
+
+    assert!(!preview.complete);
+    assert!(preview.manifest_hash_hex.is_none());
+}
+
+#[test]
+fn preview_is_incomplete_when_proposal_question_is_whitespace_only() {
+    let mut draft = complete_draft();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "   ".to_owned(),
+            "creation-rev-1".to_owned(),
+        ),
+        "draft stores whitespace before canonical construction",
+    );
+
+    let preview = draft.preview();
+
+    assert!(!preview.complete);
+    assert!(preview.manifest_hash_hex.is_none());
+}
+
+#[test]
+fn preview_is_complete_when_proposal_question_is_valid() {
+    let draft = complete_draft();
+
+    let preview = draft.preview();
+
+    assert!(preview.complete);
+    assert!(preview.manifest_hash_hex.is_some());
+}
+
+#[test]
 fn unsupported_proof_suite_is_not_exposed() {
     let mut draft = complete_draft();
     let (result, _) = ok(draft.freeze(), "freeze must succeed");
-    assert_eq!(result.summary.proof_suite_id, TARI_TRIPTYCH_PROOF_SUITE_ID_V1);
+    assert_eq!(
+        result.summary.proof_suite_id,
+        TARI_TRIPTYCH_PROOF_SUITE_ID_V1
+    );
 }
 
 #[test]
@@ -160,7 +236,10 @@ fn invalid_approval_limits_are_rejected() {
 #[test]
 fn zero_max_with_abstention_disabled_is_rejected() {
     let mut draft = GuiElectionDraftV1::new();
-    let error = err(draft.set_rules(0, 0, false), "min=0/max=0/abstention=false must fail");
+    let error = err(
+        draft.set_rules(0, 0, false),
+        "min=0/max=0/abstention=false must fail",
+    );
     assert_eq!(error.code(), "GUI_UNCASTABLE_APPROVAL_LIMITS");
     assert_eq!(
         error.message(),
@@ -175,7 +254,10 @@ fn zero_max_with_abstention_disabled_is_rejected() {
 #[test]
 fn zero_max_with_abstention_enabled_is_accepted() {
     let mut draft = GuiElectionDraftV1::new();
-    ok(draft.set_rules(0, 0, true), "min=0/max=0/abstention=true accepted");
+    ok(
+        draft.set_rules(0, 0, true),
+        "min=0/max=0/abstention=true accepted",
+    );
     let preview = draft.preview();
     assert_eq!(preview.approval_min, Some(0));
     assert_eq!(preview.approval_max, Some(0));
@@ -225,7 +307,10 @@ fn empty_required_fields_block_freeze() {
 #[test]
 fn valid_public_keys_are_accepted() {
     let mut draft = GuiElectionDraftV1::new();
-    ok(draft.set_basics("e".to_owned(), "r".to_owned()), "basics");
+    ok(
+        draft.set_basics("e".to_owned(), "Question?".to_owned(), "r".to_owned()),
+        "basics",
+    );
     ok(draft.set_voters(voter_hexs()), "voters");
     let preview = draft.preview();
     assert_eq!(preview.voter_count, 3);
@@ -246,10 +331,7 @@ fn malformed_public_key_is_rejected() {
     assert_eq!(error.code(), "GUI_MALFORMED_PUBLIC_KEY");
 
     let non_point = hex(&[0xff_u8; 32]);
-    let error = err(
-        draft.set_voters(vec![non_point]),
-        "non-point key must fail",
-    );
+    let error = err(draft.set_voters(vec![non_point]), "non-point key must fail");
     assert_eq!(error.code(), "GUI_MALFORMED_PUBLIC_KEY");
 }
 
@@ -265,7 +347,10 @@ fn duplicate_public_key_is_rejected() {
 #[test]
 fn no_secret_key_api_is_required_to_build_a_registry() {
     let mut draft = GuiElectionDraftV1::new();
-    ok(draft.set_voters(voter_hexs()), "public keys alone build the registry");
+    ok(
+        draft.set_voters(voter_hexs()),
+        "public keys alone build the registry",
+    );
     assert_eq!(draft.voter_count(), 3);
 }
 
@@ -275,7 +360,10 @@ fn registry_commitment_equals_direct_backend_construction() {
     let draft = complete_draft();
     let preview = draft.preview();
     let direct = direct_registry_commitment(&provider);
-    assert_eq!(preview.registry_commitment_hex, Some(to_hex(direct.as_bytes())));
+    assert_eq!(
+        preview.registry_commitment_hex,
+        Some(to_hex(direct.as_bytes()))
+    );
 }
 
 #[test]
@@ -285,10 +373,16 @@ fn registry_ordering_is_canonical_regardless_of_input_order() {
     reversed.reverse();
 
     let mut a = GuiElectionDraftV1::new();
-    ok(a.set_basics("e".to_owned(), "r".to_owned()), "basics a");
+    ok(
+        a.set_basics("e".to_owned(), "Question?".to_owned(), "r".to_owned()),
+        "basics a",
+    );
     ok(a.set_voters(voter_hexs()), "voters a");
     let mut b = GuiElectionDraftV1::new();
-    ok(b.set_basics("e".to_owned(), "r".to_owned()), "basics b");
+    ok(
+        b.set_basics("e".to_owned(), "Question?".to_owned(), "r".to_owned()),
+        "basics b",
+    );
     ok(b.set_voters(reversed), "voters b");
 
     let pa = a.preview();
@@ -307,7 +401,10 @@ fn registry_ordering_is_canonical_regardless_of_input_order() {
 /// key bytes derived here come exclusively from the backend registry types,
 /// not from the gui-core import helper under test.
 fn independent_registry_bytes() -> Vec<u8> {
-    ok(direct_registry_snapshot().to_canonical_cbor(), "encode registry")
+    ok(
+        direct_registry_snapshot().to_canonical_cbor(),
+        "encode registry",
+    )
 }
 
 #[test]
@@ -315,8 +412,10 @@ fn import_registry_bytes_round_trips_and_matches_independent_commitment() {
     let provider = Blake3HashProviderV1;
     let encoded = independent_registry_bytes();
     let independent = direct_registry_snapshot();
-    let independent_commitment =
-        ok(independent.canonical_commitment(&provider), "independent commitment");
+    let independent_commitment = ok(
+        independent.canonical_commitment(&provider),
+        "independent commitment",
+    );
     let independent_keys: Vec<String> = independent
         .entries()
         .iter()
@@ -324,7 +423,14 @@ fn import_registry_bytes_round_trips_and_matches_independent_commitment() {
         .collect();
 
     let mut draft = GuiElectionDraftV1::new();
-    ok(draft.set_basics("import-test".to_owned(), "rev-1".to_owned()), "basics");
+    ok(
+        draft.set_basics(
+            "import-test".to_owned(),
+            "Question?".to_owned(),
+            "rev-1".to_owned(),
+        ),
+        "basics",
+    );
     ok(draft.import_registry_bytes(&encoded), "import must succeed");
     ok(draft.set_options(options()), "options");
     ok(draft.set_rules(1, 2, true), "rules");
@@ -337,7 +443,11 @@ fn import_registry_bytes_round_trips_and_matches_independent_commitment() {
     // Voter count matches.
     assert_eq!(preview.voter_count, independent.entries().len());
     // Public keys match canonical registry semantics (canonical order).
-    let imported_keys: Vec<String> = preview.voters.iter().map(|v| v.public_key_hex.clone()).collect();
+    let imported_keys: Vec<String> = preview
+        .voters
+        .iter()
+        .map(|v| v.public_key_hex.clone())
+        .collect();
     assert_eq!(imported_keys, independent_keys);
     // Imported registry commitment matches the independently constructed one.
     assert_eq!(
@@ -357,7 +467,14 @@ fn import_registry_bytes_round_trips_and_matches_independent_commitment() {
 #[test]
 fn import_registry_bytes_rejects_malformed_cbor_without_corrupting_draft() {
     let mut draft = GuiElectionDraftV1::new();
-    ok(draft.set_basics("malformed".to_owned(), "rev".to_owned()), "basics");
+    ok(
+        draft.set_basics(
+            "malformed".to_owned(),
+            "Question?".to_owned(),
+            "rev".to_owned(),
+        ),
+        "basics",
+    );
 
     // Malformed bytes: not valid canonical CBOR. 0xff has CBOR major type 7,
     // but a registry is encoded as an array (major type 4), so the strict
@@ -476,7 +593,10 @@ fn option_ordering_matches_canonical_backend_behavior() {
     ok(draft.set_options(options()), "options");
     let preview = draft.preview();
     let direct = direct_candidate_commitment(&provider);
-    assert_eq!(preview.candidate_set_commitment_hex, Some(to_hex(direct.as_bytes())));
+    assert_eq!(
+        preview.candidate_set_commitment_hex,
+        Some(to_hex(direct.as_bytes()))
+    );
 }
 
 // --------------------------------------------------- F1: duplicate display labels
@@ -488,7 +608,10 @@ fn duplicate_option_id_is_still_rejected() {
         ("a".to_owned(), "A".to_owned()),
         ("a".to_owned(), "B".to_owned()),
     ];
-    let error = err(draft.set_options(dup), "duplicate option id must still fail");
+    let error = err(
+        draft.set_options(dup),
+        "duplicate option id must still fail",
+    );
     assert_eq!(error.code(), "DUPLICATE_CANDIDATE_ID");
 }
 
@@ -504,7 +627,10 @@ fn distinct_ids_with_duplicate_display_label_are_rejected() {
         "duplicate display label must fail",
     );
     assert_eq!(error.code(), "GUI_DUPLICATE_OPTION_DISPLAY_LABEL");
-    assert_eq!(error.message(), "Ballot option display labels must be unique.");
+    assert_eq!(
+        error.message(),
+        "Ballot option display labels must be unique."
+    );
     // No option state is installed on rejection.
     assert!(draft.preview().options.is_empty());
 }
@@ -538,7 +664,10 @@ fn duplicate_display_label_rejection_happens_before_freeze_output() {
     // set is preserved. Clear it so we can prove no freeze output is produced
     // for a draft that never reached a valid complete state with the duplicate.
     let mut fresh = GuiElectionDraftV1::new();
-    ok(fresh.set_basics("e".to_owned(), "r".to_owned()), "basics");
+    ok(
+        fresh.set_basics("e".to_owned(), "Question?".to_owned(), "r".to_owned()),
+        "basics",
+    );
     ok(fresh.set_voters(voter_hexs()), "voters");
     let dup_error = err(
         fresh.set_options(vec![
@@ -583,14 +712,20 @@ fn freeze_produces_frozen_lifecycle() {
 #[test]
 fn post_freeze_registry_mutation_is_rejected() {
     let (mut draft, _) = freeze_complete();
-    let error = err(draft.set_voters(voter_hexs()), "post-freeze voters must fail");
+    let error = err(
+        draft.set_voters(voter_hexs()),
+        "post-freeze voters must fail",
+    );
     assert_eq!(error.code(), "GUI_DRAFT_ALREADY_FROZEN");
 }
 
 #[test]
 fn post_freeze_option_mutation_is_rejected() {
     let (mut draft, _) = freeze_complete();
-    let error = err(draft.set_options(options()), "post-freeze options must fail");
+    let error = err(
+        draft.set_options(options()),
+        "post-freeze options must fail",
+    );
     assert_eq!(error.code(), "GUI_DRAFT_ALREADY_FROZEN");
 }
 
@@ -610,7 +745,11 @@ fn manifest_hash_is_stable_after_freeze() {
     };
     assert_eq!(result.summary.manifest_hash_hex, summary.manifest_hash_hex);
     assert_eq!(
-        draft.creation_result().unwrap_or(result).summary.manifest_hash_hex,
+        draft
+            .creation_result()
+            .unwrap_or(result)
+            .summary
+            .manifest_hash_hex,
         summary.manifest_hash_hex
     );
 }
@@ -624,11 +763,18 @@ fn export_writes_all_canonical_files() {
     let dir = TestDir::new("creation-export");
     let target = dir.join("election");
 
-    let exported = ok(write_election_artifacts_v1(session.artifacts(), &target), "export");
+    let exported = ok(
+        write_election_artifacts_v1(session.artifacts(), &target),
+        "export",
+    );
     let names: Vec<&str> = exported.files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(
         names,
-        vec!["election-manifest.cbor", "voter-registry.cbor", "candidate-set.cbor"]
+        vec![
+            "election-manifest.cbor",
+            "voter-registry.cbor",
+            "candidate-set.cbor"
+        ]
     );
     for file in &exported.files {
         assert!(target.join(&file.path).is_file());
@@ -644,7 +790,10 @@ fn export_overwrite_is_rejected() {
     let (_result, session) = ok(draft.freeze(), "freeze");
     let dir = TestDir::new("creation-overwrite");
     let target = dir.join("out");
-    ok(write_election_artifacts_v1(session.artifacts(), &target), "first export");
+    ok(
+        write_election_artifacts_v1(session.artifacts(), &target),
+        "first export",
+    );
     let error = err(
         write_election_artifacts_v1(session.artifacts(), &target),
         "second export must fail",
@@ -673,7 +822,10 @@ fn exported_bytes_equal_canonical_encoder_output() {
     let (_result, session) = ok(draft.freeze(), "freeze");
     let dir = TestDir::new("creation-bytes");
     let target = dir.join("out");
-    let exported = ok(write_election_artifacts_v1(session.artifacts(), &target), "export");
+    let exported = ok(
+        write_election_artifacts_v1(session.artifacts(), &target),
+        "export",
+    );
 
     let manifest_bytes = std::fs::read(target.join("election-manifest.cbor"))
         .unwrap_or_else(|e| panic!("read manifest: {e}"));
@@ -684,15 +836,24 @@ fn exported_bytes_equal_canonical_encoder_output() {
 
     assert_eq!(
         manifest_bytes,
-        ok(session.artifacts().manifest().to_canonical_cbor(), "manifest encode")
+        ok(
+            session.artifacts().manifest().to_canonical_cbor(),
+            "manifest encode"
+        )
     );
     assert_eq!(
         registry_bytes,
-        ok(session.artifacts().registry().to_canonical_cbor(), "registry encode")
+        ok(
+            session.artifacts().registry().to_canonical_cbor(),
+            "registry encode"
+        )
     );
     assert_eq!(
         candidate_bytes,
-        ok(session.artifacts().candidates().to_canonical_cbor(), "candidates encode")
+        ok(
+            session.artifacts().candidates().to_canonical_cbor(),
+            "candidates encode"
+        )
     );
 
     use tari_cc_private_ballot_archive::ArchiveFileDigestV1;
@@ -710,7 +871,10 @@ fn export_then_5a4_load_round_trip_is_exact() {
     let (result, session) = ok(draft.freeze(), "freeze");
     let dir = TestDir::new("creation-roundtrip");
     let target = dir.join("out");
-    ok(write_election_artifacts_v1(session.artifacts(), &target), "export");
+    ok(
+        write_election_artifacts_v1(session.artifacts(), &target),
+        "export",
+    );
 
     let reloaded = ok(
         GuiElectionArtifactsV1::from_paths(
@@ -721,7 +885,10 @@ fn export_then_5a4_load_round_trip_is_exact() {
         "reload",
     );
 
-    assert_eq!(reloaded.manifest_hash(), session.artifacts().manifest_hash());
+    assert_eq!(
+        reloaded.manifest_hash(),
+        session.artifacts().manifest_hash()
+    );
     assert_eq!(
         reloaded.registry_commitment(),
         session.artifacts().registry_commitment()
@@ -736,7 +903,10 @@ fn export_then_5a4_load_round_trip_is_exact() {
     assert_eq!(actual.election_id_hex, expected.election_id_hex);
     assert_eq!(actual.election_id_text, expected.election_id_text);
     assert_eq!(actual.manifest_hash_hex, expected.manifest_hash_hex);
-    assert_eq!(actual.registry_commitment_hex, expected.registry_commitment_hex);
+    assert_eq!(
+        actual.registry_commitment_hex,
+        expected.registry_commitment_hex
+    );
     assert_eq!(
         actual.candidate_set_commitment_hex,
         expected.candidate_set_commitment_hex
@@ -746,7 +916,10 @@ fn export_then_5a4_load_round_trip_is_exact() {
     assert_eq!(actual.approval_min, expected.approval_min);
     assert_eq!(actual.approval_max, expected.approval_max);
     assert_eq!(actual.abstention_allowed, expected.abstention_allowed);
-    assert_eq!(actual.governance_source_revision, expected.governance_source_revision);
+    assert_eq!(
+        actual.governance_source_revision,
+        expected.governance_source_revision
+    );
     assert_eq!(actual.ballot_kind, expected.ballot_kind);
     assert_eq!(actual.candidates, expected.candidates);
 }
@@ -763,27 +936,51 @@ fn same_draft_produces_identical_canonical_bytes_and_hash() {
         second_result.summary.manifest_hash_hex
     );
     assert_eq!(
-        ok(first_session.artifacts().manifest().to_canonical_cbor(), "first manifest"),
-        ok(second_session.artifacts().manifest().to_canonical_cbor(), "second manifest")
+        ok(
+            first_session.artifacts().manifest().to_canonical_cbor(),
+            "first manifest"
+        ),
+        ok(
+            second_session.artifacts().manifest().to_canonical_cbor(),
+            "second manifest"
+        )
     );
     assert_eq!(
-        ok(first_session.artifacts().registry().to_canonical_cbor(), "first registry"),
-        ok(second_session.artifacts().registry().to_canonical_cbor(), "second registry")
+        ok(
+            first_session.artifacts().registry().to_canonical_cbor(),
+            "first registry"
+        ),
+        ok(
+            second_session.artifacts().registry().to_canonical_cbor(),
+            "second registry"
+        )
     );
     assert_eq!(
-        ok(first_session.artifacts().candidates().to_canonical_cbor(), "first candidates"),
-        ok(second_session.artifacts().candidates().to_canonical_cbor(), "second candidates")
+        ok(
+            first_session.artifacts().candidates().to_canonical_cbor(),
+            "first candidates"
+        ),
+        ok(
+            second_session.artifacts().candidates().to_canonical_cbor(),
+            "second candidates"
+        )
     );
 }
 
 #[test]
 fn presentation_metadata_does_not_alter_canonical_bytes() {
     let mut candidate = complete_draft();
-    ok(candidate.set_presentation(GuiBallotPresentationType::Candidate), "candidate");
+    ok(
+        candidate.set_presentation(GuiBallotPresentationType::Candidate),
+        "candidate",
+    );
     let (candidate_result, candidate_session) = ok(candidate.freeze(), "candidate freeze");
 
     let mut measure = complete_draft();
-    ok(measure.set_presentation(GuiBallotPresentationType::BallotMeasure), "measure");
+    ok(
+        measure.set_presentation(GuiBallotPresentationType::BallotMeasure),
+        "measure",
+    );
     let (measure_result, measure_session) = ok(measure.freeze(), "measure freeze");
 
     assert_ne!(candidate_result.presentation, measure_result.presentation);
@@ -792,8 +989,14 @@ fn presentation_metadata_does_not_alter_canonical_bytes() {
         measure_result.summary.manifest_hash_hex
     );
     assert_eq!(
-        ok(candidate_session.artifacts().manifest().to_canonical_cbor(), "candidate manifest"),
-        ok(measure_session.artifacts().manifest().to_canonical_cbor(), "measure manifest")
+        ok(
+            candidate_session.artifacts().manifest().to_canonical_cbor(),
+            "candidate manifest"
+        ),
+        ok(
+            measure_session.artifacts().manifest().to_canonical_cbor(),
+            "measure manifest"
+        )
     );
 }
 
@@ -821,13 +1024,18 @@ fn serialized_creation_result_contains_no_secret_material() {
 
     for value in [
         ok(serde_json::from_str::<Value>(&json), "parse result json"),
-        ok(serde_json::from_str::<Value>(&preview_json), "parse preview json"),
+        ok(
+            serde_json::from_str::<Value>(&preview_json),
+            "parse preview json",
+        ),
     ] {
         let mut keys: Vec<String> = Vec::new();
         if let Some(obj) = value.as_object() {
             keys.extend(obj.keys().cloned());
         }
-        for forbidden in ["secret", "seed", "mnemonic", "auth", "token", "password", "wallet"] {
+        for forbidden in [
+            "secret", "seed", "mnemonic", "auth", "token", "password", "wallet",
+        ] {
             for k in &keys {
                 assert!(!k.to_lowercase().contains(forbidden), "field {k} forbidden");
             }
@@ -840,7 +1048,10 @@ fn error_strings_contain_no_secret_material() {
     let mut draft = GuiElectionDraftV1::new();
     let secret_hex = hex(&voters()[0].secret_bytes);
     let errors: Vec<GuiCoreError> = vec![
-        err(draft.set_basics(String::new(), "r".to_owned()), "empty id"),
+        err(
+            draft.set_basics(String::new(), "Question?".to_owned(), "r".to_owned()),
+            "empty id",
+        ),
         err(draft.set_rules(3, 1, false), "min>max"),
         err(draft.set_voters(vec!["zz".to_owned(); 32]), "bad hex"),
         err(draft.freeze(), "incomplete freeze"),
@@ -877,20 +1088,35 @@ fn creation_does_not_change_published_canonical_vectors() {
     let direct_candidates = direct_candidate_set();
     let direct_manifest = direct_manifest(
         &provider,
-        ok(direct_registry.canonical_commitment(&provider), "registry commit"),
-        ok(direct_candidates.canonical_commitment(&provider), "candidates commit"),
+        ok(
+            direct_registry.canonical_commitment(&provider),
+            "registry commit",
+        ),
+        ok(
+            direct_candidates.canonical_commitment(&provider),
+            "candidates commit",
+        ),
     );
 
     assert_eq!(
-        ok(session.artifacts().registry().to_canonical_cbor(), "session registry"),
+        ok(
+            session.artifacts().registry().to_canonical_cbor(),
+            "session registry"
+        ),
         ok(direct_registry.to_canonical_cbor(), "direct registry")
     );
     assert_eq!(
-        ok(session.artifacts().candidates().to_canonical_cbor(), "session candidates"),
+        ok(
+            session.artifacts().candidates().to_canonical_cbor(),
+            "session candidates"
+        ),
         ok(direct_candidates.to_canonical_cbor(), "direct candidates")
     );
     assert_eq!(
-        ok(session.artifacts().manifest().to_canonical_cbor(), "session manifest"),
+        ok(
+            session.artifacts().manifest().to_canonical_cbor(),
+            "session manifest"
+        ),
         ok(direct_manifest.to_canonical_cbor(), "direct manifest")
     );
 }
@@ -917,7 +1143,10 @@ fn direct_registry_snapshot() -> RegistrySnapshot {
 fn direct_registry_commitment(
     provider: &Blake3HashProviderV1,
 ) -> tari_cc_private_ballot_protocol::RegistryCommitment {
-    ok(direct_registry_snapshot().canonical_commitment(provider), "registry commitment")
+    ok(
+        direct_registry_snapshot().canonical_commitment(provider),
+        "registry commitment",
+    )
 }
 
 fn direct_candidate_set() -> CandidateSet {
@@ -934,19 +1163,25 @@ fn direct_candidate_set() -> CandidateSet {
 fn direct_candidate_commitment(
     provider: &Blake3HashProviderV1,
 ) -> tari_cc_private_ballot_protocol::CandidateSetCommitment {
-    ok(direct_candidate_set().canonical_commitment(provider), "candidate commitment")
+    ok(
+        direct_candidate_set().canonical_commitment(provider),
+        "candidate commitment",
+    )
 }
 
 fn direct_manifest(
     _provider: &Blake3HashProviderV1,
     registry_commitment: tari_cc_private_ballot_protocol::RegistryCommitment,
     candidate_set_commitment: tari_cc_private_ballot_protocol::CandidateSetCommitment,
-) -> ElectionManifestV1 {
+) -> ElectionManifestV2 {
     let limits = ok(ApprovalLimits::new(1, 2, true), "limits");
     ok(
-        ElectionManifestV1::new(ElectionManifestV1Input {
+        ElectionManifestV2::new(ElectionManifestV2Input {
             protocol_version: PROTOCOL_VERSION_V1,
-            election_id: ok(ElectionId::new(b"creation-test-election".to_vec()), "election id"),
+            election_id: ok(
+                ElectionId::new(b"creation-test-election".to_vec()),
+                "election id",
+            ),
             ballot_kind: BallotKindV1::NonBindingApprovalPilot,
             ballot_confidentiality: BallotConfidentialityV1::Public,
             registry_commitment,
@@ -954,6 +1189,7 @@ fn direct_manifest(
             proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
             approval_limits: limits,
             governance_source_revision: "creation-rev-1".to_owned(),
+            proposal_question: "Should the creation test election pass?".to_owned(),
         }),
         "manifest",
     )

@@ -86,6 +86,89 @@ class TestOnlyHashTests(unittest.TestCase):
             "e1d6c66279ae9807d8119cdc006c4d4b01f2afca6f483c7e0ebb1b856486b612",
         )
 
+    def test_stable_v2_manifest_domain_separated_vector(self) -> None:
+        self.assertEqual(
+            verifier.domain_separated_hash(
+                "tari-cc-private-ballot/election-manifest/v2",
+                bytes((1, 2, 3)),
+            ).hex(),
+            "cdb4a141517b49f6127cc5622e4ed436ad125f9805cf79c3c9f43ebd7ad385e4",
+        )
+
+
+class ElectionManifestV2ValidationTests(unittest.TestCase):
+    def manifest(self, question: str) -> list[object]:
+        return [
+            1,
+            b"election",
+            "NON_BINDING_APPROVAL_PILOT",
+            "PUBLIC",
+            bytes([1]) * 32,
+            bytes([2]) * 32,
+            verifier.TEST_ONLY_SUITE_ID,
+            [1, 1, True],
+            "revision-1",
+            question,
+        ]
+
+    def test_valid_v2_question_is_accepted_exactly(self) -> None:
+        verifier._validate_election_manifest_v2(
+            self.manifest("Should the council adopt RFC-0185?")
+        )
+
+    def test_v2_question_rejects_empty_and_whitespace_only_text(self) -> None:
+        for question in ["", "   "]:
+            with self.subTest(question=repr(question)):
+                with self.assertRaisesRegex(verifier.VerificationError, "empty"):
+                    verifier._validate_election_manifest_v2(self.manifest(question))
+
+    def test_v2_question_rejects_non_nfc_text(self) -> None:
+        with self.assertRaisesRegex(verifier.VerificationError, "NFC"):
+            verifier._validate_election_manifest_v2(self.manifest("Cafe\u0301?"))
+
+    def test_v2_question_rejects_leading_whitespace(self) -> None:
+        with self.assertRaisesRegex(verifier.VerificationError, "starts with whitespace"):
+            verifier._validate_election_manifest_v2(self.manifest(" Question?"))
+
+    def test_v2_question_rejects_trailing_whitespace(self) -> None:
+        with self.assertRaisesRegex(verifier.VerificationError, "ends with whitespace"):
+            verifier._validate_election_manifest_v2(self.manifest("Question? "))
+
+    def test_v2_question_rejects_embedded_newline(self) -> None:
+        with self.assertRaisesRegex(verifier.VerificationError, "newline"):
+            verifier._validate_election_manifest_v2(self.manifest("Question?\nYes"))
+
+    def test_v2_question_rejects_controls(self) -> None:
+        for question in ["Question?\x00 Yes", "Question?\x7f Yes", "Question?\u0085 Yes"]:
+            with self.subTest(question=repr(question)):
+                with self.assertRaisesRegex(verifier.VerificationError, "forbidden control"):
+                    verifier._validate_election_manifest_v2(self.manifest(question))
+
+    def test_v2_question_rejects_oversized_utf8(self) -> None:
+        with self.assertRaisesRegex(verifier.VerificationError, "size limit"):
+            verifier._validate_election_manifest_v2(
+                self.manifest("q" * (verifier.MAX_PROPOSAL_QUESTION_BYTES + 1))
+            )
+
+    def test_v2_shape_is_strict(self) -> None:
+        v2 = self.manifest("Question?")
+        v1 = v2[:-1]
+        with self.assertRaisesRegex(verifier.VerificationError, "shape"):
+            verifier._validate_election_manifest_v2(v1)
+        with self.assertRaisesRegex(verifier.VerificationError, "shape"):
+            verifier._validate_election_manifest_v1(v2)
+
+    def test_one_byte_question_mutation_changes_v2_digest(self) -> None:
+        first = verifier.encode_canonical(self.manifest("Question A?"))
+        second = verifier.encode_canonical(self.manifest("Question B?"))
+        domain = verifier.FAMILY_METADATA["election-manifest-v2"][1]
+
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(
+            verifier.domain_separated_hash(domain, first),
+            verifier.domain_separated_hash(domain, second),
+        )
+
 
 class FixtureVerificationTests(unittest.TestCase):
     def test_minimal_registry_fixture_verifies(self) -> None:
@@ -169,6 +252,24 @@ class FixtureVerificationTests(unittest.TestCase):
         self.assertEqual(
             set(report["decision_types"]),
             {"candidate-election", "ballot-measure"},
+        )
+
+    def test_checked_in_invalid_v2_manifest_vectors_are_rejected(self) -> None:
+        repository_root = Path(__file__).resolve().parents[1]
+        results = verifier.verify_invalid_v2_repository(repository_root)
+
+        self.assertEqual(
+            {item["vector_id"] for item in results},
+            verifier.REQUIRED_INVALID_V2_CASE_IDS,
+        )
+        self.assertEqual(
+            {item["expected_rejection_code"] for item in results},
+            {
+                "INVALID_CBOR",
+                "INVALID_PROPOSAL_QUESTION",
+                "NON_CANONICAL_CBOR",
+                "NON_NFC_PROPOSAL_QUESTION",
+            },
         )
 
 

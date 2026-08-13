@@ -1,6 +1,6 @@
 //! Verifier-owned proof-statement reconstruction.
 
-use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionManifestV1};
+use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionManifestModel};
 use tari_cc_private_ballot_protocol::{
     HashProvider, ProofStatementV1, ProofStatementV1Input, ProtocolError,
 };
@@ -9,11 +9,15 @@ use tari_cc_private_ballot_protocol::{
 ///
 /// No transcript, message, manifest hash, election scope, registry
 /// commitment, or ballot hash is accepted from the ballot submitter.
-pub fn reconstruct_approval_proof_statement<H: HashProvider>(
-    manifest: &ElectionManifestV1,
+pub fn reconstruct_approval_proof_statement<M, H>(
+    manifest: &M,
     payload: &ApprovalBallotPayload,
     provider: &H,
-) -> Result<ProofStatementV1, ProtocolError> {
+) -> Result<ProofStatementV1, ProtocolError>
+where
+    M: ElectionManifestModel,
+    H: HashProvider,
+{
     let manifest_hash = manifest.canonical_hash(provider)?;
     let election_scope = manifest.canonical_scope(provider)?;
     let ballot_payload_hash = payload.canonical_hash(provider)?;
@@ -35,7 +39,7 @@ mod tests {
     use super::*;
     use tari_cc_private_ballot_ballot::{
         ApprovalLimits, BallotConfidentialityV1, BallotKindV1, CandidateDefinition, CandidateId,
-        CandidateSet, ElectionId, ElectionManifestV1Input,
+        CandidateSet, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
     };
     use tari_cc_private_ballot_protocol::{
         CandidateSetCommitment, PROTOCOL_VERSION_V1, RegistryCommitment, TEST_ONLY_SUITE_ID,

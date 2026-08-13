@@ -24,7 +24,8 @@ pub use limits::{
     MAX_BALLOT_KIND_ID_BYTES, MAX_CANDIDATE_DISPLAY_NAME_BYTES, MAX_CANDIDATE_ID_BYTES,
     MAX_CANDIDATES, MAX_CANONICAL_OBJECT_BYTES, MAX_ELECTION_ID_BYTES, MAX_GOVERNANCE_KEY_BYTES,
     MAX_GOVERNANCE_REVISION_BYTES, MAX_HASH_ALGORITHM_ID_BYTES, MAX_NULLIFIER_BYTES,
-    MAX_PROOF_BYTES, MAX_PROOF_STATEMENT_BYTES, MAX_PROOF_SUITE_ID_BYTES, MAX_REGISTRY_MEMBERS,
+    MAX_PROOF_BYTES, MAX_PROOF_STATEMENT_BYTES, MAX_PROOF_SUITE_ID_BYTES,
+    MAX_PROPOSAL_QUESTION_BYTES, MAX_REGISTRY_MEMBERS,
 };
 pub use scope::derive_election_scope;
 
@@ -50,6 +51,9 @@ pub enum ValidationCode {
     UnexpectedCborType,
     TrailingCborData,
     EmptyElectionId,
+    EmptyProposalQuestion,
+    InvalidProposalQuestion,
+    NonNfcProposalQuestion,
     EmptyProofSuiteId,
     EmptyGovernanceSourceRevision,
     EmptyRegistry,
@@ -100,6 +104,9 @@ impl ValidationCode {
             Self::UnexpectedCborType => "UNEXPECTED_CBOR_TYPE",
             Self::TrailingCborData => "TRAILING_CBOR_DATA",
             Self::EmptyElectionId => "EMPTY_ELECTION_ID",
+            Self::EmptyProposalQuestion => "EMPTY_PROPOSAL_QUESTION",
+            Self::InvalidProposalQuestion => "INVALID_PROPOSAL_QUESTION",
+            Self::NonNfcProposalQuestion => "NON_NFC_PROPOSAL_QUESTION",
             Self::EmptyProofSuiteId => "EMPTY_PROOF_SUITE_ID",
             Self::EmptyGovernanceSourceRevision => "EMPTY_GOVERNANCE_SOURCE_REVISION",
             Self::EmptyRegistry => "EMPTY_REGISTRY",
@@ -188,6 +195,18 @@ mod tests {
             (ValidationCode::UnexpectedCborType, "UNEXPECTED_CBOR_TYPE"),
             (ValidationCode::TrailingCborData, "TRAILING_CBOR_DATA"),
             (ValidationCode::EmptyElectionId, "EMPTY_ELECTION_ID"),
+            (
+                ValidationCode::EmptyProposalQuestion,
+                "EMPTY_PROPOSAL_QUESTION",
+            ),
+            (
+                ValidationCode::InvalidProposalQuestion,
+                "INVALID_PROPOSAL_QUESTION",
+            ),
+            (
+                ValidationCode::NonNfcProposalQuestion,
+                "NON_NFC_PROPOSAL_QUESTION",
+            ),
             (ValidationCode::EmptyProofSuiteId, "EMPTY_PROOF_SUITE_ID"),
             (
                 ValidationCode::EmptyGovernanceSourceRevision,

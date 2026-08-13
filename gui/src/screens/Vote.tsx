@@ -566,6 +566,13 @@ export function Vote() {
                   {confirmation.bound.election_id_text ?? confirmation.bound.election_id_hex}
                 </span>
               </Field>
+              {confirmation.bound.proposal_question && (
+                <Field label="Ballot question">
+                  <span className="field-value">
+                    {confirmation.bound.proposal_question}
+                  </span>
+                </Field>
+              )}
               {election && (
                 <Field label="Status">
                   <span className="field-value">
@@ -592,7 +599,9 @@ export function Vote() {
             <p className="form-hint">
               This list is read-only. You choose your response after confirming the election.
             </p>
-            <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
+            {confirmation.no_proposal_question_notice && (
+              <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
+            )}
             <DetailsSection summary="Technical details">
               <div className="field-list">
                 <Field label="Election ID (canonical)">
@@ -611,6 +620,13 @@ export function Vote() {
                     {confirmation.bound.governance_source_revision}
                   </span>
                 </Field>
+                {confirmation.bound.proposal_question && (
+                  <Field label="Bound ballot question">
+                    <span className="field-value">
+                      {confirmation.bound.proposal_question}
+                    </span>
+                  </Field>
+                )}
                 <Field label="Proof-suite ID">
                   <span className="field-value">{confirmation.bound.proof_suite_id}</span>
                 </Field>

@@ -61,6 +61,10 @@ pub struct GuiArchiveVerificationV1 {
     pub archive_hash_consistent: bool,
     /// The recomputed election manifest hash, lowercase hex.
     pub election_manifest_hash_hex: Option<String>,
+    /// Decoded election manifest schema generation, when the manifest decoded.
+    pub election_manifest_schema_version: Option<u16>,
+    /// Verified V2 proposal question, derived only from canonical manifest bytes.
+    pub proposal_question: Option<String>,
     /// Distinct application-level governance source pin match fact.
     pub governance_source_matches_pin: GuiGovernanceArchivePinFactV1,
     /// Whether this archive includes the optional transport binding artifact.
@@ -102,6 +106,8 @@ fn map_verification(result: ArchiveDirectoryVerificationV1) -> GuiArchiveVerific
         recomputed_archive_hash_hex: result.recomputed_archive_hash_hex,
         archive_hash_consistent: result.archive_hash_consistent,
         election_manifest_hash_hex: result.election_manifest_hash_hex,
+        election_manifest_schema_version: result.election_manifest_schema_version,
+        proposal_question: result.proposal_question,
         governance_source_matches_pin: map_governance_pin(result.governance_source_matches_pin),
         transport_binding_present: result.transport_binding_present,
         transport_binding_verified: result.transport_binding_verified,

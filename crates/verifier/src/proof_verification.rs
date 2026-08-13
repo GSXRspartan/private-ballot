@@ -1,6 +1,6 @@
 //! Proof invocation using verifier-reconstructed statements.
 
-use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionManifestV1};
+use tari_cc_private_ballot_ballot::{ApprovalBallotPayload, ElectionManifestModel};
 use tari_cc_private_ballot_crypto::{ProofVerifierV1, VerifiedNullifier, VerifiedProofV1};
 use tari_cc_private_ballot_protocol::{
     HashProvider, MAX_PROOF_BYTES, ProofStatementV1, ProtocolError, ValidationCode,
@@ -52,14 +52,15 @@ impl VerifiedApprovalBallotV1 {
 ///
 /// Proof suites receive only verifier-reconstructed statement bytes.
 /// Successful results are rejected if they refer to any other statement.
-pub fn verify_approval_proof<H, V>(
-    manifest: &ElectionManifestV1,
+pub fn verify_approval_proof<M, H, V>(
+    manifest: &M,
     payload: &ApprovalBallotPayload,
     proof_bytes: &[u8],
     hash_provider: &H,
     proof_verifier: &V,
 ) -> Result<VerifiedApprovalBallotV1, ProtocolError>
 where
+    M: ElectionManifestModel,
     H: HashProvider,
     V: ProofVerifierV1,
 {
@@ -106,7 +107,8 @@ mod tests {
     use super::*;
     use tari_cc_private_ballot_ballot::{
         ApprovalLimits, BallotConfidentialityV1, BallotKindV1, CandidateDefinition, CandidateId,
-        CandidateSet, ElectionId, ElectionManifestV1Input,
+        CandidateSet, ElectionId, ElectionManifestV1, ElectionManifestV1Input, ElectionManifestV2,
+        ElectionManifestV2Input,
     };
     use tari_cc_private_ballot_crypto::test_only_verifier::TestOnlyProofVerifierV1;
     use tari_cc_private_ballot_protocol::{
@@ -171,6 +173,29 @@ mod tests {
         manifest
     }
 
+    fn v2_manifest_with_question(question: &str) -> ElectionManifestV2 {
+        let Ok(election_id) = ElectionId::new(b"proof-election".to_vec()) else {
+            panic!("test election ID must be valid");
+        };
+
+        let Ok(manifest) = ElectionManifestV2::new(ElectionManifestV2Input {
+            protocol_version: PROTOCOL_VERSION_V1,
+            election_id,
+            ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+            ballot_confidentiality: BallotConfidentialityV1::Public,
+            registry_commitment: RegistryCommitment::new([1_u8; 32]),
+            candidate_set_commitment: CandidateSetCommitment::new([2_u8; 32]),
+            proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
+            approval_limits: approval_limits(),
+            governance_source_revision: "revision-1".to_owned(),
+            proposal_question: question.to_owned(),
+        }) else {
+            panic!("test manifest must be valid");
+        };
+
+        manifest
+    }
+
     fn payload(candidates: &CandidateSet, selection: &[u8]) -> ApprovalBallotPayload {
         let Ok(payload) = ApprovalBallotPayload::new(
             vec![candidate_id(selection)],
@@ -211,6 +236,35 @@ mod tests {
         assert_eq!(result.statement(), &statement);
         assert_eq!(result.nullifier().as_bytes(), b"authenticated-nf");
         assert_eq!(result.payload(), &payload);
+    }
+
+    #[test]
+    fn v2_question_is_bound_through_manifest_hash_and_statement() {
+        let provider = TestOnlyDeterministicHasher;
+        let manifest = v2_manifest_with_question("Question A?");
+        let candidates = candidate_set();
+        let payload = payload(&candidates, b"a");
+
+        let Ok(statement) = reconstruct_approval_proof_statement(&manifest, &payload, &provider)
+        else {
+            panic!("statement reconstruction should succeed");
+        };
+
+        let Ok(proof) = TestOnlyProofVerifierV1::proof_for(&statement) else {
+            panic!("test proof construction should succeed");
+        };
+
+        let Ok(verifier) = TestOnlyProofVerifierV1::new(b"v2-nf".to_vec()) else {
+            panic!("test verifier must be valid");
+        };
+
+        assert!(verify_approval_proof(&manifest, &payload, &proof, &provider, &verifier).is_ok());
+
+        let mutated_manifest = v2_manifest_with_question("Question B?");
+        assert!(
+            verify_approval_proof(&mutated_manifest, &payload, &proof, &provider, &verifier)
+                .is_err()
+        );
     }
 
     #[test]

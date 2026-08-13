@@ -13,15 +13,14 @@
 //! from the canonical manifest and the validated artifact triple. The
 //! application-local presentation type is carried separately under
 //! `presentation` and is explicitly marked `presentation_is_canonical = false`.
-//! No unbound proposal question, title, or description field exists.
+//! V2 manifests expose the exact bound proposal question; V1 manifests keep an
+//! explicit no-question notice.
 //!
 //! # No secrets
 //!
 //! The DTO contains no voter secret scalar, private key, seed, mnemonic, wallet
 //! auth, or signing material. Only public identifiers, commitments, digests,
 //! and bound approval rules cross the boundary.
-
-use tari_cc_private_ballot_ballot::ElectionManifestV1;
 
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::governance::{
@@ -46,6 +45,8 @@ pub struct GuiVoterBoundFieldsV1 {
     pub election_id_hex: String,
     /// Election identifier as UTF-8 text, when valid.
     pub election_id_text: Option<String>,
+    /// Canonical V2 ballot question, when the manifest schema binds one.
+    pub proposal_question: Option<String>,
     /// Canonical ballot-kind identifier (always `NON_BINDING_APPROVAL_PILOT`).
     pub ballot_kind: &'static str,
     /// Canonical ballot-confidentiality identifier (always `PUBLIC`).
@@ -98,21 +99,20 @@ pub struct GuiVoterElectionConfirmationV1 {
     /// `presentation_is_canonical = false` for version one.
     pub presentation_is_canonical: bool,
     /// Explicit notice that the presentation label is not part of
-    /// `ElectionManifestV1`.
+    /// the election manifest.
     pub presentation_notice: &'static str,
     /// Placeholder label for the next voter stage.
     pub next_stage_placeholder: &'static str,
-    /// Explicit notice that no unbound proposal question exists.
-    pub no_proposal_question_notice: &'static str,
+    /// Explicit legacy notice when no canonical proposal question exists.
+    pub no_proposal_question_notice: Option<&'static str>,
 }
 
 /// Notice shown next to the presentation label.
 pub const PRESENTATION_NOTICE: &str =
-    "This presentation label is application-local and is not part of ElectionManifestV1.";
+    "This presentation label is application-local and is not part of the election manifest.";
 
 /// Notice shown where a proposal question would otherwise appear.
-pub const NO_PROPOSAL_QUESTION_NOTICE: &str =
-    "The version-one manifest carries no title, description, or proposal-question field. \
+pub const NO_PROPOSAL_QUESTION_NOTICE: &str = "The version-one manifest carries no title, description, or proposal-question field. \
      The governance source revision and the option display names are the binding.";
 
 /// Builds the voter confirmation view model from the validated artifact triple
@@ -123,7 +123,7 @@ pub fn build_voter_election_confirmation(
     artifacts: &GuiElectionArtifactsV1,
     governance_document: Option<&GuiGovernanceDocumentDigestV1>,
 ) -> GuiVoterElectionConfirmationV1 {
-    let manifest: &ElectionManifestV1 = artifacts.manifest();
+    let manifest = artifacts.manifest();
     let election_id_bytes = manifest.election_id().as_bytes();
 
     let candidates: Vec<GuiCandidateSummaryV1> = artifacts
@@ -142,7 +142,10 @@ pub fn build_voter_election_confirmation(
 
     let bound = GuiVoterBoundFieldsV1 {
         election_id_hex: crate::hex::to_lower_hex(election_id_bytes),
-        election_id_text: core::str::from_utf8(election_id_bytes).ok().map(str::to_owned),
+        election_id_text: core::str::from_utf8(election_id_bytes)
+            .ok()
+            .map(str::to_owned),
+        proposal_question: manifest.proposal_question().map(str::to_owned),
         ballot_kind: manifest.ballot_kind().as_str(),
         ballot_confidentiality: manifest.ballot_confidentiality().as_str(),
         manifest_hash_hex: crate::hex::to_lower_hex(artifacts.manifest_hash().as_bytes()),
@@ -155,18 +158,21 @@ pub fn build_voter_election_confirmation(
     };
 
     let advanced = GuiVoterAdvancedDetailsV1 {
-        option_machine_ids_hex: candidates.iter().map(|c| c.machine_id_hex.clone()).collect(),
-        registry_commitment_hex: crate::hex::to_lower_hex(artifacts.registry_commitment().as_bytes()),
+        option_machine_ids_hex: candidates
+            .iter()
+            .map(|c| c.machine_id_hex.clone())
+            .collect(),
+        registry_commitment_hex: crate::hex::to_lower_hex(
+            artifacts.registry_commitment().as_bytes(),
+        ),
         candidate_set_commitment_hex: crate::hex::to_lower_hex(
             artifacts.candidate_set_commitment().as_bytes(),
         ),
         voter_count: artifacts.registry().len(),
     };
 
-    let governance_document_status = match_governance_document(
-        manifest.governance_source_revision(),
-        governance_document,
-    );
+    let governance_document_status =
+        match_governance_document(manifest.governance_source_revision(), governance_document);
 
     GuiVoterElectionConfirmationV1 {
         bound,
@@ -176,6 +182,10 @@ pub fn build_voter_election_confirmation(
         presentation_is_canonical: false,
         presentation_notice: PRESENTATION_NOTICE,
         next_stage_placeholder: VOTER_NEXT_STAGE_PLACEHOLDER,
-        no_proposal_question_notice: NO_PROPOSAL_QUESTION_NOTICE,
+        no_proposal_question_notice: if manifest.proposal_question().is_some() {
+            None
+        } else {
+            Some(NO_PROPOSAL_QUESTION_NOTICE)
+        },
     }
 }

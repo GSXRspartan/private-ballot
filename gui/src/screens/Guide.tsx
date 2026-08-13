@@ -28,9 +28,10 @@ export function Guide() {
             together and have not been altered.
           </li>
           <li>
-            <strong>Review the election.</strong> Check the election identity, the choices on
-            the ballot, and how many you may select before continuing. The details shown are
-            cryptographically bound to the election and cannot be changed by the app.
+            <strong>Review the election.</strong> Check the election identity, ballot question,
+            choices, and how many you may select before continuing. For newer election files,
+            the question and response choices are cryptographically bound to the frozen election
+            definition; legacy files honestly say when no canonical question exists.
           </li>
           <li>
             <strong>Use your voting credential.</strong> You need the private voting credential
@@ -66,8 +67,8 @@ export function Guide() {
       <Card title="Organizer / Ballot Office">
         <ol className="guide-steps">
           <li>
-            <strong>Define the election.</strong> Set the election identity and the governance
-            source that defines what is being voted on.
+            <strong>Define the election.</strong> Set the election identity, the ballot question,
+            and the governance source that defines what is being voted on.
           </li>
           <li>
             <strong>Enroll eligible voters.</strong> Collect and enroll eligible{" "}

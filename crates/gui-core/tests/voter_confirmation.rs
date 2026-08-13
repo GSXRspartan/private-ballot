@@ -10,11 +10,11 @@
 mod common;
 
 use serde_json::Value;
-use tari_cc_private_ballot_gui_core::{
-    GuiGovernanceMatchStatusV1, VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,
-    content_digest_pin_for_bytes,
-};
 use tari_cc_private_ballot_gui_core::governance::GuiGovernanceDocumentDigestV1;
+use tari_cc_private_ballot_gui_core::{
+    GuiElectionDraftV1, GuiGovernanceMatchStatusV1, VOTER_NEXT_STAGE_PLACEHOLDER,
+    build_voter_election_confirmation, content_digest_pin_for_bytes,
+};
 
 use common::artifacts;
 
@@ -49,7 +49,12 @@ fn u3_confirmation_includes_governance_source_revision() {
 fn u4_confirmation_includes_canonical_option_display_labels() {
     let confirmation = build_voter_election_confirmation(&artifacts(), None);
     assert_eq!(confirmation.bound.option_display_labels.len(), 3);
-    assert!(confirmation.bound.option_display_labels.contains(&"Candidate A".to_owned()));
+    assert!(
+        confirmation
+            .bound
+            .option_display_labels
+            .contains(&"Candidate A".to_owned())
+    );
 }
 
 #[test]
@@ -80,7 +85,9 @@ fn u8_presentation_type_explicitly_marked_non_canonical() {
     let confirmation = build_voter_election_confirmation(&artifacts(), None);
     assert!(!confirmation.presentation_is_canonical);
     assert!(
-        confirmation.presentation_notice.contains("not part of ElectionManifestV1"),
+        confirmation
+            .presentation_notice
+            .contains("not part of the election manifest"),
         "presentation notice must mark it non-canonical"
     );
 }
@@ -89,15 +96,55 @@ fn u8_presentation_type_explicitly_marked_non_canonical() {
 fn u9_no_unbound_proposal_question() {
     let confirmation = build_voter_election_confirmation(&artifacts(), None);
     assert!(
-        confirmation.no_proposal_question_notice.contains("no title, description, or proposal-question"),
+        confirmation
+            .no_proposal_question_notice
+            .is_some_and(|notice| notice.contains("no title, description, or proposal-question")),
         "must state no proposal question exists"
     );
-    // No field is named like a proposal question.
+    assert!(confirmation.bound.proposal_question.is_none());
+    // No title or description field is synthesized.
     let json = ok(serde_json::to_string(&confirmation), "serialize");
     let lower = json.to_lowercase();
-    assert!(!lower.contains("\"question\""));
     assert!(!lower.contains("\"title\""));
     assert!(!lower.contains("\"description\""));
+}
+
+#[test]
+fn v2_confirmation_shows_bound_question_and_suppresses_legacy_notice() {
+    let mut draft = GuiElectionDraftV1::new();
+    let voter_hexs: Vec<String> = common::voters()
+        .iter()
+        .map(|voter| {
+            voter
+                .public_bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect();
+    ok(
+        draft.set_basics(
+            "v2-confirmation".to_owned(),
+            "Should the voter see this exact question?".to_owned(),
+            "revision-v2".to_owned(),
+        ),
+        "basics",
+    );
+    ok(draft.set_rules(1, 1, false), "rules");
+    ok(draft.set_voters(voter_hexs), "voters");
+    ok(
+        draft.set_options(vec![("yes".to_owned(), "Yes".to_owned())]),
+        "options",
+    );
+    let (_result, session) = ok(draft.freeze(), "freeze");
+    let confirmation = build_voter_election_confirmation(session.artifacts(), None);
+
+    assert_eq!(
+        confirmation.bound.proposal_question.as_deref(),
+        Some("Should the voter see this exact question?")
+    );
+    assert!(confirmation.no_proposal_question_notice.is_none());
 }
 
 #[test]
@@ -118,7 +165,12 @@ fn u10_matching_content_digest_status_says_matched() {
         confirmation.governance_document_status.status,
         GuiGovernanceMatchStatusV1::Matched
     );
-    assert!(confirmation.governance_document_status.status.is_cryptographically_matched());
+    assert!(
+        confirmation
+            .governance_document_status
+            .status
+            .is_cryptographically_matched()
+    );
 }
 
 #[test]
@@ -160,7 +212,17 @@ fn u12_no_secret_bearing_field() {
             }
         }
     }
-    for forbidden in ["secret", "seed", "mnemonic", "auth", "token", "password", "wallet", "scalar", "private_key"] {
+    for forbidden in [
+        "secret",
+        "seed",
+        "mnemonic",
+        "auth",
+        "token",
+        "password",
+        "wallet",
+        "scalar",
+        "private_key",
+    ] {
         for k in &keys {
             assert!(!k.to_lowercase().contains(forbidden), "field {k} forbidden");
         }
@@ -174,5 +236,8 @@ fn next_stage_placeholder_is_deferred() {
         "next stage must remain a deferred placeholder"
     );
     let confirmation = build_voter_election_confirmation(&artifacts(), None);
-    assert_eq!(confirmation.next_stage_placeholder, VOTER_NEXT_STAGE_PLACEHOLDER);
+    assert_eq!(
+        confirmation.next_stage_placeholder,
+        VOTER_NEXT_STAGE_PLACEHOLDER
+    );
 }

@@ -55,6 +55,7 @@ The valid canonical corpus now publishes and checks:
 - selectable-option candidate sets;
 - approval ballot payloads;
 - election manifests;
+- version-two election manifests with a hash-bound proposal question;
 - proof-bearing ballot packages;
 - archive manifests.
 
@@ -68,10 +69,25 @@ A dependency-free Python standard-library verifier now independently:
 
 - parses every checked-in valid vector without importing project Rust APIs;
 - validates the supported deterministic CBOR subset and object schema shapes;
+- enforces version-two proposal-question bounds without rewriting text;
 - re-encodes every parsed object byte-for-byte;
 - reproduces every published domain-separated test hash;
 - verifies both candidate-election and ballot-measure examples;
 - emits the deterministic `independent-verification-v1.json` report.
+
+## Implemented in Slice 12C2C
+
+The hostile CBOR corpus now includes a small checked-in
+`ElectionManifestV2::from_canonical_cbor` rejection set for:
+
+- non-NFC proposal questions;
+- leading whitespace in proposal questions;
+- C1 control U+0085 in proposal questions;
+- nine-field V1-shaped manifest payloads presented to the V2 decoder;
+- non-canonical indefinite-length V2 arrays.
+
+The independent Python verifier exercises these original malformed bytes
+directly and compares their expected rejection categories.
 
 ## Implemented in Slice 12D
 

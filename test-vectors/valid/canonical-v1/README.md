@@ -23,6 +23,7 @@ Published object families in this directory include:
 - selectable-option sets;
 - approval payloads;
 - election manifests;
+- version-two election manifests with a hash-bound proposal question;
 - proof-bearing ballot packages;
 - archive manifests.
 

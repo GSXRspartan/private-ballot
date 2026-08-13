@@ -2,8 +2,9 @@
 //! (Slice 5A8).
 //!
 //! Implements the ADR-0008 process-hardening requirements that must hold before
-//! voter credential/proof generation begins, **without** changing
-//! `ElectionManifestV1`, canonical CBOR, or any published vector.
+//! voter credential/proof generation begins. This module still treats the
+//! manifest's `governance_source_revision` as opaque bound text; schema-specific
+//! canonical manifest changes live in the ballot crate.
 //!
 //! ## `governance_source_revision` protocol semantics (unchanged)
 //!

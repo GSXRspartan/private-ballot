@@ -13,15 +13,13 @@ use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveFileCatalogV1, ArchiveFileEntryV1, ArchiveManifestV1,
     ArchivePathV1,
 };
-use tari_cc_private_ballot_gui_core::archive_writer::{
-    write_archive_directory_v1_with_governance_document,
-};
+use tari_cc_private_ballot_gui_core::archive_writer::write_archive_directory_v1_with_governance_document;
 use tari_cc_private_ballot_gui_core::{
+    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, GOVERNANCE_PIN_PREFIX_BLAKE3, GuiCoreError,
     GuiElectionDraftV1, GuiGovernanceArchivePinFactV1, GuiGovernanceMatchStatusV1,
-    GuiGovernanceSourcePinV1, GuiCoreError, MAX_GOVERNANCE_DOCUMENT_BYTES,
-    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, GOVERNANCE_PIN_PREFIX_BLAKE3,
-    compute_governance_document_digest, content_digest_pin_for_bytes, match_governance_document,
-    validate_governance_source_pin, verify_archive_directory_v1,
+    GuiGovernanceSourcePinV1, MAX_GOVERNANCE_DOCUMENT_BYTES, compute_governance_document_digest,
+    content_digest_pin_for_bytes, match_governance_document, validate_governance_source_pin,
+    verify_archive_directory_v1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, MAX_GOVERNANCE_REVISION_BYTES};
 
@@ -96,7 +94,14 @@ fn t4_whitespace_ambiguity_rejected() {
 
 #[test]
 fn t5_mutable_reference_junk_rejected() {
-    for bad in ["latest", "main", "forum post", "current proposal", "HEAD", "tip"] {
+    for bad in [
+        "latest",
+        "main",
+        "forum post",
+        "current proposal",
+        "HEAD",
+        "tip",
+    ] {
         let pin = validate_governance_source_pin(bad);
         assert_eq!(pin.kind, "UNRECOGNIZED");
         assert!(!pin.format_valid, "{bad} should be unrecognized");
@@ -113,7 +118,10 @@ fn t6_valid_git_sha_accepted() {
 #[test]
 fn t7_malformed_git_sha_rejected() {
     assert!(!validate_governance_source_pin("git:abcd").format_valid);
-    assert!(!validate_governance_source_pin("git:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").format_valid);
+    assert!(
+        !validate_governance_source_pin("git:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+            .format_valid
+    );
 }
 
 // ===================================================== Document digest T8-T13
@@ -258,7 +266,11 @@ fn t16_git_sha_reports_operator_attested_not_verified() {
 fn complete_draft_with_revision(revision: &str) -> GuiElectionDraftV1 {
     let mut draft = GuiElectionDraftV1::new();
     ok(
-        draft.set_basics("gov-test-election".to_owned(), revision.to_owned()),
+        draft.set_basics(
+            "gov-test-election".to_owned(),
+            "Should the governance test proposal pass?".to_owned(),
+            revision.to_owned(),
+        ),
         "basics",
     );
     ok(draft.set_rules(1, 2, true), "rules");
@@ -273,7 +285,10 @@ fn t17_content_digest_pin_can_populate_governance_source_revision() {
     let path = write_doc(&dir, "proposal.md", b"populate-doc");
     let mut draft = complete_draft_with_revision("placeholder-rev");
     ok(draft.set_governance_document(&path), "select doc");
-    ok(draft.use_governance_document_digest_as_revision(), "use digest");
+    ok(
+        draft.use_governance_document_digest_as_revision(),
+        "use digest",
+    );
     let preview = draft.preview();
     let pin = &preview.governance_source_pin;
     assert!(pin.format_valid);
@@ -299,7 +314,10 @@ fn t18_freeze_fails_when_digest_mode_document_does_not_match() {
     assert_eq!(error.code(), "GUI_GOVERNANCE_DIGEST_MISMATCH");
     // Sanity: pinning the real digest would freeze fine.
     let mut good = complete_draft_with_revision(&real_pin);
-    ok(good.set_governance_document(&real_path), "select real doc again");
+    ok(
+        good.set_governance_document(&real_path),
+        "select real doc again",
+    );
     let (_result, _session) = ok(good.freeze(), "freeze with matching pin");
 }
 
@@ -321,14 +339,23 @@ fn t19_manifest_bytes_byte_identical_whether_or_not_document_support_enabled() {
         without_result.summary.manifest_hash_hex
     );
     assert_eq!(
-        ok(with_session.artifacts().manifest().to_canonical_cbor(), "with manifest"),
-        ok(without_session.artifacts().manifest().to_canonical_cbor(), "without manifest")
+        ok(
+            with_session.artifacts().manifest().to_canonical_cbor(),
+            "with manifest"
+        ),
+        ok(
+            without_session.artifacts().manifest().to_canonical_cbor(),
+            "without manifest"
+        )
     );
 }
 
 // ========================================================= Archive T20-T24
 
-fn session_with_governance_doc() -> (tari_cc_private_ballot_gui_core::GuiElectionSessionV1, Vec<u8>) {
+fn session_with_governance_doc() -> (
+    tari_cc_private_ballot_gui_core::GuiElectionSessionV1,
+    Vec<u8>,
+) {
     let mut session = open_session();
     if let Err(error) = session.close() {
         panic!("session must close: {error}");
@@ -360,8 +387,17 @@ fn t21_archive_with_governance_document_verifies() {
         "write archive",
     );
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
-    assert!(verification.files.iter().any(|f| f.path == GOVERNANCE_DOCUMENT_ARCHIVE_PATH));
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
+    assert!(
+        verification
+            .files
+            .iter()
+            .any(|f| f.path == GOVERNANCE_DOCUMENT_ARCHIVE_PATH)
+    );
 }
 
 #[test]
@@ -461,7 +497,11 @@ fn t26_archive_without_governance_document_still_verifies() {
     let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
     assert!(!paths.contains(&GOVERNANCE_DOCUMENT_ARCHIVE_PATH));
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
 }
 
 // =============================================== Bonus: pin DTO carries no secret
@@ -471,7 +511,9 @@ fn governance_pin_dto_carries_no_secret_field() {
     let pin: GuiGovernanceSourcePinV1 = validate_governance_source_pin(VALID_GIT);
     let json = ok(serde_json::to_string(&pin), "serialize pin");
     let lower = json.to_lowercase();
-    for forbidden in ["secret", "seed", "mnemonic", "auth", "token", "password", "wallet"] {
+    for forbidden in [
+        "secret", "seed", "mnemonic", "auth", "token", "password", "wallet",
+    ] {
         assert!(!lower.contains(forbidden), "pin DTO exposes {forbidden}");
     }
 }
@@ -516,8 +558,7 @@ fn governance_document_too_large_error_is_bounded() {
 #[test]
 fn kat_governance_document_digest_is_frozen() {
     const KAT_BYTES: &[u8] = b"tari-governance-document-kat-v1";
-    const KAT_DIGEST_HEX: &str =
-        "9d1ba26f69b6e1af1f6c3a687139eb3110cc9289a97aa22806f65a652fc60053";
+    const KAT_DIGEST_HEX: &str = "9d1ba26f69b6e1af1f6c3a687139eb3110cc9289a97aa22806f65a652fc60053";
     let pin = content_digest_pin_for_bytes(KAT_BYTES);
     assert_eq!(
         pin,
@@ -567,7 +608,11 @@ fn content_pin_digest_equals_archive_catalog_digest() {
     );
 
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
     assert_eq!(
         verification.governance_source_matches_pin,
         GuiGovernanceArchivePinFactV1::Matched,
@@ -625,7 +670,10 @@ fn build_internally_consistent_archive(
     let provider = Blake3HashProviderV1;
     let manifest_bytes = ok(artifacts.manifest().to_canonical_cbor(), "manifest cbor");
     let registry_bytes = ok(artifacts.registry().to_canonical_cbor(), "registry cbor");
-    let candidate_bytes = ok(artifacts.candidates().to_canonical_cbor(), "candidates cbor");
+    let candidate_bytes = ok(
+        artifacts.candidates().to_canonical_cbor(),
+        "candidates cbor",
+    );
 
     let mut file_set: Vec<(String, Vec<u8>)> = vec![
         ("election-manifest.cbor".to_owned(), manifest_bytes),
@@ -648,7 +696,10 @@ fn build_internally_consistent_archive(
         ArchiveManifestV1::for_provider(artifacts.manifest_hash(), catalog, &provider),
         "archive manifest",
     );
-    let archive_manifest_bytes = ok(archive_manifest.to_canonical_cbor(), "archive manifest cbor");
+    let archive_manifest_bytes = ok(
+        archive_manifest.to_canonical_cbor(),
+        "archive manifest cbor",
+    );
     write_raw_file(
         &target.join(ARCHIVE_MANIFEST_CANONICAL_PATH),
         &archive_manifest_bytes,
@@ -709,7 +760,11 @@ fn verify_rejects_missing_governance_document_for_blake3_pin() {
     build_internally_consistent_archive(&target, &artifacts, None);
 
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(!verification.verified, "must fail: {:?}", verification.failure_code);
+    assert!(
+        !verification.verified,
+        "must fail: {:?}",
+        verification.failure_code
+    );
     assert_eq!(verification.failure_stage, Some("GOVERNANCE_PIN"));
     assert_eq!(
         verification.failure_code.as_deref(),
@@ -727,15 +782,17 @@ fn verify_rejects_missing_governance_document_for_blake3_pin() {
 #[test]
 fn verify_git_sha_archive_reports_operator_attested_not_matched() {
     let doc = b"git-attested-governance-document";
-    let artifacts = common::artifacts_with_revision(
-        "git:0123456789abcdef0123456789abcdef01234567",
-    );
+    let artifacts = common::artifacts_with_revision("git:0123456789abcdef0123456789abcdef01234567");
     let dir = TestDir::new("gov-verify-git");
     let target = dir.join("archive");
     build_internally_consistent_archive(&target, &artifacts, Some(doc));
 
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
     assert_eq!(
         verification.governance_source_matches_pin,
         GuiGovernanceArchivePinFactV1::OperatorAttested,
@@ -757,7 +814,11 @@ fn verify_unrecognized_revision_archive_reports_not_applicable() {
     build_internally_consistent_archive(&target, &artifacts, None);
 
     let verification = ok(verify_archive_directory_v1(&target), "verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
     assert_eq!(
         verification.governance_source_matches_pin,
         GuiGovernanceArchivePinFactV1::NotApplicable
@@ -805,9 +866,15 @@ fn governance_archive_pin_error_codes_are_bounded_and_safe() {
         GuiCoreError::governance_archive_pin_mismatch(),
         GuiCoreError::governance_archive_document_missing(),
     ] {
-        assert!(error.message().is_ascii(), "message must be ASCII: {}", error.code());
+        assert!(
+            error.message().is_ascii(),
+            "message must be ASCII: {}",
+            error.code()
+        );
         let lower = error.message().to_lowercase();
-        for forbidden in ["secret", "seed", "mnemonic", "path", "token", "password", "wallet"] {
+        for forbidden in [
+            "secret", "seed", "mnemonic", "path", "token", "password", "wallet",
+        ] {
             assert!(
                 !lower.contains(forbidden),
                 "error {} message leaks {forbidden}: {}",

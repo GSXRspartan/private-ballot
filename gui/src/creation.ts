@@ -224,6 +224,7 @@ export interface CreateElectionSessionState {
   step: CreateElectionStep;
   ballotType: GuiBallotPresentationType;
   electionIdText: string;
+  proposalQuestion: string;
   governanceRevision: string;
   voterText: string;
   options: CreateDraftOption[];
@@ -241,6 +242,7 @@ export function newCreateElectionSession(): CreateElectionSessionState {
     step: "basics",
     ballotType: "BallotMeasure",
     electionIdText: "",
+    proposalQuestion: "",
     governanceRevision: "",
     voterText: "",
     options: [],
@@ -263,6 +265,7 @@ export function hydrateCreateElectionSession(
     ...initial,
     ballotType: preview.presentation,
     electionIdText: preview.election_id_text ?? "",
+    proposalQuestion: preview.proposal_question ?? "",
     governanceRevision: preview.governance_source_revision ?? "",
     voterText: preview.voters.map((voter) => voter.public_key_hex).join("\n"),
     options: preview.options.flatMap((option) =>

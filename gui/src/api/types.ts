@@ -17,6 +17,7 @@ export interface GuiElectionSummaryV1 {
   election_id_hex: string;
   election_id_text: string | null;
   lifecycle_state: string | null;
+  manifest_schema_version: number;
   manifest_hash_hex: string;
   registry_commitment_hex: string;
   candidate_set_commitment_hex: string;
@@ -28,6 +29,7 @@ export interface GuiElectionSummaryV1 {
   approval_max: number;
   abstention_allowed: boolean;
   governance_source_revision: string;
+  proposal_question: string | null;
   candidates: GuiCandidateSummaryV1[];
 }
 
@@ -135,6 +137,8 @@ export interface GuiArchiveVerificationV1 {
   recomputed_archive_hash_hex: string | null;
   archive_hash_consistent: boolean;
   election_manifest_hash_hex: string | null;
+  election_manifest_schema_version: number | null;
+  proposal_question: string | null;
   /** Distinct application-level fact about whether the archived governance
    *  document matches the bound `governance_source_revision` pin. This is
    *  SEPARATE from `verified` (archive integrity): archive integrity proves
@@ -303,6 +307,7 @@ export interface GuiDraftVoterV1 {
 export interface GuiElectionDraftPreviewV1 {
   election_id_hex: string | null;
   election_id_text: string | null;
+  proposal_question: string | null;
   governance_source_revision: string | null;
   proof_suite_id: string;
   approval_min: number | null;
@@ -401,6 +406,7 @@ export interface GuiGovernanceDocumentStatusV1 {
 export interface GuiVoterBoundFieldsV1 {
   election_id_hex: string;
   election_id_text: string | null;
+  proposal_question: string | null;
   ballot_kind: string;
   ballot_confidentiality: string;
   manifest_hash_hex: string;
@@ -429,7 +435,7 @@ export interface GuiVoterElectionConfirmationV1 {
   presentation_is_canonical: boolean;
   presentation_notice: string;
   next_stage_placeholder: string;
-  no_proposal_question_notice: string;
+  no_proposal_question_notice: string | null;
 }
 
 // ---------------------------------------------------------------------------

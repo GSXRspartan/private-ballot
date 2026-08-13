@@ -1,0 +1,8 @@
+{
+  "schema": "phase2-invalid-cbor-case-v1",
+  "vector_id": "election-manifest-v2-indefinite-array",
+  "target": "ElectionManifestV2::from_canonical_cbor",
+  "object_family": "election-manifest-v2",
+  "encoding": "raw-cbor-bytes",
+  "byte_length": 228
+}

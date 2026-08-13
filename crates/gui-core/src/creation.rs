@@ -9,19 +9,19 @@
 //!
 //! # Canonical scope
 //!
-//! The version-one manifest carries exactly one ballot kind
-//! (`NON_BINDING_APPROVAL_PILOT`) and no title, description, proposal text, or
-//! ballot-type discriminator. The candidate/governance/ballot-measure label is
-//! therefore **application-local presentation only**; it is never serialized
-//! into canonical election files and does not survive export/import. It is
-//! documented as such and tested to prove it does not alter canonical bytes.
+//! New GUI-created elections use `ElectionManifestV2`, which binds exactly one
+//! human-readable `proposal_question` in addition to the version-one fields.
+//! `protocol_version = 1` still identifies the existing cryptographic/proof
+//! protocol consumed by `ProofStatementV1`; manifest V1/V2 is the manifest
+//! schema generation. The candidate/governance/ballot-measure presentation
+//! label remains **application-local presentation only**; it is never
+//! serialized into canonical election files and does not survive export/import.
 //!
 //! The only cryptographically bound governance text is the manifest's
 //! `governance_source_revision`; option display names and machine IDs are
-//! bound through the candidate-set commitment. No authoritative proposal
-//! question text exists in the protocol, so this facade intentionally exposes
-//! none: unbound text must never be presented to a voter as the signed
-//! question.
+//! bound through the candidate-set commitment. For V2, the exact accepted
+//! proposal question is bound through the manifest hash; for legacy V1, no
+//! authoritative proposal question exists.
 //!
 //! # No secrets
 //!
@@ -34,13 +34,13 @@ use std::path::{Path, PathBuf};
 use tari_cc_private_ballot_archive::ArchiveFileDigestV1;
 use tari_cc_private_ballot_ballot::{
     ApprovalLimits, BallotConfidentialityV1, BallotKindV1, CandidateDefinition, CandidateId,
-    CandidateSet, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
+    CandidateSet, ElectionId, ElectionManifestV2, ElectionManifestV2Input,
 };
 use tari_cc_private_ballot_crypto::{
     RISTRETTO_COMPRESSED_POINT_BYTES, RistrettoPublicKeyV1, TARI_TRIPTYCH_PROOF_SUITE_ID_V1,
 };
 use tari_cc_private_ballot_protocol::{
-    Blake3HashProviderV1, ManifestHash, MAX_GOVERNANCE_REVISION_BYTES, PROTOCOL_VERSION_V1,
+    Blake3HashProviderV1, MAX_GOVERNANCE_REVISION_BYTES, ManifestHash, PROTOCOL_VERSION_V1,
     ProtocolError, ValidationCode,
 };
 use tari_cc_private_ballot_registry::{
@@ -135,6 +135,7 @@ pub struct GuiDraftVoterV1 {
 pub struct GuiElectionDraftPreviewV1 {
     pub election_id_hex: Option<String>,
     pub election_id_text: Option<String>,
+    pub proposal_question: Option<String>,
     pub governance_source_revision: Option<String>,
     pub proof_suite_id: String,
     pub approval_min: Option<usize>,
@@ -211,6 +212,7 @@ pub struct GuiElectionExportResultV1 {
 /// frozen election through this facade.
 pub struct GuiElectionDraftV1 {
     election_id: Option<Vec<u8>>,
+    proposal_question: Option<String>,
     governance_source_revision: Option<String>,
     approval_min: Option<usize>,
     approval_max: Option<usize>,
@@ -240,6 +242,7 @@ impl GuiElectionDraftV1 {
     pub fn new() -> Self {
         Self {
             election_id: None,
+            proposal_question: None,
             governance_source_revision: None,
             approval_min: None,
             approval_max: None,
@@ -285,6 +288,7 @@ impl GuiElectionDraftV1 {
     pub fn set_basics(
         &mut self,
         election_id_text: String,
+        proposal_question: String,
         governance_source_revision: String,
     ) -> Result<(), GuiCoreError> {
         self.reject_if_frozen()?;
@@ -292,6 +296,7 @@ impl GuiElectionDraftV1 {
         ElectionId::new(id_bytes.clone()).map_err(|error| wrap(&error, "basics"))?;
         validate_governance_revision(&governance_source_revision)?;
         self.election_id = Some(id_bytes);
+        self.proposal_question = Some(proposal_question);
         self.governance_source_revision = Some(governance_source_revision);
         Ok(())
     }
@@ -328,7 +333,10 @@ impl GuiElectionDraftV1 {
     /// and digests the exact raw bytes (no semantic parsing, no network). The
     /// document is treated as immutable raw bytes for hashing and archival.
     /// Symlinks, directories, and oversized files are rejected.
-    pub fn set_governance_document(&mut self, path: &Path) -> Result<GuiGovernanceDocumentDigestV1, GuiCoreError> {
+    pub fn set_governance_document(
+        &mut self,
+        path: &Path,
+    ) -> Result<GuiGovernanceDocumentDigestV1, GuiCoreError> {
         self.reject_if_frozen()?;
         let (bytes, digest) = read_governance_document(path)?;
         self.governance_document_bytes = Some(bytes);
@@ -424,10 +432,7 @@ impl GuiElectionDraftV1 {
     /// labels and must not be presented with indistinguishable options. An
     /// empty list is permitted during editing (freeze rejects an empty option
     /// set).
-    pub fn set_options(
-        &mut self,
-        options: Vec<(String, String)>,
-    ) -> Result<(), GuiCoreError> {
+    pub fn set_options(&mut self, options: Vec<(String, String)>) -> Result<(), GuiCoreError> {
         self.reject_if_frozen()?;
         let mut built: Vec<(Vec<u8>, String)> = Vec::with_capacity(options.len());
         for (id_text, display_name) in options {
@@ -461,7 +466,10 @@ impl GuiElectionDraftV1 {
     }
 
     /// Sets the application-local presentation type (non-canonical).
-    pub fn set_presentation(&mut self, presentation: GuiBallotPresentationType) -> Result<(), GuiCoreError> {
+    pub fn set_presentation(
+        &mut self,
+        presentation: GuiBallotPresentationType,
+    ) -> Result<(), GuiCoreError> {
         self.reject_if_frozen()?;
         self.presentation = presentation;
         Ok(())
@@ -515,13 +523,14 @@ impl GuiElectionDraftV1 {
         };
 
         let missing = self.missing_fields();
-        let complete = missing.is_empty();
-
-        let manifest_hash_hex = if complete {
-            self.build_manifest_hash(&provider).map(|h| to_lower_hex(h.as_bytes())).ok()
+        let manifest_hash_hex = if missing.is_empty() {
+            self.build_manifest_hash(&provider)
+                .map(|h| to_lower_hex(h.as_bytes()))
+                .ok()
         } else {
             None
         };
+        let complete = missing.is_empty() && manifest_hash_hex.is_some();
 
         let election_id_hex = self.election_id.as_ref().map(|b| to_lower_hex(b));
         let election_id_text = self
@@ -529,16 +538,15 @@ impl GuiElectionDraftV1 {
             .as_ref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok().map(str::to_owned));
 
-        let revision = self
-            .governance_source_revision
-            .clone()
-            .unwrap_or_default();
+        let revision = self.governance_source_revision.clone().unwrap_or_default();
         let pin = validate_governance_source_pin(&revision);
-        let doc_status = match_governance_document(&revision, self.governance_document_digest.as_ref());
+        let doc_status =
+            match_governance_document(&revision, self.governance_document_digest.as_ref());
 
         GuiElectionDraftPreviewV1 {
             election_id_hex,
             election_id_text,
+            proposal_question: self.proposal_question.clone(),
             governance_source_revision: self.governance_source_revision.clone(),
             proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
             approval_min: self.approval_min,
@@ -602,7 +610,7 @@ impl GuiElectionDraftV1 {
         )
         .map_err(|error| wrap(&error, "rules"))?;
 
-        let manifest = ElectionManifestV1::new(ElectionManifestV1Input {
+        let manifest = ElectionManifestV2::new(ElectionManifestV2Input {
             protocol_version: PROTOCOL_VERSION_V1,
             election_id,
             ballot_kind: BallotKindV1::NonBindingApprovalPilot,
@@ -612,6 +620,7 @@ impl GuiElectionDraftV1 {
             proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
             approval_limits,
             governance_source_revision,
+            proposal_question: self.proposal_question.clone().unwrap_or_default(),
         })
         .map_err(|error| wrap(&error, "manifest"))?;
 
@@ -642,7 +651,8 @@ impl GuiElectionDraftV1 {
 
         // Reload through the existing cross-binding loader so the exported
         // bytes are guaranteed to round-trip identically.
-        let artifacts = GuiElectionArtifactsV1::from_bytes(&manifest_bytes, &registry_bytes, &candidate_bytes)?;
+        let artifacts =
+            GuiElectionArtifactsV1::from_bytes(&manifest_bytes, &registry_bytes, &candidate_bytes)?;
         let session = GuiElectionSessionV1::new(artifacts)?;
         let summary = session.summary();
 
@@ -671,7 +681,8 @@ impl GuiElectionDraftV1 {
                 Ok(RegistryEntry::from_voter_registration(registration))
             })
             .collect::<Result<Vec<_>, GuiCoreError>>()?;
-        RegistrySnapshot::new(entries).map_err(|error| GuiCoreError::from_protocol(&error, "voters"))
+        RegistrySnapshot::new(entries)
+            .map_err(|error| GuiCoreError::from_protocol(&error, "voters"))
     }
 
     fn build_candidate_set(&self) -> Result<CandidateSet, GuiCoreError> {
@@ -683,10 +694,14 @@ impl GuiElectionDraftV1 {
                 CandidateDefinition::new(id, name.clone()).map_err(|e| wrap(&e, "options"))
             })
             .collect::<Result<Vec<_>, GuiCoreError>>()?;
-        CandidateSet::new(definitions).map_err(|error| GuiCoreError::from_protocol(&error, "options"))
+        CandidateSet::new(definitions)
+            .map_err(|error| GuiCoreError::from_protocol(&error, "options"))
     }
 
-    fn build_manifest_hash(&self, provider: &Blake3HashProviderV1) -> Result<ManifestHash, GuiCoreError> {
+    fn build_manifest_hash(
+        &self,
+        provider: &Blake3HashProviderV1,
+    ) -> Result<ManifestHash, GuiCoreError> {
         let registry = self.build_registry()?;
         let candidates = self.build_candidate_set()?;
         let registry_commitment = registry
@@ -703,7 +718,7 @@ impl GuiElectionDraftV1 {
             self.allow_abstention,
         )
         .map_err(|error| wrap(&error, "rules"))?;
-        let manifest = ElectionManifestV1::new(ElectionManifestV1Input {
+        let manifest = ElectionManifestV2::new(ElectionManifestV2Input {
             protocol_version: PROTOCOL_VERSION_V1,
             election_id,
             ballot_kind: BallotKindV1::NonBindingApprovalPilot,
@@ -713,6 +728,7 @@ impl GuiElectionDraftV1 {
             proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
             approval_limits,
             governance_source_revision: self.governance_source_revision.clone().unwrap_or_default(),
+            proposal_question: self.proposal_question.clone().unwrap_or_default(),
         })
         .map_err(|error| wrap(&error, "manifest"))?;
         manifest
@@ -724,6 +740,9 @@ impl GuiElectionDraftV1 {
         let mut missing = Vec::new();
         if self.election_id.is_none() {
             missing.push("election_id");
+        }
+        if self.proposal_question.is_none() {
+            missing.push("proposal_question");
         }
         if self.governance_source_revision.is_none() {
             missing.push("governance_source_revision");

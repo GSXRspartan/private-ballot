@@ -4,13 +4,14 @@
   "implementation_language": "python-standard-library",
   "project_canonical_api_imports": false,
   "hash_algorithm_id": "TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC",
-  "case_count": 9,
+  "case_count": 11,
   "object_families": [
     "approval-ballot-payload-v1",
     "archive-manifest-v1",
     "ballot-package-v1",
     "candidate-set-v1",
     "election-manifest-v1",
+    "election-manifest-v2",
     "registry-snapshot-v1"
   ],
   "decision_types": [
@@ -88,6 +89,24 @@
       "canonical_byte_length": 237,
       "domain_label": "tari-cc-private-ballot/election-manifest/v1",
       "digest_hex": "e9493732fb5285e9b6a94badbc8de8f260f024f5323fd7e00d0dbf6e8d346308",
+      "round_trip_equal": true,
+      "decision_type": "candidate-election"
+    },
+    {
+      "vector_id": "election-manifest-v2-ballot-measure",
+      "object_family": "election-manifest-v2",
+      "canonical_byte_length": 277,
+      "domain_label": "tari-cc-private-ballot/election-manifest/v2",
+      "digest_hex": "ac2154fb272465bd296ce99ffe0621d8fc83286f24e2078740d49138faa89817",
+      "round_trip_equal": true,
+      "decision_type": "ballot-measure"
+    },
+    {
+      "vector_id": "election-manifest-v2-candidate-election",
+      "object_family": "election-manifest-v2",
+      "canonical_byte_length": 279,
+      "domain_label": "tari-cc-private-ballot/election-manifest/v2",
+      "digest_hex": "02d11dd7749952c99e91909ba78d62ce3afa62dd27f7012ace5035ca855cfa08",
       "round_trip_equal": true,
       "decision_type": "candidate-election"
     },

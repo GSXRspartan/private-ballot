@@ -21,6 +21,8 @@ pub struct GuiCandidateSummaryV1 {
 /// Human-facing summary of one validated election.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiElectionSummaryV1 {
+    /// Manifest schema generation (`1` or `2`).
+    pub manifest_schema_version: u16,
     /// Stable election identifier, lowercase hex.
     pub election_id_hex: String,
     /// Election identifier as UTF-8 text, when it is valid UTF-8.
@@ -49,6 +51,8 @@ pub struct GuiElectionSummaryV1 {
     pub abstention_allowed: bool,
     /// Governance source revision pinned by the manifest.
     pub governance_source_revision: String,
+    /// Canonical V2 ballot question, when the manifest schema binds one.
+    pub proposal_question: Option<String>,
     /// Candidates in canonical machine-ID order.
     pub candidates: Vec<GuiCandidateSummaryV1>,
 }

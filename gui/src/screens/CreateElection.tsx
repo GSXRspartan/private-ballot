@@ -93,6 +93,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     step,
     ballotType,
     electionIdText,
+    proposalQuestion,
     governanceRevision,
     voterText,
     options,
@@ -241,7 +242,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       return false;
     }
     const ok = await runAction(() =>
-      api.setDraftBasics(electionIdText, governanceRevision),
+      api.setDraftBasics(electionIdText, proposalQuestion, governanceRevision),
     );
     if (!ok) return false;
     const ok2 = await runAction(() =>
@@ -288,12 +289,16 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       setDraftNotReadyError();
       return;
     }
-    if (electionIdText.trim().length === 0 || governanceRevision.trim().length === 0) {
+    if (
+      electionIdText.trim().length === 0 ||
+      proposalQuestion.trim().length === 0 ||
+      governanceRevision.trim().length === 0
+    ) {
       setLocalError({
         code: "GUI_DRAFT_INCOMPLETE",
         category: "INVALID_INPUT",
         context: "draft",
-        message: "election identifier and governance source revision are required",
+        message: "election identifier, ballot question, and governance source revision are required",
       });
       return;
     }
@@ -602,6 +607,10 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           setElectionIdText={(electionIdText) =>
             updateSession((current) => ({ ...current, electionIdText }))
           }
+          proposalQuestion={proposalQuestion}
+          setProposalQuestion={(proposalQuestion) =>
+            updateSession((current) => ({ ...current, proposalQuestion }))
+          }
           governanceRevision={governanceRevision}
           setGovernanceRevision={(governanceRevision) =>
             updateSession((current) => ({ ...current, governanceRevision }))
@@ -733,6 +742,8 @@ function BasicsStep(props: {
   setBallotType: (t: GuiBallotPresentationType) => void;
   electionIdText: string;
   setElectionIdText: (v: string) => void;
+  proposalQuestion: string;
+  setProposalQuestion: (v: string) => void;
   governanceRevision: string;
   setGovernanceRevision: (v: string) => void;
   busy: boolean;
@@ -784,6 +795,23 @@ function BasicsStep(props: {
         </p>
       </Card>
 
+      <Card title="Ballot question">
+        <label className="field-label" htmlFor="proposal-question">
+          Ballot question
+        </label>
+        <input
+          id="proposal-question"
+          className="text-input"
+          value={props.proposalQuestion}
+          onChange={(e) => props.setProposalQuestion(e.target.value)}
+          placeholder="e.g. Should the council adopt RFC-0185?"
+        />
+        <p className="form-hint">
+          This exact question is written into the version-two election manifest and covered by
+          the manifest hash shown to voters and verifiers.
+        </p>
+      </Card>
+
       <Card title="Governance source">
         <label className="field-label" htmlFor="governance-revision">
           Governance source revision
@@ -807,9 +835,8 @@ function BasicsStep(props: {
         </Notice>
         <DetailsSection summary="Technical details">
           <p className="form-hint">
-            The current election format has no separate title, description, or proposal-question
-            field. Do not present unbound text to voters as the signed question; the governance
-            source revision and the option display names are the binding.
+            New elections use a version-two manifest with the proposal question appended to the
+            canonical manifest fields. The proof protocol version remains unchanged.
           </p>
         </DetailsSection>
       </Card>
@@ -1247,6 +1274,9 @@ function ReviewStep(props: {
           <Field label="Election ID">
             <span className="field-value">{p.election_id_text ?? p.election_id_hex ?? "\u2014"}</span>
           </Field>
+          <Field label="Ballot question">
+            <span className="field-value">{p.proposal_question ?? "\u2014"}</span>
+          </Field>
           <Field label="Governance source">
             <span className="field-value">{p.governance_source_revision ?? "\u2014"}</span>
           </Field>
@@ -1334,6 +1364,11 @@ function ReviewStep(props: {
             <HashValue value={p.manifest_hash_hex} />
             {p.manifest_hash_hex && <CopyButton value={p.manifest_hash_hex} />}
           </Field>
+          <Field label="Manifest schema">
+            <span className="field-value">
+              {p.manifest_hash_hex ? "ElectionManifestV2" : "\u2014"}
+            </span>
+          </Field>
         </div>
         <p className="form-hint">
           {p.complete
@@ -1376,6 +1411,12 @@ function FrozenView(props: {
           </Field>
           <Field label="Election ID">
             <span className="field-value">{s.election_id_text ?? s.election_id_hex}</span>
+          </Field>
+          <Field label="Ballot question">
+            <span className="field-value">{s.proposal_question ?? "\u2014"}</span>
+          </Field>
+          <Field label="Manifest schema">
+            <span className="field-value">ElectionManifestV{s.manifest_schema_version}</span>
           </Field>
           <Field label="Manifest hash">
             <HashValue value={s.manifest_hash_hex} />

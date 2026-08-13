@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -26,6 +27,7 @@ HASH_FRAME_PREFIX = b"TARI_CC_PRIVATE_BALLOT_HASH_FRAME_V1"
 MASK64 = (1 << 64) - 1
 MAX_INPUT_BYTES = 1 << 20
 MAX_DEPTH = 64
+MAX_PROPOSAL_QUESTION_BYTES = 512
 
 FAMILY_METADATA = {
     "registry-snapshot-v1": (
@@ -43,6 +45,10 @@ FAMILY_METADATA = {
     "election-manifest-v1": (
         "ElectionManifestV1::from_canonical_cbor",
         "tari-cc-private-ballot/election-manifest/v1",
+    ),
+    "election-manifest-v2": (
+        "ElectionManifestV2::from_canonical_cbor",
+        "tari-cc-private-ballot/election-manifest/v2",
     ),
     "ballot-package-v1": (
         "BallotPackageV1::from_canonical_cbor",
@@ -63,6 +69,14 @@ REQUIRED_CASE_FILES = {
     "expected-hashes.json",
 }
 
+REQUIRED_INVALID_CASE_FILES = {
+    "description.md",
+    "input.json",
+    "invalid.cbor",
+    "invalid.hex",
+    "expected.json",
+}
+
 REQUIRED_CASE_IDS = {
     "registry-snapshot-multi-member",
     "candidate-set-governance-options",
@@ -71,8 +85,18 @@ REQUIRED_CASE_IDS = {
     "ballot-package-candidate-election",
     "archive-manifest-candidate-election",
     "election-manifest-ballot-measure",
+    "election-manifest-v2-candidate-election",
+    "election-manifest-v2-ballot-measure",
     "ballot-package-ballot-measure",
     "archive-manifest-ballot-measure",
+}
+
+REQUIRED_INVALID_V2_CASE_IDS = {
+    "election-manifest-v2-c1-control-question",
+    "election-manifest-v2-indefinite-array",
+    "election-manifest-v2-leading-whitespace-question",
+    "election-manifest-v2-non-nfc-question",
+    "election-manifest-v2-wrong-field-count-v1-payload",
 }
 
 
@@ -446,8 +470,11 @@ def _validate_approval_payload(value: Any) -> None:
     _strictly_increasing(value, "approval selections")
 
 
-def _validate_election_manifest(value: Any) -> None:
-    _require(isinstance(value, list) and len(value) == 9, "invalid election manifest shape")
+def _validate_election_manifest_common(value: Any, field_count: int) -> None:
+    _require(
+        isinstance(value, list) and len(value) == field_count,
+        "invalid election manifest shape",
+    )
     _require(_is_exact_int(value[0]) and value[0] == 1, "invalid manifest protocol version")
     _require(isinstance(value[1], bytes) and value[1], "invalid election identifier")
     _require(value[2] == "NON_BINDING_APPROVAL_PILOT", "unexpected ballot kind")
@@ -469,6 +496,40 @@ def _validate_election_manifest(value: Any) -> None:
         isinstance(value[8], str) and bool(value[8].strip()),
         "invalid governance-source revision",
     )
+
+
+def _is_forbidden_control(character: str) -> bool:
+    codepoint = ord(character)
+    return codepoint <= 0x1F or 0x7F <= codepoint <= 0x9F
+
+
+def _validate_proposal_question(value: Any) -> None:
+    _require(isinstance(value, str), "invalid proposal question")
+    _require(value != "" and bool(value.strip()), "empty proposal question")
+    _require(
+        len(value.encode("utf-8")) <= MAX_PROPOSAL_QUESTION_BYTES,
+        "proposal question exceeds the protocol size limit",
+    )
+    _require(not value[0].isspace(), "proposal question starts with whitespace")
+    _require(not value[-1].isspace(), "proposal question ends with whitespace")
+    _require("\n" not in value and "\r" not in value, "proposal question contains newline")
+    _require(
+        all(not _is_forbidden_control(character) for character in value),
+        "proposal question contains a forbidden control",
+    )
+    _require(
+        unicodedata.normalize("NFC", value) == value,
+        "proposal question is not NFC",
+    )
+
+
+def _validate_election_manifest_v1(value: Any) -> None:
+    _validate_election_manifest_common(value, 9)
+
+
+def _validate_election_manifest_v2(value: Any) -> None:
+    _validate_election_manifest_common(value, 10)
+    _validate_proposal_question(value[9])
 
 
 def _validate_ballot_package(value: Any) -> None:
@@ -541,7 +602,8 @@ FAMILY_VALIDATORS = {
     "registry-snapshot-v1": _validate_registry,
     "candidate-set-v1": _validate_candidate_set,
     "approval-ballot-payload-v1": _validate_approval_payload,
-    "election-manifest-v1": _validate_election_manifest,
+    "election-manifest-v1": _validate_election_manifest_v1,
+    "election-manifest-v2": _validate_election_manifest_v2,
     "ballot-package-v1": _validate_ballot_package,
     "archive-manifest-v1": _validate_archive_manifest,
 }
@@ -710,6 +772,8 @@ def report_bytes(report: dict[str, Any]) -> bytes:
 
 def verify_repository(root: Path) -> dict[str, Any]:
     root = root.resolve()
+    verify_invalid_v2_repository(root)
+
     vector_root = root / "test-vectors" / "valid" / "canonical-v1"
     _require(vector_root.is_dir(), f"valid-vector root does not exist: {vector_root}")
 
@@ -734,6 +798,95 @@ def verify_repository(root: Path) -> dict[str, Any]:
     )
 
     return report
+
+
+def _classify_invalid_v2_rejection(error: VerificationError) -> str:
+    message = str(error)
+
+    if "indefinite-length" in message or "shortest encoding" in message:
+        return "NON_CANONICAL_CBOR"
+    if "not NFC" in message:
+        return "NON_NFC_PROPOSAL_QUESTION"
+    if "empty proposal question" in message:
+        return "EMPTY_PROPOSAL_QUESTION"
+    if "size limit" in message:
+        return "PROTOCOL_LIMIT_EXCEEDED"
+    if (
+        "invalid proposal question" in message
+        or "starts with whitespace" in message
+        or "ends with whitespace" in message
+        or "contains newline" in message
+        or "forbidden control" in message
+    ):
+        return "INVALID_PROPOSAL_QUESTION"
+    return "INVALID_CBOR"
+
+
+def verify_invalid_v2_case(case_dir: Path) -> dict[str, str]:
+    missing_files = sorted(REQUIRED_INVALID_CASE_FILES - {path.name for path in case_dir.iterdir()})
+    _require(not missing_files, f"invalid-vector case is missing files {missing_files}: {case_dir}")
+
+    input_metadata = _read_json_object(case_dir / "input.json")
+    expected = _read_json_object(case_dir / "expected.json")
+    vector_id = _require_property(input_metadata, "vector_id", str, case_dir / "input.json")
+    target = _require_property(input_metadata, "target", str, case_dir / "input.json")
+    byte_length = _require_property(input_metadata, "byte_length", int, case_dir / "input.json")
+    expected_vector_id = _require_property(expected, "vector_id", str, case_dir / "expected.json")
+    expected_target = _require_property(expected, "target", str, case_dir / "expected.json")
+    accepted = _require_property(expected, "accepted", bool, case_dir / "expected.json")
+    expected_code = _require_property(
+        expected,
+        "expected_rejection_code",
+        str,
+        case_dir / "expected.json",
+    )
+
+    _require(vector_id == case_dir.name, f"invalid vector_id must match directory: {case_dir}")
+    _require(vector_id == expected_vector_id, f"expected vector_id mismatch: {case_dir}")
+    _require(target == expected_target, f"target mismatch: {case_dir}")
+    _require(target == FAMILY_METADATA["election-manifest-v2"][0], f"unsupported invalid target: {case_dir}")
+    _require(not accepted, f"invalid vector expected accepted=false: {case_dir}")
+
+    invalid_bytes = (case_dir / "invalid.cbor").read_bytes()
+    invalid_hex = (case_dir / "invalid.hex").read_text(encoding="ascii").strip()
+    _require(len(invalid_bytes) == byte_length, f"invalid byte_length mismatch: {case_dir}")
+    _require(invalid_bytes.hex() == invalid_hex, f"invalid hex does not match bytes: {case_dir}")
+
+    try:
+        decoded = decode_canonical(invalid_bytes)
+        _validate_election_manifest_v2(decoded)
+    except VerificationError as error:
+        actual_code = _classify_invalid_v2_rejection(error)
+    else:
+        raise VerificationError(f"invalid V2 manifest vector was accepted: {case_dir}")
+
+    _require(
+        actual_code == expected_code,
+        f"invalid V2 rejection mismatch for {case_dir}: expected {expected_code}, got {actual_code}",
+    )
+
+    return {
+        "vector_id": vector_id,
+        "target": target,
+        "expected_rejection_code": expected_code,
+    }
+
+
+def verify_invalid_v2_repository(root: Path) -> list[dict[str, str]]:
+    invalid_root = root / "test-vectors" / "invalid" / "cbor-v1"
+    _require(invalid_root.is_dir(), f"invalid-vector root does not exist: {invalid_root}")
+
+    missing_ids = sorted(
+        vector_id
+        for vector_id in REQUIRED_INVALID_V2_CASE_IDS
+        if not (invalid_root / vector_id).is_dir()
+    )
+    _require(not missing_ids, f"required invalid V2 vectors are missing: {missing_ids}")
+
+    return [
+        verify_invalid_v2_case(invalid_root / vector_id)
+        for vector_id in sorted(REQUIRED_INVALID_V2_CASE_IDS)
+    ]
 
 
 def _print_summary(report: dict[str, Any]) -> None:

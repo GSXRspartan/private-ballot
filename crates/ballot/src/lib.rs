@@ -11,7 +11,9 @@ mod package;
 
 pub use lifecycle::{ElectionLifecycleStateV1, ElectionLifecycleV1};
 pub use manifest::{
-    BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifestV1, ElectionManifestV1Input,
+    BallotConfidentialityV1, BallotKindV1, ElectionId, ElectionManifest, ElectionManifestModel,
+    ElectionManifestV1, ElectionManifestV1Input, ElectionManifestV2, ElectionManifestV2Input,
+    ProposalQuestion,
 };
 pub use package::{BallotPackageEnvelopeV1, BallotPackageV1, BallotPackageV1Input};
 

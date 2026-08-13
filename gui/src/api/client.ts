@@ -152,8 +152,16 @@ export const api = {
     call<GuiElectionDraftPreviewV1>("get_or_create_election_draft"),
   startElectionDraft: () => call<void>("start_election_draft"),
   discardElectionDraft: () => call<void>("discard_election_draft"),
-  setDraftBasics: (electionIdText: string, governanceSourceRevision: string) =>
-    call<void>("set_draft_basics", { electionIdText, governanceSourceRevision }),
+  setDraftBasics: (
+    electionIdText: string,
+    proposalQuestion: string,
+    governanceSourceRevision: string,
+  ) =>
+    call<void>("set_draft_basics", {
+      electionIdText,
+      proposalQuestion,
+      governanceSourceRevision,
+    }),
   setDraftRules: (approvalMin: number, approvalMax: number, allowAbstention: boolean) =>
     call<void>("set_draft_rules", { approvalMin, approvalMax, allowAbstention }),
   setDraftVoters: (publicKeyHexs: string[]) =>

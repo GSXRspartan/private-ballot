@@ -9,7 +9,7 @@ use tari_cc_private_ballot_archive::{
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
-    ElectionManifestV1, ElectionManifestV1Input,
+    ElectionManifestV1, ElectionManifestV1Input, ElectionManifestV2, ElectionManifestV2Input,
 };
 use tari_cc_private_ballot_crypto::test_only_verifier::{
     TEST_ONLY_PROOF_MARKER, TestOnlyProofVerifierV1,
@@ -63,6 +63,13 @@ impl DecisionType {
         }
     }
 
+    const fn proposal_question(self) -> &'static str {
+        match self {
+            Self::CandidateElection => "Which council candidates should advance?",
+            Self::BallotMeasure => "Should the council adopt the ballot measure?",
+        }
+    }
+
     const fn election_identifier(self) -> &'static [u8] {
         match self {
             Self::CandidateElection => b"council-candidate-election-pilot-0001",
@@ -91,7 +98,8 @@ impl DecisionType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VectorKind {
-    ElectionManifest,
+    ElectionManifestV1,
+    ElectionManifestV2,
     BallotPackage,
     ArchiveManifest,
 }
@@ -99,7 +107,8 @@ enum VectorKind {
 impl VectorKind {
     const fn slug(self) -> &'static str {
         match self {
-            Self::ElectionManifest => "election-manifest",
+            Self::ElectionManifestV1 => "election-manifest",
+            Self::ElectionManifestV2 => "election-manifest-v2",
             Self::BallotPackage => "ballot-package",
             Self::ArchiveManifest => "archive-manifest",
         }
@@ -107,7 +116,8 @@ impl VectorKind {
 
     const fn object_family(self) -> &'static str {
         match self {
-            Self::ElectionManifest => "election-manifest-v1",
+            Self::ElectionManifestV1 => "election-manifest-v1",
+            Self::ElectionManifestV2 => "election-manifest-v2",
             Self::BallotPackage => "ballot-package-v1",
             Self::ArchiveManifest => "archive-manifest-v1",
         }
@@ -115,7 +125,8 @@ impl VectorKind {
 
     const fn decoder_target(self) -> &'static str {
         match self {
-            Self::ElectionManifest => "ElectionManifestV1::from_canonical_cbor",
+            Self::ElectionManifestV1 => "ElectionManifestV1::from_canonical_cbor",
+            Self::ElectionManifestV2 => "ElectionManifestV2::from_canonical_cbor",
             Self::BallotPackage => "BallotPackageV1::from_canonical_cbor",
             Self::ArchiveManifest => "ArchiveManifestV1::from_canonical_cbor",
         }
@@ -123,7 +134,8 @@ impl VectorKind {
 
     const fn hash_domain(self) -> HashDomain {
         match self {
-            Self::ElectionManifest => HashDomain::ElectionManifestV1,
+            Self::ElectionManifestV1 => HashDomain::ElectionManifestV1,
+            Self::ElectionManifestV2 => HashDomain::ElectionManifestV2,
             Self::BallotPackage => HashDomain::BallotPackageV1,
             Self::ArchiveManifest => HashDomain::ArchiveManifestV1,
         }
@@ -145,7 +157,9 @@ impl PublishedVector {
             VectorKind::BallotPackage => format!(
                 "\nThe package contains the explicit forgeable proof marker `{TEST_ONLY_PROOF_MARKER}` and is not anonymous or suitable for binding elections.\n"
             ),
-            VectorKind::ElectionManifest | VectorKind::ArchiveManifest => {
+            VectorKind::ElectionManifestV1
+            | VectorKind::ElectionManifestV2
+            | VectorKind::ArchiveManifest => {
                 "\nThe object commits to the reserved test-only proof or hash plumbing and is not suitable for binding elections.\n".to_owned()
             }
         };
@@ -231,6 +245,7 @@ struct DecisionFixture {
     candidates: CandidateSet,
     limits: ApprovalLimits,
     manifest: ElectionManifestV1,
+    manifest_v2: ElectionManifestV2,
     package: BallotPackageV1,
     archive_manifest: ArchiveManifestV1,
     archive_files: Vec<(String, Vec<u8>)>,
@@ -398,6 +413,25 @@ fn fixture(decision_type: DecisionType) -> DecisionFixture {
         panic!("published election manifest must be valid");
     };
 
+    let Ok(v2_election_id) = ElectionId::new(decision_type.election_identifier().to_vec()) else {
+        panic!("published decision identifier must be valid");
+    };
+
+    let Ok(manifest_v2) = ElectionManifestV2::new(ElectionManifestV2Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        election_id: v2_election_id,
+        ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+        ballot_confidentiality: BallotConfidentialityV1::Public,
+        registry_commitment,
+        candidate_set_commitment,
+        proof_suite_id: TEST_ONLY_SUITE_ID.to_owned(),
+        approval_limits: limits,
+        governance_source_revision: decision_type.governance_revision().to_owned(),
+        proposal_question: decision_type.proposal_question().to_owned(),
+    }) else {
+        panic!("published version-two election manifest must be valid");
+    };
+
     let payload = approval_payload(decision_type, &candidates, limits);
 
     let Ok(statement) = reconstruct_approval_proof_statement(&manifest, &payload, &provider) else {
@@ -469,6 +503,7 @@ fn fixture(decision_type: DecisionType) -> DecisionFixture {
         candidates,
         limits,
         manifest,
+        manifest_v2,
         package,
         archive_manifest,
         archive_files,
@@ -479,13 +514,24 @@ fn published_vector(fixture: &DecisionFixture, kind: VectorKind) -> PublishedVec
     let provider = TestOnlyDeterministicHasher;
 
     let (canonical, digest) = match kind {
-        VectorKind::ElectionManifest => {
+        VectorKind::ElectionManifestV1 => {
             let Ok(canonical) = fixture.manifest.to_canonical_cbor() else {
                 panic!("published election-manifest encoding must succeed");
             };
 
             let Ok(hash) = fixture.manifest.canonical_hash(&provider) else {
                 panic!("published election-manifest hash must succeed");
+            };
+
+            (canonical, hash.into_bytes())
+        }
+        VectorKind::ElectionManifestV2 => {
+            let Ok(canonical) = fixture.manifest_v2.to_canonical_cbor() else {
+                panic!("published version-two election-manifest encoding must succeed");
+            };
+
+            let Ok(hash) = fixture.manifest_v2.canonical_hash(&provider) else {
+                panic!("published version-two election-manifest hash must succeed");
             };
 
             (canonical, hash.into_bytes())
@@ -535,7 +581,8 @@ fn vectors() -> Vec<PublishedVector> {
         let fixture = fixture(decision_type);
 
         for kind in [
-            VectorKind::ElectionManifest,
+            VectorKind::ElectionManifestV1,
+            VectorKind::ElectionManifestV2,
             VectorKind::BallotPackage,
             VectorKind::ArchiveManifest,
         ] {
@@ -624,7 +671,7 @@ fn decode_and_reencode(case: &PublishedVector, canonical: &[u8]) -> Vec<u8> {
     let fixture = fixture(case.decision_type);
 
     match case.kind {
-        VectorKind::ElectionManifest => {
+        VectorKind::ElectionManifestV1 => {
             let Ok(decoded) = ElectionManifestV1::from_canonical_cbor(canonical) else {
                 panic!("published election-manifest vector must decode");
             };
@@ -641,6 +688,31 @@ fn decode_and_reencode(case: &PublishedVector, canonical: &[u8]) -> Vec<u8> {
 
             let Ok(reencoded) = decoded.to_canonical_cbor() else {
                 panic!("published election-manifest vector must re-encode");
+            };
+
+            reencoded
+        }
+        VectorKind::ElectionManifestV2 => {
+            let Ok(decoded) = ElectionManifestV2::from_canonical_cbor(canonical) else {
+                panic!("published version-two election-manifest vector must decode");
+            };
+
+            assert_eq!(decoded, fixture.manifest_v2);
+            assert_eq!(
+                decoded.election_id().as_bytes(),
+                case.decision_type.election_identifier()
+            );
+            assert_eq!(
+                decoded.governance_source_revision(),
+                case.decision_type.governance_revision(),
+            );
+            assert_eq!(
+                decoded.proposal_question(),
+                case.decision_type.proposal_question(),
+            );
+
+            let Ok(reencoded) = decoded.to_canonical_cbor() else {
+                panic!("published version-two election-manifest vector must re-encode");
             };
 
             reencoded
@@ -761,7 +833,7 @@ fn published_decision_vectors_match_elections_and_ballot_measures() {
     let provider = TestOnlyDeterministicHasher;
     let cases = vectors();
 
-    assert_eq!(cases.len(), 6);
+    assert_eq!(cases.len(), 8);
     assert!(
         cases
             .iter()

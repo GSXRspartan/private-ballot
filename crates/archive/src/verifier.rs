@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use tari_cc_private_ballot_ballot::{CandidateSet, ElectionLifecycleV1, ElectionManifestV1};
+use tari_cc_private_ballot_ballot::{CandidateSet, ElectionLifecycleV1, ElectionManifest};
 use tari_cc_private_ballot_crypto::TariTriptychPrototypeVerifierV1;
 use tari_cc_private_ballot_protocol::{
-    Blake3HashProviderV1, HashDomain, ManifestHash, RegistryCommitment, ValidationCode,
-    MAX_CANONICAL_OBJECT_BYTES, MAX_GOVERNANCE_REVISION_BYTES, hash_domain_separated,
+    Blake3HashProviderV1, HashDomain, MAX_CANONICAL_OBJECT_BYTES, MAX_GOVERNANCE_REVISION_BYTES,
+    ManifestHash, RegistryCommitment, ValidationCode, hash_domain_separated,
 };
 use tari_cc_private_ballot_registry::RegistrySnapshot;
 use tari_cc_private_ballot_tally::{ApprovalTally, LeadingResult};
@@ -201,6 +201,10 @@ pub struct ArchiveDirectoryVerificationV1 {
     pub archive_hash_consistent: bool,
     /// The recomputed election manifest hash, lowercase hex.
     pub election_manifest_hash_hex: Option<String>,
+    /// Decoded election manifest schema generation, when the manifest decoded.
+    pub election_manifest_schema_version: Option<u16>,
+    /// Verified V2 proposal question, derived only from canonical manifest bytes.
+    pub proposal_question: Option<String>,
     /// Whether the archived governance document matches the bound pin.
     pub governance_source_matches_pin: ArchiveGovernancePinFactV1,
     /// Whether this archive includes the optional transport binding artifact.
@@ -233,6 +237,8 @@ impl ArchiveDirectoryVerificationV1 {
             recomputed_archive_hash_hex: None,
             archive_hash_consistent: false,
             election_manifest_hash_hex: None,
+            election_manifest_schema_version: None,
+            proposal_question: None,
             governance_source_matches_pin: ArchiveGovernancePinFactV1::NotApplicable,
             transport_binding_present: false,
             transport_binding_verified: false,
@@ -347,6 +353,8 @@ pub fn verify_archive_directory_v1(
         Err(code) => return Ok(result.fail(STAGE_ELECTION_ARTIFACTS, code)),
     };
     result.election_manifest_hash_hex = Some(to_lower_hex(artifacts.manifest_hash().as_bytes()));
+    result.election_manifest_schema_version = Some(artifacts.manifest().manifest_schema_version());
+    result.proposal_question = artifacts.manifest().proposal_question().map(str::to_owned);
 
     if let Some(bytes) = files.get(TRANSPORT_ARCHIVE_BINDING_PATH_V1) {
         result.transport_binding_present = true;
@@ -372,8 +380,12 @@ pub fn verify_archive_directory_v1(
                 .map(|batch| batch.accepted_unique_count())
                 .sum(),
         );
-        result.transport_reduced_anonymity =
-            Some(binding.batches().iter().any(|batch| batch.reduced_anonymity()));
+        result.transport_reduced_anonymity = Some(
+            binding
+                .batches()
+                .iter()
+                .any(|batch| batch.reduced_anonymity()),
+        );
     }
 
     let revision = artifacts.manifest().governance_source_revision();
@@ -401,10 +413,9 @@ pub fn verify_archive_directory_v1(
                     result.governance_source_matches_pin = ArchiveGovernancePinFactV1::Matched;
                 } else {
                     result.governance_source_matches_pin = ArchiveGovernancePinFactV1::Mismatch;
-                    return Ok(result.fail(
-                        STAGE_GOVERNANCE_PIN,
-                        "GUI_GOVERNANCE_ARCHIVE_PIN_MISMATCH",
-                    ));
+                    return Ok(
+                        result.fail(STAGE_GOVERNANCE_PIN, "GUI_GOVERNANCE_ARCHIVE_PIN_MISMATCH")
+                    );
                 }
             }
         }
@@ -449,12 +460,17 @@ pub fn verify_archive_directory_v1(
     let rebuilt_entries = files
         .iter()
         .map(|(path, bytes)| {
-            let archive_path = ArchivePathV1::new(path.clone()).map_err(|_| ArchiveVerifierError::IoFailure)?;
-            Ok(ArchiveFileEntryV1::for_bytes(archive_path, &provider, bytes))
+            let archive_path =
+                ArchivePathV1::new(path.clone()).map_err(|_| ArchiveVerifierError::IoFailure)?;
+            Ok(ArchiveFileEntryV1::for_bytes(
+                archive_path,
+                &provider,
+                bytes,
+            ))
         })
         .collect::<Result<Vec<_>, ArchiveVerifierError>>()?;
-    let rebuilt_catalog = ArchiveFileCatalogV1::new(rebuilt_entries)
-        .map_err(|_| ArchiveVerifierError::IoFailure)?;
+    let rebuilt_catalog =
+        ArchiveFileCatalogV1::new(rebuilt_entries).map_err(|_| ArchiveVerifierError::IoFailure)?;
     let rebuilt_manifest = if archive_manifest.is_finalized_archive_manifest() {
         ArchiveManifestV1::finalized_for_provider(
             session.artifacts().manifest_hash(),
@@ -462,7 +478,11 @@ pub fn verify_archive_directory_v1(
             &provider,
         )
     } else {
-        ArchiveManifestV1::for_provider(session.artifacts().manifest_hash(), rebuilt_catalog, &provider)
+        ArchiveManifestV1::for_provider(
+            session.artifacts().manifest_hash(),
+            rebuilt_catalog,
+            &provider,
+        )
     }
     .map_err(|_| ArchiveVerifierError::IoFailure)?;
     let recomputed_hash = rebuilt_manifest
@@ -482,7 +502,7 @@ pub fn verify_archive_directory_v1(
 
 #[derive(Debug, Clone)]
 struct ArchiveElectionArtifactsV1 {
-    manifest: ElectionManifestV1,
+    manifest: ElectionManifest,
     registry: RegistrySnapshot,
     candidates: CandidateSet,
     manifest_hash: ManifestHash,
@@ -495,7 +515,7 @@ impl ArchiveElectionArtifactsV1 {
         registry_bytes: &[u8],
         candidate_bytes: &[u8],
     ) -> Result<Self, &'static str> {
-        let manifest = ElectionManifestV1::from_canonical_cbor(manifest_bytes)
+        let manifest = ElectionManifest::from_canonical_cbor(manifest_bytes)
             .map_err(|error| error.code().as_str())?;
         let registry = RegistrySnapshot::from_canonical_cbor(registry_bytes)
             .map_err(|error| error.code().as_str())?;
@@ -534,7 +554,7 @@ impl ArchiveElectionArtifactsV1 {
         })
     }
 
-    const fn manifest(&self) -> &ElectionManifestV1 {
+    const fn manifest(&self) -> &ElectionManifest {
         &self.manifest
     }
 
@@ -567,8 +587,9 @@ struct ArchiveReplaySessionV1 {
 impl ArchiveReplaySessionV1 {
     fn new(artifacts: ArchiveElectionArtifactsV1) -> Result<Self, &'static str> {
         let provider = Blake3HashProviderV1;
-        let verifier = build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
-            .map_err(|error| error.code().as_str())?;
+        let verifier =
+            build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
+                .map_err(|error| error.code().as_str())?;
 
         let mut lifecycle = ElectionLifecycleV1::new();
         lifecycle
@@ -775,10 +796,7 @@ fn read_bounded(path: &Path) -> Result<Vec<u8>, ArchiveVerifierError> {
     std::fs::read(path).map_err(|_| ArchiveVerifierError::IoFailure)
 }
 
-fn read_bounded_archive_file(
-    path: &Path,
-    relative: &str,
-) -> Result<Vec<u8>, ArchiveVerifierError> {
+fn read_bounded_archive_file(path: &Path, relative: &str) -> Result<Vec<u8>, ArchiveVerifierError> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ArchiveVerifierError::FileNotFound
@@ -804,12 +822,13 @@ fn enumerate_disk_files(dir: &Path) -> Result<BTreeSet<String>, ArchiveVerifierE
     let mut files = BTreeSet::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
-        let entries =
-            std::fs::read_dir(&current).map_err(|_| ArchiveVerifierError::IoFailure)?;
+        let entries = std::fs::read_dir(&current).map_err(|_| ArchiveVerifierError::IoFailure)?;
         for entry in entries {
             let entry = entry.map_err(|_| ArchiveVerifierError::IoFailure)?;
             let path = entry.path();
-            let file_type = entry.file_type().map_err(|_| ArchiveVerifierError::IoFailure)?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| ArchiveVerifierError::IoFailure)?;
             if file_type.is_dir() {
                 stack.push(path);
                 continue;

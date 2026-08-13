@@ -78,6 +78,12 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
               <Field label="Lifecycle">
                 <LifecyclePill state={election.lifecycle_state} />
               </Field>
+              <Field label="Manifest schema">
+                ElectionManifestV{election.manifest_schema_version}
+              </Field>
+              {election.proposal_question && (
+                <Field label="Ballot question">{election.proposal_question}</Field>
+              )}
               <Field label="Ballot kind">{election.ballot_kind}</Field>
               <Field label="Eligible voters">{election.voter_count}</Field>
               <Field label={presentation.optionSetNoun}>

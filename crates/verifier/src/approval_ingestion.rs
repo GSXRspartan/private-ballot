@@ -1,7 +1,7 @@
 //! Manifest-bound approval-package ingestion for normal application use.
 
 use tari_cc_private_ballot_ballot::{
-    BallotPackageEnvelopeV1, CandidateSet, ElectionLifecycleV1, ElectionManifestV1,
+    BallotPackageEnvelopeV1, CandidateSet, ElectionLifecycleV1, ElectionManifestModel,
 };
 use tari_cc_private_ballot_crypto::ProofVerifierV1;
 use tari_cc_private_ballot_protocol::{HashProvider, ProtocolError, ValidationCode};
@@ -14,9 +14,9 @@ use crate::{BallotAcceptanceLedger, ProductionProofSuitePolicyV1, verify_approva
 /// checks their binding and the production proof-suite policy, validates the
 /// authoritative candidate commitment, then decodes the payload using the
 /// manifest's approval limits before proof verification and ledger acceptance.
-pub fn ingest_approval_ballot_package_v1<H, V>(
+pub fn ingest_approval_ballot_package_v1<M, H, V>(
     package_bytes: &[u8],
-    manifest: &ElectionManifestV1,
+    manifest: &M,
     candidates: &CandidateSet,
     lifecycle: &ElectionLifecycleV1,
     ledger: &mut BallotAcceptanceLedger,
@@ -24,6 +24,7 @@ pub fn ingest_approval_ballot_package_v1<H, V>(
     proof_verifier: &V,
 ) -> Result<(), ProtocolError>
 where
+    M: ElectionManifestModel,
     H: HashProvider,
     V: ProofVerifierV1,
 {

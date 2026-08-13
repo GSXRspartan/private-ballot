@@ -46,6 +46,11 @@ To regenerate the deterministic report:
 python -B tools/independent_vector_verifier.py --root . --report test-vectors/valid/independent-verification-v1.json
 ```
 
+The `v1` suffix in `independent-verification-v1.json` and in the report schema
+identifies the independent verification report format version. It does not mean
+the report only covers `ElectionManifestV1` objects; the current report also
+includes `ElectionManifestV2` cases.
+
 Run its unit and repository tests with:
 
 ```text
@@ -63,8 +68,9 @@ The current verifier covers:
 2. selectable-option candidate sets;
 3. approval ballot payloads;
 4. election manifests;
-5. proof-bearing ballot packages;
-6. archive manifests.
+5. version-two election manifests with a hash-bound proposal question;
+6. proof-bearing ballot packages;
+7. archive manifests.
 
 The published decision examples cover both:
 
@@ -81,6 +87,7 @@ The verifier independently enforces:
 - complete input consumption;
 - deterministic map-key order where maps occur;
 - exact schema array lengths and field types;
+- version-two proposal-question bounds without trimming or normalization;
 - canonical ordering for registries, selectable options, approvals, and archive
   paths;
 - nested canonical approval payloads inside ballot packages.

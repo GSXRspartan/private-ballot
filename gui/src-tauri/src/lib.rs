@@ -670,11 +670,12 @@ fn discard_election_draft(state: tauri::State<'_, AppState>) -> Result<(), Comma
 #[tauri::command]
 fn set_draft_basics(
     election_id_text: String,
+    proposal_question: String,
     governance_source_revision: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
     state.with_draft_mut(|draft| {
-        draft.set_basics(election_id_text, governance_source_revision)?;
+        draft.set_basics(election_id_text, proposal_question, governance_source_revision)?;
         Ok(())
     })
 }
@@ -1281,6 +1282,7 @@ mod tests {
         draft
             .set_basics(
                 "preserved-election".to_owned(),
+                "Should the preserved shell test election pass?".to_owned(),
                 "preserved-revision".to_owned(),
             )
             .expect("valid basics");
