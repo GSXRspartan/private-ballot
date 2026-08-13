@@ -44,10 +44,10 @@ function describeLeading(tally: GuiTallySummaryV1): string {
   if ("NoApprovals" in tally.leading) return "No approvals recorded";
   if ("SingleLeader" in tally.leading) {
     const leader = tally.leading.SingleLeader;
-    return `Leading: ${leader.display_name || leader.candidate_id_hex} (${leader.approvals})`;
+    return `Leading: ${leader.display_name || leader.candidate_id_hex} (${leader.approvals} approvals)`;
   }
   const tie = tally.leading.Tie;
-  return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} each)`;
+  return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} approvals each)`;
 }
 
 function basename(path: string): string {
@@ -98,6 +98,11 @@ export function ManageElection() {
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
   const tallyAvailable = canShowTally(lifecycle);
   const finalArchiveAvailable = canWriteFinalArchive(lifecycle);
+  const finalArchiveError =
+    localError !== null &&
+    (localError.code === "GUI_ARCHIVE_TARGET_NOT_EMPTY" ||
+      localError.code === "GUI_ARCHIVE_NOT_FINALIZED" ||
+      localError.context === "archive-directory");
   const participationSealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
   const participationDisclosed = participationIsDisclosed(participation);
@@ -176,16 +181,17 @@ export function ManageElection() {
 
   const onWriteArchive = async () => {
     clearLocalError();
+    setArchiveResult(null);
     try {
-      const result = await api.writeArchiveWithGovernanceDocument(
+      const result = await api.writeFinalizedArchive(
         archiveDir,
         archiveGovernanceDocPath,
       );
       setArchiveResult(result);
       recordAction(
         archiveGovernanceDocPath
-          ? "Wrote offline archive with governance document"
-          : "Wrote offline archive",
+          ? "Wrote finalized archive with governance document"
+          : "Wrote finalized archive",
       );
     } catch (error) {
       showError(error);
@@ -225,7 +231,7 @@ export function ManageElection() {
       </p>
 
       <BackendErrorNotice error={backendError} onDismiss={dismissError} />
-      <BackendErrorNotice error={localError} onDismiss={clearLocalError} />
+      <BackendErrorNotice error={finalArchiveError ? null : localError} onDismiss={clearLocalError} />
       {!shellAvailable && (
         <Notice tone="info">
           Browser preview: commands are disabled because the desktop shell is not running.
@@ -539,16 +545,21 @@ export function ManageElection() {
               >
                 {participationSealed ? (
                   <span className="metric-value metric-sealed">
-                    <LockIcon label="Sealed" />
-                    Sealed
+                    <LockIcon label="Hidden" />
+                    Hidden while voting is open
                   </span>
                 ) : participation.participation_visibility === "COARSE" ? (
                   <span className="metric-value">
                     {coarseBucketLabel(participation.coarse_bucket)}
                   </span>
-                ) : (
+                ) : participation.participation_basis_points !== null ? (
                   <span className="metric-value">
                     {formatPercent(participation.participation_basis_points)}
+                  </span>
+                ) : (
+                  <span className="metric-value metric-sealed">
+                    <LockIcon label="Hidden" />
+                    Hidden
                   </span>
                 )}
                 {participationDisclosed && participation.accepted_ballots !== null && (
@@ -559,11 +570,16 @@ export function ManageElection() {
               </div>
               <ParticipationTrack summary={participation} />
               {participationSealed && lifecycle === "OPEN" && (
-                <p className="card-body">Voting is in progress. Participation is sealed until voting closes.</p>
+                <p className="card-body">Voting is in progress. Participation is hidden until voting closes.</p>
               )}
-              {participation.small_electorate && !participationSealed && (
+              {participation.small_electorate && !participationSealed && lifecycle === "OPEN" && (
                 <p className="card-body">
-                  Small electorate: live detail is withheld while voting is open.
+                  Small electorate: live detail is hidden while voting is open.
+                </p>
+              )}
+              {participation.small_electorate && !participationSealed && lifecycle !== "OPEN" && lifecycle !== null && (
+                <p className="card-body">
+                  Small electorate: live detail was hidden while voting was open.
                 </p>
               )}
               <p className="card-body">
@@ -638,7 +654,9 @@ export function ManageElection() {
             supporting document so its bytes travel with the record.
           </p>
           {!finalArchiveAvailable && (
-            <Notice tone="info">Close voting before writing the final archive.</Notice>
+            <Notice tone="info">
+              Mark verified and finalize the election before writing the final archive.
+            </Notice>
           )}
           <DetailsSection summary="Technical details">
             <p className="card-body">
@@ -656,7 +674,11 @@ export function ManageElection() {
                 id="archive-dir"
                 type="text"
                 value={archiveDir}
-                onChange={(e) => setArchiveDir(e.target.value)}
+                onChange={(e) => {
+                  setArchiveDir(e.target.value);
+                  setArchiveResult(null);
+                  if (finalArchiveError) clearLocalError();
+                }}
                 placeholder="archive output directory"
               />
               <button
@@ -701,29 +723,37 @@ export function ManageElection() {
           <div className="btn-row">
             <button
               type="button"
-              className="btn btn-primary"
-              disabled={!canAct || !archiveDir || !finalArchiveAvailable}
-              onClick={() => void onWriteArchive()}
-            >
-              Write final archive
-            </button>
-            <button
-              type="button"
               className="btn btn-secondary"
               disabled={!canAct || lifecycle !== "VERIFIED"}
               onClick={() => void runLifecycle("finalize")}
             >
               Finalize
             </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!canAct || !archiveDir || !finalArchiveAvailable}
+              onClick={() => void onWriteArchive()}
+            >
+              Write final archive
+            </button>
           </div>
+          <BackendErrorNotice error={finalArchiveError ? localError : null} onDismiss={clearLocalError} />
           {archiveResult && (
-            <div className="field-list">
-              <Field label="Archive hash">
-                <HashValue value={archiveResult.archive_hash_hex} />
-                <CopyButton value={archiveResult.archive_hash_hex} />
-              </Field>
-              <Field label="Files written">{archiveResult.files.length}</Field>
-            </div>
+            <>
+              <Notice tone="ok">
+                Final archive written
+                <br />
+                <span className="hash">{archiveResult.directory}</span>
+              </Notice>
+              <div className="field-list">
+                <Field label="Archive hash">
+                  <HashValue value={archiveResult.archive_hash_hex} />
+                  <CopyButton value={archiveResult.archive_hash_hex} />
+                </Field>
+                <Field label="Files written">{archiveResult.files.length}</Field>
+              </div>
+            </>
           )}
         </Card>
 

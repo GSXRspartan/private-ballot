@@ -11,6 +11,7 @@ use tari_cc_private_ballot_archive::{
 use tari_cc_private_ballot_gui_core::archive_writer::{
     submission_archive_path, write_archive_directory_v1,
     write_archive_directory_v1_with_transport_binding, write_finalized_archive_v1,
+    write_finalized_archive_v1_with_governance_document,
     write_finalized_archive_v1_with_transport_binding,
 };
 use tari_cc_private_ballot_gui_core::{
@@ -253,6 +254,40 @@ fn finalized_session_can_produce_finalized_archive() {
     );
     assert_eq!(manifest.final_lifecycle_state(), Some("FINALIZED"));
     assert!(manifest.is_finalized_archive_manifest());
+}
+
+#[test]
+fn finalized_governance_archive_path_keeps_finalized_gate() {
+    let doc = b"governance source bytes";
+    let mut verified = session_with_ballots();
+    verified
+        .mark_verified()
+        .expect("session should reach VERIFIED");
+    let dir = TestDir::new("archive-finalized-governance-gate");
+
+    let error = write_finalized_archive_v1_with_governance_document(
+        &verified,
+        &dir.join("verified"),
+        Some(doc),
+    )
+    .expect_err("VERIFIED session must not write finalized archive");
+    assert_eq!(error.code(), "GUI_ARCHIVE_NOT_FINALIZED");
+
+    let mut finalized = verified;
+    finalized.finalize().expect("session should reach FINALIZED");
+    let target = dir.join("finalized");
+    write_finalized_archive_v1_with_governance_document(&finalized, &target, Some(doc))
+        .expect("FINALIZED session must write finalized archive with governance document");
+
+    let verification = verify_archive_directory_v1(&target).expect("archive must verify");
+    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(verification.finalized);
+    assert!(
+        verification
+            .files
+            .iter()
+            .any(|file| file.path == "governance/source.bin" && file.present)
+    );
 }
 
 #[test]

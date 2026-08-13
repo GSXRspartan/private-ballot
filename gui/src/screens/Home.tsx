@@ -143,16 +143,21 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 >
                   {sealed ? (
                     <span className="metric-value metric-sealed">
-                      <LockIcon label="Sealed" />
-                      Sealed
+                      <LockIcon label="Hidden" />
+                      Hidden while voting is open
                     </span>
                   ) : participation.participation_visibility === "COARSE" ? (
                     <span className="metric-value">
                       {coarseBucketLabel(participation.coarse_bucket)}
                     </span>
-                  ) : (
+                  ) : participation.participation_basis_points !== null ? (
                     <span className="metric-value">
                       {formatPercent(participation.participation_basis_points)}
+                    </span>
+                  ) : (
+                    <span className="metric-value metric-sealed">
+                      <LockIcon label="Hidden" />
+                      Hidden
                     </span>
                   )}
                   {disclosed && participation.accepted_ballots !== null && (
@@ -165,9 +170,14 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 {sealed && (
                   <p className="card-body">Participation is hidden until voting closes.</p>
                 )}
-                {participation.small_electorate && !sealed && (
+                {participation.small_electorate && !sealed && election?.lifecycle_state === "OPEN" && (
                   <p className="card-body">
-                    Small electorate: live detail is withheld while voting is open.
+                    Small electorate: live detail is hidden while voting is open.
+                  </p>
+                )}
+                {participation.small_electorate && !sealed && election?.lifecycle_state !== "OPEN" && (
+                  <p className="card-body">
+                    Small electorate: live detail was hidden while voting was open.
                   </p>
                 )}
                 <p className="card-body">
@@ -187,14 +197,14 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
             ) : (
               <div className="metric-head">
                 <span className="metric-value metric-sealed">
-                  <LockIcon label="Sealed" />
-                  Sealed
+                  <LockIcon label="Hidden" />
+                  Hidden while voting is open
                 </span>
               </div>
             )}
             <p className="card-body">
               {sealed
-                ? "Accepted-ballot count is sealed until voting closes."
+                ? "Accepted-ballot count is hidden until voting closes."
                 : "Accepted ballots are deduplicated by registry-scoped nullifier."}
             </p>
           </Card>

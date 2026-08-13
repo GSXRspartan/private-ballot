@@ -450,7 +450,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
         code: "GUI_UNCASTABLE_APPROVAL_LIMITS",
         category: "INVALID_INPUT",
         context: "rules",
-        message: "At least one approval must be allowed when abstention is disabled.",
+        message: "At least one selection must be allowed when abstaining is disabled.",
       });
       return;
     }
@@ -1075,9 +1075,12 @@ function OptionsStep(props: {
           </button>
         </div>
         <p className="form-hint">
-          Add everything voters can approve. Each option has a short stable ID (used by the
-          software) and a display label (what voters see). Display order here is cosmetic; the
-          saved option list is sorted by ID.
+          Add everything voters can choose. Each entry needs two parts, and both are required.
+          The <strong>stable ID</strong> is a short machine-readable identifier used to bind
+          this response into the election, for example{" "}
+          <span className="hash">actually-anonymous</span>. Voters normally do not see it. The{" "}
+          <strong>response label</strong> is the text voters will see. Display order here is
+          cosmetic; the saved option list is sorted by stable ID.
         </p>
         <div className="option-editor">
           {props.options.map((option, index) => (
@@ -1086,15 +1089,15 @@ function OptionsStep(props: {
                 className="text-input option-edit-id"
                 value={option.id}
                 onChange={(e) => props.updateOption(index, { id: e.target.value })}
-                placeholder="machine ID"
-                aria-label={`Machine ID for ${noun} ${index + 1}`}
+                placeholder="stable ID, e.g. actually-anonymous"
+                aria-label={`Stable ID for ${noun} ${index + 1}`}
               />
               <input
                 className="text-input option-edit-label"
                 value={option.label}
                 onChange={(e) => props.updateOption(index, { label: e.target.value })}
-                placeholder="display label"
-                aria-label={`Display label for ${noun} ${index + 1}`}
+                placeholder="label voters will see"
+                aria-label={`Response label for ${noun} ${index + 1}`}
               />
               <button
                 type="button"
@@ -1135,11 +1138,11 @@ function RulesStep(props: {
     <>
       <Card title="Voting rules">
         <p className="form-hint">
-          Decide how many options each ballot may approve, and whether voters may abstain
+          Decide how many responses each voter may choose, and whether voters may abstain
           (submit an empty selection). These rules are locked in when the election is frozen.
         </p>
         <div className="field-list">
-          <Field label="Minimum approvals">
+          <Field label="Minimum selections">
             <input
               type="number"
               className="text-input number-input"
@@ -1149,7 +1152,7 @@ function RulesStep(props: {
               onChange={(e) => props.setApprovalMin(Number(e.target.value))}
             />
           </Field>
-          <Field label="Maximum approvals">
+          <Field label="Maximum selections">
             <input
               type="number"
               className="text-input number-input"
@@ -1159,14 +1162,14 @@ function RulesStep(props: {
               onChange={(e) => props.setApprovalMax(Number(e.target.value))}
             />
           </Field>
-          <Field label="Abstention">
+          <Field label="Abstaining">
             <label className="radio-option">
               <input
                 type="checkbox"
                 checked={props.allowAbstention}
                 onChange={(e) => props.setAllowAbstention(e.target.checked)}
               />
-              Allow an empty selection (abstain)
+              Allow voters to abstain (submit an empty selection)
             </label>
           </Field>
         </div>
@@ -1175,6 +1178,10 @@ function RulesStep(props: {
         </p>
         <Notice tone="info">{NO_QUORUM_STATEMENT}</Notice>
         <DetailsSection summary="Technical details">
+          <p className="form-hint">
+            These limits are recorded as approval rules (minimum/maximum approvals and the
+            abstention flag) in the canonical election definition.
+          </p>
           <p className="form-hint">
             Proof suite: the production Triptych prototype suite is used by default and is not
             selectable.

@@ -413,7 +413,7 @@ describe("creation: option validation", () => {
     const empty = optionValidationErrors([
       { machine_id_text: "", display_name: "A" },
     ]);
-    assert.ok(empty.some((e) => /empty machine ID/i.test(e)));
+    assert.ok(empty.some((e) => /empty stable ID/i.test(e)));
     const emptyLabel = optionValidationErrors([
       { machine_id_text: "b", display_name: "   " },
     ]);
@@ -422,7 +422,7 @@ describe("creation: option validation", () => {
       { machine_id_text: "c", display_name: "C" },
       { machine_id_text: "c", display_name: "D" },
     ]);
-    assert.ok(dup.some((e) => /duplicate machine ID/i.test(e)));
+    assert.ok(dup.some((e) => /duplicate stable ID/i.test(e)));
   });
 
   it("rejects duplicate display labels after trim normalization", () => {
@@ -617,11 +617,11 @@ describe("creation: approval rule preview", () => {
 });
 
 describe("final archive lifecycle gate", () => {
-  it("permits a final archive only after voting has closed", () => {
+  it("permits a final archive only after finalization", () => {
     assert.equal(canWriteFinalArchive("FROZEN"), false);
     assert.equal(canWriteFinalArchive("OPEN"), false);
-    assert.equal(canWriteFinalArchive("CLOSED"), true);
-    assert.equal(canWriteFinalArchive("VERIFIED"), true);
+    assert.equal(canWriteFinalArchive("CLOSED"), false);
+    assert.equal(canWriteFinalArchive("VERIFIED"), false);
     assert.equal(canWriteFinalArchive("FINALIZED"), true);
   });
 });

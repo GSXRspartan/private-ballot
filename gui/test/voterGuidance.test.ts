@@ -47,7 +47,8 @@ describe("voter-facing how voting works", () => {
     assert.match(vote, /tied to this specific election/);
     assert.match(vote, /Submit your ballot\./);
     assert.match(vote, /Check its status\./);
-    assert.match(vote, /received,\s+accepted, included in the final election record, and, where applicable, anchored/);
+    assert.match(vote, /received,\s+accepted by the organizer, or rejected/);
+    assert.match(vote, /Inclusion and Ootle anchoring are checked\s+later/);
   });
 
   it("keeps protocol vocabulary out of the primary voter explanation", () => {
@@ -62,7 +63,8 @@ describe("voter-facing how voting works", () => {
     assert.match(guide, /Technical details/);
     assert.match(guide, /Tari Triptych/);
     assert.match(guide, /election-bound proof/);
-    assert.match(guide, /receipt states/);
+    assert.match(guide, /receipt state only/);
+    assert.match(guide, /published organizer records/);
   });
 
   it("does not send the voter to GitHub or the README to learn how to vote", () => {

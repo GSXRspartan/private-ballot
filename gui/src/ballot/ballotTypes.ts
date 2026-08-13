@@ -107,3 +107,28 @@ export function approvalRuleText(summary: GuiElectionSummaryV1): string {
     : " Abstaining is not permitted.";
   return `Each ballot approves ${range}.${abstention}`;
 }
+
+/**
+ * Voter-facing instruction for the ballot-selection screen, generated from
+ * the actual election rules rather than a fixed approval-protocol sentence.
+ * For example, an exactly-one election says "Choose one option." instead of
+ * "Approve one or more ballot options". Abstention is stated plainly.
+ */
+export function selectionInstructionText(rules: {
+  approval_min: number;
+  approval_max: number;
+  abstention_allowed: boolean;
+}): string {
+  const min = rules.approval_min;
+  const max = rules.approval_max;
+  const instruction =
+    min === max
+      ? `Choose ${min === 1 ? "one" : `exactly ${min}`} ${max === 1 ? "option" : "options"}.`
+      : min === 0
+        ? `Choose up to ${max} option${max === 1 ? "" : "s"}.`
+        : `Choose between ${min} and ${max} options.`;
+  const abstention = rules.abstention_allowed
+    ? " You may abstain (choose nothing)."
+    : " Abstaining is not allowed.";
+  return `${instruction}${abstention}`;
+}

@@ -8,6 +8,7 @@ import { Anchor } from "./screens/Anchor";
 import { Archive } from "./screens/Archive";
 import { CreateElection } from "./screens/CreateElection";
 import { Evidence } from "./screens/Evidence";
+import { Guide } from "./screens/Guide";
 import { Home } from "./screens/Home";
 import { ManageElection } from "./screens/ManageElection";
 import { Settings } from "./screens/Settings";
@@ -16,6 +17,7 @@ import { useAppState } from "./state/AppState";
 
 const SCREEN_TITLES: Record<NavSection, string> = {
   home: "Home",
+  guide: "Guide",
   create: "Create Election",
   manage: "Manage Election",
   vote: "Vote",
@@ -78,6 +80,7 @@ export default function App() {
       </div>
       <ScreenErrorBoundary key={section}>
         {section === "home" && <Home onNavigate={navigate} />}
+        {section === "guide" && <Guide />}
         {section === "create" && <CreateElection onNavigate={navigate} />}
         {section === "manage" && <ManageElection />}
         {section === "vote" && <Vote />}

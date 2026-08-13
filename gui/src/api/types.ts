@@ -121,6 +121,7 @@ export interface GuiArchiveFileCheckV1 {
 
 export interface GuiArchiveVerificationV1 {
   verified: boolean;
+  finalized: boolean;
   failure_stage: string | null;
   failure_code: string | null;
   file_count: number;
@@ -143,12 +144,15 @@ export interface GuiArchiveVerificationV1 {
   transport_binding_present: boolean;
   transport_binding_verified: boolean;
   transport_batch_set_commitment_hex: string | null;
+  transport_accepted_count: number | null;
+  transport_reduced_anonymity: boolean | null;
 }
 
 export interface GuiTransportAnchorVerificationV1 {
   state: "INCLUDED" | "ANCHORED";
   transport_binding_verified: boolean;
   archive_verified: boolean;
+  archive_finalized: boolean;
   anchor_verified: boolean;
   transport_batch_set_commitment_hex: string | null;
 }

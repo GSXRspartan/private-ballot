@@ -121,6 +121,15 @@ export const api = {
   writeArchive: (targetDir: string) =>
     call<GuiArchiveWriteResultV1>("write_archive", { targetDir }),
 
+  writeFinalizedArchive: (
+    targetDir: string,
+    governanceDocumentPath: string | null,
+  ) =>
+    call<GuiArchiveWriteResultV1>("write_finalized_archive", {
+      targetDir,
+      governanceDocumentPath,
+    }),
+
   verifyArchive: (directory: string) =>
     call<GuiArchiveVerificationV1>("verify_archive", { directory }),
   verifyTransportArchiveAnchor: (archiveDirectory: string, anchorEvidencePath: string) =>

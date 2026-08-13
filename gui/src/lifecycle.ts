@@ -41,16 +41,40 @@ export function canShowTally(state: string | null | undefined): boolean {
   return (TALLY_AVAILABLE_LIFECYCLE_STATES as ReadonlyArray<string>).includes(state);
 }
 
-/** A final archive must describe a completed voting lifecycle. The Rust
- * archive writer remains authoritative; this only prevents misleading UI
- * wording and actions while voting is still open. */
+/** A genuine final archive must be written only after the election reaches
+ * FINALIZED. The Rust finalized writer remains authoritative; this mirrors
+ * that gate so the UI ordering does not imply CLOSED/VERIFIED are final. */
 export function canWriteFinalArchive(state: string | null | undefined): boolean {
-  return canShowTally(state);
+  return state === "FINALIZED";
 }
 
 /** Returns true while results are sealed (DRAFT, FROZEN, OPEN, or unknown). */
 export function resultsAreSealed(state: string | null | undefined): boolean {
   return !canShowTally(state);
+}
+
+/**
+ * Plain-language voter-facing label for a lifecycle state. The raw machine
+ * strings (DRAFT/FROZEN/OPEN/…) stay in lifecycle pills and technical
+ * details; this is the human sentence for primary voter screens.
+ */
+export function lifecyclePlainText(state: string | null | undefined): string {
+  switch (state) {
+    case "DRAFT":
+      return "Being prepared — not yet locked";
+    case "FROZEN":
+      return "Locked — voting has not opened yet";
+    case "OPEN":
+      return "Voting is open";
+    case "CLOSED":
+      return "Voting is closed";
+    case "VERIFIED":
+      return "Results verified";
+    case "FINALIZED":
+      return "Election finalized";
+    default:
+      return state ?? "Unknown";
+  }
 }
 
 // ---------------------------------------------------------------------------

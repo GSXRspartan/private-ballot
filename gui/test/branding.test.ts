@@ -19,6 +19,7 @@ import {
 } from "../src/branding/identity.ts";
 import { describeError } from "../src/api/errorDisplay.ts";
 import {
+  aggregateStateText,
   receiptStateIsAccepted,
   receiptStateText,
 } from "../src/voterWorkflow.ts";
@@ -293,22 +294,25 @@ describe("submission status wording", () => {
   it("explains each receipt state in ordinary language", () => {
     assert.match(receiptStateText("RECEIVED"), /reached the transport system/);
     assert.match(receiptStateText("ACCEPTED"), /passed election validation/);
-    assert.match(receiptStateText("INCLUDED"), /finalized election record/);
-    assert.match(receiptStateText("ANCHORED"), /anchor evidence/);
     assert.match(receiptStateText("REJECTED"), /not accepted/);
+    assert.match(receiptStateText("OFFLINE_EXPORT"), /no online submission/);
   });
 
-  it("does not overstate ANCHORED", () => {
-    const text = receiptStateText("ANCHORED");
-    assert.doesNotMatch(text, /result|outcome|tally is final/i);
+  it("keeps voter receipts separate from aggregate archive states", () => {
+    assert.equal(receiptStateIsAccepted("INCLUDED"), false);
+    assert.equal(receiptStateIsAccepted("ANCHORED"), false);
+    assert.doesNotMatch(receiptStateText("INCLUDED"), /finalized election record/);
+    assert.doesNotMatch(receiptStateText("ANCHORED"), /anchor evidence/);
+    assert.match(aggregateStateText("INCLUDED"), /aggregate record/);
+    assert.match(aggregateStateText("ANCHORED"), /verified FINALIZED archive/);
+    assert.doesNotMatch(aggregateStateText("ANCHORED"), /voter transaction/i);
   });
 
   it("distinguishes accepted states from in-progress ones", () => {
     assert.equal(receiptStateIsAccepted("ACCEPTED"), true);
-    assert.equal(receiptStateIsAccepted("INCLUDED"), true);
-    assert.equal(receiptStateIsAccepted("ANCHORED"), true);
     assert.equal(receiptStateIsAccepted("RECEIVED"), false);
     assert.equal(receiptStateIsAccepted("REJECTED"), false);
+    assert.equal(receiptStateIsAccepted("OFFLINE_EXPORT"), false);
   });
 });
 
@@ -319,8 +323,8 @@ describe("submission status wording", () => {
 describe("privacy wording", () => {
   it("never claims permanent ballot secrecy on the Vote screen", () => {
     const vote = readProjectFile("src/screens/Vote.tsx");
-    assert.match(vote, /hides which eligible voter you are/);
-    assert.match(vote, /not permanently sealed/);
+    assert.match(vote, /without revealing which eligible voter you are/);
+    assert.match(vote, /not\s+permanently sealed/);
     assert.doesNotMatch(vote, /permanently secret/i);
     assert.doesNotMatch(vote, /coercion.resistan/i);
   });

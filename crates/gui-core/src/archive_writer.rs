@@ -167,6 +167,27 @@ pub fn write_finalized_archive_v1(
     )
 }
 
+/// Writes one finalized election archive, optionally including a governance
+/// supporting document (ADR-0008).
+///
+/// This is the finalized equivalent of
+/// [`write_archive_directory_v1_with_governance_document`]: it reuses the same
+/// archive assembly path, but keeps the authoritative FINALIZED lifecycle gate
+/// and version-two finalized manifest semantics.
+pub fn write_finalized_archive_v1_with_governance_document(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    governance_document_bytes: Option<&[u8]>,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        governance_document_bytes,
+        None,
+        ArchiveFinalityMode::Finalized,
+    )
+}
+
 /// Writes one finalized election archive with a hash-covered public transport
 /// binding artifact.
 pub fn write_finalized_archive_v1_with_transport_binding(

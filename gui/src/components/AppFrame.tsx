@@ -13,6 +13,7 @@ import { LifecyclePill, Pill } from "./ui";
 
 export type NavSection =
   | "home"
+  | "guide"
   | "create"
   | "manage"
   | "vote"
@@ -30,6 +31,7 @@ interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { id: "home", label: "Home", group: "Overview" },
+  { id: "guide", label: "Guide", group: "Overview" },
   { id: "create", label: "Create Election", group: "Organizer" },
   { id: "manage", label: "Manage Election", group: "Organizer" },
   { id: "vote", label: "Vote", group: "Voter" },

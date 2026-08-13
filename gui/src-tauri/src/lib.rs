@@ -30,7 +30,8 @@ use tari_cc_private_ballot_gui_core::{
     GuiVoterSessionV1, GuiVoterWorkflowStatusV1, VoterGovernanceCredentialV1,
     inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
     verify_archive_directory_v1, verify_transport_archive_anchor_v1, write_archive_directory_v1,
-    write_election_artifacts_v1, write_live_anchor_config_from_verified_archive_v1,
+    write_election_artifacts_v1, write_finalized_archive_v1_with_governance_document,
+    write_live_anchor_config_from_verified_archive_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
@@ -548,6 +549,32 @@ fn write_archive(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
     state.with_session(|session| Ok(write_archive_directory_v1(session, Path::new(&target_dir))?))
+}
+
+/// Writes a genuine finalized archive for the active session.
+///
+/// The gui-core finalized writer remains authoritative: it refuses any session
+/// that has not reached FINALIZED and emits the finalized archive manifest.
+#[tauri::command]
+fn write_finalized_archive(
+    target_dir: String,
+    governance_document_path: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiArchiveWriteResultV1, CommandError> {
+    state.with_session(|session| {
+        let doc_bytes = governance_document_path
+            .map(|path| {
+                let bytes = std::fs::read(Path::new(&path))
+                    .map_err(|_| CommandError::package_read_failed())?;
+                Ok::<Vec<u8>, CommandError>(bytes)
+            })
+            .transpose()?;
+        Ok(write_finalized_archive_v1_with_governance_document(
+            session,
+            Path::new(&target_dir),
+            doc_bytes.as_deref(),
+        )?)
+    })
 }
 
 /// Runs the full offline archive replay verifier over one archive directory.
@@ -1496,6 +1523,7 @@ pub fn run() {
             current_tally,
             participation_summary,
             write_archive,
+            write_finalized_archive,
             verify_archive,
             verify_transport_archive_anchor,
             write_live_anchor_config_from_verified_archive,

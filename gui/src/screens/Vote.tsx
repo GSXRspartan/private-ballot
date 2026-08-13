@@ -17,12 +17,10 @@ import type {
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
 } from "../api/types";
-import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
+import { selectionInstructionText } from "../ballot/ballotTypes";
+import { lifecyclePlainText } from "../lifecycle";
 import {
-  ADVANCED_DETAILS_LABEL,
   BOUND_SECTION_LABEL,
-  INFORMATIONAL_LABEL,
-  PRESENTATION_SECTION_LABEL,
   confirmationContinueAvailable,
   documentMatchShortLabel,
   documentMatchTone,
@@ -41,6 +39,7 @@ import {
   receiptStateText,
   selectionAtApprovalMax,
   selectionSummaryText,
+  workflowStateText,
   workflowTone,
 } from "../voterWorkflow";
 import { BallotSaveDialogError, requestAndExportPreparedBallot } from "../voterExport";
@@ -381,9 +380,10 @@ export function Vote() {
   const docStatus = confirmation?.governance_document_status ?? null;
   const matchTone = documentMatchTone(docStatus?.status);
   const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
-  const presentation = presentationFor(election);
   const selectionLiveText = selectionSummaryText(selection);
   const selectionAtMax = selectionAtApprovalMax(selection);
+  const eligibleCredential =
+    !!credential?.credential_loaded && credential.eligibility === "Eligible";
 
   return (
     <>
@@ -421,15 +421,16 @@ export function Vote() {
           </li>
           <li>
             <strong>Check its status.</strong> The app shows whether your ballot was received,
-            accepted, included in the final election record, and, where applicable, anchored.
+            accepted by the organizer, or rejected. Inclusion and Ootle anchoring are checked
+            later from the published archive and organizer evidence.
           </li>
         </ol>
         <DetailsSection summary="Technical details">
           <p className="card-body">
             Eligibility is proven with the Tari Triptych implementation using an
-            election-bound proof. After submission, receipt states (received, accepted,
-            included, and, where applicable, anchored) describe how far your ballot has
-            progressed.
+            election-bound proof. This voter workflow reports local preparation and transport
+            receipt state only; finalized archive inclusion and aggregate Ootle evidence are
+            verified from published organizer records.
           </p>
         </DetailsSection>
       </details>
@@ -560,25 +561,20 @@ export function Vote() {
               anyone, including this app.
             </Notice>
             <div className="field-list">
-              <Field label="Election ID">
+              <Field label="Election">
                 <span className="field-value">
                   {confirmation.bound.election_id_text ?? confirmation.bound.election_id_hex}
                 </span>
               </Field>
-              <Field label="Canonical ballot kind">
-                <span className="field-value">{confirmation.bound.ballot_kind}</span>
-              </Field>
-              <Field label="Manifest hash">
-                <HashValue value={confirmation.bound.manifest_hash_hex} />
-                <CopyButton value={confirmation.bound.manifest_hash_hex} />
-              </Field>
-              <Field label="Governance source revision">
-                <span className="field-value">
-                  {confirmation.bound.governance_source_revision}
-                </span>
-              </Field>
-              <Field label="Option display labels">
-                <ul className="option-list bound-labels" aria-label="Bound option labels">
+              {election && (
+                <Field label="Status">
+                  <span className="field-value">
+                    {lifecyclePlainText(election.lifecycle_state)}
+                  </span>
+                </Field>
+              )}
+              <Field label="Choices on the ballot">
+                <ul className="option-list bound-labels" aria-label="Ballot choices, read-only">
                   {confirmation.bound.option_display_labels.map((label, i) => (
                     <li key={i} className="option-item">
                       <span className="option-marker" aria-hidden="true" />
@@ -587,17 +583,60 @@ export function Vote() {
                   ))}
                 </ul>
               </Field>
-              <Field label="Approval rules">
+              <Field label="How many to choose">
                 <span className="field-value">
-                  between {confirmation.bound.approval_min} and {confirmation.bound.approval_max}{" "}
-                  options; abstention{" "}
-                  {confirmation.bound.abstention_allowed ? "permitted" : "not permitted"}
+                  {selectionInstructionText(confirmation.bound)}
                 </span>
               </Field>
-              <Field label="Proof-suite ID">
-                <span className="field-value">{confirmation.bound.proof_suite_id}</span>
-              </Field>
             </div>
+            <p className="form-hint">
+              This list is read-only. You choose your response after confirming the election.
+            </p>
+            <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
+            <DetailsSection summary="Technical details">
+              <div className="field-list">
+                <Field label="Election ID (canonical)">
+                  <HashValue value={confirmation.bound.election_id_hex} />
+                  <CopyButton value={confirmation.bound.election_id_hex} />
+                </Field>
+                <Field label="Ballot kind">
+                  <span className="field-value">{confirmation.bound.ballot_kind}</span>
+                </Field>
+                <Field label="Manifest hash">
+                  <HashValue value={confirmation.bound.manifest_hash_hex} />
+                  <CopyButton value={confirmation.bound.manifest_hash_hex} />
+                </Field>
+                <Field label="Governance source revision">
+                  <span className="field-value">
+                    {confirmation.bound.governance_source_revision}
+                  </span>
+                </Field>
+                <Field label="Proof-suite ID">
+                  <span className="field-value">{confirmation.bound.proof_suite_id}</span>
+                </Field>
+                <Field label="Option machine IDs">
+                  <ul className="option-list bound-labels">
+                    {confirmation.advanced.option_machine_ids_hex.map((id, i) => (
+                      <li key={i} className="option-item">
+                        <span className="hash">{id}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Field>
+                <Field label="Registry commitment">
+                  <HashValue value={confirmation.advanced.registry_commitment_hex} />
+                  <CopyButton value={confirmation.advanced.registry_commitment_hex} />
+                </Field>
+                <Field label="Candidate-set commitment">
+                  <HashValue value={confirmation.advanced.candidate_set_commitment_hex} />
+                  <CopyButton value={confirmation.advanced.candidate_set_commitment_hex} />
+                </Field>
+                <Field label="Eligible voters / anonymity-set size">
+                  <span className="field-value">{confirmation.advanced.voter_count}</span>
+                </Field>
+              </div>
+              <p className="form-hint">{confirmation.presentation_notice}</p>
+            </DetailsSection>
           </Card>
 
           <Card title="Governance document">
@@ -665,45 +704,6 @@ export function Vote() {
             )}
           </Card>
 
-          <Card title={PRESENTATION_SECTION_LABEL}>
-            <div className="field-list">
-              <Field label="Presentation">
-                <span className="field-value">Ballot options (neutral)</span>
-              </Field>
-            </div>
-            <Notice tone="info">
-              <strong>{INFORMATIONAL_LABEL}.</strong> {confirmation.presentation_notice}
-            </Notice>
-            <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
-          </Card>
-
-          <Card title={ADVANCED_DETAILS_LABEL}>
-            <DetailsSection summary="Show advanced commitments">
-              <div className="field-list">
-                <Field label="Option machine IDs">
-                  <ul className="option-list bound-labels">
-                    {confirmation.advanced.option_machine_ids_hex.map((id, i) => (
-                      <li key={i} className="option-item">
-                        <span className="hash">{id}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </Field>
-                <Field label="Registry commitment">
-                  <HashValue value={confirmation.advanced.registry_commitment_hex} />
-                  <CopyButton value={confirmation.advanced.registry_commitment_hex} />
-                </Field>
-                <Field label="Candidate-set commitment">
-                  <HashValue value={confirmation.advanced.candidate_set_commitment_hex} />
-                  <CopyButton value={confirmation.advanced.candidate_set_commitment_hex} />
-                </Field>
-                <Field label="Voter count / anonymity-set size">
-                  <span className="field-value">{confirmation.advanced.voter_count}</span>
-                </Field>
-              </div>
-            </DetailsSection>
-          </Card>
-
           <Card title="Review election">
             <label className="radio-option">
               <input
@@ -731,51 +731,101 @@ export function Vote() {
           {credentialStage && (
             <>
               <Card title="Your voter credential">
-                <p className="form-hint">
-                  The local-pilot credential was generated before this election was frozen. It lets the
-                  app prove you are on the eligible voter list — without revealing which eligible
-                  voter you are. It exists only for this session and is never stored.
-                </p>
                 <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
-                <div className="field-list">
-                  <Field label="Credential">
-                    <span className="field-value">{credentialStatusText(credential)}</span>
-                  </Field>
-                  <Field label="Storage">
-                    <span className="field-value">
-                      {credential?.session_notice ??
-                        "Governance credentials are session-only in this build."}
-                    </span>
-                  </Field>
-                  <Field label="Import / export">
-                    <span className="field-value">
-                      Deferred until a reviewed private credential format exists.
-                    </span>
-                  </Field>
-                </div>
-                <div className="action-row">
-                  {credential?.credential_loaded && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      onClick={onResetCredential}
-                      disabled={busy}
-                    >
-                      Clear credential
-                    </button>
-                  )}
-                </div>
-                <p className="form-hint">
-                  {credential
-                    ? credential.enrollment_notice
-                    : "Checking for the Rust-owned local pilot credential."}
-                </p>
-                {!credential?.credential_loaded && (
-                  <Notice tone="warn">
-                    This election is already frozen. Generating a new credential now cannot add
-                    it to the immutable voter registry. The enrolled local credential is required;
-                    credential import is deferred until a reviewed private format exists.
-                  </Notice>
+                {eligibleCredential ? (
+                  <>
+                    <div className="field-list">
+                      <Field label="Credential">
+                        <span className="field-value">Eligible voter credential found</span>
+                      </Field>
+                      <Field label="Status">
+                        <Pill tone="ok">Eligible</Pill>
+                      </Field>
+                    </div>
+                    <DetailsSection summary="Technical details">
+                      <div className="field-list">
+                        <Field label="Your public voting key">
+                          <span className="field-value">{publicKeyDisplay(credential)}</span>
+                          {credential?.public_governance_key_hex && (
+                            <CopyButton value={credential.public_governance_key_hex} />
+                          )}
+                        </Field>
+                        <Field label="Storage">
+                          <span className="field-value">
+                            {credential?.session_notice ??
+                              "Governance credentials are session-only in this build."}
+                          </span>
+                        </Field>
+                        <Field label="Import / export">
+                          <span className="field-value">
+                            Deferred until a reviewed private credential format exists.
+                          </span>
+                        </Field>
+                      </div>
+                    </DetailsSection>
+                    <div className="action-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={onResetCredential}
+                        disabled={busy}
+                      >
+                        Clear credential
+                      </button>
+                    </div>
+                    <p className="form-hint">{credential?.enrollment_notice}</p>
+                  </>
+                ) : (
+                  <>
+                    <p className="form-hint">
+                      The local-pilot credential was generated before this election was frozen. It lets the
+                      app prove you are on the eligible voter list — without revealing which eligible
+                      voter you are. It exists only for this session and is never stored.
+                    </p>
+                    <div className="field-list">
+                      <Field label="Credential">
+                        <span className="field-value">{credentialStatusText(credential)}</span>
+                      </Field>
+                      <Field label="Storage">
+                        <span className="field-value">
+                          {credential?.session_notice ??
+                            "Governance credentials are session-only in this build."}
+                        </span>
+                      </Field>
+                      <Field label="Import / export">
+                        <span className="field-value">
+                          Deferred until a reviewed private credential format exists.
+                        </span>
+                      </Field>
+                    </div>
+                    <div className="action-row">
+                      {credential?.credential_loaded && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={onResetCredential}
+                          disabled={busy}
+                        >
+                          Clear credential
+                        </button>
+                      )}
+                    </div>
+                    <p className="form-hint">
+                      {credential
+                        ? credential.enrollment_notice
+                        : "Checking for the Rust-owned local pilot credential."}
+                    </p>
+                    {!credential?.credential_loaded && (
+                      <Notice tone="warn">
+                        The private voting credential corresponding to an enrolled public voting
+                        key is required.
+                        This election is already frozen. Generating a new credential now cannot add
+                        it to the immutable voter registry, so a fresh credential cannot make you
+                        eligible for this election; credential import is deferred until a reviewed
+                        private format exists.
+                      </Notice>
+                    )}
+                  </>
                 )}
               </Card>
 
@@ -827,16 +877,18 @@ export function Vote() {
 
               {selectionStage && confirmation && (
                 <>
-                  <Card title="Ballot selection">
-                    <p className="form-hint">{election ? approvalRuleText(election) : ""}</p>
+                  <Card title="Choose your response">
+                    <p className="selection-instruction">
+                      {selectionInstructionText(selection ?? confirmation.bound)}
+                    </p>
                     <fieldset className="selection-fieldset" disabled={busy || abstaining}>
-                      <legend>{presentation.selectionHeading}</legend>
+                      <legend>Ballot responses</legend>
                       <div className="selection-options">
                         {confirmation.candidates.map((option) => {
                           const checked = selectedOptionIds.includes(option.machine_id_hex);
                           const disabled = !checked && selectionAtMax;
                           return (
-                            <label className="selection-option" key={option.machine_id_hex}>
+                            <label className="selection-option selection-option-choice" key={option.machine_id_hex}>
                               <input
                                 type="checkbox"
                                 checked={checked}
@@ -847,9 +899,6 @@ export function Vote() {
                               />
                               <span className="selection-option-label">
                                 {option.display_name}
-                              </span>
-                              <span className="selection-option-id">
-                                {option.machine_id_text ?? option.machine_id_hex}
                               </span>
                             </label>
                           );
@@ -864,18 +913,19 @@ export function Vote() {
                           disabled={busy}
                           onChange={(e) => void onToggleAbstain(e.target.checked)}
                         />
-                        Abstain
+                        Abstain (choose nothing)
                       </label>
                     )}
                     <div className="selection-status" aria-live="polite">
-                      <Pill tone={selection?.valid ? "ok" : "neutral"}>{selectionLiveText}</Pill>
-                      {selection && (
-                        <span>
-                          Required: {selection.approval_min}-{selection.approval_max}; lifecycle{" "}
-                          {selection.lifecycle_state}
-                        </span>
-                      )}
+                      <Pill tone={workflowTone(workflow?.workflow_state)}>
+                        {workflowStateText(workflow?.workflow_state)}
+                      </Pill>
+                      <span>{selectionLiveText}</span>
                     </div>
+                    <p className="form-hint">
+                      Choosing a response does not submit a vote. You can change your response at
+                      any time before creating the proof.
+                    </p>
                     {selection && !selection.valid && (
                       <Notice tone="warn">{selection.message}</Notice>
                     )}
@@ -889,18 +939,46 @@ export function Vote() {
                         Clear selection
                       </button>
                     </div>
+                    <DetailsSection summary="Technical details">
+                      <div className="field-list">
+                        <Field label="Option machine IDs">
+                          <ul className="option-list bound-labels">
+                            {confirmation.candidates.map((option) => (
+                              <li key={option.machine_id_hex} className="option-item">
+                                <span>{option.display_name}</span>
+                                <span className="hash form-hint">
+                                  {option.machine_id_text ?? option.machine_id_hex}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </Field>
+                        {selection && (
+                          <>
+                            <Field label="Approval limits">
+                              <span className="field-value">
+                                {selection.approval_min}–{selection.approval_max}
+                              </span>
+                            </Field>
+                            <Field label="Lifecycle">
+                              <span className="field-value">{selection.lifecycle_state}</span>
+                            </Field>
+                          </>
+                        )}
+                      </div>
+                    </DetailsSection>
                   </Card>
 
                   <Card title="Anonymous eligibility proof">
                     <Notice tone="info">
-                      Your eligibility proof hides which eligible voter you are. Your ballot
-                      choice is not permanently sealed and may become public as part of the
-                      verifiable election record.
+                      This proves that your credential belongs to the eligible voter set without
+                      revealing which eligible voter you are. Your ballot choice is not
+                      permanently sealed and may appear in the final verifiable election record.
                     </Notice>
                     <div className="field-list">
-                      <Field label="Workflow">
+                      <Field label="Status">
                         <Pill tone={workflowTone(workflow?.workflow_state)}>
-                          {workflow?.workflow_state ?? "SelectionIncomplete"}
+                          {workflowStateText(workflow?.workflow_state)}
                         </Pill>
                       </Field>
                       <Field label="Preparation">
@@ -909,7 +987,11 @@ export function Vote() {
                         </span>
                       </Field>
                     </div>
-                    {busy && <Notice tone="info">Creating anonymous eligibility proof…</Notice>}
+                    {busy && (
+                      <Notice tone="info">
+                        Creating anonymous eligibility proof… This can take a moment.
+                      </Notice>
+                    )}
                     <div className="action-row">
                       <button
                         type="button"
@@ -934,45 +1016,63 @@ export function Vote() {
                       </p>
                     </DetailsSection>
                     {workflow?.prepared_ballot.summary && (
-                      <>
-                        <Card title="Review prepared ballot">
+                      <Card title="Ballot prepared">
+                        <div className="field-list">
+                          <Field label="Status">
+                            <Pill tone="ok">Ballot prepared</Pill>
+                          </Field>
+                          <Field label="Local verification">
+                            <Pill tone="ok">Verified</Pill>
+                          </Field>
+                          <Field label="Your response">
+                            <span className="field-value">
+                              {workflow.prepared_ballot.summary.selected_display_labels.join(", ") || "Abstention"}
+                            </span>
+                          </Field>
+                        </div>
+                        <DetailsSection summary="Technical details">
                           <div className="field-list">
-                            <Field label="Selected options">
-                              <span className="field-value">
-                                {workflow.prepared_ballot.summary.selected_display_labels.join(", ") || "Abstention"}
-                              </span>
-                            </Field>
                             <Field label="Package digest">
                               <HashValue value={workflow.prepared_ballot.summary.package_digest_hex} />
                             </Field>
-                            <Field label="Local verification">
-                              <Pill tone="ok">Verified</Pill>
-                            </Field>
-                          </div>
-                          <div className="action-row">
-                            <button
-                              type="button"
-                              className="btn btn-primary"
-                              disabled={busy || !workflow.prepared_ballot.ready_to_export}
-                              onClick={() => void onExportBallot()}
-                            >
-                              Save ballot file
-                            </button>
-                          </div>
-                          <div className="field-list">
-                            <Field label="Submission">
+                            <Field label="Proof suite">
                               <span className="field-value">
-                                Choose how to submit. The verified ballot package stays in the
-                                Rust backend; this screen never sends ballot bytes itself.
+                                {workflow.prepared_ballot.summary.proof_suite_id}
+                              </span>
+                            </Field>
+                            <Field label="Package size">
+                              <span className="field-value">
+                                {formatByteSize(workflow.prepared_ballot.summary.canonical_package_bytes)}
                               </span>
                             </Field>
                           </div>
-                          {transport && (
+                        </DetailsSection>
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={busy || !workflow.prepared_ballot.ready_to_export}
+                            onClick={() => void onExportBallot()}
+                          >
+                            Save ballot file
+                          </button>
+                        </div>
+                        {exported && (
+                          <Notice tone="ok">
+                            Ballot file saved. Deliver this file through the election's approved
+                            intake method.
+                          </Notice>
+                        )}
+                        {transport &&
+                          (transport.managed_tor_available ||
+                          transport.split_trust_relay_available ? (
                             <>
-                              <Notice tone={transport.development_transport ? "warn" : "info"}>
-                                {transport.message}
-                              </Notice>
-                              <div className="selection-options" role="radiogroup" aria-label="Submission options">
+                              <p className="form-hint">
+                                Alternatively, submit the prepared ballot through a private online
+                                route. The verified ballot package stays in the Rust backend; this
+                                screen never sends ballot bytes itself.
+                              </p>
+                              <div className="selection-options" role="radiogroup" aria-label="Private submission route">
                                 <label className="selection-option">
                                   <input
                                     type="radio"
@@ -995,17 +1095,6 @@ export function Vote() {
                                   <span className="selection-option-label">Split-trust relay</span>
                                   <span className="selection-option-desc">An alternative private route that splits trust between independent relays.</span>
                                 </label>
-                                <label className="selection-option">
-                                  <input
-                                    type="radio"
-                                    name="private-route"
-                                    checked={privateRoute === "OfflineExport"}
-                                    disabled={busy || !transport.offline_export_available}
-                                    onChange={() => setPrivateRoute("OfflineExport")}
-                                  />
-                                  <span className="selection-option-label">Offline ballot file</span>
-                                  <span className="selection-option-desc">Save the verified ballot package and transfer it separately to the election organizer.</span>
-                                </label>
                               </div>
                               <div className="action-row">
                                 <button
@@ -1018,25 +1107,29 @@ export function Vote() {
                                   }
                                   onClick={() => void onSubmitPrivately()}
                                 >
-                                  {privateRoute === "OfflineExport" ? "Save ballot file" : "Submit privately"}
+                                  Submit privately
                                 </button>
                               </div>
                             </>
-                          )}
-                          {privateResult && (
-                            <Notice tone={receiptStateIsAccepted(privateResult.receipt_state) ? "ok" : "info"}>
-                              {receiptStateText(privateResult.receipt_state)}
-                              {privateResult.reduced_anonymity && " Reduced anonymity / small population."}
-                            </Notice>
-                          )}
-                        </Card>
-                        {exported && (
-                          <Notice tone="ok">
-                            Ballot file saved. Deliver this ballot file to the election organizer
-                            through the approved intake process.
+                          ) : (
+                            <>
+                              <Notice tone="info">
+                                Online private submission is not available in this build. Save the
+                                ballot file above and deliver it through the election's approved
+                                intake method.
+                              </Notice>
+                              <DetailsSection summary="Transport details">
+                                <p className="card-body">{transport.message}</p>
+                              </DetailsSection>
+                            </>
+                          ))}
+                        {privateResult && (
+                          <Notice tone={receiptStateIsAccepted(privateResult.receipt_state) ? "ok" : "info"}>
+                            {receiptStateText(privateResult.receipt_state)}
+                            {privateResult.reduced_anonymity && " Reduced anonymity / small population."}
                           </Notice>
                         )}
-                      </>
+                      </Card>
                     )}
                   </Card>
                 </>

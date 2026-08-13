@@ -60,6 +60,7 @@ pub use archive_verify::{
 pub use archive_writer::{
     GuiArchiveFileSummaryV1, GuiArchiveWriteResultV1, write_archive_directory_v1,
     write_archive_directory_v1_with_transport_binding, write_finalized_archive_v1,
+    write_finalized_archive_v1_with_governance_document,
     write_finalized_archive_v1_with_transport_binding,
 };
 pub use artifacts::GuiElectionArtifactsV1;

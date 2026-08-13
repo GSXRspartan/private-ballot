@@ -17,6 +17,7 @@ import {
   Notice,
   Pill,
 } from "../components/ui";
+import { aggregateStateText } from "../voterWorkflow";
 
 /**
  * Archive: full offline replay verification of an archive directory through
@@ -153,7 +154,8 @@ export function Archive() {
         <DetailsSection summary="Technical details">
           <p className="form-hint">
             Verifies an existing finalized Phase 4 evidence record against this completed
-            archive. Submitted or unverified anchors remain INCLUDED, not ANCHORED.
+            archive. Submitted or unverified anchors remain INCLUDED, not ANCHORED; this
+            does not imply a voter transaction exists.
           </p>
         </DetailsSection>
         <div className="form-row">
@@ -198,6 +200,10 @@ export function Archive() {
                 {transportAnchor.state}
               </Pill>
             </Field>
+            <Field label="Archive finality">
+              {transportAnchor.archive_finalized ? "finalized" : "not finalized"}
+            </Field>
+            <Field label="Meaning">{aggregateStateText(transportAnchor.state)}</Field>
             <Field label="Archive binding">{transportAnchor.transport_binding_verified ? "verified" : "not verified"}</Field>
             <Field label="Phase 4 anchor">{transportAnchor.anchor_verified ? "verified" : "not verified"}</Field>
           </div>
@@ -206,15 +212,51 @@ export function Archive() {
 
       {result && (
         <>
-          <Card title="Verification status">
+          <Card title="Result at a glance">
             <div className="field-list">
-              <Field label="Result">
+              <Field label="Archive integrity">
                 {result.verified ? (
                   <Pill tone="ok">Verified</Pill>
                 ) : (
                   <Pill tone="error">Failed</Pill>
                 )}
               </Field>
+              <Field label="Election finality">
+                {result.finalized ? (
+                  <Pill tone="ok">Finalized election verified</Pill>
+                ) : (
+                  <Pill tone="warn">Intermediate archive - not finalized</Pill>
+                )}
+              </Field>
+              <Field label="Accepted ballots">{result.accepted_count}</Field>
+              <Field label="Rejected ballots">{result.rejected_count}</Field>
+              <Field label="Archive hash">
+                {result.archive_hash_consistent ? "Matches" : "Mismatch"}
+              </Field>
+              <Field label="Recomputed result">
+                {result.tally ? "tally recomputed" : "not available"}
+              </Field>
+            </div>
+            <p className="form-hint">
+              Rejected ballots are valid audit evidence — for example, the same ballot imported
+              twice — and are never hidden. Raw hashes, machine IDs, and component-level detail
+              are in the sections below.
+            </p>
+            {result.finalized ? (
+              <p className="form-hint">
+                This archive verifies as a finalized election archive. Optional Ootle anchoring,
+                when present, is aggregate evidence over the archive commitment.
+              </p>
+            ) : (
+              <p className="form-hint">
+                This archive may verify internally, but it is an intermediate archive, not a
+                finalized election archive, and is not eligible for live Ootle anchoring.
+              </p>
+            )}
+          </Card>
+
+          <Card title="Verification status">
+            <div className="field-list">
               {result.failure_stage && (
                 <Field label="First failing stage">{result.failure_stage}</Field>
               )}
@@ -222,9 +264,7 @@ export function Archive() {
               <Field label="Transcript complete">
                 {result.transcript_complete ? "yes" : "no"}
               </Field>
-              <Field label="Archive hash consistent">
-                {result.archive_hash_consistent ? "yes" : "no"}
-              </Field>
+              <Field label="Catalog files checked">{result.file_count}</Field>
             </div>
           </Card>
 
@@ -299,6 +339,16 @@ export function Archive() {
               {result.transport_batch_set_commitment_hex && (
                 <Field label="Final batch-set commitment">
                   <HashValue value={result.transport_batch_set_commitment_hex} />
+                </Field>
+              )}
+              {result.transport_accepted_count !== null && (
+                <Field label="Transport accepted count">
+                  {result.transport_accepted_count}
+                </Field>
+              )}
+              {result.transport_reduced_anonymity !== null && (
+                <Field label="Reduced anonymity">
+                  {result.transport_reduced_anonymity ? "reported" : "not reported"}
                 </Field>
               )}
             </div>

@@ -92,7 +92,7 @@ export function optionValidationErrors(options: DraftOptionInput[]): string[] {
   const seenLabels = new Set<string>();
   for (const option of options) {
     if (option.machine_id_text.trim().length === 0) {
-      errors.push("A ballot option has an empty machine ID.");
+      errors.push("A ballot option has an empty stable ID.");
       continue;
     }
     if (option.display_name.trim().length === 0) {
@@ -100,7 +100,7 @@ export function optionValidationErrors(options: DraftOptionInput[]): string[] {
       continue;
     }
     if (seenIds.has(option.machine_id_text)) {
-      errors.push(`Duplicate machine ID: ${option.machine_id_text}`);
+      errors.push(`Duplicate stable ID: ${option.machine_id_text}`);
       continue;
     }
     // Display labels are compared after the same trim normalization the backend

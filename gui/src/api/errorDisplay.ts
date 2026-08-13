@@ -88,6 +88,43 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
       context: error.context,
     };
   }
+  // A refused non-empty export/archive destination is a protective
+  // no-overwrite refusal, not a read failure: give it an accurate title and
+  // next step instead of the generic FILE_IO presentation.
+  if (error.code === "GUI_EXPORT_TARGET_NOT_EMPTY") {
+    return {
+      title: "Export folder is not empty",
+      message:
+        "Election packages can only be exported to a new or empty folder. This prevents files from different election records from being mixed or overwritten.",
+      nextStep:
+        "Choose or create a new empty folder, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_ARCHIVE_TARGET_NOT_EMPTY") {
+    return {
+      title: "Folder is not empty",
+      message:
+        "Final archives can only be written to a new or empty folder. This prevents files from different election records from being mixed or overwritten.",
+      nextStep:
+        "Choose or create a new empty folder, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_ARCHIVE_NOT_FINALIZED") {
+    return {
+      title: "Election is not finalized",
+      message: error.message,
+      nextStep: "Finalize the verified election before writing the final archive.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
   return {
     title: CATEGORY_TITLES[error.category] ?? FALLBACK_TITLE,
     message: error.message,
