@@ -112,6 +112,8 @@ export function noVoterWorkflowSecretFieldNames(fieldNames: string[]): boolean {
     "member_index",
     "nullifier",
     "proof",
+    "passphrase",
+    "password",
     "duplicate_of_sequence",
     "intake_sequence",
   ];

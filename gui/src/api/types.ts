@@ -446,7 +446,13 @@ export interface GuiVoterElectionConfirmationV1 {
 // nullifier, ballot package, or registry index.
 // ---------------------------------------------------------------------------
 
-export type GuiVoterCredentialOriginV1 = "Generated";
+export type GuiVoterCredentialOriginV1 =
+  | "Generated"
+  | "DurableCreated"
+  | "UnlockedSaved"
+  | "ImportedSession"
+  | "ImportedSaved"
+  | "MemoryOnly";
 
 export type GuiVoterEligibilityV1 =
   | "NotChecked"
@@ -463,8 +469,35 @@ export interface GuiVoterCredentialStatusV1 {
   can_continue: boolean;
   session_only: boolean;
   session_notice: string;
+  saved_locally: boolean;
   wallet_key_warning: string;
   enrollment_notice: string;
+}
+
+export interface GuiVoterCredentialFileSummaryV1 {
+  public_governance_key_hex: string;
+  public_governance_key_abbrev: string;
+  format_version: number;
+  saved_locally: boolean;
+  is_default: boolean;
+}
+
+export interface GuiSavedVoterCredentialsV1 {
+  saved_credential_count: number;
+  skipped_invalid_count: number;
+  credentials: GuiVoterCredentialFileSummaryV1[];
+}
+
+export interface GuiVoterCredentialBackupResultV1 {
+  public_governance_key_hex: string;
+  public_governance_key_abbrev: string;
+  format_version: number;
+}
+
+export interface GuiSavedVoterCredentialDeleteResultV1 {
+  public_governance_key_hex: string;
+  public_governance_key_abbrev: string;
+  deleted: boolean;
 }
 
 // ---------------------------------------------------------------------------

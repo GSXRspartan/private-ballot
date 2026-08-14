@@ -31,8 +31,11 @@ import type {
   GuiPrivateTransportAvailabilityV1,
   GuiPreparedBallotExportV1,
   GuiPreparedBallotStatusV1,
+  GuiSavedVoterCredentialDeleteResultV1,
+  GuiSavedVoterCredentialsV1,
   GuiTallySummaryV1,
   GuiTransportAnchorVerificationV1,
+  GuiVoterCredentialBackupResultV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
@@ -200,6 +203,36 @@ export const api = {
     call<GuiVoterElectionConfirmationV1>("voter_confirmation", { governanceDocumentPath }),
   voterGovernanceCredentialStatus: () =>
     call<GuiVoterCredentialStatusV1>("voter_governance_credential_status"),
+  listSavedVoterCredentials: () =>
+    call<GuiSavedVoterCredentialsV1>("list_saved_voter_credentials"),
+  createDurableVoterCredential: (passphrase: string) =>
+    call<GuiVoterCredentialStatusV1>("create_durable_voter_credential", { passphrase }),
+  unlockSavedVoterCredential: (publicKeyHex: string, passphrase: string) =>
+    call<GuiVoterCredentialStatusV1>("unlock_saved_voter_credential", {
+      publicKeyHex,
+      passphrase,
+    }),
+  importVoterCredential: (
+    path: string,
+    passphrase: string,
+    persistLocally: boolean,
+  ) =>
+    call<GuiVoterCredentialStatusV1>("import_voter_credential", {
+      path,
+      passphrase,
+      persistLocally,
+    }),
+  backupVoterCredential: (path: string, passphrase: string) =>
+    call<GuiVoterCredentialBackupResultV1>("backup_voter_credential", {
+      path,
+      passphrase,
+    }),
+  clearVoterCredentialFromMemory: () =>
+    call<GuiVoterCredentialStatusV1>("clear_voter_credential_from_memory"),
+  deleteSavedVoterCredential: (publicKeyHex: string) =>
+    call<GuiSavedVoterCredentialDeleteResultV1>("delete_saved_voter_credential", {
+      publicKeyHex,
+    }),
   generateVoterGovernanceCredential: () =>
     call<GuiVoterCredentialStatusV1>("generate_voter_governance_credential"),
   generatePendingVoterGovernanceCredential: () =>

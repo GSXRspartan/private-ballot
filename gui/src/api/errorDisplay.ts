@@ -125,6 +125,82 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
       context: error.context,
     };
   }
+  if (error.code === "GUI_CREDENTIAL_ALREADY_LOADED") {
+    return {
+      title: "Credential already unlocked",
+      message:
+        "A different voter credential is already unlocked. Clear it from memory before switching credentials.",
+      nextStep:
+        "Use Clear from memory, then unlock or import the other credential.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_CREDENTIAL_UNLOCK_FAILED") {
+    return {
+      title: "Credential could not be unlocked",
+      message:
+        "Could not unlock this credential. The passphrase may be incorrect or the file may be damaged.",
+      nextStep: "Check the passphrase and selected credential file, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_CREDENTIAL_OUTPUT_COLLISION") {
+    return {
+      title: "Credential file already exists",
+      message:
+        "The credential output file already exists. Existing credential files are not overwritten.",
+      nextStep: "Choose a new backup filename or remove the old file yourself, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_CREDENTIAL_UNSAFE_PATH") {
+    return {
+      title: "Credential path is not allowed",
+      message:
+        "Portable credential import and backup require a regular absolute file path.",
+      nextStep: "Use the native file dialog to choose a normal .tcbcred file path.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_APP_DATA_UNAVAILABLE") {
+    return {
+      title: "Credential store unavailable",
+      message: "The application data directory is unavailable.",
+      nextStep: "Check that the desktop app can access its application data folder, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_CREDENTIAL_CONTAINER_FRAMING") {
+    return {
+      title: "Credential file is not supported",
+      message:
+        "The voter credential file is not a supported V1 credential container.",
+      nextStep: "Choose a .tcbcred file created by this version of Tari Private Ballot.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_CREDENTIAL_CONTAINER_VERSION") {
+    return {
+      title: "Credential file version is not supported",
+      message: "The voter credential file version is not supported.",
+      nextStep: "Use a credential backup created by a compatible version of the app.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
   return {
     title: CATEGORY_TITLES[error.category] ?? FALLBACK_TITLE,
     message: error.message,

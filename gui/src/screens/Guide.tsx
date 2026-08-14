@@ -34,9 +34,10 @@ export function Guide() {
             definition; legacy files honestly say when no canonical question exists.
           </li>
           <li>
-            <strong>Use your voting credential.</strong> You need the private voting credential
-            corresponding to a public voting key the organizer enrolled before the election was
-            frozen. A credential created after the freeze cannot join the election.
+            <strong>Use your voter credential.</strong> Your voter credential is your private
+            voting identity, not a Tari wallet seed. Give the organizer only your public
+            enrollment key before the election is frozen; keep the encrypted credential file,
+            its passphrase, and any backup for yourself.
           </li>
           <li>
             <strong>Verify your eligibility.</strong> The app checks your public voting key
@@ -131,6 +132,26 @@ export function Guide() {
             organizer, and not with another voter.
           </li>
           <li>
+            <strong>Your public enrollment key is safe to give the organizer.</strong> It is the
+            value used for voter enrollment, and it is not enough to vote without the private
+            credential.
+          </li>
+          <li>
+            <strong>The organizer cannot recover your credential.</strong> To recover it on this
+            or another computer, you need the encrypted credential file or backup plus the
+            passphrase. Losing both the saved credential file and any usable backup means losing
+            the ability to vote as that registered key.
+          </li>
+          <li>
+            <strong>Copying the same credential to multiple computers does not allow two
+            accepted votes in the same election.</strong> The election rejects a second ballot
+            from the same registered key.
+          </li>
+          <li>
+            <strong>The passphrase protects the credential file at rest.</strong> It does not
+            protect a machine that is already compromised while the credential is unlocked.
+          </li>
+          <li>
             <strong>The eligibility proof hides which eligible registry member voted.</strong>{" "}
             It proves membership in the eligible voter set, nothing more.
           </li>
@@ -149,9 +170,9 @@ export function Guide() {
           </li>
         </ul>
         <Notice tone="info">
-          This guide describes the intended finished product. Where a capability is not
-          available in this build — for example credential import or a production online
-          transport — the screens say so rather than pretending it works.
+          This guide describes the desktop workflow in this build. Private online transport is
+          still shown only when the backend reports it is available; otherwise voters save a
+          ballot file and deliver it through the election's approved intake method.
         </Notice>
       </Card>
     </>

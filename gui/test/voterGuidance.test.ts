@@ -143,7 +143,13 @@ describe("protocol behavior unchanged", () => {
     for (const call of [
       "api.voterConfirmation(",
       "api.voterGovernanceCredentialStatus(",
-      "api.resetVoterGovernanceCredential(",
+      "api.listSavedVoterCredentials(",
+      "api.createDurableVoterCredential(",
+      "api.unlockSavedVoterCredential(",
+      "api.importVoterCredential(",
+      "api.backupVoterCredential(",
+      "api.clearVoterCredentialFromMemory(",
+      "api.deleteSavedVoterCredential(",
       "api.voterWorkflowStatus(",
       "api.voterBallotSelectionStatus(",
       "api.setVoterBallotSelection(",
@@ -158,12 +164,16 @@ describe("protocol behavior unchanged", () => {
     }
   });
 
-  it("loads the carried credential after review and never offers post-freeze generation", () => {
+  it("loads credential status after review and uses durable credential controls", () => {
     assert.match(vote, /async function onEnterCredentialStage\(\)/);
-    assert.match(vote, /setCredential\(await api\.voterGovernanceCredentialStatus\(\)\)/);
+    assert.match(vote, /await refreshCredentialStatus\(\)/);
     assert.match(vote, /onClick=\{\(\) => void onEnterCredentialStage\(\)\}/);
-    assert.doesNotMatch(vote, /Generate new credential/);
-    assert.match(vote, /This election is already frozen\. Generating a new credential now cannot add/);
+    assert.match(vote, /<VoterCredentialCard/);
+    assert.doesNotMatch(vote, /generateVoterGovernanceCredential|generatePendingVoterGovernanceCredential/);
+    const credentialCard = readProjectFile("src/components/VoterCredentialCard.tsx");
+    assert.match(credentialCard, /Create credential/);
+    assert.match(credentialCard, /Import credential/);
+    assert.match(credentialCard, /Creating a new credential after this election was frozen cannot add it to the\s+registry/);
   });
 
   it("adds no new backend/API imports for the voter guidance", () => {

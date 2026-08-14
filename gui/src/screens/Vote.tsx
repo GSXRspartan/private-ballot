@@ -12,6 +12,7 @@ import type {
   GuiPrivateRouteV1,
   GuiPrivateSubmissionResultV1,
   GuiPrivateTransportAvailabilityV1,
+  GuiSavedVoterCredentialsV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
@@ -30,9 +31,7 @@ import {
 import {
   canProceedAfterCredential,
   credentialEligibilityTone,
-  credentialStatusText,
   publicKeyDisplay,
-  WALLET_SEED_WARNING,
 } from "../voterCredential";
 import {
   receiptStateIsAccepted,
@@ -56,6 +55,7 @@ import {
   Notice,
   Pill,
 } from "../components/ui";
+import { VoterCredentialCard } from "../components/VoterCredentialCard";
 
 /**
  * Vote (voter) — the voter journey in plain terms:
@@ -77,6 +77,8 @@ export function Vote() {
   const [confirmation, setConfirmation] = useState<GuiVoterElectionConfirmationV1 | null>(null);
   const [govDocDigest, setGovDocDigest] = useState<GuiGovernanceDocumentDigestV1 | null>(null);
   const [credential, setCredential] = useState<GuiVoterCredentialStatusV1 | null>(null);
+  const [savedCredentials, setSavedCredentials] =
+    useState<GuiSavedVoterCredentialsV1 | null>(null);
   const [selection, setSelection] = useState<GuiVoterSelectionStatusV1 | null>(null);
   const [workflow, setWorkflow] = useState<GuiVoterWorkflowStatusV1 | null>(null);
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
@@ -85,6 +87,7 @@ export function Vote() {
   const [credentialStage, setCredentialStage] = useState(false);
   const [selectionStage, setSelectionStage] = useState(false);
   const [error, setError] = useState<GuiCommandError | null>(null);
+  const [credentialError, setCredentialError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
   const [exported, setExported] = useState(false);
   const [transport, setTransport] = useState<GuiPrivateTransportAvailabilityV1 | null>(null);
@@ -97,7 +100,6 @@ export function Vote() {
   useEffect(() => {
     setConfirmation(null);
     setGovDocDigest(null);
-    setCredential(null);
     setSelection(null);
     setWorkflow(null);
     setSelectedOptionIds([]);
@@ -114,15 +116,22 @@ export function Vote() {
     setPrivateResult(null);
   }, [election]);
 
+  function commandErrorFromUnknown(err: unknown): GuiCommandError {
+    if (err instanceof BackendError) return err.payload;
+    return {
+      code: "GUI_UNEXPECTED_ERROR",
+      category: "INVALID_INPUT",
+      context: null,
+      message: "an unexpected frontend/backend boundary error occurred",
+    };
+  }
+
   function captureError(err: unknown) {
-    if (err instanceof BackendError) setError(err.payload);
-    else
-      setError({
-        code: "GUI_UNEXPECTED_ERROR",
-        category: "INVALID_INPUT",
-        context: null,
-        message: "an unexpected frontend/backend boundary error occurred",
-      });
+    setError(commandErrorFromUnknown(err));
+  }
+
+  function captureCredentialError(err: unknown) {
+    setCredentialError(commandErrorFromUnknown(err));
   }
 
   // Voter-facing Load Election. Reuses the same safe backend loading path
@@ -175,6 +184,11 @@ export function Vote() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
 
+  useEffect(() => {
+    if (shellAvailable) void refreshCredentialStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election, shellAvailable]);
+
   async function onSelectGovernanceDocument() {
     const path = await pickGovernanceDocument("Select local governance document to inspect");
     if (!path) return;
@@ -205,7 +219,7 @@ export function Vote() {
     setBusy(true);
     setError(null);
     try {
-      setCredential(await api.voterGovernanceCredentialStatus());
+      await refreshCredentialStatus();
     } catch (err) {
       captureError(err);
     } finally {
@@ -213,23 +227,67 @@ export function Vote() {
     }
   }
 
-  async function onResetCredential() {
+  async function refreshSavedCredentials() {
+    if (!shellAvailable) return null;
+    const saved = await api.listSavedVoterCredentials();
+    setSavedCredentials(saved);
+    return saved;
+  }
+
+  async function refreshCredentialStatus() {
+    if (!shellAvailable) return null;
+    const [status, saved] = await Promise.all([
+      api.voterGovernanceCredentialStatus(),
+      api.listSavedVoterCredentials(),
+    ]);
+    setCredential(status);
+    setSavedCredentials(saved);
+    return status;
+  }
+
+  async function applyCredentialStatus(status: GuiVoterCredentialStatusV1) {
+    setCredential(status);
+    await refreshSavedCredentials();
+    if (selectionStage) await refreshWorkflow(true);
+  }
+
+  async function onCreateCredential(passphrase: string) {
+    const status = await api.createDurableVoterCredential(passphrase);
+    await applyCredentialStatus(status);
+  }
+
+  async function onUnlockCredential(publicKeyHex: string, passphrase: string) {
+    const status = await api.unlockSavedVoterCredential(publicKeyHex, passphrase);
+    await applyCredentialStatus(status);
+  }
+
+  async function onImportCredential(
+    path: string,
+    passphrase: string,
+    persistLocally: boolean,
+  ) {
+    const status = await api.importVoterCredential(path, passphrase, persistLocally);
+    await applyCredentialStatus(status);
+  }
+
+  async function onBackupCredential(path: string, passphrase: string) {
+    await api.backupVoterCredential(path, passphrase);
+  }
+
+  async function onClearCredentialFromMemory() {
     if (!shellAvailable) {
       setCredential(null);
       setWorkflow(null);
       return;
     }
-    setBusy(true);
-    setError(null);
-    try {
-      const status = await api.resetVoterGovernanceCredential();
-      setCredential(status);
-      if (selectionStage) await refreshWorkflow(true);
-    } catch (err) {
-      captureError(err);
-    } finally {
-      setBusy(false);
-    }
+    const status = await api.clearVoterCredentialFromMemory();
+    await applyCredentialStatus(status);
+  }
+
+  async function onDeleteSavedCredential(publicKeyHex: string) {
+    await api.deleteSavedVoterCredential(publicKeyHex);
+    await refreshCredentialStatus();
+    if (selectionStage) await refreshWorkflow(true);
   }
 
   async function refreshWorkflow(reviewConfirmed = confirmed) {
@@ -382,8 +440,6 @@ export function Vote() {
   const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
   const selectionLiveText = selectionSummaryText(selection);
   const selectionAtMax = selectionAtApprovalMax(selection);
-  const eligibleCredential =
-    !!credential?.credential_loaded && credential.eligibility === "Eligible";
 
   return (
     <>
@@ -454,6 +510,25 @@ export function Vote() {
       </div>
 
       <BackendErrorNotice error={error} onDismiss={() => setError(null)} />
+
+      <VoterCredentialCard
+        status={credential}
+        savedCredentials={savedCredentials}
+        shellAvailable={shellAvailable}
+        busy={busy}
+        context="vote"
+        showFrozenElectionNotice={!!election}
+        onCreate={onCreateCredential}
+        onUnlock={onUnlockCredential}
+        onImport={onImportCredential}
+        onBackup={onBackupCredential}
+        onClear={onClearCredentialFromMemory}
+        onDeleteSaved={onDeleteSavedCredential}
+        onError={captureCredentialError}
+        operationError={credentialError}
+        onOperationSuccess={() => setCredentialError(null)}
+        onOperationErrorDismiss={() => setCredentialError(null)}
+      />
 
       {!election && (
         <Card title="Load Election">
@@ -746,105 +821,6 @@ export function Vote() {
 
           {credentialStage && (
             <>
-              <Card title="Your voter credential">
-                <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
-                {eligibleCredential ? (
-                  <>
-                    <div className="field-list">
-                      <Field label="Credential">
-                        <span className="field-value">Eligible voter credential found</span>
-                      </Field>
-                      <Field label="Status">
-                        <Pill tone="ok">Eligible</Pill>
-                      </Field>
-                    </div>
-                    <DetailsSection summary="Technical details">
-                      <div className="field-list">
-                        <Field label="Your public voting key">
-                          <span className="field-value">{publicKeyDisplay(credential)}</span>
-                          {credential?.public_governance_key_hex && (
-                            <CopyButton value={credential.public_governance_key_hex} />
-                          )}
-                        </Field>
-                        <Field label="Storage">
-                          <span className="field-value">
-                            {credential?.session_notice ??
-                              "Governance credentials are session-only in this build."}
-                          </span>
-                        </Field>
-                        <Field label="Import / export">
-                          <span className="field-value">
-                            Deferred until a reviewed private credential format exists.
-                          </span>
-                        </Field>
-                      </div>
-                    </DetailsSection>
-                    <div className="action-row">
-                      <button
-                        type="button"
-                        className="btn btn-secondary"
-                        onClick={onResetCredential}
-                        disabled={busy}
-                      >
-                        Clear credential
-                      </button>
-                    </div>
-                    <p className="form-hint">{credential?.enrollment_notice}</p>
-                  </>
-                ) : (
-                  <>
-                    <p className="form-hint">
-                      The local-pilot credential was generated before this election was frozen. It lets the
-                      app prove you are on the eligible voter list — without revealing which eligible
-                      voter you are. It exists only for this session and is never stored.
-                    </p>
-                    <div className="field-list">
-                      <Field label="Credential">
-                        <span className="field-value">{credentialStatusText(credential)}</span>
-                      </Field>
-                      <Field label="Storage">
-                        <span className="field-value">
-                          {credential?.session_notice ??
-                            "Governance credentials are session-only in this build."}
-                        </span>
-                      </Field>
-                      <Field label="Import / export">
-                        <span className="field-value">
-                          Deferred until a reviewed private credential format exists.
-                        </span>
-                      </Field>
-                    </div>
-                    <div className="action-row">
-                      {credential?.credential_loaded && (
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={onResetCredential}
-                          disabled={busy}
-                        >
-                          Clear credential
-                        </button>
-                      )}
-                    </div>
-                    <p className="form-hint">
-                      {credential
-                        ? credential.enrollment_notice
-                        : "Checking for the Rust-owned local pilot credential."}
-                    </p>
-                    {!credential?.credential_loaded && (
-                      <Notice tone="warn">
-                        The private voting credential corresponding to an enrolled public voting
-                        key is required.
-                        This election is already frozen. Generating a new credential now cannot add
-                        it to the immutable voter registry, so a fresh credential cannot make you
-                        eligible for this election; credential import is deferred until a reviewed
-                        private format exists.
-                      </Notice>
-                    )}
-                  </>
-                )}
-              </Card>
-
               <Card title="Eligibility">
                 <p className="form-hint">
                   The election defines who is eligible to vote. The app checks your public voting
@@ -875,8 +851,8 @@ export function Vote() {
                 )}
                 {credential?.eligibility === "NotEligible" && (
                   <Notice tone="warn">
-                    Generating a replacement cannot change this frozen registry. Credential import
-                    is deferred until a reviewed private format exists.
+                    Creating or importing another credential cannot change this frozen registry.
+                    Clear the current credential from memory before switching identities.
                   </Notice>
                 )}
                 <div className="action-row">

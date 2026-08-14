@@ -37,6 +37,7 @@ const manage = readProjectFile("src/screens/ManageElection.tsx");
 const home = readProjectFile("src/screens/Home.tsx");
 const track = readProjectFile("src/components/ParticipationTrack.tsx");
 const guide = readProjectFile("src/screens/Guide.tsx");
+const credentialCard = readProjectFile("src/components/VoterCredentialCard.tsx");
 const app = readProjectFile("src/App.tsx");
 const frame = readProjectFile("src/components/AppFrame.tsx");
 const types = readProjectFile("src/api/types.ts");
@@ -307,9 +308,11 @@ describe("built-in guide", () => {
     assert.doesNotMatch(guide, /fully anonymous|untraceable|permanently private/i);
   });
 
-  it("does not falsely claim unimplemented capability works today", () => {
-    assert.match(guide, /intended finished product/);
-    assert.doesNotMatch(guide, /import your credential from a file|export your credential/i);
+  it("documents durable credential recovery without claiming private online transport is always available", () => {
+    assert.match(guide, /encrypted credential file or backup plus the\s+passphrase/);
+    assert.match(guide, /Private online transport is\s+still shown only when the backend reports it is available/);
+    const notice = guide.slice(guide.indexOf("<Notice tone=\"info\">"));
+    assert.doesNotMatch(notice, /intended finished product/);
   });
 });
 
@@ -482,17 +485,22 @@ describe("archive result presentation", () => {
 // -------------------------------------------------------------------------
 
 describe("credential presentation", () => {
-  it("collapses to a compact eligible state when the credential qualifies", () => {
-    assert.match(vote, /Eligible voter credential found/);
+  it("collapses to a compact loaded state when the credential is unlocked", () => {
+    assert.match(credentialCard, /Credential loaded/);
   });
 
-  it("explains that a fresh credential cannot join a frozen election", () => {
-    assert.match(vote, /cannot add/);
-    assert.match(vote, /a fresh credential cannot make you\s+eligible for this election/);
+  it("explains that a new credential cannot join a frozen registry by itself", () => {
+    assert.match(credentialCard, /cannot add it to the\s+registry/);
+    assert.match(credentialCard, /public enrollment key the organizer enrolled/);
   });
 
-  it("never prominently offers post-freeze credential generation", () => {
-    assert.doesNotMatch(vote, /Generate new credential/);
+  it("routes visible credential creation through durable commands", () => {
+    const create = readProjectFile("src/screens/CreateElection.tsx");
+    assert.match(credentialCard, /Create credential/);
+    assert.match(vote, /api\.createDurableVoterCredential\(passphrase\)/);
+    assert.match(create, /api\.createDurableVoterCredential\(passphrase\)/);
+    assert.doesNotMatch(vote, /generatePendingVoterGovernanceCredential/);
+    assert.doesNotMatch(create, /generatePendingVoterGovernanceCredential/);
   });
 });
 

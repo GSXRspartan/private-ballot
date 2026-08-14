@@ -725,6 +725,7 @@ describe("voter credential helpers", () => {
     can_continue: true,
     session_only: true,
     session_notice: "Session only",
+    saved_locally: false,
     wallet_key_warning: WALLET_SEED_WARNING,
     enrollment_notice: "Enroll before freeze",
   };

@@ -63,6 +63,7 @@ test("voter workflow api field names stay free of secret-bearing material", () =
   );
   assert.equal(noVoterWorkflowSecretFieldNames(["proof_bytes"]), false);
   assert.equal(noVoterWorkflowSecretFieldNames(["member_index"]), false);
+  assert.equal(noVoterWorkflowSecretFieldNames(["passphrase"]), false);
 });
 
 test("private submission DTO field names stay voter-safe", () => {

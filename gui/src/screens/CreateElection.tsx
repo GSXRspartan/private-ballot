@@ -10,6 +10,7 @@ import type {
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
   GuiGovernanceDocumentDigestV1,
+  GuiSavedVoterCredentialsV1,
   GuiVoterCredentialStatusV1,
 } from "../api/types";
 import { presentationIdentifier } from "../api/client";
@@ -43,7 +44,6 @@ import {
   pinFormatTone,
   pinKindLabel,
 } from "../governance";
-import { publicKeyDisplay, WALLET_SEED_WARNING } from "../voterCredential";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -57,6 +57,7 @@ import {
   Notice,
   Pill,
 } from "../components/ui";
+import { VoterCredentialCard } from "../components/VoterCredentialCard";
 
 type Step = CreateElectionStep;
 
@@ -114,9 +115,10 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   const draftRequestRef = useRef<Promise<boolean> | null>(null);
   const errorNoticeRef = useRef<HTMLDivElement | null>(null);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
-  const [confirmCredentialReset, setConfirmCredentialReset] = useState(false);
   const [bootstrapCredential, setBootstrapCredential] =
     useState<GuiVoterCredentialStatusV1 | null>(null);
+  const [savedCredentials, setSavedCredentials] =
+    useState<GuiSavedVoterCredentialsV1 | null>(null);
 
   function captureError(error: unknown) {
     if (error instanceof BackendError) setLocalError(error.payload);
@@ -166,8 +168,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
             }
           },
         );
-        const status = await api.voterGovernanceCredentialStatus();
-        setBootstrapCredential(status);
+        await refreshBootstrapCredential();
         return true;
       } catch (error) {
         captureError(error);
@@ -341,15 +342,58 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     goNext("voters");
   }
 
-  async function onGenerateBootstrapCredential() {
-    const status = await run(() => api.generatePendingVoterGovernanceCredential());
-    if (status) setBootstrapCredential(status);
+  async function refreshSavedCredentials() {
+    const saved = await api.listSavedVoterCredentials();
+    setSavedCredentials(saved);
+    return saved;
   }
 
-  async function onResetBootstrapCredential() {
-    setConfirmCredentialReset(false);
-    const status = await run(() => api.resetPendingVoterGovernanceCredential());
-    if (status) setBootstrapCredential(status);
+  async function refreshBootstrapCredential() {
+    const [status, saved] = await Promise.all([
+      api.voterGovernanceCredentialStatus(),
+      api.listSavedVoterCredentials(),
+    ]);
+    setBootstrapCredential(status);
+    setSavedCredentials(saved);
+    return status;
+  }
+
+  async function applyBootstrapCredentialStatus(status: GuiVoterCredentialStatusV1) {
+    setBootstrapCredential(status);
+    await refreshSavedCredentials();
+  }
+
+  async function onCreateBootstrapCredential(passphrase: string) {
+    const status = await api.createDurableVoterCredential(passphrase);
+    await applyBootstrapCredentialStatus(status);
+  }
+
+  async function onUnlockBootstrapCredential(publicKeyHex: string, passphrase: string) {
+    const status = await api.unlockSavedVoterCredential(publicKeyHex, passphrase);
+    await applyBootstrapCredentialStatus(status);
+  }
+
+  async function onImportBootstrapCredential(
+    path: string,
+    passphrase: string,
+    persistLocally: boolean,
+  ) {
+    const status = await api.importVoterCredential(path, passphrase, persistLocally);
+    await applyBootstrapCredentialStatus(status);
+  }
+
+  async function onBackupBootstrapCredential(path: string, passphrase: string) {
+    await api.backupVoterCredential(path, passphrase);
+  }
+
+  async function onClearBootstrapCredential() {
+    const status = await api.clearVoterCredentialFromMemory();
+    await applyBootstrapCredentialStatus(status);
+  }
+
+  async function onDeleteBootstrapSavedCredential(publicKeyHex: string) {
+    await api.deleteSavedVoterCredential(publicKeyHex);
+    await refreshBootstrapCredential();
   }
 
   // ---- Voters ------------------------------------------------------------
@@ -552,38 +596,21 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
       {ready && (
         <>
-          <Card title="Voter credential bootstrap (local pilot)">
-            <p className="form-hint">
-              A voter can create a credential on this computer before the registry is frozen.
-              Rust keeps the private credential; copy only the public key below into the eligible
-              voter list. This credential survives navigation and election loading during this
-              application session, but is lost when the application restarts.
-            </p>
-            <Notice tone="warn">{WALLET_SEED_WARNING}</Notice>
-            <div className="action-row">
-              {!bootstrapCredential?.credential_loaded && (
-                <button type="button" className="btn btn-secondary" disabled={busy || !shellAvailable}
-                  onClick={() => void onGenerateBootstrapCredential()}>
-                  Generate voter credential
-                </button>
-              )}
-              {bootstrapCredential?.credential_loaded && (
-                <button type="button" className="btn btn-secondary" disabled={busy}
-                  onClick={() => setConfirmCredentialReset(true)}>
-                  Clear credential
-                </button>
-              )}
-            </div>
-            {bootstrapCredential?.public_governance_key_hex && (
-              <div className="field-list">
-                <Field label="Public enrollment key">
-                  <span className="field-value">{publicKeyDisplay(bootstrapCredential)}</span>
-                  <CopyButton value={bootstrapCredential.public_governance_key_hex} />
-                </Field>
-                <Field label="Eligibility"><span className="field-value">Checked after freeze against the canonical registry.</span></Field>
-              </div>
-            )}
-          </Card>
+          <VoterCredentialCard
+            title="Voter credential bootstrap"
+            status={bootstrapCredential}
+            savedCredentials={savedCredentials}
+            shellAvailable={shellAvailable}
+            busy={busy}
+            context="bootstrap"
+            onCreate={onCreateBootstrapCredential}
+            onUnlock={onUnlockBootstrapCredential}
+            onImport={onImportBootstrapCredential}
+            onBackup={onBackupBootstrapCredential}
+            onClear={onClearBootstrapCredential}
+            onDeleteSaved={onDeleteBootstrapSavedCredential}
+            onError={captureError}
+          />
           <ol className="stepper" aria-label="Creation steps">
         {STEPS.map((s, i) => {
           const state =
@@ -711,22 +738,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           busy={busy}
           onConfirm={onFreeze}
           onCancel={() => setConfirmFreeze(false)}
-        />
-      )}
-      {confirmCredentialReset && (
-        <ConfirmDialog
-          title="Clear local voter credential?"
-          body={
-            <p>
-              This removes the Rust-owned local pilot credential for this application session.
-              Generate a replacement only after clearing it deliberately.
-            </p>
-          }
-          confirmLabel="Clear credential"
-          confirmTone="danger"
-          busy={busy}
-          onConfirm={() => void onResetBootstrapCredential()}
-          onCancel={() => setConfirmCredentialReset(false)}
         />
       )}
         </>

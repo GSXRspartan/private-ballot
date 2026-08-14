@@ -59,6 +59,39 @@ export async function pickBallotPackagePath(): Promise<string | null> {
   });
 }
 
+/** Opens a native single-file picker for a portable encrypted voter
+ * credential. The frontend receives only the selected path; Rust reads and
+ * decrypts the reviewed container. */
+export async function pickVoterCredentialFile(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const selected = await open({
+    title: "Import voter credential",
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Tari Private Ballot credential", extensions: ["tcbcred"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return selected ?? null;
+}
+
+/** Opens the native save dialog for another encrypted credential copy. Rust,
+ * not JavaScript, writes the selected file. */
+export async function pickVoterCredentialBackupPath(
+  defaultPath = "voter-credential.tcbcred",
+): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  return await save({
+    title: "Back up voter credential",
+    defaultPath,
+    filters: [
+      { name: "Tari Private Ballot credential", extensions: ["tcbcred"] },
+    ],
+  });
+}
+
 /**
  * Opens a native single-file picker for a canonical ballot package import.
  * The selected path is transient operator UX only; Rust reads the bytes and
