@@ -13,7 +13,7 @@
 //! credential bytes, walletd bearer token, wallet seed, mnemonic, or wallet
 //! signing material.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -25,18 +25,27 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
     GuiLiveAnchorConfigResultV1, GuiParticipationSummaryV1, GuiPreparedBallotExportV1,
-    GuiPreparedBallotStatusV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
-    GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
-    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, VoterGovernanceCredentialV1,
-    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    verify_archive_directory_v1, verify_transport_archive_anchor_v1, write_archive_directory_v1,
-    write_election_artifacts_v1, write_finalized_archive_v1_with_governance_document,
-    write_live_anchor_config_from_verified_archive_v1,
+    GuiPreparedBallotStatusV1, GuiSavedVoterCredentialDeleteResultV1, GuiSavedVoterCredentialsV1,
+    GuiTallySummaryV1, GuiTransportAnchorVerificationV1, GuiVoterCredentialBackupResultV1,
+    GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1,
+    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
+    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
+    copy_validated_voter_credential_to_default_v1, delete_saved_voter_credential_v1,
+    ensure_voter_credentials_directory_v1, file_summary_for_public_key,
+    import_voter_credential_from_path_v1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
+    inspect_anchor_snapshot_v1, list_saved_voter_credentials_v1,
+    parse_public_governance_key_hex_v1, unlock_saved_voter_credential_v1,
+    verify_archive_directory_v1, verify_transport_archive_anchor_v1,
+    voter_credentials_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
+    write_finalized_archive_v1_with_governance_document,
+    write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
 };
 use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
+use tauri::{AppHandle, Manager};
+use zeroize::Zeroizing;
 
 /// Serializable command error: a bounded copy of the gui-core error model.
 ///
@@ -116,6 +125,22 @@ impl CommandError {
             "private transport unavailable; select offline export or explicitly choose another available route",
         )
     }
+
+    fn app_data_unavailable() -> Self {
+        Self::new(
+            "GUI_APP_DATA_UNAVAILABLE",
+            "FILE_IO",
+            "the application data directory is unavailable",
+        )
+    }
+
+    fn external_path_required() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_UNSAFE_PATH",
+            "FILE_IO",
+            "portable credential import and backup require an explicit absolute file path",
+        )
+    }
 }
 
 impl From<GuiCoreError> for CommandError {
@@ -129,19 +154,50 @@ impl From<GuiCoreError> for CommandError {
     }
 }
 
+struct PendingVoterCredentialV1 {
+    credential: VoterGovernanceCredentialV1,
+    origin: GuiVoterCredentialOriginV1,
+}
+
+impl PendingVoterCredentialV1 {
+    fn status(&self) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        Ok(self.credential.pending_status_with_origin(self.origin)?)
+    }
+
+    fn public_key_hex(&self) -> Result<String, CommandError> {
+        Ok(self
+            .credential
+            .pending_status_with_origin(self.origin)?
+            .public_governance_key_hex
+            .ok_or_else(|| CommandError::from(GuiCoreError::credential_not_loaded()))?)
+    }
+
+    fn backup_to_path(
+        &self,
+        path: &Path,
+        passphrase: &str,
+    ) -> Result<GuiVoterCredentialBackupResultV1, CommandError> {
+        Ok(backup_voter_credential_to_path_v1(
+            &self.credential,
+            path,
+            passphrase,
+        )?)
+    }
+}
+
 /// Shell-owned application state: at most one organizer election session and
 /// at most one Rust-side voter workflow session. A pending credential is
-/// Rust-owned separately so a voter may create it before the registry freezes.
+/// Rust-owned separately so a voter may create or unlock it before the
+/// registry freezes.
 ///
-/// The election session and voter workflow session are owned by gui-core and
-/// are never persisted by the shell (ADR-0007: no new canonical format, no
-/// credential persistence). Election replacement clears workflow state, while
-/// the Rust-only pending credential survives for same-process membership checks.
+/// The election session and voter workflow session are owned by gui-core.
+/// Election replacement clears election workflow state, while the Rust-only
+/// credential survives in pending memory for same-process membership checks.
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
     voter: Mutex<Option<GuiVoterSessionV1>>,
-    pending_voter_credential: Mutex<Option<VoterGovernanceCredentialV1>>,
+    pending_voter_credential: Mutex<Option<PendingVoterCredentialV1>>,
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
 }
 
@@ -287,7 +343,7 @@ impl AppState {
             .map_err(|_| CommandError::state_poisoned())?;
         pending
             .as_ref()
-            .map(VoterGovernanceCredentialV1::pending_status)
+            .map(PendingVoterCredentialV1::status)
             .transpose()?
             .map_or_else(|| Ok(GuiVoterCredentialStatusV1::unloaded()), Ok)
     }
@@ -301,8 +357,12 @@ impl AppState {
             return Err(CommandError::pending_credential_exists());
         }
         let credential = VoterGovernanceCredentialV1::generate()?;
-        let status = credential.pending_status()?;
-        *pending = Some(credential);
+        let pending_credential = PendingVoterCredentialV1 {
+            credential,
+            origin: GuiVoterCredentialOriginV1::Generated,
+        };
+        let status = pending_credential.status()?;
+        *pending = Some(pending_credential);
         Ok(status)
     }
 
@@ -313,6 +373,226 @@ impl AppState {
             .map_err(|_| CommandError::state_poisoned())?;
         *pending = None;
         Ok(GuiVoterCredentialStatusV1::unloaded())
+    }
+
+    fn active_public_key_hex(&self) -> Result<Option<String>, CommandError> {
+        let guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(voter) = guard.as_ref() {
+            if let Some(public_key_hex) = voter.credential_public_key_hex() {
+                return Ok(Some(public_key_hex));
+            }
+        }
+        drop(guard);
+
+        let pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        pending
+            .as_ref()
+            .map(PendingVoterCredentialV1::public_key_hex)
+            .transpose()
+    }
+
+    fn ensure_no_loaded_credential_for_create(&self) -> Result<(), CommandError> {
+        if self.active_public_key_hex()?.is_some() {
+            return Err(GuiCoreError::credential_already_loaded().into());
+        }
+        Ok(())
+    }
+
+    fn ensure_identity_can_load(&self, public_key_hex: &str) -> Result<bool, CommandError> {
+        match self.active_public_key_hex()? {
+            Some(loaded) if loaded == public_key_hex => Ok(true),
+            Some(_) => Err(GuiCoreError::credential_already_loaded().into()),
+            None => Ok(false),
+        }
+    }
+
+    fn install_credential(
+        &self,
+        credential: VoterGovernanceCredentialV1,
+        origin: GuiVoterCredentialOriginV1,
+    ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let session_guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(session) = session_guard.as_ref() {
+            let mut voter_guard = self
+                .voter
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            let Some(voter) = voter_guard.as_mut() else {
+                return Err(CommandError::no_voter_session());
+            };
+            let status =
+                voter.install_credential_with_origin(credential, origin, session.artifacts())?;
+            drop(voter_guard);
+            let mut pending = self
+                .pending_voter_credential
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            *pending = None;
+            return Ok(status);
+        }
+        drop(session_guard);
+
+        let pending_credential = PendingVoterCredentialV1 { credential, origin };
+        let status = pending_credential.status()?;
+        let mut pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *pending = Some(pending_credential);
+        Ok(status)
+    }
+
+    fn update_loaded_origin_if_same(
+        &self,
+        public_key_hex: &str,
+        origin: GuiVoterCredentialOriginV1,
+    ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let mut voter_guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(voter) = voter_guard.as_mut() {
+            if voter.credential_public_key_hex().as_deref() == Some(public_key_hex) {
+                return Ok(voter.set_credential_origin(origin));
+            }
+        }
+        drop(voter_guard);
+
+        let mut pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(pending_credential) = pending.as_mut() {
+            if pending_credential.public_key_hex()?.as_str() == public_key_hex {
+                pending_credential.origin = origin;
+                return pending_credential.status();
+            }
+        }
+        Err(GuiCoreError::credential_not_loaded().into())
+    }
+
+    fn current_credential_backup(
+        &self,
+        path: &Path,
+        passphrase: &str,
+    ) -> Result<GuiVoterCredentialBackupResultV1, CommandError> {
+        let voter_guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(voter) = voter_guard.as_ref() {
+            if voter.credential_public_key_hex().is_some() {
+                return Ok(voter.backup_credential_to_path(path, passphrase)?);
+            }
+        }
+        drop(voter_guard);
+
+        let pending = self
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(pending) = pending.as_ref() else {
+            return Err(GuiCoreError::credential_not_loaded().into());
+        };
+        pending.backup_to_path(path, passphrase)
+    }
+
+    fn clear_credential_from_memory(&self) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let mut voter_guard = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(voter) = voter_guard.as_mut() {
+            let status = voter.reset_credential();
+            drop(voter_guard);
+            let mut pending = self
+                .pending_voter_credential
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            *pending = None;
+            return Ok(status);
+        }
+        drop(voter_guard);
+        self.reset_pending_credential()
+    }
+
+    fn create_durable_credential_in_dir(
+        &self,
+        credentials_dir: &Path,
+        passphrase: &str,
+    ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        self.ensure_no_loaded_credential_for_create()?;
+        let credential = VoterGovernanceCredentialV1::generate()?;
+        let summary =
+            write_new_durable_voter_credential_v1(credentials_dir, &credential, passphrase)?;
+        let already_loaded = self.ensure_identity_can_load(&summary.public_governance_key_hex)?;
+        if already_loaded {
+            return self.update_loaded_origin_if_same(
+                &summary.public_governance_key_hex,
+                GuiVoterCredentialOriginV1::DurableCreated,
+            );
+        }
+        self.install_credential(credential, GuiVoterCredentialOriginV1::DurableCreated)
+    }
+
+    fn unlock_saved_credential_in_dir(
+        &self,
+        credentials_dir: &Path,
+        public_key: &[u8; 32],
+        passphrase: &str,
+    ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let public_key_hex =
+            file_summary_for_public_key(public_key, true, true).public_governance_key_hex;
+        let already_loaded = self.ensure_identity_can_load(&public_key_hex)?;
+        let credential = unlock_saved_voter_credential_v1(credentials_dir, public_key, passphrase)?;
+        if already_loaded {
+            return self.update_loaded_origin_if_same(
+                &public_key_hex,
+                GuiVoterCredentialOriginV1::UnlockedSaved,
+            );
+        }
+        self.install_credential(credential, GuiVoterCredentialOriginV1::UnlockedSaved)
+    }
+
+    fn import_credential_from_path(
+        &self,
+        path: &Path,
+        passphrase: &str,
+        persist_locally: bool,
+        credentials_dir: Option<&Path>,
+    ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+        let (credential, container) = import_voter_credential_from_path_v1(path, passphrase)?;
+        let public_key = credential.public_key_bytes()?;
+        let public_key_hex =
+            file_summary_for_public_key(&public_key, persist_locally, persist_locally)
+                .public_governance_key_hex;
+        let already_loaded = self.ensure_identity_can_load(&public_key_hex)?;
+        let origin = if persist_locally {
+            let Some(credentials_dir) = credentials_dir else {
+                return Err(CommandError::app_data_unavailable());
+            };
+            copy_validated_voter_credential_to_default_v1(credentials_dir, &container)?;
+            GuiVoterCredentialOriginV1::ImportedSaved
+        } else {
+            GuiVoterCredentialOriginV1::ImportedSession
+        };
+
+        if already_loaded {
+            if persist_locally {
+                return self.update_loaded_origin_if_same(&public_key_hex, origin);
+            }
+            return self.voter_credential_status();
+        }
+        self.install_credential(credential, origin)
     }
 
     /// Moves a Rust-owned pre-freeze credential, if present, into a voter
@@ -326,7 +606,11 @@ impl AppState {
             .map_err(|_| CommandError::state_poisoned())?
             .take();
         if let Some(credential) = pending_credential {
-            voter.install_credential(credential, session.artifacts())?;
+            voter.install_credential_with_origin(
+                credential.credential,
+                credential.origin,
+                session.artifacts(),
+            )?;
         }
         let mut session_guard = self
             .session
@@ -340,6 +624,24 @@ impl AppState {
         *voter_guard = Some(voter);
         Ok(())
     }
+}
+
+fn credentials_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let credentials_dir = voter_credentials_directory_v1(&app_data_root);
+    ensure_voter_credentials_directory_v1(&credentials_dir)?;
+    Ok(credentials_dir)
+}
+
+fn external_credential_path(path: String) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(CommandError::external_path_required());
+    }
+    Ok(path)
 }
 
 /// Static shell identity for the About screen. Contains no state.
@@ -385,7 +687,8 @@ fn load_election(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?
         .as_mut()
-        .and_then(GuiVoterSessionV1::take_credential);
+        .and_then(GuiVoterSessionV1::take_credential_with_origin)
+        .map(|(credential, origin)| PendingVoterCredentialV1 { credential, origin });
     let pending_credential = state
         .pending_voter_credential
         .lock()
@@ -394,7 +697,11 @@ fn load_election(
         .or(carried_credential);
     let mut voter = GuiVoterSessionV1::new(session.artifacts());
     if let Some(credential) = pending_credential {
-        voter.install_credential(credential, session.artifacts())?;
+        voter.install_credential_with_origin(
+            credential.credential,
+            credential.origin,
+            session.artifacts(),
+        )?;
     }
     let summary = session.summary();
     let mut guard = state
@@ -426,7 +733,8 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
         .map_err(|_| CommandError::state_poisoned())?;
     let credential = voter_guard
         .as_mut()
-        .and_then(GuiVoterSessionV1::take_credential);
+        .and_then(GuiVoterSessionV1::take_credential_with_origin)
+        .map(|(credential, origin)| PendingVoterCredentialV1 { credential, origin });
     *voter_guard = None;
     if let Some(credential) = credential {
         let mut pending_guard = state
@@ -675,7 +983,11 @@ fn set_draft_basics(
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
     state.with_draft_mut(|draft| {
-        draft.set_basics(election_id_text, proposal_question, governance_source_revision)?;
+        draft.set_basics(
+            election_id_text,
+            proposal_question,
+            governance_source_revision,
+        )?;
         Ok(())
     })
 }
@@ -894,6 +1206,111 @@ fn voter_confirmation(
             ),
         )
     })
+}
+
+/// Lists valid encrypted credentials from the backend-controlled local store.
+/// Only public metadata is returned.
+#[tauri::command]
+fn list_saved_voter_credentials(
+    app: AppHandle,
+) -> Result<GuiSavedVoterCredentialsV1, CommandError> {
+    let credentials_dir = credentials_directory(&app)?;
+    Ok(list_saved_voter_credentials_v1(&credentials_dir)?)
+}
+
+/// Generates a new voter governance credential, persists the encrypted V1
+/// container first, then installs the secret into memory. The passphrase is
+/// accepted over IPC for this approved command only and is zeroized on drop.
+#[tauri::command]
+fn create_durable_voter_credential(
+    passphrase: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let credentials_dir = credentials_directory(&app)?;
+    state.create_durable_credential_in_dir(&credentials_dir, passphrase.as_str())
+}
+
+/// Unlocks a saved default credential identified by public governance key.
+/// The frontend supplies no path for this operation.
+#[tauri::command]
+fn unlock_saved_voter_credential(
+    public_key_hex: String,
+    passphrase: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
+    let credentials_dir = credentials_directory(&app)?;
+    state.unlock_saved_credential_in_dir(&credentials_dir, &public_key, passphrase.as_str())
+}
+
+/// Imports a user-selected portable encrypted credential file. If
+/// `persist_locally` is true, the validated encrypted bytes are copied into
+/// the backend-derived default path before the credential is installed.
+#[tauri::command]
+fn import_voter_credential(
+    path: String,
+    passphrase: String,
+    persist_locally: bool,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let path = external_credential_path(path)?;
+    if persist_locally {
+        let credentials_dir = credentials_directory(&app)?;
+        state.import_credential_from_path(&path, passphrase.as_str(), true, Some(&credentials_dir))
+    } else {
+        state.import_credential_from_path(&path, passphrase.as_str(), false, None)
+    }
+}
+
+/// Writes a fresh encrypted portable backup for the currently unlocked
+/// credential. This is copy semantics and does not mutate session state.
+#[tauri::command]
+fn backup_voter_credential(
+    path: String,
+    passphrase: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialBackupResultV1, CommandError> {
+    let passphrase = Zeroizing::new(passphrase);
+    let path = external_credential_path(path)?;
+    state.current_credential_backup(&path, passphrase.as_str())
+}
+
+/// Clears the unlocked credential from Rust memory without deleting any local
+/// or portable credential files.
+#[tauri::command]
+fn clear_voter_credential_from_memory(
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiVoterCredentialStatusV1, CommandError> {
+    state.clear_credential_from_memory()
+}
+
+/// Deletes only the backend-derived local encrypted credential file for a
+/// validated public governance key. No in-memory credential is cleared.
+#[tauri::command]
+fn delete_saved_voter_credential(
+    public_key_hex: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiSavedVoterCredentialDeleteResultV1, CommandError> {
+    let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
+    let public_key_hex =
+        file_summary_for_public_key(&public_key, true, true).public_governance_key_hex;
+    let credentials_dir = credentials_directory(&app)?;
+    let result = delete_saved_voter_credential_v1(&credentials_dir, &public_key)?;
+    if result.deleted && state.active_public_key_hex()?.as_deref() == Some(public_key_hex.as_str())
+    {
+        let _ = state.update_loaded_origin_if_same(
+            &public_key_hex,
+            GuiVoterCredentialOriginV1::MemoryOnly,
+        )?;
+    }
+    Ok(result)
 }
 
 /// Returns only safe public metadata about the active Rust-side voter
@@ -1505,6 +1922,336 @@ mod tests {
         );
         assert!(!status.can_continue);
     }
+
+    #[test]
+    fn durable_create_restart_unlock_clear_and_delete_are_distinct() {
+        let dir = TestDir::new("durable-create");
+        let credentials_dir = dir.join("credentials");
+        ensure_voter_credentials_directory_v1(&credentials_dir).expect("credential dir");
+        let state = AppState::default();
+
+        let created = state
+            .create_durable_credential_in_dir(&credentials_dir, "main passphrase")
+            .expect("durable create");
+        let public_key_hex = created
+            .public_governance_key_hex
+            .clone()
+            .expect("public key");
+        assert!(created.credential_loaded);
+        assert!(!created.session_only);
+        assert!(created.saved_locally);
+        assert_eq!(
+            created.credential_origin,
+            Some(GuiVoterCredentialOriginV1::DurableCreated)
+        );
+        let listed = list_saved_voter_credentials_v1(&credentials_dir).expect("list saved");
+        assert_eq!(listed.saved_credential_count, 1);
+
+        let restarted = AppState::default();
+        let public_key =
+            parse_public_governance_key_hex_v1(&public_key_hex).expect("valid public key");
+        let unlocked = restarted
+            .unlock_saved_credential_in_dir(&credentials_dir, &public_key, "main passphrase")
+            .expect("restart unlock");
+        assert_eq!(
+            unlocked.public_governance_key_hex.as_deref(),
+            Some(public_key_hex.as_str())
+        );
+        assert_eq!(
+            unlocked.credential_origin,
+            Some(GuiVoterCredentialOriginV1::UnlockedSaved)
+        );
+
+        let cleared = restarted
+            .clear_credential_from_memory()
+            .expect("clear memory");
+        assert!(!cleared.credential_loaded);
+        assert_eq!(
+            list_saved_voter_credentials_v1(&credentials_dir)
+                .expect("file remains")
+                .saved_credential_count,
+            1
+        );
+
+        let unlocked_again = restarted
+            .unlock_saved_credential_in_dir(&credentials_dir, &public_key, "main passphrase")
+            .expect("unlock after clear");
+        assert!(unlocked_again.saved_locally);
+        let deleted =
+            delete_saved_voter_credential_v1(&credentials_dir, &public_key).expect("delete saved");
+        assert!(deleted.deleted);
+        restarted
+            .update_loaded_origin_if_same(&public_key_hex, GuiVoterCredentialOriginV1::MemoryOnly)
+            .expect("mark memory only");
+        let memory_only = restarted
+            .voter_credential_status()
+            .expect("memory-only status");
+        assert!(memory_only.session_only);
+        assert!(!memory_only.saved_locally);
+        assert_eq!(
+            memory_only.credential_origin,
+            Some(GuiVoterCredentialOriginV1::MemoryOnly)
+        );
+    }
+
+    #[test]
+    fn durable_create_failure_does_not_install_credential() {
+        let dir = TestDir::new("durable-create-failure");
+        let credentials_dir = dir.join("credentials-as-file");
+        std::fs::write(&credentials_dir, b"not a directory").expect("file marker");
+        let state = AppState::default();
+
+        let error = state
+            .create_durable_credential_in_dir(&credentials_dir, "main passphrase")
+            .expect_err("unsafe output must fail");
+
+        assert_eq!(error.code, "GUI_CREDENTIAL_UNSAFE_PATH");
+        let status = state
+            .voter_credential_status()
+            .expect("status after failed create");
+        assert!(!status.credential_loaded);
+    }
+
+    #[test]
+    fn import_backup_and_identity_conflict_preserve_loaded_credential() {
+        let dir = TestDir::new("import-conflict");
+        let credentials_dir = dir.join("credentials");
+        ensure_voter_credentials_directory_v1(&credentials_dir).expect("credential dir");
+        let state = AppState::default();
+        let created = state
+            .create_durable_credential_in_dir(&credentials_dir, "alpha passphrase")
+            .expect("durable alpha");
+        let alpha_key = created.public_governance_key_hex.clone();
+
+        let portable = dir.join("portable-beta.tcbcred");
+        let beta = VoterGovernanceCredentialV1::generate().expect("beta credential");
+        backup_voter_credential_to_path_v1(&beta, &portable, "beta passphrase")
+            .expect("portable beta");
+
+        let conflict = state
+            .import_credential_from_path(&portable, "beta passphrase", false, None)
+            .expect_err("different loaded credential rejected");
+        assert_eq!(conflict.code, "GUI_CREDENTIAL_ALREADY_LOADED");
+        let retained = state
+            .voter_credential_status()
+            .expect("retained credential");
+        assert_eq!(retained.public_governance_key_hex, alpha_key);
+
+        state.clear_credential_from_memory().expect("clear alpha");
+        let imported = state
+            .import_credential_from_path(&portable, "beta passphrase", false, None)
+            .expect("session import beta");
+        assert!(imported.session_only);
+        assert!(!imported.saved_locally);
+        let backup = dir.join("backup-beta.tcbcred");
+        let before = state
+            .voter_credential_status()
+            .expect("status before backup");
+        state
+            .current_credential_backup(&backup, "backup passphrase")
+            .expect("backup beta");
+        let after = state
+            .voter_credential_status()
+            .expect("status after backup");
+        assert_eq!(before, after);
+        assert_ne!(
+            std::fs::read(&portable).expect("portable bytes"),
+            std::fs::read(&backup).expect("backup bytes")
+        );
+
+        let persisted = state
+            .import_credential_from_path(&portable, "beta passphrase", true, Some(&credentials_dir))
+            .expect("same beta persist");
+        assert!(!persisted.session_only);
+        assert!(persisted.saved_locally);
+        assert_eq!(
+            persisted.credential_origin,
+            Some(GuiVoterCredentialOriginV1::ImportedSaved)
+        );
+    }
+
+    #[test]
+    fn wrong_passphrase_does_not_alter_loaded_identity() {
+        let dir = TestDir::new("wrong-passphrase");
+        let credentials_dir = dir.join("credentials");
+        ensure_voter_credentials_directory_v1(&credentials_dir).expect("credential dir");
+        let state = AppState::default();
+        let created = state
+            .create_durable_credential_in_dir(&credentials_dir, "alpha passphrase")
+            .expect("durable alpha");
+        let alpha_key_hex = created
+            .public_governance_key_hex
+            .clone()
+            .expect("alpha key");
+        let alpha_key =
+            parse_public_governance_key_hex_v1(&alpha_key_hex).expect("valid public key");
+
+        let error = state
+            .unlock_saved_credential_in_dir(&credentials_dir, &alpha_key, "wrong passphrase")
+            .expect_err("wrong passphrase fails");
+
+        assert_eq!(error.code, "GUI_CREDENTIAL_UNLOCK_FAILED");
+        let retained = state
+            .voter_credential_status()
+            .expect("retained after wrong passphrase");
+        assert_eq!(
+            retained.public_governance_key_hex.as_deref(),
+            Some(alpha_key_hex.as_str())
+        );
+    }
+
+    #[test]
+    fn tauri_passphrase_boundary_is_explicitly_allowlisted() {
+        let source = shell_source();
+        let signatures = command_signatures(&source);
+        let mut commands_with_passphrase = Vec::new();
+        for (name, signature) in &signatures {
+            if signature.contains("passphrase:") {
+                commands_with_passphrase.push(name.as_str());
+            }
+            for forbidden in [
+                "password:",
+                "secret:",
+                "scalar:",
+                "seed:",
+                "mnemonic:",
+                "private_key:",
+                "credential_bytes:",
+            ] {
+                assert!(
+                    !signature.contains(forbidden),
+                    "{name} must not accept {forbidden}"
+                );
+            }
+            assert!(!signature.contains("VoterGovernanceCredentialV1"));
+            assert!(!signature.contains("TariTriptychSecretKeyV1"));
+        }
+        commands_with_passphrase.sort_unstable();
+        assert_eq!(
+            commands_with_passphrase,
+            [
+                "backup_voter_credential",
+                "create_durable_voter_credential",
+                "import_voter_credential",
+                "unlock_saved_voter_credential",
+            ]
+        );
+
+        let app_state_block = source
+            .split("struct AppState")
+            .nth(1)
+            .and_then(|tail| tail.split("impl Default for AppState").next())
+            .expect("AppState block");
+        assert!(!app_state_block.contains("passphrase"));
+        assert!(!app_state_block.contains("credential_bytes"));
+
+        for block in serializable_struct_blocks(&source) {
+            for forbidden_response_field in [
+                "passphrase",
+                "password",
+                "secret",
+                "scalar",
+                "seed",
+                "mnemonic",
+                "private_key",
+                "credential_bytes",
+            ] {
+                let private_field = format!("{forbidden_response_field}:");
+                let public_field = format!("pub {forbidden_response_field}:");
+                assert!(
+                    !block.lines().any(|line| {
+                        let trimmed = line.trim_start();
+                        trimmed.starts_with(&private_field) || trimmed.starts_with(&public_field)
+                    }),
+                    "serializable DTO must not expose {forbidden_response_field}"
+                );
+            }
+        }
+    }
+
+    fn shell_source() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("shell source")
+    }
+
+    fn command_signatures(source: &str) -> Vec<(String, String)> {
+        let mut signatures = Vec::new();
+        let mut lines = source.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "#[tauri::command]" {
+                continue;
+            }
+            let mut signature = String::new();
+            for sig_line in lines.by_ref() {
+                let trimmed = sig_line.trim();
+                signature.push_str(trimmed);
+                signature.push('\n');
+                if trimmed.ends_with('{') {
+                    break;
+                }
+            }
+            let name = signature
+                .strip_prefix("fn ")
+                .and_then(|tail| tail.split('(').next())
+                .expect("command function name")
+                .to_owned();
+            signatures.push((name, signature));
+        }
+        signatures
+    }
+
+    fn serializable_struct_blocks(source: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut derive_serialize = false;
+        let mut lines = source.lines().peekable();
+        while let Some(line) = lines.next() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[derive(") {
+                derive_serialize = trimmed.contains("Serialize");
+                continue;
+            }
+            if derive_serialize && trimmed.starts_with("struct ") {
+                let mut block = String::from(line);
+                block.push('\n');
+                for body_line in lines.by_ref() {
+                    block.push_str(body_line);
+                    block.push('\n');
+                    if body_line.trim() == "}" {
+                        break;
+                    }
+                }
+                blocks.push(block);
+            }
+            derive_serialize = false;
+        }
+        blocks
+    }
+
+    struct TestDir {
+        path: PathBuf,
+    }
+
+    impl TestDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tari-private-ballot-tauri-{}-{label}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("test temp dir");
+            Self { path }
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.path.join(name)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1551,6 +2298,13 @@ pub fn run() {
             compute_governance_document_digest,
             match_governance_document,
             voter_confirmation,
+            list_saved_voter_credentials,
+            create_durable_voter_credential,
+            unlock_saved_voter_credential,
+            import_voter_credential,
+            backup_voter_credential,
+            clear_voter_credential_from_memory,
+            delete_saved_voter_credential,
             voter_governance_credential_status,
             generate_voter_governance_credential,
             generate_pending_voter_governance_credential,

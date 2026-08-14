@@ -539,6 +539,28 @@ impl GuiCoreError {
             "the credential path is not a regular direct file path",
         )
     }
+
+    /// A credential operation requires an unlocked in-memory credential.
+    #[must_use]
+    pub const fn credential_not_loaded() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_NOT_LOADED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("credential"),
+            "no voter credential is currently loaded",
+        )
+    }
+
+    /// A different voter credential is already loaded in memory.
+    #[must_use]
+    pub const fn credential_already_loaded() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_ALREADY_LOADED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("credential"),
+            "a different voter credential is already loaded; clear it before switching",
+        )
+    }
 }
 
 /// Maps an existing protocol validation code onto a coarse GUI category.

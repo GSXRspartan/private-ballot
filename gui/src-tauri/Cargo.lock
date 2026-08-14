@@ -5157,12 +5157,15 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "zeroize",
 ]
 
 [[package]]
 name = "tari-cc-private-ballot-gui-core"
 version = "0.1.0"
 dependencies = [
+ "argon2 0.5.3",
+ "chacha20poly1305 0.10.1",
  "ed25519-dalek",
  "hpke",
  "serde",
@@ -5181,6 +5184,9 @@ dependencies = [
  "tari-cc-private-ballot-registry",
  "tari-cc-private-ballot-tally",
  "tari-cc-private-ballot-verifier",
+ "tempfile",
+ "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]

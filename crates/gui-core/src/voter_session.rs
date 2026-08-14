@@ -17,7 +17,8 @@ use crate::error::{GuiCoreError, GuiErrorCategory};
 use crate::hex::{from_hex, to_lower_hex};
 use crate::summary::GuiCandidateSummaryV1;
 use crate::voter_credential::{
-    GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1, GuiVoterEligibilityV1,
+    GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
+    GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
 };
 
 /// Public notice about the local-only proof workflow.
@@ -381,15 +382,28 @@ impl GuiVoterSessionV1 {
     /// currently loaded frozen registry. The credential never crosses a DTO.
     pub fn install_credential(
         &mut self,
-        credential: crate::voter_credential::VoterGovernanceCredentialV1,
+        credential: VoterGovernanceCredentialV1,
+        artifacts: &GuiElectionArtifactsV1,
+    ) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
+        self.install_credential_with_origin(
+            credential,
+            GuiVoterCredentialOriginV1::Generated,
+            artifacts,
+        )
+    }
+
+    /// Installs a Rust-owned credential with its public durability origin
+    /// after binding it to the currently loaded frozen registry. The
+    /// credential never crosses a DTO.
+    pub fn install_credential_with_origin(
+        &mut self,
+        credential: VoterGovernanceCredentialV1,
+        origin: GuiVoterCredentialOriginV1,
         artifacts: &GuiElectionArtifactsV1,
     ) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
-        let credential = GuiVoterCredentialSessionV1::from_credential(
-            credential,
-            crate::voter_credential::GuiVoterCredentialOriginV1::Generated,
-            artifacts.registry(),
-        )?;
+        let credential =
+            GuiVoterCredentialSessionV1::from_credential(credential, origin, artifacts.registry())?;
         let status = credential.status();
         self.credential = Some(credential);
         self.credential_generation = self.credential_generation.saturating_add(1);
@@ -400,11 +414,60 @@ impl GuiVoterSessionV1 {
     /// Returns the private credential to the shell-owned pending slot when an
     /// election is unloaded. This preserves the current-process bootstrap
     /// workflow without retaining any election-specific eligibility state.
-    pub fn take_credential(&mut self) -> Option<crate::voter_credential::VoterGovernanceCredentialV1> {
-        let credential = self.credential.take()?.into_credential();
+    pub fn take_credential(&mut self) -> Option<VoterGovernanceCredentialV1> {
+        self.take_credential_with_origin()
+            .map(|(credential, _origin)| credential)
+    }
+
+    /// Returns the private credential and its public durability origin to the
+    /// shell-owned pending slot when an election is unloaded.
+    pub fn take_credential_with_origin(
+        &mut self,
+    ) -> Option<(VoterGovernanceCredentialV1, GuiVoterCredentialOriginV1)> {
+        let session = self.credential.take()?;
+        let origin = session.origin();
+        let credential = session.into_credential();
         self.credential_generation = self.credential_generation.saturating_add(1);
         self.invalidate_prepared("Election changed; prepared ballot state was cleared.");
-        Some(credential)
+        Some((credential, origin))
+    }
+
+    /// Updates only the public durability origin for the current active
+    /// credential. This is used when a same-key session-only credential is
+    /// copied into the default local store without replacing the secret object.
+    pub fn set_credential_origin(
+        &mut self,
+        origin: GuiVoterCredentialOriginV1,
+    ) -> GuiVoterCredentialStatusV1 {
+        if let Some(credential) = self.credential.as_mut() {
+            credential.set_origin(origin);
+            return credential.status();
+        }
+        GuiVoterCredentialStatusV1::unloaded()
+    }
+
+    /// Writes a fresh encrypted V1 backup for the current active credential.
+    /// This does not mutate the voter session.
+    pub fn backup_credential_to_path(
+        &self,
+        path: &std::path::Path,
+        passphrase: &str,
+    ) -> Result<crate::voter_credential_store::GuiVoterCredentialBackupResultV1, GuiCoreError> {
+        let Some(credential) = self.credential.as_ref() else {
+            return Err(GuiCoreError::credential_not_loaded());
+        };
+        crate::voter_credential_store::backup_voter_credential_to_path_v1(
+            credential.credential(),
+            path,
+            passphrase,
+        )
+    }
+
+    /// Returns the active credential public governance key as lowercase hex,
+    /// if a credential is loaded.
+    #[must_use]
+    pub fn credential_public_key_hex(&self) -> Option<String> {
+        self.credential_status().public_governance_key_hex
     }
 
     /// Returns whether this session still belongs to the supplied artifacts.
@@ -845,7 +908,10 @@ impl GuiVoterSessionV1 {
                 "a prepared ballot can be submitted only while the election is open",
             ));
         }
-        let PreparedBallotStateV1::Ready { canonical_bytes, .. } = &self.prepared_ballot else {
+        let PreparedBallotStateV1::Ready {
+            canonical_bytes, ..
+        } = &self.prepared_ballot
+        else {
             return Err(GuiCoreError::new(
                 "GUI_NO_PREPARED_BALLOT",
                 GuiErrorCategory::InvalidInput,

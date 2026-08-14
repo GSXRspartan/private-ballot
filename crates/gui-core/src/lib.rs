@@ -52,6 +52,7 @@ pub mod transport_anchor;
 pub mod voter_confirmation;
 pub mod voter_credential;
 pub mod voter_credential_container;
+pub mod voter_credential_store;
 pub mod voter_session;
 
 pub use archive_verify::{
@@ -108,9 +109,9 @@ pub use voter_confirmation::{
     VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,
 };
 pub use voter_credential::{
-    GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE, GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
-    GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
-    GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
+    GOVERNANCE_CREDENTIAL_DURABLE_NOTICE, GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
+    GOVERNANCE_CREDENTIAL_SESSION_NOTICE, GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1,
+    GuiVoterCredentialStatusV1, GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
 };
 pub use voter_credential_container::{
     VOTER_CREDENTIAL_CONTAINER_V1_AEAD_ID_XCHACHA20_POLY1305, VOTER_CREDENTIAL_CONTAINER_V1_BYTES,
@@ -124,6 +125,17 @@ pub use voter_credential_container::{
     export_voter_credential_container_v1, import_voter_credential_container_bytes_v1,
     import_voter_credential_container_v1, read_voter_credential_container_v1,
     write_voter_credential_container_v1,
+};
+pub use voter_credential_store::{
+    GuiSavedVoterCredentialDeleteResultV1, GuiSavedVoterCredentialsV1,
+    GuiVoterCredentialBackupResultV1, GuiVoterCredentialFileSummaryV1,
+    VOTER_CREDENTIALS_DIRECTORY_NAME, backup_voter_credential_to_path_v1,
+    copy_validated_voter_credential_to_default_v1, default_voter_credential_path_v1,
+    delete_saved_voter_credential_v1, ensure_voter_credentials_directory_v1,
+    file_summary_for_public_key, import_voter_credential_from_path_v1,
+    list_saved_voter_credentials_v1, parse_public_governance_key_hex_v1,
+    unlock_saved_voter_credential_v1, voter_credentials_directory_v1,
+    write_new_durable_voter_credential_v1,
 };
 pub use voter_session::{
     GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiPreparedBallotSummaryV1,

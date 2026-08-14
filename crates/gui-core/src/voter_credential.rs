@@ -16,8 +16,12 @@ use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
 use crate::hex::{abbreviate_hex, to_lower_hex};
 
-/// Public notice attached to every voter credential status.
-pub const GOVERNANCE_CREDENTIAL_SESSION_NOTICE: &str = "Governance credentials are session-only in this build and are lost on restart or election reset.";
+/// Public notice attached to transitional session-only credentials.
+pub const GOVERNANCE_CREDENTIAL_SESSION_NOTICE: &str =
+    "This credential is loaded only for the current application run and is not saved locally.";
+
+/// Public notice attached to durable locally saved credentials.
+pub const GOVERNANCE_CREDENTIAL_DURABLE_NOTICE: &str = "This credential is saved locally as an encrypted V1 container and must be unlocked after restart.";
 
 /// Public notice explaining why generation after freeze usually is not eligible.
 pub const GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE: &str = "A newly generated public governance key is eligible only if it was already enrolled in the frozen voter registry.";
@@ -27,6 +31,16 @@ pub const GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE: &str = "A newly generated pub
 pub enum GuiVoterCredentialOriginV1 {
     /// Generated inside Rust with operating-system randomness.
     Generated,
+    /// Generated inside Rust and saved locally before loading into memory.
+    DurableCreated,
+    /// Unlocked from the backend-controlled local credential store.
+    UnlockedSaved,
+    /// Imported from a portable file for this application run only.
+    ImportedSession,
+    /// Imported from a portable file and copied into the local credential store.
+    ImportedSaved,
+    /// Kept unlocked in memory after the default local file was removed.
+    MemoryOnly,
 }
 
 impl GuiVoterCredentialOriginV1 {
@@ -35,6 +49,41 @@ impl GuiVoterCredentialOriginV1 {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Generated => "Generated",
+            Self::DurableCreated => "DurableCreated",
+            Self::UnlockedSaved => "UnlockedSaved",
+            Self::ImportedSession => "ImportedSession",
+            Self::ImportedSaved => "ImportedSaved",
+            Self::MemoryOnly => "MemoryOnly",
+        }
+    }
+
+    /// Returns whether this origin means the loaded credential has no local
+    /// default-store copy.
+    #[must_use]
+    pub const fn session_only(self) -> bool {
+        matches!(
+            self,
+            Self::Generated | Self::ImportedSession | Self::MemoryOnly
+        )
+    }
+
+    /// Returns whether this origin means the local default store has an
+    /// encrypted copy for the same public governance key.
+    #[must_use]
+    pub const fn saved_locally(self) -> bool {
+        matches!(
+            self,
+            Self::DurableCreated | Self::UnlockedSaved | Self::ImportedSaved
+        )
+    }
+
+    /// Returns the bounded public notice for this origin.
+    #[must_use]
+    pub const fn notice(self) -> &'static str {
+        if self.session_only() {
+            GOVERNANCE_CREDENTIAL_SESSION_NOTICE
+        } else {
+            GOVERNANCE_CREDENTIAL_DURABLE_NOTICE
         }
     }
 }
@@ -90,10 +139,15 @@ pub struct GuiVoterCredentialStatusV1 {
     pub eligibility_label: &'static str,
     /// Whether the voter may proceed to the next stage.
     pub can_continue: bool,
-    /// True because this slice implements no secure persistence.
+    /// True when the currently loaded credential has no local default-store
+    /// copy.
     pub session_only: bool,
-    /// Fixed session-only notice.
+    /// Public durability notice for the loaded credential, or the transitional
+    /// session-only notice when unloaded.
     pub session_notice: &'static str,
+    /// True when the currently loaded credential has an encrypted local
+    /// default-store copy.
+    pub saved_locally: bool,
     /// Fixed wallet-seed separation warning.
     pub wallet_key_warning: &'static str,
     /// Fixed enrollment notice for generated credentials.
@@ -114,6 +168,7 @@ impl GuiVoterCredentialStatusV1 {
             can_continue: false,
             session_only: true,
             session_notice: GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
+            saved_locally: false,
             wallet_key_warning: GOVERNANCE_KEY_WARNING,
             enrollment_notice: GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
         }
@@ -172,17 +227,27 @@ impl VoterGovernanceCredentialV1 {
     /// Returns public-only pending-bootstrap status before an election is
     /// frozen and therefore before eligibility can be evaluated.
     pub fn pending_status(&self) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
+        self.pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
+    }
+
+    /// Returns public-only pending-bootstrap status with the supplied
+    /// durability origin.
+    pub fn pending_status_with_origin(
+        &self,
+        origin: GuiVoterCredentialOriginV1,
+    ) -> Result<GuiVoterCredentialStatusV1, GuiCoreError> {
         let public_hex = to_lower_hex(&self.public_key_bytes()?);
         Ok(GuiVoterCredentialStatusV1 {
             credential_loaded: true,
-            credential_origin: Some(GuiVoterCredentialOriginV1::Generated),
+            credential_origin: Some(origin),
             public_governance_key_abbrev: Some(abbreviate_hex(&public_hex, 8, 6)),
             public_governance_key_hex: Some(public_hex),
             eligibility: GuiVoterEligibilityV1::NotChecked,
             eligibility_label: "Eligibility will be checked against the frozen registry.",
             can_continue: false,
-            session_only: true,
-            session_notice: GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
+            session_only: origin.session_only(),
+            session_notice: origin.notice(),
+            saved_locally: origin.saved_locally(),
             wallet_key_warning: GOVERNANCE_KEY_WARNING,
             enrollment_notice: GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
         })
@@ -241,6 +306,18 @@ impl GuiVoterCredentialSessionV1 {
         self.credential
     }
 
+    /// Returns the in-memory credential origin.
+    #[must_use]
+    pub const fn origin(&self) -> GuiVoterCredentialOriginV1 {
+        self.origin
+    }
+
+    /// Updates only the public durability origin for an already-loaded same
+    /// identity.
+    pub fn set_origin(&mut self, origin: GuiVoterCredentialOriginV1) {
+        self.origin = origin;
+    }
+
     /// Borrows the Rust-owned credential for in-process proof construction.
     /// This stays crate-private so no caller can export the secret scalar.
     pub(crate) const fn credential(&self) -> &VoterGovernanceCredentialV1 {
@@ -259,8 +336,9 @@ impl GuiVoterCredentialSessionV1 {
             eligibility: self.eligibility,
             eligibility_label: self.eligibility.label(),
             can_continue: self.eligibility.permits_next_stage(),
-            session_only: true,
-            session_notice: GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
+            session_only: self.origin.session_only(),
+            session_notice: self.origin.notice(),
+            saved_locally: self.origin.saved_locally(),
             wallet_key_warning: GOVERNANCE_KEY_WARNING,
             enrollment_notice: GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE,
         }
