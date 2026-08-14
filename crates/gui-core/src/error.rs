@@ -458,6 +458,87 @@ impl GuiCoreError {
             "select a governance document first",
         )
     }
+
+    /// The encrypted voter credential container has corrupt framing or
+    /// unsupported V1 algorithm parameters.
+    #[must_use]
+    pub const fn credential_container_framing() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_CONTAINER_FRAMING",
+            GuiErrorCategory::UnsupportedFormat,
+            Some("credential-container"),
+            "the voter credential file is not a supported V1 credential container",
+        )
+    }
+
+    /// The encrypted voter credential container declares an unsupported format
+    /// version.
+    #[must_use]
+    pub const fn credential_container_version() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_CONTAINER_VERSION",
+            GuiErrorCategory::UnsupportedFormat,
+            Some("credential-container"),
+            "the voter credential file version is not supported",
+        )
+    }
+
+    /// The credential could not be decrypted and reconstructed.
+    #[must_use]
+    pub const fn credential_unlock_failed() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_UNLOCK_FAILED",
+            GuiErrorCategory::InvalidInput,
+            Some("credential-container"),
+            "Could not unlock credential. The passphrase may be incorrect or the file may be damaged.",
+        )
+    }
+
+    /// A credential container could not be produced from valid inputs.
+    #[must_use]
+    pub const fn credential_encryption_failed() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_ENCRYPTION_FAILED",
+            GuiErrorCategory::InvalidInput,
+            Some("credential-container"),
+            "the voter credential could not be encrypted",
+        )
+    }
+
+    /// The decrypted scalar does not match the public governance key recorded
+    /// in the authenticated container header.
+    #[must_use]
+    pub const fn credential_public_key_mismatch() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_PUBLIC_KEY_MISMATCH",
+            GuiErrorCategory::BindingMismatch,
+            Some("credential-container"),
+            "the decrypted credential does not match the credential file public key",
+        )
+    }
+
+    /// A credential write target already exists.
+    #[must_use]
+    pub const fn credential_output_collision() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_OUTPUT_COLLISION",
+            GuiErrorCategory::FileIo,
+            Some("credential-container"),
+            "the credential output file already exists",
+        )
+    }
+
+    /// A credential path is a symlink, reparse point, or otherwise unsafe for
+    /// this storage helper.
+    #[must_use]
+    pub const fn credential_unsafe_path() -> Self {
+        Self::new(
+            "GUI_CREDENTIAL_UNSAFE_PATH",
+            GuiErrorCategory::FileIo,
+            Some("credential-container"),
+            "the credential path is not a regular direct file path",
+        )
+    }
 }
 
 /// Maps an existing protocol validation code onto a coarse GUI category.

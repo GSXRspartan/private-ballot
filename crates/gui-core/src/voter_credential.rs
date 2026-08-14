@@ -10,6 +10,7 @@ use core::fmt;
 use serde::Serialize;
 use tari_cc_private_ballot_crypto::{RISTRETTO_COMPRESSED_POINT_BYTES, TariTriptychSecretKeyV1};
 use tari_cc_private_ballot_registry::{GOVERNANCE_KEY_WARNING, RegistrySnapshot};
+use zeroize::Zeroizing;
 
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
@@ -134,6 +135,16 @@ impl VoterGovernanceCredentialV1 {
     pub fn generate() -> Result<Self, GuiCoreError> {
         let secret_key = TariTriptychSecretKeyV1::generate_os_rng()
             .map_err(|error| GuiCoreError::from_protocol(&error, "voter-credential"))?;
+        Ok(Self { secret_key })
+    }
+
+    /// Reconstructs one credential from decrypted canonical scalar bytes held
+    /// in zeroizing scratch storage.
+    pub(crate) fn from_canonical_scalar_v1(
+        bytes: Zeroizing<[u8; RISTRETTO_COMPRESSED_POINT_BYTES]>,
+    ) -> Result<Self, GuiCoreError> {
+        let secret_key = TariTriptychSecretKeyV1::from_canonical_bytes(*bytes)
+            .map_err(|_| GuiCoreError::credential_unlock_failed())?;
         Ok(Self { secret_key })
     }
 

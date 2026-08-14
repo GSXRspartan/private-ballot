@@ -28,10 +28,10 @@
 //! material, and its view models contain no secret-bearing fields. Slice 5A9
 //! adds a narrow Rust-only, session-only voter governance credential holder;
 //! the private scalar is never serialized or returned to TypeScript. It
-//! performs no network, walletd, or indexer I/O. It introduces no new
-//! canonical format, no new hash provider, no container or bundle format, no
-//! credential persistence, and no async runtime. The offline archive remains
-//! authoritative; Ootle anchoring remains optional and non-binding.
+//! performs no network, walletd, or indexer I/O. Durable credential helpers
+//! write only the reviewed encrypted V1 credential-container bytes and do not
+//! choose app-data paths or expose frontend commands. The offline archive
+//! remains authoritative; Ootle anchoring remains optional and non-binding.
 
 pub mod archive_verify;
 pub mod archive_writer;
@@ -51,6 +51,7 @@ pub mod transport;
 pub mod transport_anchor;
 pub mod voter_confirmation;
 pub mod voter_credential;
+pub mod voter_credential_container;
 pub mod voter_session;
 
 pub use archive_verify::{
@@ -110,6 +111,19 @@ pub use voter_credential::{
     GOVERNANCE_CREDENTIAL_ENROLLMENT_NOTICE, GOVERNANCE_CREDENTIAL_SESSION_NOTICE,
     GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
     GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
+};
+pub use voter_credential_container::{
+    VOTER_CREDENTIAL_CONTAINER_V1_AEAD_ID_XCHACHA20_POLY1305, VOTER_CREDENTIAL_CONTAINER_V1_BYTES,
+    VOTER_CREDENTIAL_CONTAINER_V1_CIPHERTEXT_AND_TAG_BYTES,
+    VOTER_CREDENTIAL_CONTAINER_V1_FORMAT_VERSION, VOTER_CREDENTIAL_CONTAINER_V1_HEADER_BYTES,
+    VOTER_CREDENTIAL_CONTAINER_V1_KDF_ID_ARGON2ID, VOTER_CREDENTIAL_CONTAINER_V1_KDF_MEMORY_MIB,
+    VOTER_CREDENTIAL_CONTAINER_V1_KDF_PARALLELISM, VOTER_CREDENTIAL_CONTAINER_V1_KDF_TIME_COST,
+    VOTER_CREDENTIAL_CONTAINER_V1_MAGIC, VOTER_CREDENTIAL_CONTAINER_V1_NONCE_BYTES,
+    VOTER_CREDENTIAL_CONTAINER_V1_PLAINTEXT_BYTES, VOTER_CREDENTIAL_CONTAINER_V1_SALT_BYTES,
+    VoterCredentialContainerV1, default_voter_credential_filename_v1,
+    export_voter_credential_container_v1, import_voter_credential_container_bytes_v1,
+    import_voter_credential_container_v1, read_voter_credential_container_v1,
+    write_voter_credential_container_v1,
 };
 pub use voter_session::{
     GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiPreparedBallotSummaryV1,

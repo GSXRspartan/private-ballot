@@ -75,6 +75,20 @@ impl TariTriptychSecretKeyV1 {
         RistrettoPublicKeyV1::from_bytes(&encoded)
     }
 
+    /// Borrows the canonical scalar bytes for the reviewed gui-core
+    /// credential-container encryption boundary.
+    ///
+    /// This deliberately does not make the secret key cloneable or
+    /// serializable. The stored scalar is revalidated as canonical and nonzero
+    /// before the closure receives a borrow.
+    pub fn with_credential_container_secret_bytes_v1<R>(
+        &self,
+        read: impl FnOnce(&[u8; RISTRETTO_COMPRESSED_POINT_BYTES]) -> R,
+    ) -> Result<R, ProtocolError> {
+        let _scalar = self.scalar()?;
+        Ok(read(&self.bytes))
+    }
+
     fn scalar(&self) -> Result<Zeroizing<Scalar>, ProtocolError> {
         let Some(scalar) = Option::<Scalar>::from(Scalar::from_canonical_bytes(self.bytes)) else {
             return Err(invalid_secret(
@@ -342,6 +356,19 @@ mod tests {
             core::mem::size_of::<TariTriptychSecretKeyV1>(),
             RISTRETTO_COMPRESSED_POINT_BYTES,
         );
+    }
+
+    #[test]
+    fn credential_container_secret_byte_access_is_scoped_to_closure() {
+        let secret = secret_key();
+        let Ok(matches_fixture) = secret.with_credential_container_secret_bytes_v1(|bytes| {
+            bytes == &Scalar::from(SECRET_SCALAR).to_bytes()
+        }) else {
+            panic!("fixture secret must expose scoped bytes for credential container");
+        };
+
+        assert!(matches_fixture);
+        assert_eq!(format!("{secret:?}"), "TariTriptychSecretKeyV1([REDACTED])",);
     }
 
     struct Fixture {
