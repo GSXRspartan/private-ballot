@@ -54,7 +54,7 @@ impl AcceptedBallot {
 }
 
 /// Acceptance-order ledger implementing first-valid-ballot-counts.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BallotAcceptanceLedger {
     seen_nullifiers: BTreeSet<VerifiedNullifier>,
     accepted_ballots: Vec<AcceptedBallot>,

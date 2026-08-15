@@ -230,6 +230,25 @@ pub struct GuiElectionDraftV1 {
     result: Option<GuiElectionCreationResultV1>,
 }
 
+/// Narrow durable representation of one in-progress organizer draft.
+///
+/// Every field is public organizer input or non-secret governance evidence.
+/// No voter credential, passphrase, proof witness, nullifier, selected voter
+/// choice, wallet key, or transport secret is represented here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiElectionDraftSnapshotV1 {
+    pub election_id: Option<Vec<u8>>,
+    pub proposal_question: Option<String>,
+    pub governance_source_revision: Option<String>,
+    pub approval_min: Option<usize>,
+    pub approval_max: Option<usize>,
+    pub allow_abstention: bool,
+    pub voters: Vec<Vec<u8>>,
+    pub options: Vec<(Vec<u8>, String)>,
+    pub presentation: GuiBallotPresentationType,
+    pub governance_document_bytes: Option<Vec<u8>>,
+}
+
 impl Default for GuiElectionDraftV1 {
     fn default() -> Self {
         Self::new()
@@ -255,6 +274,132 @@ impl GuiElectionDraftV1 {
             frozen: false,
             result: None,
         }
+    }
+
+    /// Reconstructs a draft from a durable public-organizer snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded [`GuiCoreError`] if a corrupted workspace contains
+    /// malformed public keys, duplicate entries, invalid option definitions,
+    /// or invalid stored rule fields.
+    pub fn from_durable_snapshot(
+        snapshot: GuiElectionDraftSnapshotV1,
+    ) -> Result<Self, GuiCoreError> {
+        if let Some(election_id) = snapshot.election_id.as_ref() {
+            ElectionId::new(election_id.clone()).map_err(|error| wrap(&error, "draft"))?;
+        }
+        if let Some(revision) = snapshot.governance_source_revision.as_ref() {
+            validate_governance_revision(revision)?;
+        }
+        if snapshot.approval_min.is_some() != snapshot.approval_max.is_some() {
+            return Err(GuiCoreError::new(
+                "GUI_WORKSPACE_INVALID_DRAFT",
+                GuiErrorCategory::ArchiveIntegrity,
+                Some("election-workspace"),
+                "durable draft has incomplete approval limits",
+            ));
+        }
+        if let (Some(minimum), Some(maximum)) = (snapshot.approval_min, snapshot.approval_max) {
+            ApprovalLimits::new(minimum, maximum, snapshot.allow_abstention)
+                .map_err(|error| wrap(&error, "rules"))?;
+            if !snapshot.allow_abstention && maximum == 0 {
+                return Err(GuiCoreError::uncastable_approval_limits());
+            }
+        }
+
+        for voter in &snapshot.voters {
+            if voter.len() != RISTRETTO_COMPRESSED_POINT_BYTES {
+                return Err(GuiCoreError::malformed_public_key());
+            }
+            RistrettoPublicKeyV1::from_bytes(voter)
+                .map_err(|_| GuiCoreError::malformed_public_key())?;
+        }
+        if has_duplicate(&snapshot.voters) {
+            return Err(GuiCoreError::new(
+                ValidationCode::DuplicateGovernanceKey.as_str(),
+                GuiErrorCategory::InvalidInput,
+                Some("voters"),
+                "duplicate governance public key",
+            ));
+        }
+
+        let ids: Vec<Vec<u8>> = snapshot
+            .options
+            .iter()
+            .map(|(id_bytes, _)| id_bytes.clone())
+            .collect();
+        if has_duplicate(&ids) {
+            return Err(GuiCoreError::new(
+                ValidationCode::DuplicateCandidateId.as_str(),
+                GuiErrorCategory::InvalidInput,
+                Some("options"),
+                "duplicate ballot option machine identifier",
+            ));
+        }
+        let mut labels: Vec<String> = Vec::with_capacity(snapshot.options.len());
+        for (id_bytes, display_name) in &snapshot.options {
+            let id = CandidateId::new(id_bytes.clone()).map_err(|e| wrap(&e, "options"))?;
+            CandidateDefinition::new(id, display_name.clone()).map_err(|e| wrap(&e, "options"))?;
+            labels.push(display_name.trim().to_owned());
+        }
+        labels.sort();
+        if labels.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(GuiCoreError::duplicate_option_display_label());
+        }
+
+        let governance_document_digest =
+            if let Some(bytes) = snapshot.governance_document_bytes.as_ref() {
+                Some(crate::governance::GuiGovernanceDocumentDigestV1 {
+                    display_filename: "recovered-governance-document".to_owned(),
+                    bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                    digest_algorithm_id:
+                        tari_cc_private_ballot_protocol::BLAKE3_256_HASH_ALGORITHM_ID_V1,
+                    digest_hex: crate::hex::to_lower_hex(
+                        &crate::governance::governance_document_digest_for_bytes(bytes),
+                    ),
+                })
+            } else {
+                None
+            };
+
+        Ok(Self {
+            election_id: snapshot.election_id,
+            proposal_question: snapshot.proposal_question,
+            governance_source_revision: snapshot.governance_source_revision,
+            approval_min: snapshot.approval_min,
+            approval_max: snapshot.approval_max,
+            allow_abstention: snapshot.allow_abstention,
+            voters: snapshot.voters,
+            options: snapshot.options,
+            presentation: snapshot.presentation,
+            governance_document_bytes: snapshot.governance_document_bytes,
+            governance_document_digest,
+            frozen: false,
+            result: None,
+        })
+    }
+
+    /// Returns the public-organizer durable draft representation.
+    #[must_use]
+    pub fn to_durable_snapshot(&self) -> GuiElectionDraftSnapshotV1 {
+        GuiElectionDraftSnapshotV1 {
+            election_id: self.election_id.clone(),
+            proposal_question: self.proposal_question.clone(),
+            governance_source_revision: self.governance_source_revision.clone(),
+            approval_min: self.approval_min,
+            approval_max: self.approval_max,
+            allow_abstention: self.allow_abstention,
+            voters: self.voters.clone(),
+            options: self.options.clone(),
+            presentation: self.presentation,
+            governance_document_bytes: self.governance_document_bytes.clone(),
+        }
+    }
+
+    /// Replays this draft into a fresh value through durable validation.
+    pub fn replayed_clone(&self) -> Result<Self, GuiCoreError> {
+        Self::from_durable_snapshot(self.to_durable_snapshot())
     }
 
     /// Returns whether the draft has been frozen.

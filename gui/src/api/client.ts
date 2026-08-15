@@ -23,6 +23,8 @@ import type {
   GuiElectionDraftPreviewV1,
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
+  GuiElectionWorkspaceResumeResultV1,
+  GuiElectionWorkspaceSummaryV1,
   GuiGovernanceDocumentDigestV1,
   GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
@@ -107,6 +109,13 @@ export const api = {
   unloadElection: () => call<void>("unload_election"),
 
   electionSummary: () => call<GuiElectionSummaryV1 | null>("election_summary"),
+
+  listElectionWorkspaces: () =>
+    call<GuiElectionWorkspaceSummaryV1[]>("list_election_workspaces"),
+  resumeElectionWorkspace: (workspaceId: string) =>
+    call<GuiElectionWorkspaceResumeResultV1>("resume_election_workspace", {
+      workspaceId,
+    }),
 
   openVoting: () => call<GuiElectionSummaryV1>("open_voting"),
   closeVoting: () => call<GuiElectionSummaryV1>("close_voting"),

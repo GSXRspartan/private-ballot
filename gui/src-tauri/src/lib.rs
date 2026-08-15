@@ -23,22 +23,27 @@ use tari_cc_private_ballot_gui_core::{
     GuiBallotIntakeResultV1, GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
     GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
+    GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
     GuiLiveAnchorConfigResultV1, GuiParticipationSummaryV1, GuiPreparedBallotExportV1,
     GuiPreparedBallotStatusV1, GuiSavedVoterCredentialDeleteResultV1, GuiSavedVoterCredentialsV1,
     GuiTallySummaryV1, GuiTransportAnchorVerificationV1, GuiVoterCredentialBackupResultV1,
     GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1,
     GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
-    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
-    copy_validated_voter_credential_to_default_v1, delete_saved_voter_credential_v1,
+    LoadedElectionWorkspaceV1, VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
+    copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
+    delete_saved_voter_credential_v1, ensure_election_workspaces_directory_v1,
     ensure_voter_credentials_directory_v1, file_summary_for_public_key,
     import_voter_credential_from_path_v1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
-    inspect_anchor_snapshot_v1, list_saved_voter_credentials_v1,
-    parse_public_governance_key_hex_v1, unlock_saved_voter_credential_v1,
+    inspect_anchor_snapshot_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
+    parse_public_governance_key_hex_v1, read_ballot_package_file_bounded_v1,
+    resume_election_workspace_v1, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
     verify_archive_directory_v1, verify_transport_archive_anchor_v1,
-    voter_credentials_directory_v1, write_archive_directory_v1, write_election_artifacts_v1,
+    voter_credentials_directory_v1, workspace_id_for_session_v1, write_archive_directory_v1,
+    write_draft_workspace_revision_v1, write_election_artifacts_v1,
     write_finalized_archive_v1_with_governance_document,
     write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
+    write_session_workspace_revision_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
@@ -196,6 +201,8 @@ impl PendingVoterCredentialV1 {
 struct AppState {
     session: Mutex<Option<GuiElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
+    session_workspace_id: Mutex<Option<String>>,
+    draft_workspace_id: Mutex<Option<String>>,
     voter: Mutex<Option<GuiVoterSessionV1>>,
     pending_voter_credential: Mutex<Option<PendingVoterCredentialV1>>,
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
@@ -206,6 +213,8 @@ impl Default for AppState {
         Self {
             session: Mutex::new(None),
             draft: Mutex::new(None),
+            session_workspace_id: Mutex::new(None),
+            draft_workspace_id: Mutex::new(None),
             voter: Mutex::new(None),
             pending_voter_credential: Mutex::new(None),
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
@@ -282,6 +291,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn with_session_mut<T>(
         &self,
         f: impl FnOnce(&mut GuiElectionSessionV1) -> Result<T, CommandError>,
@@ -310,6 +320,7 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn get_or_create_draft_preview(&self) -> Result<GuiElectionDraftPreviewV1, CommandError> {
         let mut guard = self
             .draft
@@ -319,6 +330,7 @@ impl AppState {
         Ok(draft.preview())
     }
 
+    #[cfg(test)]
     fn start_new_draft(&self) -> Result<(), CommandError> {
         let mut guard = self
             .draft
@@ -600,11 +612,19 @@ impl AppState {
     /// eligibility from the canonical registry during installation.
     fn install_frozen_session(&self, session: GuiElectionSessionV1) -> Result<(), CommandError> {
         let mut voter = GuiVoterSessionV1::new(session.artifacts());
+        let carried_credential = self
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?
+            .as_mut()
+            .and_then(GuiVoterSessionV1::take_credential_with_origin)
+            .map(|(credential, origin)| PendingVoterCredentialV1 { credential, origin });
         let pending_credential = self
             .pending_voter_credential
             .lock()
             .map_err(|_| CommandError::state_poisoned())?
-            .take();
+            .take()
+            .or(carried_credential);
         if let Some(credential) = pending_credential {
             voter.install_credential_with_origin(
                 credential.credential,
@@ -624,6 +644,146 @@ impl AppState {
         *voter_guard = Some(voter);
         Ok(())
     }
+
+    fn replace_active_session(&self, session: GuiElectionSessionV1) -> Result<(), CommandError> {
+        let mut session_guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *session_guard = Some(session);
+        Ok(())
+    }
+
+    fn set_session_workspace_id(&self, workspace_id: String) -> Result<(), CommandError> {
+        let mut guard = self
+            .session_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(workspace_id);
+        Ok(())
+    }
+
+    fn clear_session_workspace_id(&self) -> Result<(), CommandError> {
+        let mut guard = self
+            .session_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = None;
+        Ok(())
+    }
+
+    fn set_draft_workspace_id(&self, workspace_id: String) -> Result<(), CommandError> {
+        let mut guard = self
+            .draft_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(workspace_id);
+        Ok(())
+    }
+
+    fn clear_draft_workspace_id(&self) -> Result<(), CommandError> {
+        let mut guard = self
+            .draft_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = None;
+        Ok(())
+    }
+}
+
+fn workspaces_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    Ok(ensure_election_workspaces_directory_v1(&app_data_root)?)
+}
+
+fn active_or_new_draft_workspace_id(
+    state: &AppState,
+    workspaces_dir: &Path,
+) -> Result<String, CommandError> {
+    let mut guard = state
+        .draft_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    if let Some(workspace_id) = guard.as_ref() {
+        validate_workspace_id_v1(workspace_id)?;
+        return Ok(workspace_id.clone());
+    }
+    let workspace_id = create_draft_workspace_id_v1(workspaces_dir)?;
+    *guard = Some(workspace_id.clone());
+    Ok(workspace_id)
+}
+
+fn active_or_session_derived_workspace_id(
+    state: &AppState,
+    session: &GuiElectionSessionV1,
+) -> Result<String, CommandError> {
+    let mut guard = state
+        .session_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    if let Some(workspace_id) = guard.as_ref() {
+        validate_workspace_id_v1(workspace_id)?;
+        return Ok(workspace_id.clone());
+    }
+    let workspace_id = workspace_id_for_session_v1(session);
+    *guard = Some(workspace_id.clone());
+    Ok(workspace_id)
+}
+
+fn mutate_draft_transactionally<T>(
+    app: &AppHandle,
+    state: &AppState,
+    mutate: impl FnOnce(&mut GuiElectionDraftV1) -> Result<T, CommandError>,
+) -> Result<T, CommandError> {
+    let workspaces_dir = workspaces_directory(app)?;
+    let workspace_id = active_or_new_draft_workspace_id(state, &workspaces_dir)?;
+    let mut next = {
+        let guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(draft) = guard.as_ref() else {
+            return Err(CommandError::no_draft());
+        };
+        draft.replayed_clone()?
+    };
+    let result = mutate(&mut next)?;
+    write_draft_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+    let mut guard = state
+        .draft
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *guard = Some(next);
+    Ok(result)
+}
+
+fn mutate_session_transactionally<T>(
+    app: &AppHandle,
+    state: &AppState,
+    mutate: impl FnOnce(&mut GuiElectionSessionV1) -> Result<T, CommandError>,
+) -> Result<(T, GuiElectionSummaryV1, ElectionLifecycleStateV1), CommandError> {
+    let workspaces_dir = workspaces_directory(app)?;
+    let original = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        session.transactional_clone()
+    };
+    let mut next = original;
+    let result = mutate(&mut next)?;
+    let summary = next.summary();
+    let lifecycle_state = next.lifecycle_state_v1();
+    let workspace_id = active_or_session_derived_workspace_id(state, &next)?;
+    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+    state.replace_active_session(next)?;
+    Ok((result, summary, lifecycle_state))
 }
 
 fn credentials_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
@@ -672,6 +832,7 @@ fn load_election(
     manifest_path: String,
     registry_path: String,
     option_set_path: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
     let artifacts = GuiElectionArtifactsV1::from_paths(
@@ -680,6 +841,9 @@ fn load_election(
         Path::new(&option_set_path),
     )?;
     let session = GuiElectionSessionV1::new(artifacts)?;
+    let workspaces_dir = workspaces_directory(&app)?;
+    let workspace_id = workspace_id_for_session_v1(&session);
+    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
     // Preserve a same-process credential across an explicit reload. Its
     // eligibility is recomputed only after the new canonical registry loads.
     let carried_credential = state
@@ -714,6 +878,7 @@ fn load_election(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *voter_guard = Some(voter);
+    state.set_session_workspace_id(workspace_id)?;
     Ok(summary)
 }
 
@@ -743,6 +908,7 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
             .map_err(|_| CommandError::state_poisoned())?;
         *pending_guard = Some(credential);
     }
+    state.clear_session_workspace_id()?;
     Ok(())
 }
 
@@ -759,33 +925,97 @@ fn election_summary(
     Ok(guard.as_ref().map(GuiElectionSessionV1::summary))
 }
 
+/// Lists resumable local election workspaces from the backend-controlled
+/// app-data directory. The frontend receives public summaries only.
+#[tauri::command]
+fn list_election_workspaces(
+    app: AppHandle,
+) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, CommandError> {
+    let workspaces_dir = workspaces_directory(&app)?;
+    Ok(list_election_workspaces_v1(&workspaces_dir)?)
+}
+
+/// Resumes one local election workspace by backend-issued id.
+#[tauri::command]
+fn resume_election_workspace(
+    workspace_id: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionWorkspaceResumeResultV1, CommandError> {
+    let workspaces_dir = workspaces_directory(&app)?;
+    let loaded = resume_election_workspace_v1(&workspaces_dir, &workspace_id)?;
+    match loaded {
+        LoadedElectionWorkspaceV1::Draft { workspace, draft } => {
+            let preview = draft.preview();
+            preserve_credential_and_clear_session(&state)?;
+            {
+                let mut draft_guard = state
+                    .draft
+                    .lock()
+                    .map_err(|_| CommandError::state_poisoned())?;
+                *draft_guard = Some(draft);
+            }
+            state.set_draft_workspace_id(workspace_id)?;
+            Ok(GuiElectionWorkspaceResumeResultV1 {
+                workspace,
+                election: None,
+                draft: Some(preview),
+            })
+        }
+        LoadedElectionWorkspaceV1::Session { workspace, session } => {
+            let election = session.summary();
+            state.install_frozen_session(session)?;
+            state.set_session_workspace_id(workspace_id)?;
+            state.clear_draft_workspace_id()?;
+            Ok(GuiElectionWorkspaceResumeResultV1 {
+                workspace,
+                election: Some(election),
+                draft: None,
+            })
+        }
+    }
+}
+
 /// Opens the frozen election for ballot intake (lifecycle delegation).
 #[tauri::command]
-fn open_voting(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1, CommandError> {
-    state.with_session_mut(|session| {
-        session.open()?;
-        Ok(session.summary())
-    })
+fn open_voting(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    let (_result, summary, _lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            session.open()?;
+            Ok(())
+        })?;
+    Ok(summary)
 }
 
 /// Closes ballot acceptance permanently (lifecycle delegation).
 #[tauri::command]
-fn close_voting(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1, CommandError> {
-    let (summary, lifecycle_state) = state.with_session_mut(|session| {
-        session.close()?;
-        Ok((session.summary(), session.lifecycle_state_v1()))
-    })?;
+fn close_voting(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    let (_result, summary, lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            session.close()?;
+            Ok(())
+        })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
     Ok(summary)
 }
 
 /// Records completion of public verification (lifecycle delegation).
 #[tauri::command]
-fn mark_verified(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummaryV1, CommandError> {
-    let (summary, lifecycle_state) = state.with_session_mut(|session| {
-        session.mark_verified()?;
-        Ok((session.summary(), session.lifecycle_state_v1()))
-    })?;
+fn mark_verified(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    let (_result, summary, lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            session.mark_verified()?;
+            Ok(())
+        })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
     Ok(summary)
 }
@@ -794,12 +1024,14 @@ fn mark_verified(state: tauri::State<'_, AppState>) -> Result<GuiElectionSummary
 /// delegation).
 #[tauri::command]
 fn finalize_election(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
-    let (summary, lifecycle_state) = state.with_session_mut(|session| {
-        session.finalize()?;
-        Ok((session.summary(), session.lifecycle_state_v1()))
-    })?;
+    let (_result, summary, lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            session.finalize()?;
+            Ok(())
+        })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
     Ok(summary)
 }
@@ -825,11 +1057,15 @@ fn invalidate_voter_for_lifecycle(
 #[tauri::command]
 fn intake_ballot_package(
     package_path: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiBallotIntakeResultV1, CommandError> {
-    let package_bytes =
-        std::fs::read(Path::new(&package_path)).map_err(|_| CommandError::package_read_failed())?;
-    state.with_session_mut(|session| Ok(session.intake_ballot_package_bytes(&package_bytes)?))
+    let package_bytes = read_ballot_package_file_bounded_v1(Path::new(&package_path))?;
+    let (result, _summary, _lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            Ok(session.intake_ballot_package_bytes(&package_bytes)?)
+        })?;
+    Ok(result)
 }
 
 /// Computes the deterministic tally over the currently accepted ballots.
@@ -950,17 +1186,50 @@ fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1
 /// when none exists. This is the non-destructive Create Election entry point.
 #[tauri::command]
 fn get_or_create_election_draft(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionDraftPreviewV1, CommandError> {
-    state.get_or_create_draft_preview()
+    {
+        let guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(draft) = guard.as_ref() {
+            return Ok(draft.preview());
+        }
+    }
+    let workspaces_dir = workspaces_directory(&app)?;
+    let workspace_id = create_draft_workspace_id_v1(&workspaces_dir)?;
+    let draft = GuiElectionDraftV1::new();
+    write_draft_workspace_revision_v1(&workspaces_dir, &workspace_id, &draft)?;
+    state.set_draft_workspace_id(workspace_id)?;
+    let preview = draft.preview();
+    let mut guard = state
+        .draft
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *guard = Some(draft);
+    Ok(preview)
 }
 
 /// Starts a fresh organizer election draft, clearing any existing draft. A
 /// previously loaded frozen session is left intact so the organizer can review
 /// it; calling this discards only the in-progress draft.
 #[tauri::command]
-fn start_election_draft(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
-    state.start_new_draft()
+fn start_election_draft(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let workspaces_dir = workspaces_directory(&app)?;
+    let workspace_id = create_draft_workspace_id_v1(&workspaces_dir)?;
+    let draft = GuiElectionDraftV1::new();
+    write_draft_workspace_revision_v1(&workspaces_dir, &workspace_id, &draft)?;
+    let mut guard = state
+        .draft
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *guard = Some(draft);
+    state.set_draft_workspace_id(workspace_id)
 }
 
 /// Discards the in-progress draft. Does not unload a frozen session.
@@ -971,7 +1240,37 @@ fn discard_election_draft(state: tauri::State<'_, AppState>) -> Result<(), Comma
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *guard = None;
+    state.clear_draft_workspace_id()?;
     Ok(())
+}
+
+fn preserve_credential_and_clear_session(
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    {
+        let mut session_guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *session_guard = None;
+    }
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let credential = voter_guard
+        .as_mut()
+        .and_then(GuiVoterSessionV1::take_credential_with_origin)
+        .map(|(credential, origin)| PendingVoterCredentialV1 { credential, origin });
+    *voter_guard = None;
+    if let Some(credential) = credential {
+        let mut pending_guard = state
+            .pending_voter_credential
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *pending_guard = Some(credential);
+    }
+    state.clear_session_workspace_id()
 }
 
 /// Sets the election basics (identifier text + governance source revision).
@@ -980,9 +1279,10 @@ fn set_draft_basics(
     election_id_text: String,
     proposal_question: String,
     governance_source_revision: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.set_basics(
             election_id_text,
             proposal_question,
@@ -998,9 +1298,10 @@ fn set_draft_rules(
     approval_min: usize,
     approval_max: usize,
     allow_abstention: bool,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.set_rules(approval_min, approval_max, allow_abstention)?;
         Ok(())
     })
@@ -1010,9 +1311,10 @@ fn set_draft_rules(
 #[tauri::command]
 fn set_draft_voters(
     public_key_hexs: Vec<String>,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.set_voters(public_key_hexs)?;
         Ok(())
     })
@@ -1022,9 +1324,10 @@ fn set_draft_voters(
 #[tauri::command]
 fn set_draft_options(
     options: Vec<DraftOptionInput>,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         let parsed: Vec<(String, String)> = options
             .into_iter()
             .map(|o| (o.machine_id_text, o.display_name))
@@ -1038,9 +1341,10 @@ fn set_draft_options(
 #[tauri::command]
 fn set_draft_presentation(
     presentation: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         let parsed = GuiBallotPresentationType::from_identifier(&presentation)?;
         draft.set_presentation(parsed)?;
         Ok(())
@@ -1052,11 +1356,12 @@ fn set_draft_presentation(
 #[tauri::command]
 fn import_registry_to_draft(
     registry_path: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
     let bytes = std::fs::read(Path::new(&registry_path))
         .map_err(|_| CommandError::package_read_failed())?;
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.import_registry_bytes(&bytes)?;
         Ok(())
     })
@@ -1075,10 +1380,33 @@ fn preview_draft(
 /// active in the `FROZEN` lifecycle state.
 #[tauri::command]
 fn freeze_election(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionCreationResultV1, CommandError> {
-    let (result, session) = state.with_draft_mut(|draft| Ok(draft.freeze()?))?;
+    let workspaces_dir = workspaces_directory(&app)?;
+    let mut draft = {
+        let guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(draft) = guard.as_ref() else {
+            return Err(CommandError::no_draft());
+        };
+        draft.replayed_clone()?
+    };
+    let (result, session) = draft.freeze()?;
+    let workspace_id = workspace_id_for_session_v1(&session);
+    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+    {
+        let mut guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(draft);
+    }
     state.install_frozen_session(session)?;
+    state.set_session_workspace_id(workspace_id)?;
+    state.clear_draft_workspace_id()?;
     Ok(result)
 }
 
@@ -1111,9 +1439,10 @@ fn export_election_artifacts(
 #[tauri::command]
 fn set_draft_governance_source_revision(
     governance_source_revision: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.set_governance_source_revision(governance_source_revision)?;
         Ok(())
     })
@@ -1125,15 +1454,21 @@ fn set_draft_governance_source_revision(
 #[tauri::command]
 fn set_draft_governance_document(
     path: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiGovernanceDocumentDigestV1, CommandError> {
-    state.with_draft_mut(|draft| Ok(draft.set_governance_document(Path::new(&path))?))
+    mutate_draft_transactionally(&app, &state, |draft| {
+        Ok(draft.set_governance_document(Path::new(&path))?)
+    })
 }
 
 /// Clears any selected governance document.
 #[tauri::command]
-fn clear_draft_governance_document(state: tauri::State<'_, AppState>) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+fn clear_draft_governance_document(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.clear_governance_document()?;
         Ok(())
     })
@@ -1144,9 +1479,10 @@ fn clear_draft_governance_document(state: tauri::State<'_, AppState>) -> Result<
 /// has been selected.
 #[tauri::command]
 fn use_governance_document_digest_as_revision(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    state.with_draft_mut(|draft| {
+    mutate_draft_transactionally(&app, &state, |draft| {
         draft.use_governance_document_digest_as_revision()?;
         Ok(())
     })
@@ -2264,6 +2600,8 @@ pub fn run() {
             load_election,
             unload_election,
             election_summary,
+            list_election_workspaces,
+            resume_election_workspace,
             open_voting,
             close_voting,
             mark_verified,

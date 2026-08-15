@@ -33,6 +33,23 @@ export interface GuiElectionSummaryV1 {
   candidates: GuiCandidateSummaryV1[];
 }
 
+export interface GuiElectionWorkspaceSummaryV1 {
+  workspace_id: string;
+  election_manifest_hash_hex: string | null;
+  question_preview: string | null;
+  lifecycle_state: string;
+  accepted_ballot_count: number;
+  last_revision: number;
+  updated_at_unix_secs: number | null;
+  finalized: boolean;
+}
+
+export interface GuiElectionWorkspaceResumeResultV1 {
+  workspace: GuiElectionWorkspaceSummaryV1;
+  election: GuiElectionSummaryV1 | null;
+  draft: GuiElectionDraftPreviewV1 | null;
+}
+
 export type GuiIntakeCategory =
   | "Accepted"
   | "Duplicate"

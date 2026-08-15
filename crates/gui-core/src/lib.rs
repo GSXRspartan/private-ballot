@@ -54,6 +54,7 @@ pub mod voter_credential;
 pub mod voter_credential_container;
 pub mod voter_credential_store;
 pub mod voter_session;
+pub mod workspace;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, STAGE_TRANSPORT_BINDING,
@@ -68,8 +69,8 @@ pub use archive_writer::{
 pub use artifacts::GuiElectionArtifactsV1;
 pub use creation::{
     GuiBallotPresentationType, GuiDraftOptionV1, GuiDraftVoterV1, GuiElectionCreationResultV1,
-    GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportFileV1,
-    GuiElectionExportResultV1, write_election_artifacts_v1,
+    GuiElectionDraftPreviewV1, GuiElectionDraftSnapshotV1, GuiElectionDraftV1,
+    GuiElectionExportFileV1, GuiElectionExportResultV1, write_election_artifacts_v1,
 };
 pub use error::{GuiCoreError, GuiErrorCategory};
 pub use governance::{
@@ -93,7 +94,7 @@ pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
     ResultVisibility, SMALL_ELECTORATE_THRESHOLD,
 };
-pub use session::GuiElectionSessionV1;
+pub use session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
@@ -142,4 +143,14 @@ pub use voter_session::{
     GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1, GuiVoterSelectionStatusV1,
     GuiVoterSessionV1, GuiVoterWorkflowStateV1, GuiVoterWorkflowStatusV1,
     PROOF_GENERATION_DEFERRED_NOTICE, voter_selectable_options,
+};
+pub use workspace::{
+    ELECTION_WORKSPACES_DIRECTORY_NAME, GuiElectionWorkspaceResumeResultV1,
+    GuiElectionWorkspaceSummaryV1, LoadedElectionWorkspaceV1, MAX_BALLOT_PACKAGE_BYTES_V1,
+    MAX_ELECTION_WORKSPACES_V1, MAX_WORKSPACE_PACKAGE_COUNT_V1, MAX_WORKSPACE_REVISION_BYTES_V1,
+    create_draft_workspace_id_v1, election_workspaces_directory_v1,
+    ensure_election_workspaces_directory_v1, list_election_workspaces_v1,
+    read_ballot_package_file_bounded_v1, resume_election_workspace_v1, validate_workspace_id_v1,
+    workspace_id_for_session_v1, write_draft_workspace_revision_v1,
+    write_session_workspace_revision_v1,
 };

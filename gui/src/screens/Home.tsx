@@ -37,7 +37,9 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     recentActions,
     backendError,
     shellAvailable,
+    workspaces,
     dismissError,
+    resumeElectionWorkspace,
   } = useAppState();
   const presentation = presentationFor(election);
   const sealed =
@@ -45,6 +47,16 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
   const resultsSealed =
     participation !== null && participation.result_visibility === "SEALED";
   const disclosed = participationIsDisclosed(participation);
+  const resumableWorkspaces = workspaces.slice(0, 5);
+
+  async function resumeWorkspace(workspaceId: string, lifecycleState: string) {
+    const result = await resumeElectionWorkspace(workspaceId);
+    if (result.draft || lifecycleState === "DRAFT") {
+      onNavigate?.("create");
+      return;
+    }
+    onNavigate?.("manage");
+  }
 
   return (
     <>
@@ -78,6 +90,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
               <Field label="Lifecycle">
                 <LifecyclePill state={election.lifecycle_state} />
               </Field>
+              <Field label="Recovery">Recovery state saved locally</Field>
               <Field label="Manifest schema">
                 ElectionManifestV{election.manifest_schema_version}
               </Field>
@@ -258,30 +271,76 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
         </div>
         </>
       ) : (
-        <Card title="No election loaded">
-          <div className="empty-state">
-            <div className="card-body">
-              Load an election shared by an organizer, or create a new election to get
-              started.
+        <>
+          {resumableWorkspaces.length > 0 && (
+            <Card title="Resume Election">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th scope="col">Election</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Accepted ballots</th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {resumableWorkspaces.map((workspace) => (
+                    <tr key={workspace.workspace_id}>
+                      <td>
+                        {workspace.question_preview ??
+                          workspace.election_manifest_hash_hex ??
+                          workspace.workspace_id}
+                      </td>
+                      <td>
+                        <LifecyclePill state={workspace.lifecycle_state} />
+                      </td>
+                      <td>{workspace.accepted_ballot_count}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={() =>
+                            void resumeWorkspace(
+                              workspace.workspace_id,
+                              workspace.lifecycle_state,
+                            )
+                          }
+                        >
+                          Resume
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
+
+          <Card title="No election loaded">
+            <div className="empty-state">
+              <div className="card-body">
+                Load an election shared by an organizer, or create a new election to get
+                started.
+              </div>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => onNavigate?.("manage")}
+                >
+                  Load Election
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => onNavigate?.("create")}
+                >
+                  Create Election
+                </button>
+              </div>
             </div>
-            <div className="btn-row">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => onNavigate?.("manage")}
-              >
-                Load Election
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={() => onNavigate?.("create")}
-              >
-                Create Election
-              </button>
-            </div>
-          </div>
-        </Card>
+          </Card>
+        </>
       )}
 
       <Card title="Recent actions">

@@ -41,7 +41,7 @@ use crate::tally::{GuiTallySummaryV1, summarize_tally};
 /// first-valid-nullifier acceptance ledger, the replay transcript, and the
 /// exact canonical bytes of every ingested package (public data needed for
 /// archive construction).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GuiElectionSessionV1 {
     artifacts: GuiElectionArtifactsV1,
     verifier: TariTriptychPrototypeVerifierV1,
@@ -49,6 +49,20 @@ pub struct GuiElectionSessionV1 {
     ledger: BallotAcceptanceLedger,
     transcript: VerificationTranscriptV1,
     packages: Vec<Vec<u8>>,
+}
+
+/// Narrow durable representation of one organizer session.
+///
+/// This is intentionally made from canonical public artifacts plus the exact
+/// canonical ballot-package bytes that already feed archive replay. It does
+/// not serialize the verifier, nullifier set, or accepted-ledger internals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiElectionSessionSnapshotV1 {
+    pub lifecycle_state: ElectionLifecycleStateV1,
+    pub manifest_bytes: Vec<u8>,
+    pub registry_bytes: Vec<u8>,
+    pub candidate_bytes: Vec<u8>,
+    pub packages: Vec<Vec<u8>>,
 }
 
 impl GuiElectionSessionV1 {
@@ -82,6 +96,131 @@ impl GuiElectionSessionV1 {
             transcript,
             packages: Vec::new(),
         })
+    }
+
+    /// Reconstructs a session by replaying persisted canonical packages
+    /// through the same verifier and first-valid-nullifier ledger used during
+    /// live intake.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded [`GuiCoreError`] if artifacts fail validation,
+    /// lifecycle replay is invalid, or a transcript invariant fails.
+    pub fn from_durable_snapshot(
+        snapshot: GuiElectionSessionSnapshotV1,
+    ) -> Result<Self, GuiCoreError> {
+        if matches!(snapshot.lifecycle_state, ElectionLifecycleStateV1::Draft) {
+            return Err(GuiCoreError::new(
+                "GUI_WORKSPACE_INVALID_STATE",
+                crate::error::GuiErrorCategory::ArchiveIntegrity,
+                Some("election-workspace"),
+                "durable session snapshot cannot use draft lifecycle state",
+            ));
+        }
+
+        let artifacts = GuiElectionArtifactsV1::from_bytes(
+            &snapshot.manifest_bytes,
+            &snapshot.registry_bytes,
+            &snapshot.candidate_bytes,
+        )?;
+        let mut session = Self::new(artifacts)?;
+
+        if matches!(snapshot.lifecycle_state, ElectionLifecycleStateV1::Frozen) {
+            if !snapshot.packages.is_empty() {
+                return Err(GuiCoreError::new(
+                    "GUI_WORKSPACE_INVALID_STATE",
+                    crate::error::GuiErrorCategory::ArchiveIntegrity,
+                    Some("election-workspace"),
+                    "frozen durable workspace cannot contain ballot packages",
+                ));
+            }
+            return Ok(session);
+        }
+
+        session.open()?;
+        for package in &snapshot.packages {
+            let _ = session.intake_ballot_package_bytes(package)?;
+        }
+
+        match snapshot.lifecycle_state {
+            ElectionLifecycleStateV1::Open => {}
+            ElectionLifecycleStateV1::Closed => {
+                session.close()?;
+            }
+            ElectionLifecycleStateV1::Verified => {
+                session.close()?;
+                session.mark_verified()?;
+            }
+            ElectionLifecycleStateV1::Finalized => {
+                session.close()?;
+                session.mark_verified()?;
+                session.finalize()?;
+            }
+            ElectionLifecycleStateV1::Draft | ElectionLifecycleStateV1::Frozen => {
+                return Err(GuiCoreError::new(
+                    "GUI_WORKSPACE_INVALID_STATE",
+                    crate::error::GuiErrorCategory::ArchiveIntegrity,
+                    Some("election-workspace"),
+                    "durable workspace lifecycle state is inconsistent",
+                ));
+            }
+        }
+
+        Ok(session)
+    }
+
+    /// Returns the replayable durable session representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing canonical encoder error if any public artifact
+    /// cannot be encoded.
+    pub fn to_durable_snapshot(&self) -> Result<GuiElectionSessionSnapshotV1, GuiCoreError> {
+        let manifest_bytes = self
+            .artifacts
+            .manifest()
+            .to_canonical_cbor()
+            .map_err(|error| GuiCoreError::from_protocol(&error, "manifest"))?;
+        let registry_bytes = self
+            .artifacts
+            .registry()
+            .to_canonical_cbor()
+            .map_err(|error| GuiCoreError::from_protocol(&error, "registry"))?;
+        let candidate_bytes = self
+            .artifacts
+            .candidates()
+            .to_canonical_cbor()
+            .map_err(|error| GuiCoreError::from_protocol(&error, "candidates"))?;
+
+        Ok(GuiElectionSessionSnapshotV1 {
+            lifecycle_state: self.lifecycle.state(),
+            manifest_bytes,
+            registry_bytes,
+            candidate_bytes,
+            packages: self.packages.clone(),
+        })
+    }
+
+    /// Structurally clones this already-validated in-memory session for a
+    /// transactional mutation candidate.
+    ///
+    /// This intentionally does not call [`from_durable_snapshot`](Self::from_durable_snapshot):
+    /// disk resume still replays persisted packages through proof verification,
+    /// but ordinary same-process mutations preserve the already-validated
+    /// verifier, ledger, transcript, lifecycle, and package bytes directly.
+    #[must_use]
+    pub fn transactional_clone(&self) -> Self {
+        self.clone()
+    }
+
+    /// Replays this session into a fresh value using its own durable snapshot.
+    ///
+    /// This remains available for hostile disk-resume validation tests and
+    /// diagnostics. Normal shell mutations should use
+    /// [`transactional_clone`](Self::transactional_clone) so historical proofs
+    /// are not reverified on every ballot intake.
+    pub fn replayed_clone(&self) -> Result<Self, GuiCoreError> {
+        Self::from_durable_snapshot(self.to_durable_snapshot()?)
     }
 
     /// Opens the frozen election for ballot intake.

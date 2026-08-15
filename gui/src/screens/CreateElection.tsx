@@ -83,6 +83,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   const {
     refreshElection,
     refreshParticipation,
+    refreshWorkspaces,
     recordAction,
     shellAvailable,
     createElectionSession,
@@ -521,6 +522,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     updateSession((current) => ({ ...current, frozen: result, step: "frozen" }));
     await refreshElection();
     void refreshParticipation();
+    void refreshWorkspaces();
     recordAction(
       `Froze election ${result.summary.election_id_text ?? result.summary.election_id_hex}`,
     );
@@ -541,6 +543,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     await runAction(async () => {
       await api.openVoting();
       await refreshElection();
+      void refreshWorkspaces();
       recordAction("Opened voting");
     });
   }

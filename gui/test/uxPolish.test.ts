@@ -366,6 +366,48 @@ describe("hidden participation presentation", () => {
 });
 
 // -------------------------------------------------------------------------
+// Durable election workspace resume
+// -------------------------------------------------------------------------
+
+describe("durable election workspace resume", () => {
+  it("shows resumable workspaces on Home without internal paths", () => {
+    assert.match(home, /Resume Election/);
+    assert.match(home, /workspaces\.slice\(0, 5\)/);
+    assert.match(home, /workspace\.workspace_id/);
+    assert.match(home, /workspace\.accepted_ballot_count/);
+    assert.match(home, /workspace\.question_preview/);
+    assert.match(home, /Recovery state saved locally/);
+    assert.doesNotMatch(home, /workspace\.(path|directory|absolute)/);
+  });
+
+  it("resumes through the backend-issued public workspace id", () => {
+    const workspaceClient = client.slice(
+      client.indexOf("listElectionWorkspaces"),
+      client.indexOf("openVoting"),
+    );
+    assert.match(home, /resumeElectionWorkspace\(workspaceId\)/);
+    assert.match(home, /onNavigate\?\.\("create"\)/);
+    assert.match(home, /onNavigate\?\.\("manage"\)/);
+    assert.match(client, /"list_election_workspaces"/);
+    assert.match(client, /"resume_election_workspace"/);
+    assert.match(tauriShell, /fn list_election_workspaces\(/);
+    assert.match(tauriShell, /fn resume_election_workspace\(/);
+    assert.doesNotMatch(workspaceClient, /workspacePath|workspace_path|directory/);
+  });
+
+  it("does not add voter-choice or workspace state to web storage", () => {
+    const stored = [
+      ...home.matchAll(/localStorage|sessionStorage/g),
+      ...vote.matchAll(/localStorage|sessionStorage/g),
+      ...client.matchAll(/localStorage|sessionStorage/g),
+    ];
+    assert.equal(stored.length, 0);
+    assert.doesNotMatch(home, /selectedChoice|selected_choice|ballotChoice|ballot_choice/);
+    assert.doesNotMatch(vote, /localStorage\.setItem|sessionStorage\.setItem/);
+  });
+});
+
+// -------------------------------------------------------------------------
 // Export / archive folder error wording
 // -------------------------------------------------------------------------
 

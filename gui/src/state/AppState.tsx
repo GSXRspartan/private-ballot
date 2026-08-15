@@ -9,6 +9,8 @@ import { RequestGenerationGate } from "../requestGeneration";
 import type {
   GuiCommandError,
   GuiElectionSummaryV1,
+  GuiElectionWorkspaceResumeResultV1,
+  GuiElectionWorkspaceSummaryV1,
   GuiParticipationSummaryV1,
   GuiTallySummaryV1,
 } from "../api/types";
@@ -39,6 +41,7 @@ interface AppStateValue {
   /** Privacy-aware participation summary (backend-authoritative; cleared on
    *  unload). Numeric fields are null while sealed. */
   participation: GuiParticipationSummaryV1 | null;
+  workspaces: GuiElectionWorkspaceSummaryV1[];
   recentActions: RecentAction[];
   settings: AppSettings;
   /** Last structured backend error, or null when none is active. */
@@ -47,6 +50,7 @@ interface AppStateValue {
   selectedArtifactPaths: SelectedArtifactPaths | null;
   setSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
   refreshElection: () => Promise<void>;
+  refreshWorkspaces: () => Promise<void>;
   /** Refreshes the participation summary from the backend. Does not disclose
    *  sealed values; the backend returns null numerics while sealed. */
   refreshParticipation: () => Promise<void>;
@@ -56,6 +60,9 @@ interface AppStateValue {
     registryPath: string,
     optionSetPath: string,
   ) => Promise<void>;
+  resumeElectionWorkspace: (
+    workspaceId: string,
+  ) => Promise<GuiElectionWorkspaceResumeResultV1>;
   unloadElection: () => Promise<void>;
   dismissError: () => void;
   recordAction: (label: string) => void;
@@ -101,6 +108,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [participation, setParticipation] =
     useState<GuiParticipationSummaryV1 | null>(null);
+  const [workspaces, setWorkspaces] = useState<GuiElectionWorkspaceSummaryV1[]>([]);
   const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
   const [settings, setSettings] = useState<AppSettings>(readSettings);
   const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
@@ -154,6 +162,20 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     }
   }, [captureError]);
 
+  const refreshWorkspaces = useCallback(async () => {
+    if (!isDesktopShell()) {
+      setWorkspaces([]);
+      return;
+    }
+    try {
+      const summaries = await api.listElectionWorkspaces();
+      setWorkspaces(summaries);
+    } catch (error) {
+      captureError(error);
+      setWorkspaces([]);
+    }
+  }, [captureError]);
+
   const refreshParticipation = useCallback(async () => {
     if (!isDesktopShell()) {
       setParticipation(null);
@@ -185,8 +207,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     if (shellAvailable) {
       void refreshElection();
       void refreshParticipation();
+      void refreshWorkspaces();
     }
-  }, [shellAvailable, refreshElection, refreshParticipation]);
+  }, [shellAvailable, refreshElection, refreshParticipation, refreshWorkspaces]);
 
   const loadElection = useCallback(
     async (manifestPath: string, registryPath: string, optionSetPath: string) => {
@@ -203,12 +226,41 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         });
         recordAction(`Loaded election ${summary.election_id_text ?? summary.election_id_hex}`);
         void refreshParticipation();
+        void refreshWorkspaces();
       } catch (error) {
         captureError(error);
         throw error;
       }
     },
-    [captureError, recordAction, refreshParticipation],
+    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
+  );
+
+  const resumeElectionWorkspace = useCallback(
+    async (workspaceId: string) => {
+      try {
+        const result = await api.resumeElectionWorkspace(workspaceId);
+        setElection(result.election);
+        setTally(null);
+        setParticipation(null);
+        setBackendError(null);
+        setSelectedArtifactPaths(null);
+        if (result.draft) {
+          setCreateElectionSession(null);
+        }
+        recordAction(
+          result.election
+            ? `Resumed election ${result.election.election_id_text ?? result.election.election_id_hex}`
+            : "Resumed election draft",
+        );
+        if (result.election) void refreshParticipation();
+        void refreshWorkspaces();
+        return result;
+      } catch (error) {
+        captureError(error);
+        throw error;
+      }
+    },
+    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
   );
 
   const unloadElection = useCallback(async () => {
@@ -221,10 +273,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setBackendError(null);
       setSelectedArtifactPaths(null);
       recordAction("Unloaded election session");
+      void refreshWorkspaces();
     } catch (error) {
       captureError(error);
     }
-  }, [captureError, recordAction]);
+  }, [captureError, recordAction, refreshWorkspaces]);
 
   const runLifecycle = useCallback(
     async (action: "open" | "close" | "verify" | "finalize") => {
@@ -252,11 +305,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         setBackendError(null);
         recordAction(labels[action]);
         void refreshParticipation();
+        void refreshWorkspaces();
       } catch (error) {
         captureError(error);
       }
     },
-    [captureError, recordAction, refreshParticipation],
+    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
   );
 
   const setSetting = useCallback(
@@ -280,15 +334,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       election,
       tally,
       participation,
+      workspaces,
       recentActions,
       settings,
       backendError,
       selectedArtifactPaths,
       setSetting,
       refreshElection,
+      refreshWorkspaces,
       refreshParticipation,
       runLifecycle,
       loadElection,
+      resumeElectionWorkspace,
       unloadElection,
       dismissError,
       recordAction,
@@ -301,15 +358,18 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       election,
       tally,
       participation,
+      workspaces,
       recentActions,
       settings,
       backendError,
       selectedArtifactPaths,
       setSetting,
       refreshElection,
+      refreshWorkspaces,
       refreshParticipation,
       runLifecycle,
       loadElection,
+      resumeElectionWorkspace,
       unloadElection,
       dismissError,
       recordAction,
