@@ -6,8 +6,8 @@ mod common;
 use ed25519_dalek::SigningKey;
 use hpke::{Kem as KemTrait, Serializable, kem::X25519HkdfSha256};
 use tari_cc_private_ballot_gui_core::{
-    BatchPolicyV1, PaddingPolicyV1, PrivateBallotEnvelopeV1, RetryStatusV1, TransportDescriptorV1,
-    TransportAuthorityRootV1, TransportRoutePolicyV1, VoterReceiptStateV1,
+    BatchPolicyV1, PaddingPolicyV1, PrivateBallotEnvelopeV1, RetryStatusV1,
+    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1, VoterReceiptStateV1,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 use tari_cc_private_ballot_transport_gateway::{
@@ -180,30 +180,53 @@ fn retry_cache_preserves_accepted_duplicate_and_rejected_truth() {
     assert_eq!(retry.state, VoterReceiptStateV1::Accepted);
     assert_eq!(retry.retry_status, RetryStatusV1::PreviousDeliveryAccepted);
 
-    let duplicate_capability = new_retry_capability_v1();
-    let duplicate = gateway
+    // Re-delivering the EXACT SAME accepted package with a FRESH retry capability
+    // (as the HTTP collector always uses — it mints a new capability per request)
+    // is an idempotent recovery of the prior acceptance, NOT a generic duplicate:
+    // it returns Accepted / PreviousDeliveryAccepted so a voter whose receipt was
+    // lost to a delayed/reset Tor close can still promote to CAST, and it never
+    // counts a second vote. (Before the fix this returned Rejected /
+    // GenericDuplicate, which stranded the voter in CAST_PENDING forever.)
+    let recovery_capability = new_retry_capability_v1();
+    let recovered = gateway
         .deliver(
             &first_encoded,
             &descriptor,
             &receiver_key,
-            duplicate_capability,
+            recovery_capability,
             &mut session,
         )
-        .expect("duplicate");
-    assert_eq!(duplicate.state, VoterReceiptStateV1::Rejected);
-    assert_eq!(duplicate.retry_status, RetryStatusV1::GenericDuplicate);
-    let retry = gateway
+        .expect("recovered exact retry");
+    assert_eq!(recovered.state, VoterReceiptStateV1::Accepted);
+    assert_eq!(
+        recovered.retry_status,
+        RetryStatusV1::PreviousDeliveryAccepted
+    );
+    assert_eq!(
+        gateway.accepted_unique_count(),
+        1,
+        "an exact retry of an accepted ballot never inflates the accepted count",
+    );
+    // Retrying that same exact package under the same fresh capability stays a
+    // recovered acceptance too (capability cache hit on an Accepted receipt).
+    let recovered_again = gateway
         .deliver(
             &first_encoded,
             &descriptor,
             &receiver_key,
-            duplicate_capability,
+            recovery_capability,
             &mut session,
         )
-        .expect("duplicate retry");
-    assert_eq!(retry.state, VoterReceiptStateV1::Rejected);
-    assert_eq!(retry.retry_status, RetryStatusV1::PreviousDeliveryRejected);
+        .expect("recovered exact retry (capability cache)");
+    assert_eq!(recovered_again.state, VoterReceiptStateV1::Accepted);
+    assert_eq!(
+        recovered_again.retry_status,
+        RetryStatusV1::PreviousDeliveryAccepted
+    );
 
+    // A DIFFERENT package replayed under a previously-seen capability is still a
+    // rejected generic duplicate: the capability's committed package digest does
+    // not match, so no acceptance can be recovered for it.
     let second_package = common::triptych_package_bytes(1, &[b"candidate-b"]);
     let second_encoded = PrivateBallotEnvelopeV1::seal(&descriptor, &second_package)
         .expect("seal")
@@ -214,7 +237,7 @@ fn retry_cache_preserves_accepted_duplicate_and_rejected_truth() {
             &second_encoded,
             &descriptor,
             &receiver_key,
-            duplicate_capability,
+            recovery_capability,
             &mut session,
         )
         .expect("reused capability");
@@ -295,7 +318,11 @@ impl PrivateSubmissionCarrierV1 for FakeCarrier {
 
 fn coordinator_configuration(
     route: TransportRoutePolicyV1,
-) -> (TransportAuthorityRootV1, TransportDescriptorV1, GatewayReceiverKeyV1) {
+) -> (
+    TransportAuthorityRootV1,
+    TransportDescriptorV1,
+    GatewayReceiverKeyV1,
+) {
     let (receiver_secret, receiver_public) = Kem::gen_keypair();
     let mut public = [0; 32];
     public.copy_from_slice(receiver_public.to_bytes().as_slice());
@@ -305,7 +332,9 @@ fn coordinator_configuration(
     let manifest = common::manifest();
     let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
         manifest.election_id().as_bytes().to_vec(),
-        manifest.canonical_hash(&Blake3HashProviderV1).expect("manifest hash"),
+        manifest
+            .canonical_hash(&Blake3HashProviderV1)
+            .expect("manifest hash"),
         1,
         route,
         vec!["test-onion.invalid".to_owned()],
@@ -313,8 +342,14 @@ fn coordinator_configuration(
         public,
         "test-gateway".to_owned(),
         Vec::new(),
-        PaddingPolicyV1 { id: "test-fixed".to_owned(), padded_bytes: 65_536 },
-        BatchPolicyV1 { id: "accepted-100".to_owned(), accepted_unique_floor: 100 },
+        PaddingPolicyV1 {
+            id: "test-fixed".to_owned(),
+            padded_bytes: 65_536,
+        },
+        BatchPolicyV1 {
+            id: "accepted-100".to_owned(),
+            accepted_unique_floor: 100,
+        },
         None,
         "TEST_ROOT".to_owned(),
         &signing,
@@ -332,16 +367,26 @@ fn coordinator_configuration(
 
 #[test]
 fn coordinator_delivers_exact_bytes_through_explicit_managed_tor() {
-    let (root, descriptor, receiver) = coordinator_configuration(TransportRoutePolicyV1::ManagedTorOrOffline);
+    let (root, descriptor, receiver) =
+        coordinator_configuration(TransportRoutePolicyV1::ManagedTorOrOffline);
     let package = common::triptych_package_bytes(0, &[b"candidate-a"]);
-    let mut coordinator = PrivateSubmissionCoordinatorV1::with_test_configuration(
-        root, descriptor, receiver, None,
-    )
-    .expect("test configuration");
+    let mut coordinator =
+        PrivateSubmissionCoordinatorV1::with_test_configuration(root, descriptor, receiver, None)
+            .expect("test configuration");
     let mut session = common::open_session();
-    let mut carrier = FakeCarrier { managed_tor_calls: 0, relay_calls: 0, fail_tor: false, opaque_envelopes: Vec::new() };
+    let mut carrier = FakeCarrier {
+        managed_tor_calls: 0,
+        relay_calls: 0,
+        fail_tor: false,
+        opaque_envelopes: Vec::new(),
+    };
     let result = coordinator
-        .submit(VoterPrivateRouteV1::ManagedTor, &package, &mut session, &mut carrier)
+        .submit(
+            VoterPrivateRouteV1::ManagedTor,
+            &package,
+            &mut session,
+            &mut carrier,
+        )
         .expect("accepted through coordinator");
     assert_eq!(result.receipt.state, VoterReceiptStateV1::Accepted);
     assert_eq!(carrier.managed_tor_calls, 1);
@@ -351,39 +396,80 @@ fn coordinator_delivers_exact_bytes_through_explicit_managed_tor() {
 
 #[test]
 fn coordinator_tor_failure_never_calls_relay_or_direct() {
-    let (root, descriptor, receiver) = coordinator_configuration(TransportRoutePolicyV1::ManagedTorOrOffline);
-    let mut coordinator = PrivateSubmissionCoordinatorV1::with_test_configuration(root, descriptor, receiver, None)
-        .expect("test configuration");
+    let (root, descriptor, receiver) =
+        coordinator_configuration(TransportRoutePolicyV1::ManagedTorOrOffline);
+    let mut coordinator =
+        PrivateSubmissionCoordinatorV1::with_test_configuration(root, descriptor, receiver, None)
+            .expect("test configuration");
     let mut session = common::open_session();
-    let mut carrier = FakeCarrier { managed_tor_calls: 0, relay_calls: 0, fail_tor: true, opaque_envelopes: Vec::new() };
-    assert!(coordinator
-        .submit(VoterPrivateRouteV1::ManagedTor, &common::triptych_package_bytes(0, &[b"candidate-a"]), &mut session, &mut carrier)
-        .is_err());
+    let mut carrier = FakeCarrier {
+        managed_tor_calls: 0,
+        relay_calls: 0,
+        fail_tor: true,
+        opaque_envelopes: Vec::new(),
+    };
+    assert!(
+        coordinator
+            .submit(
+                VoterPrivateRouteV1::ManagedTor,
+                &common::triptych_package_bytes(0, &[b"candidate-a"]),
+                &mut session,
+                &mut carrier
+            )
+            .is_err()
+    );
     assert_eq!(carrier.managed_tor_calls, 1);
     assert_eq!(carrier.relay_calls, 0);
 }
 
 #[test]
 fn coordinator_uses_relay_only_after_explicit_selection_and_production_fails_closed() {
-    let (root, descriptor, receiver) = coordinator_configuration(TransportRoutePolicyV1::RelayOrOffline);
-    let mut coordinator = PrivateSubmissionCoordinatorV1::with_test_configuration(root, descriptor, receiver, None)
-        .expect("test configuration");
+    let (root, descriptor, receiver) =
+        coordinator_configuration(TransportRoutePolicyV1::RelayOrOffline);
+    let mut coordinator =
+        PrivateSubmissionCoordinatorV1::with_test_configuration(root, descriptor, receiver, None)
+            .expect("test configuration");
     let mut session = common::open_session();
-    let mut carrier = FakeCarrier { managed_tor_calls: 0, relay_calls: 0, fail_tor: false, opaque_envelopes: Vec::new() };
-    assert_eq!(coordinator
-        .submit(VoterPrivateRouteV1::SplitTrustRelay, &common::triptych_package_bytes(0, &[b"candidate-a"]), &mut session, &mut carrier)
-        .expect("explicit relay")
-        .receipt
-        .state, VoterReceiptStateV1::Accepted);
+    let mut carrier = FakeCarrier {
+        managed_tor_calls: 0,
+        relay_calls: 0,
+        fail_tor: false,
+        opaque_envelopes: Vec::new(),
+    };
+    assert_eq!(
+        coordinator
+            .submit(
+                VoterPrivateRouteV1::SplitTrustRelay,
+                &common::triptych_package_bytes(0, &[b"candidate-a"]),
+                &mut session,
+                &mut carrier
+            )
+            .expect("explicit relay")
+            .receipt
+            .state,
+        VoterReceiptStateV1::Accepted
+    );
     assert_eq!(carrier.managed_tor_calls, 0);
     assert_eq!(carrier.relay_calls, 1);
 
     let mut production = PrivateSubmissionCoordinatorV1::production_unprovisioned();
     let mut fresh_session = common::open_session();
-    let mut no_carrier = FakeCarrier { managed_tor_calls: 0, relay_calls: 0, fail_tor: false, opaque_envelopes: Vec::new() };
-    assert!(production
-        .submit(VoterPrivateRouteV1::ManagedTor, &common::triptych_package_bytes(0, &[b"candidate-a"]), &mut fresh_session, &mut no_carrier)
-        .is_err());
+    let mut no_carrier = FakeCarrier {
+        managed_tor_calls: 0,
+        relay_calls: 0,
+        fail_tor: false,
+        opaque_envelopes: Vec::new(),
+    };
+    assert!(
+        production
+            .submit(
+                VoterPrivateRouteV1::ManagedTor,
+                &common::triptych_package_bytes(0, &[b"candidate-a"]),
+                &mut fresh_session,
+                &mut no_carrier
+            )
+            .is_err()
+    );
     assert_eq!(no_carrier.managed_tor_calls, 0);
     assert_eq!(no_carrier.relay_calls, 0);
 }

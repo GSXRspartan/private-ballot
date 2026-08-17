@@ -3,12 +3,25 @@ import { useEffect, useRef, useState } from "react";
 import { api, BackendError } from "../api/client";
 import {
   pickBallotPackagePath,
+  pickDirectory,
   pickElectionArtifact,
   pickGovernanceDocument,
+  pickTorExecutable,
+  pickVoterTransportBundle,
 } from "../api/dialog";
+import {
+  recallManagedTorConfig,
+  rememberManagedTorConfig,
+} from "../api/managedTorConfigMemory";
+import {
+  managedTorTestCardVisible,
+  privateSubmissionStageLabel,
+  privateSubmissionStatus,
+} from "../privateSubmission";
 import type {
   GuiCommandError,
   GuiGovernanceDocumentDigestV1,
+  GuiPrivateReleaseResultV1,
   GuiPrivateRouteV1,
   GuiPrivateSubmissionResultV1,
   GuiPrivateTransportAvailabilityV1,
@@ -17,6 +30,7 @@ import type {
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
+  ManagedTorTestStatusV1,
 } from "../api/types";
 import { selectionInstructionText } from "../ballot/ballotTypes";
 import { lifecyclePlainText } from "../lifecycle";
@@ -47,6 +61,7 @@ import { RequestGenerationGate } from "../requestGeneration";
 import {
   BackendErrorNotice,
   Card,
+  ConfirmDialog,
   CopyButton,
   DetailsSection,
   Field,
@@ -89,10 +104,24 @@ export function Vote() {
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [credentialError, setCredentialError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
-  const [exported, setExported] = useState(false);
+  const [confirmCast, setConfirmCast] = useState(false);
   const [transport, setTransport] = useState<GuiPrivateTransportAvailabilityV1 | null>(null);
   const [privateRoute, setPrivateRoute] = useState<GuiPrivateRouteV1>("ManagedTor");
-  const [privateResult, setPrivateResult] = useState<GuiPrivateSubmissionResultV1 | null>(null);
+  const [privateResult, setPrivateResult] = useState<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1 | null>(null);
+  const [managedTorStatus, setManagedTorStatus] = useState<ManagedTorTestStatusV1 | null>(null);
+  // Local, voter-safe error for the private-submission controls only, shown next
+  // to those controls instead of only at the top of the screen (Issue 5). It
+  // never carries transport internals beyond the backend's coarsened codes.
+  const [privateError, setPrivateError] = useState<GuiCommandError | null>(null);
+  // The three NON-SECRET controlled-test paths, pre-filled from local memory so a
+  // tester does not retype them after navigation/restart. Pre-filling never
+  // starts Tor or transmits anything; Rust re-validates every path before use.
+  // tor.exe is a GLOBAL convenience path; the bundle and data directory are
+  // ELECTION-SPECIFIC and are (re)hydrated per election below, so a different
+  // election never silently inherits the previous election's transport bundle.
+  const [torExePath, setTorExePath] = useState(() => recallManagedTorConfig().torExePath);
+  const [torDataDir, setTorDataDir] = useState("");
+  const [voterBundlePath, setVoterBundlePath] = useState("");
   const selectionDraftIdsRef = useRef<string[]>([]);
   const selectionRequestGenerationRef = useRef(0);
   const confirmationRequestGenerationRef = useRef(new RequestGenerationGate());
@@ -110,11 +139,25 @@ export function Vote() {
     setConfirmed(false);
     setCredentialStage(false);
     setSelectionStage(false);
-    setExported(false);
     setTransport(null);
     setPrivateRoute("ManagedTor");
     setPrivateResult(null);
+    setPrivateError(null);
   }, [election]);
+
+  // Re-hydrate the remembered controlled-test paths whenever the election
+  // identity changes. The GLOBAL tor.exe is restored; the ELECTION-SPECIFIC
+  // bundle and data directory are restored only when they were remembered for
+  // THIS election (manifest hash), and are otherwise cleared so a prior
+  // election's transport bundle is never silently reused (F2). Runs on mount and
+  // on every election switch, not on same-election field edits.
+  const electionManifestHashHex = election?.manifest_hash_hex ?? "";
+  useEffect(() => {
+    const remembered = recallManagedTorConfig(electionManifestHashHex);
+    setTorExePath(remembered.torExePath);
+    setTorDataDir(remembered.torDataDir);
+    setVoterBundlePath(remembered.voterBundlePath);
+  }, [electionManifestHashHex]);
 
   function commandErrorFromUnknown(err: unknown): GuiCommandError {
     if (err instanceof BackendError) return err.payload;
@@ -186,6 +229,15 @@ export function Vote() {
 
   useEffect(() => {
     if (shellAvailable) void refreshCredentialStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election, shellAvailable]);
+
+  // Populate the controlled managed-Tor status on load so the recovery/status
+  // card reflects reality after a restart (feature presence + durable state),
+  // without waiting for the voter to act. Read-only: it never starts Tor,
+  // creates a PENDING record, or transmits anything.
+  useEffect(() => {
+    if (election && shellAvailable) void refreshManagedTorStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
 
@@ -369,11 +421,11 @@ export function Vote() {
     if (!shellAvailable) return;
     setBusy(true);
     setError(null);
-    setExported(false);
     try {
       const prepared = await api.prepareVoterBallot();
       await refreshWorkflow(true);
       setTransport(await api.privateTransportAvailability());
+      await refreshManagedTorStatus();
       if (prepared.state !== "Ready") {
         setError({
           code: "GUI_PROOF_VERIFICATION_FAILED",
@@ -398,7 +450,6 @@ export function Vote() {
         (path) => api.exportPreparedVoterBallot(path),
       );
       if (!saved) return;
-      setExported(true);
       await refreshWorkflow(true);
     } catch (err) {
       if (err instanceof BallotSaveDialogError) {
@@ -417,6 +468,19 @@ export function Vote() {
     }
   }
 
+  async function onChangeChoice() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.changeMyBallotChoice();
+      await refreshWorkflow(true);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onSubmitPrivately() {
     if (privateRoute === "OfflineExport") {
       await onExportBallot();
@@ -424,12 +488,110 @@ export function Vote() {
     }
     setBusy(true);
     setError(null);
+    setPrivateError(null);
     setPrivateResult(null);
     try {
       setPrivateResult(await api.submitPreparedVoterBallotPrivately(privateRoute));
       setTransport(await api.privateTransportAvailability());
+      await refreshWorkflow(true);
+      setManagedTorStatus(await api.managedTorTestStatus());
     } catch (err) {
-      captureError(err);
+      // Private-submission failures are shown next to the submission controls
+      // (Issue 5), not only at the top of the screen. The durable cast state
+      // (recovered by refreshWorkflow) remains the authority for locked/pending.
+      setPrivateError(commandErrorFromUnknown(err));
+      await refreshWorkflow(true).catch(() => {});
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshManagedTorStatus() {
+    if (!shellAvailable) return;
+    try {
+      setManagedTorStatus(await api.managedTorTestStatus());
+    } catch {
+      // The command may fail closed when the feature is absent; ignore.
+    }
+  }
+
+  async function onConfigureManagedTor() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      const status = await api.configureManagedTorTest(torExePath, torDataDir, voterBundlePath);
+      // Remember only the three NON-SECRET paths for the next run/navigation.
+      rememberManagedTorConfig({
+        torExePath,
+        torDataDir,
+        voterBundlePath,
+        electionManifestHashHex,
+      });
+      setManagedTorStatus(status);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onBrowseTorExe() {
+    const picked = await pickTorExecutable();
+    if (picked !== null) setTorExePath(picked);
+  }
+
+  async function onBrowseVoterBundle() {
+    const picked = await pickVoterTransportBundle();
+    if (picked !== null) setVoterBundlePath(picked);
+  }
+
+  async function onBrowseTorDataDir() {
+    const picked = await pickDirectory("Choose voter Tor data directory");
+    if (picked !== null) setTorDataDir(picked);
+  }
+
+  async function onStartManagedTor() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      const status = await api.startManagedTor();
+      setManagedTorStatus(status);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onStopManagedTor() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      const status = await api.stopManagedTor();
+      setManagedTorStatus(status);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onRetryPrivateSubmission() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      const result = await api.retryPrivateSubmission();
+      setPrivateResult(result);
+      await refreshWorkflow(true);
+      setManagedTorStatus(await api.managedTorTestStatus());
+    } catch (err) {
+      // Show retry failures next to the controls; durable state stays authoritative.
+      setPrivateError(commandErrorFromUnknown(err));
+      await refreshWorkflow(true).catch(() => {});
     } finally {
       setBusy(false);
     }
@@ -440,6 +602,48 @@ export function Vote() {
   const eligibilityTone = credentialEligibilityTone(credential?.eligibility ?? "NotChecked");
   const selectionLiveText = selectionSummaryText(selection);
   const selectionAtMax = selectionAtApprovalMax(selection);
+  // Durable local cast state. Once CAST, the choice is locked on this device and
+  // no reconsideration/preparation is offered (the election-scoped nullifier is
+  // the authoritative cross-machine one-vote rule). CAST_PENDING is a locked
+  // recovery state.
+  const castState = workflow?.cast_lock_state ?? "NOT_CAST";
+  const ballotCast = castState === "CAST";
+  const castPending = castState === "CAST_PENDING";
+  const castLocked = ballotCast || castPending;
+  // Whether THIS ballot reached CAST through an authenticated online (Tor)
+  // submission in this session, rather than an offline file export. The durable
+  // cast-lock state carries only NOT_CAST/CAST_PENDING/CAST and cannot itself
+  // distinguish the two, so we use the in-session accepted private result. When
+  // it is present the "Ballot cast" card must NOT tell the voter to deliver an
+  // exported file — the organizer already returned an authenticated receipt.
+  const castViaAuthenticatedOnline =
+    ballotCast &&
+    privateResult !== null &&
+    "receipt_state" in privateResult &&
+    receiptStateIsAccepted(privateResult.receipt_state);
+  // Whether the controlled managed-Tor test feature is present in this build.
+  // The status command returns a value (even "not configured") when compiled,
+  // and the frontend leaves managedTorStatus null when the command is absent.
+  const managedTorFeaturePresent = managedTorStatus !== null;
+  // Authoritative private-submission status, derived from DURABLE cast state so
+  // it survives navigation/restart (Issues 4 and 17) — a transient result object
+  // is never required to show SUCCESS or PENDING.
+  const privateStatus = privateSubmissionStatus({
+    castState,
+    configured: managedTorStatus?.configured ?? false,
+    torRunning: managedTorStatus?.tor_running ?? false,
+    busy,
+    lastReceiptState:
+      privateResult && "receipt_state" in privateResult ? privateResult.receipt_state : null,
+  });
+  // Bounded, privacy-safe stage from the most recent private-release attempt,
+  // for the Advanced/diagnostics panel only. Present only on an uncertain
+  // (CAST_PENDING) attempt this session; the durable status block above is the
+  // authoritative success/pending indicator.
+  const privateStageLabel =
+    privateResult && "diagnostic_stage" in privateResult
+      ? privateSubmissionStageLabel(privateResult.diagnostic_stage)
+      : null;
 
   return (
     <>
@@ -869,6 +1073,13 @@ export function Vote() {
 
               {selectionStage && confirmation && (
                 <>
+                  {/* The editable choice UI is shown only while nothing is durably
+                      locked. After a restart in CAST_PENDING the plaintext choice
+                      is intentionally not restored from the encrypted pending
+                      submission, so a "No selection" editable list would be
+                      misleading (Issue 11); the locked card below is shown
+                      instead. */}
+                  {!castLocked && (
                   <Card title="Choose your response">
                     <p className="selection-instruction">
                       {selectionInstructionText(selection ?? confirmation.bound)}
@@ -960,7 +1171,78 @@ export function Vote() {
                       </div>
                     </DetailsSection>
                   </Card>
+                  )}
 
+                  {castLocked ? (
+                    <Card title={ballotCast ? "Ballot cast" : "Finishing your ballot submission"}>
+                      {ballotCast ? (
+                        <>
+                          {castViaAuthenticatedOnline ? (
+                            <>
+                              <Notice tone="ok">
+                                Your encrypted ballot was submitted privately and an authenticated
+                                organizer receipt was verified. Your vote is locked for this
+                                election and your choice can no longer be changed here.
+                              </Notice>
+                              <p className="card-body">
+                                An authenticated receipt confirms the organizer received your
+                                encrypted ballot. Acceptance, counting, final-record inclusion, and
+                                Ootle anchoring are confirmed separately from the published record.
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <Notice tone="ok">
+                                Your ballot for this election was exported and cast on this device.
+                                Your choice can no longer be changed here.
+                              </Notice>
+                              <p className="card-body">
+                                Exporting released your ballot file for delivery. It does not mean the
+                                organizer has received, accepted, counted, included, or anchored it —
+                                those are confirmed separately from the published record.
+                              </p>
+                              <p className="card-body">
+                                Deliver the exported ballot file through the election's approved intake
+                                method.
+                              </p>
+                            </>
+                          )}
+                          <DetailsSection summary="Why can't I change it?">
+                            <p className="card-body">
+                              This installation locks your credential for this election once a
+                              ballot is exported, so you are not misled into thinking a released
+                              ballot can be replaced. Even on another computer, the election
+                              independently rejects a second ballot from the same credential using
+                              its election-scoped duplicate check — that cryptographic rule, not
+                              this local lock, is what guarantees one vote.
+                            </p>
+                          </DetailsSection>
+                        </>
+                      ) : (
+                        <>
+                          <Notice tone="warn">
+                            Your ballot for this election is being finalized, and your choice is
+                            locked. Return to this screen to finish it. If it cannot be completed
+                            safely, your credential stays locked for this election so the one-vote
+                            rule is never weakened. Your vote was not erased and you do not need to
+                            choose again.
+                          </Notice>
+                          <p className="card-body">
+                            Your previously prepared ballot is locked. The plaintext choice is not
+                            restored from the encrypted pending submission; you can retry the same
+                            encrypted submission below without creating a new ballot.
+                          </p>
+                          <div className="field-list">
+                            <Field label="Status">
+                              <Pill tone={workflowTone(workflow?.workflow_state)}>
+                                {workflowStateText(workflow?.workflow_state)}
+                              </Pill>
+                            </Field>
+                          </div>
+                        </>
+                      )}
+                    </Card>
+                  ) : (
                   <Card title="Anonymous eligibility proof">
                     <Notice tone="info">
                       This proves that your credential belongs to the eligible voter set without
@@ -1039,30 +1321,48 @@ export function Vote() {
                             </Field>
                           </div>
                         </DetailsSection>
+                        <h3 className="submission-route-heading">Offline submission</h3>
+                        <p className="card-body">
+                          Save an encrypted ballot file to deliver manually through the
+                          election&rsquo;s approved intake method. Nothing is sent over the network
+                          when you save.
+                        </p>
+                        <Notice tone="warn">
+                          Once you save or send this ballot for submission, your vote is locked on
+                          this device. After this ballot is exported for submission, your vote for this election
+                          cannot be changed on this device. You can still change your choice until
+                          you save.
+                        </Notice>
                         <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={busy}
+                            onClick={() => void onChangeChoice()}
+                          >
+                            Change my choice
+                          </button>
                           <button
                             type="button"
                             className="btn btn-primary"
                             disabled={busy || !workflow.prepared_ballot.ready_to_export}
-                            onClick={() => void onExportBallot()}
+                            onClick={() => setConfirmCast(true)}
                           >
                             Save ballot file
                           </button>
                         </div>
-                        {exported && (
-                          <Notice tone="ok">
-                            Ballot file saved. Deliver this file through the election's approved
-                            intake method.
-                          </Notice>
-                        )}
                         {transport &&
                           (transport.managed_tor_available ||
                           transport.split_trust_relay_available ? (
                             <>
+                              <h3 className="submission-route-heading">
+                                Private online submission · Tor
+                              </h3>
                               <p className="form-hint">
-                                Alternatively, submit the prepared ballot through a private online
-                                route. The verified ballot package stays in the Rust backend; this
-                                screen never sends ballot bytes itself.
+                                Send the encrypted ballot directly to the organizer over a private
+                                online route. Submission is confirmed only after an authenticated
+                                organizer receipt is verified. The verified ballot package stays in
+                                the Rust backend; this screen never sends ballot bytes itself.
                               </p>
                               <div className="selection-options" role="radiogroup" aria-label="Private submission route">
                                 <label className="selection-option">
@@ -1099,10 +1399,19 @@ export function Vote() {
                                   }
                                   onClick={() => void onSubmitPrivately()}
                                 >
-                                  Submit privately
+                                  Submit privately over Tor
                                 </button>
                               </div>
                             </>
+                          ) : managedTorFeaturePresent ? (
+                            // The controlled managed-Tor test transport IS available
+                            // in this build, so the generic production "unavailable"
+                            // message would contradict the active card below (Issue 9).
+                            <Notice tone="info">
+                              Submit through the private connection in the controlled-test card
+                              below, or save the ballot file above and deliver it through the
+                              election's approved intake method.
+                            </Notice>
                           ) : (
                             <>
                               <Notice tone="info">
@@ -1118,12 +1427,238 @@ export function Vote() {
                         {privateResult && (
                           <Notice tone={receiptStateIsAccepted(privateResult.receipt_state) ? "ok" : "info"}>
                             {receiptStateText(privateResult.receipt_state)}
-                            {privateResult.reduced_anonymity && " Reduced anonymity / small population."}
+                            {"reduced_anonymity" in privateResult && privateResult.reduced_anonymity && " Reduced anonymity / small population."}
+                            {"cast_lock_state" in privateResult && privateResult.cast_lock_state === "CAST" && " Ballot accepted; receipt authenticated."}
+                            {"cast_lock_state" in privateResult && privateResult.cast_lock_state === "CAST_PENDING" && " Submission uncertain; ballot remains locked. Retry when ready."}
+                            {"released" in privateResult && privateResult.released && " Delivery authenticated (this is not final archive or Ootle anchor)."}
                           </Notice>
                         )}
                       </Card>
                     )}
                   </Card>
+                  )}
+
+                  {/* managed-tor-test: private submission controls. Rendered ONLY
+                      when the controlled-test feature is actually present in this
+                      build (a production build without `managed-tor-test` never
+                      shows this card — the backend refuses those commands and the
+                      status command is absent, so managedTorFeaturePresent stays
+                      false). When present, it is shown whenever a ballot is Ready
+                      to submit OR the durable cast state is CAST_PENDING/CAST, so
+                      the recovery/status route survives a restart even though the
+                      transient prepared-ballot state is gone (Issue 2). */}
+                  {managedTorTestCardVisible({
+                    featurePresent: managedTorFeaturePresent,
+                    preparedReady: workflow?.prepared_ballot.state === "Ready",
+                    castState,
+                  }) && (
+                    <Card title="Private submission (controlled test)">
+                      {/* Unmistakable, authoritative status derived from the
+                          DURABLE cast state (Issues 4/17), so SUCCESS and PENDING
+                          survive navigation/restart without any transient result. */}
+                      <Notice tone={privateStatus.tone}>
+                        <strong>{privateStatus.title}</strong>
+                        <br />
+                        {privateStatus.detail}
+                      </Notice>
+
+                      {/* Private-submission errors are shown HERE, next to the
+                          controls, not only at the top of the screen (Issue 5). */}
+                      <BackendErrorNotice
+                        error={privateError}
+                        onDismiss={() => setPrivateError(null)}
+                      />
+
+                      {!managedTorStatus?.configured && !ballotCast && (
+                        <div className="config-stack">
+                          <p className="form-hint">
+                            Configure the private connection with an already-installed tor.exe, the
+                            organizer&rsquo;s voter transport bundle, and a voter Tor data directory
+                            outside the repository. Configuring never starts Tor or sends anything.
+                          </p>
+                          <div className="form-row form-row--full">
+                            <label htmlFor="tor-exe-path">Tor executable</label>
+                            <div className="file-row">
+                              <input
+                                id="tor-exe-path"
+                                type="text"
+                                value={torExePath}
+                                onChange={(e) => setTorExePath(e.target.value)}
+                                placeholder="C:\path\to\tor.exe"
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy || !shellAvailable}
+                                onClick={() => void onBrowseTorExe()}
+                              >
+                                Browse
+                              </button>
+                            </div>
+                          </div>
+                          <div className="form-row form-row--full">
+                            <label htmlFor="voter-bundle-path">Voter transport bundle</label>
+                            <div className="file-row">
+                              <input
+                                id="voter-bundle-path"
+                                type="text"
+                                value={voterBundlePath}
+                                onChange={(e) => setVoterBundlePath(e.target.value)}
+                                placeholder="C:\test-root\voter-public-bundle.cbor"
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy || !shellAvailable}
+                                onClick={() => void onBrowseVoterBundle()}
+                              >
+                                Browse
+                              </button>
+                            </div>
+                          </div>
+                          <div className="form-row form-row--full">
+                            <label htmlFor="tor-data-dir">Voter Tor data directory</label>
+                            <div className="file-row">
+                              <input
+                                id="tor-data-dir"
+                                type="text"
+                                value={torDataDir}
+                                onChange={(e) => setTorDataDir(e.target.value)}
+                                placeholder="C:\test-root\voter-tor"
+                              />
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy || !shellAvailable}
+                                onClick={() => void onBrowseTorDataDir()}
+                              >
+                                Browse
+                              </button>
+                            </div>
+                          </div>
+                          <div className="action-row">
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              disabled={busy || !torExePath || !torDataDir || !voterBundlePath}
+                              onClick={() => void onConfigureManagedTor()}
+                            >
+                              Configure private connection
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
+                      {managedTorStatus?.configured && !managedTorStatus.tor_running && !ballotCast && (
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={busy}
+                            onClick={() => void onStartManagedTor()}
+                          >
+                            Start private connection
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Fresh Submit is offered ONLY when nothing is durably
+                          locked (Issues 3/18). CAST_PENDING shows Retry instead,
+                          and CAST shows neither. */}
+                      {managedTorStatus?.tor_running && !castLocked && (
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={busy || !workflow?.prepared_ballot.ready_to_export}
+                            onClick={() => void onSubmitPrivately()}
+                          >
+                            Submit privately over Tor
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={busy}
+                            onClick={() => void onStopManagedTor()}
+                          >
+                            Stop private connection
+                          </button>
+                        </div>
+                      )}
+
+                      {/* CAST_PENDING recovery: retries the EXACT staged envelope
+                          only; it never prepares or sends a new ballot. No fresh
+                          Submit is shown here (Issue 3). */}
+                      {castPending && (
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={busy}
+                            onClick={() => void onRetryPrivateSubmission()}
+                          >
+                            Retry private submission
+                          </button>
+                          {managedTorStatus?.tor_running ? (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              disabled={busy}
+                              onClick={() => void onStopManagedTor()}
+                            >
+                              Stop private connection
+                            </button>
+                          ) : (
+                            managedTorStatus?.configured && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy}
+                                onClick={() => void onStartManagedTor()}
+                              >
+                                Start private connection
+                              </button>
+                            )
+                          )}
+                        </div>
+                      )}
+
+                      <DetailsSection summary="Advanced / diagnostics">
+                        {privateStageLabel && (
+                          <Notice tone="info">
+                            <strong>Last attempt diagnostic</strong>
+                            <br />
+                            {privateStageLabel}
+                          </Notice>
+                        )}
+                        {managedTorStatus?.socks_addr && (
+                          <p className="form-hint">
+                            Local SOCKS endpoint: <code>{managedTorStatus.socks_addr}</code>
+                          </p>
+                        )}
+                        {managedTorStatus?.onion_hostname && (
+                          <p className="form-hint">
+                            Organizer onion (public route):{" "}
+                            <code>{managedTorStatus.onion_hostname}</code>
+                          </p>
+                        )}
+                        {managedTorStatus?.descriptor_fingerprint && (
+                          <p className="form-hint">
+                            Descriptor fingerprint:{" "}
+                            <code>{managedTorStatus.descriptor_fingerprint}</code>
+                          </p>
+                        )}
+                        <p className="card-body">
+                          Tor mitigates submission network metadata. The cryptographic ballot
+                          protocol provides anonymous eligibility and linkability properties. These
+                          are distinct concepts; Tor alone does not provide voting anonymity. A
+                          &ldquo;ready&rdquo; private connection means the managed Tor process is
+                          running with a working local SOCKS listener; it does not by itself mean the
+                          organizer is reachable or that a ballot was delivered.
+                        </p>
+                      </DetailsSection>
+                    </Card>
+                  )}
                 </>
               )}
             </>
@@ -1142,6 +1677,33 @@ export function Vote() {
             </Field>
           </div>
         </Card>
+      )}
+
+      {confirmCast && (
+        <ConfirmDialog
+          title="Save this ballot file?"
+          body={
+            <>
+              <p>
+                After this ballot is exported for submission, your vote for this election cannot
+                be changed on this device.
+              </p>
+              <p>
+                Saving writes an encrypted ballot file to this device for offline delivery.
+                Nothing is sent over the network, and it does not mean the organizer has received,
+                accepted, or counted it.
+              </p>
+            </>
+          }
+          confirmLabel="Save ballot file"
+          confirmTone="danger"
+          busy={busy}
+          onConfirm={() => {
+            setConfirmCast(false);
+            void onExportBallot();
+          }}
+          onCancel={() => setConfirmCast(false)}
+        />
       )}
     </>
   );

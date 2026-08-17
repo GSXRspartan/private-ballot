@@ -74,14 +74,22 @@ test("a save-dialog runtime failure is distinct and does not invoke Rust", async
   assert.equal(exportCalls, 0);
 });
 
-test("Vote surfaces dialog failures and sets its success state only after export", () => {
+test("Vote surfaces dialog failures and refreshes state only after export", () => {
   const vote = readProjectFile("src/screens/Vote.tsx");
   assert.match(vote, /await requestAndExportPreparedBallot\(/);
   assert.match(vote, /if \(!saved\) return;/);
   assert.match(vote, /GUI_BALLOT_SAVE_DIALOG_UNAVAILABLE/);
   assert.match(vote, /The native Save dialog could not open/);
+  // Within onExportBallot, the workflow refresh (which reveals the cast state)
+  // must wait for the Rust export command to complete.
+  const exportFn = vote.slice(
+    vote.indexOf("async function onExportBallot"),
+    vote.indexOf("async function onChangeChoice"),
+  );
+  assert.ok(exportFn.length > 0, "onExportBallot must precede onChangeChoice");
   assert.ok(
-    vote.indexOf("await requestAndExportPreparedBallot(") < vote.indexOf("setExported(true)"),
+    exportFn.indexOf("await requestAndExportPreparedBallot(") <
+      exportFn.indexOf("refreshWorkflow(true)"),
     "success UI must wait for the Rust export command",
   );
 });

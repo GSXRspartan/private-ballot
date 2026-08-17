@@ -1,4 +1,4 @@
-import { approvalBps, approvalLabel, formatPercent } from "../lifecycle";
+import { approvalBps, approvalLabel, describeLeadingOutcome, formatPercent } from "../lifecycle";
 import type { GuiTallySummaryV1 } from "../api/types";
 import { presentationFor } from "../ballot/ballotTypes";
 import type { GuiElectionSummaryV1 } from "../api/types";
@@ -75,18 +75,8 @@ export function ResultBars({
       </div>
 
       <div className="result-bars-leading" aria-live="polite">
-        {describeLeading(tally)}
+        {describeLeadingOutcome(tally)}
       </div>
     </div>
   );
-}
-
-function describeLeading(tally: GuiTallySummaryV1): string {
-  if ("NoApprovals" in tally.leading) return "No approvals recorded.";
-  if ("SingleLeader" in tally.leading) {
-    const leader = tally.leading.SingleLeader;
-    return `Leading: ${leader.display_name || leader.candidate_id_hex} (${leader.approvals} approvals).`;
-  }
-  const tie = tally.leading.Tie;
-  return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} approvals each).`;
 }

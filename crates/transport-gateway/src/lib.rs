@@ -7,6 +7,35 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
+mod collector;
+
+pub use collector::{
+    CollectorBindErrorV1, CollectorRejectionV1, CollectorServeOutcomeV1, GatewayCollectorHandlerV1,
+    OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1, OPAQUE_ENVELOPE_HTTP_PATH_V1, OpaqueEnvelopeCollectorV1,
+    OpaqueEnvelopeGatewayHandlerV1,
+};
+
+#[cfg(feature = "managed-tor-test")]
+mod test_service_loop;
+
+#[cfg(feature = "managed-tor-test")]
+pub use test_service_loop::{
+    OrganizerCollectorServiceLoopV1, ServicedRequestObservationV1, ThreadSafeCollectorHandlerV1,
+};
+
+#[cfg(feature = "managed-tor-test")]
+mod test_provisioning;
+
+#[cfg(feature = "managed-tor-test")]
+pub use test_provisioning::{
+    IntakeValidationErrorV1, LoadedOrganizerPrivateBundleV1, ProvisioningErrorV1,
+    TestAuthorityMaterialV1, TestElectionBindingV1, VoterPublicBundleV1, build_test_descriptor_v1,
+    directory_contains_any_secret_bytes_v1, generate_test_authority_material_v1,
+    load_organizer_private_bundle_v1, load_voter_public_bundle_v1,
+    provision_organizer_test_bundles_v1, validate_intake_startup_v1,
+    write_organizer_private_bundle_v1, write_voter_public_bundle_v1,
+};
+
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 
 use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBindingV1};
@@ -459,6 +488,31 @@ impl GatewayReceiverKeyV1 {
         Ok(Self {
             receiver_secret_bytes,
         })
+    }
+
+    /// Derives the HPKE receiver PUBLIC key from the stored secret using the
+    /// existing canonical KEM API (`Kem::sk_to_pk`). This is the same derivation
+    /// used at keypair-generation time; it is reused here so intake validation
+    /// can prove the actual secret in `gateway-receiver-secret.bin` derives the
+    /// public key the descriptor and bundle manifest both expect — never a
+    /// manifest-stored value an inconsistent secret file could bypass.
+    #[must_use]
+    pub fn receiver_public_key(&self) -> [u8; 32] {
+        let private = <Kem as KemTrait>::PrivateKey::from_bytes(&self.receiver_secret_bytes)
+            .expect("receiver secret was validated at construction");
+        let public = <Kem as KemTrait>::sk_to_pk(&private);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(public.to_bytes().as_slice());
+        out
+    }
+
+    /// Returns the 32-byte HPKE receiver secret. This is used only by the
+    /// controlled-test intake binary to reconstruct the key behind an `Arc`
+    /// for the thread-safe collector handler. The secret never crosses a
+    /// frontend DTO.
+    #[must_use]
+    pub fn secret_bytes(&self) -> [u8; 32] {
+        self.receiver_secret_bytes
     }
 }
 
@@ -1038,6 +1092,22 @@ impl TransportGatewaySimulatorV1 {
         retry_capability: [u8; 32],
         session: &mut GuiElectionSessionV1,
     ) -> Result<VoterTransportReceiptV1, TransportError> {
+        self.deliver_and_digest(encoded, descriptor, receiver_key, retry_capability, session)
+            .map(|(receipt, _digest)| receipt)
+    }
+
+    /// Same as [`Self::deliver`], but also returns the exact ballot-package
+    /// digest the gateway computed while opening the envelope. The organizer
+    /// collector needs this digest (and the descriptor fingerprint) to sign an
+    /// authenticated, descriptor-bound receipt without re-opening the envelope.
+    pub fn deliver_and_digest(
+        &mut self,
+        encoded: &[u8],
+        descriptor: &TransportDescriptorV1,
+        receiver_key: &GatewayReceiverKeyV1,
+        retry_capability: [u8; 32],
+        session: &mut GuiElectionSessionV1,
+    ) -> Result<(VoterTransportReceiptV1, [u8; 32]), TransportError> {
         let admission_generation = self.admission.admit(session)?;
         let result = self.deliver_admitted(
             encoded,
@@ -1062,7 +1132,7 @@ impl TransportGatewaySimulatorV1 {
         retry_capability: [u8; 32],
         session: &mut GuiElectionSessionV1,
         admission_generation: u64,
-    ) -> Result<VoterTransportReceiptV1, TransportError> {
+    ) -> Result<(VoterTransportReceiptV1, [u8; 32]), TransportError> {
         let envelope = self.collect(encoded)?;
         let bytes = open_envelope_bytes_v1(&envelope, descriptor, receiver_key)?;
         let package_digest =
@@ -1074,17 +1144,20 @@ impl TransportGatewaySimulatorV1 {
         );
         if let Some(prior) = self.retries.get(&capability_commitment) {
             if prior.package_digest != package_digest {
-                return Ok(VoterTransportReceiptV1 {
-                    state: VoterReceiptStateV1::Rejected,
-                    retry_status: RetryStatusV1::GenericDuplicate,
-                });
+                return Ok((
+                    VoterTransportReceiptV1 {
+                        state: VoterReceiptStateV1::Rejected,
+                        retry_status: RetryStatusV1::GenericDuplicate,
+                    },
+                    package_digest,
+                ));
             }
             let mut receipt = prior.receipt.clone();
             receipt.retry_status = match receipt.state {
                 VoterReceiptStateV1::Accepted => RetryStatusV1::PreviousDeliveryAccepted,
                 _ => RetryStatusV1::PreviousDeliveryRejected,
             };
-            return Ok(receipt);
+            return Ok((receipt, package_digest));
         }
 
         // A drain expiry invalidates its earlier admission before core intake.
@@ -1106,9 +1179,36 @@ impl TransportGatewaySimulatorV1 {
                 retry_status: RetryStatusV1::NewDelivery,
             }
         } else if result.category == GuiIntakeCategory::Duplicate {
-            VoterTransportReceiptV1 {
-                state: VoterReceiptStateV1::Rejected,
-                retry_status: RetryStatusV1::GenericDuplicate,
+            // A duplicate election nullifier. Distinguish two very different cases
+            // by the exact package digest:
+            //
+            //   * Same package we already accepted (an idempotent retry of a
+            //     delivery that DID succeed — e.g. the voter's authenticated
+            //     receipt was lost to a delayed/reset Tor close and it retried the
+            //     EXACT staged envelope). The organizer must authenticate the prior
+            //     acceptance so the voter can recover to CAST, and must NOT count a
+            //     second vote.
+            //
+            //   * A different package under the same credential (a genuine
+            //     double-vote / changed-choice attempt). This stays a rejected
+            //     generic duplicate — the election-scoped nullifier double-vote rule
+            //     is unchanged and authoritative.
+            //
+            // `pending_digests` holds the digests of ballots accepted in this intake
+            // session that are not yet sealed into a batch, which is exactly the set
+            // of already-accepted packages during controlled live intake. Recovering
+            // via the exact package digest (never the fresh retry capability) never
+            // increments `accepted_unique_count`.
+            if self.pending_digests.contains(&package_digest) {
+                VoterTransportReceiptV1 {
+                    state: VoterReceiptStateV1::Accepted,
+                    retry_status: RetryStatusV1::PreviousDeliveryAccepted,
+                }
+            } else {
+                VoterTransportReceiptV1 {
+                    state: VoterReceiptStateV1::Rejected,
+                    retry_status: RetryStatusV1::GenericDuplicate,
+                }
             }
         } else {
             VoterTransportReceiptV1 {
@@ -1125,7 +1225,7 @@ impl TransportGatewaySimulatorV1 {
                 },
             );
         }
-        Ok(receipt)
+        Ok((receipt, package_digest))
     }
 }
 

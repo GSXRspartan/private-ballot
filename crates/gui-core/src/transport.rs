@@ -325,9 +325,24 @@ impl TransportDescriptorV1 {
     pub fn batch(&self) -> &BatchPolicyV1 {
         &self.batch
     }
+    /// The optional validity end epoch. `None` means no epoch expiry is
+    /// enforced for this descriptor (used by the controlled test where no
+    /// trustworthy current Ootle epoch source exists).
+    #[must_use]
+    pub fn validity_end_epoch(&self) -> Option<u64> {
+        self.validity_end_epoch
+    }
     #[must_use]
     pub fn route(&self) -> TransportRoutePolicyV1 {
         self.route
+    }
+    /// Onion service endpoints authorized by this signed descriptor. A network
+    /// carrier derives its Tor destination from these, never from independently
+    /// supplied configuration, so the transmitted envelope can only reach a
+    /// destination the verified descriptor names.
+    #[must_use]
+    pub fn onion_endpoints(&self) -> &[String] {
+        &self.onion_endpoints
     }
     /// Public keys authorized by this signed descriptor to verify receipts.
     /// They are distinct from voter, Triptych, wallet, and Ootle keys.
@@ -776,6 +791,259 @@ pub enum RetryStatusV1 {
     GenericDuplicate,
 }
 
+// Version 2 binds the receipt to the exact transport descriptor fingerprint.
+// This receipt format is unreleased; an older provisional (unbound) receipt
+// fails the strict version check and is rejected (fail closed).
+const AUTHENTICATED_RECEIPT_VERSION: u64 = 2;
+const AUTHENTICATED_RECEIPT_DOMAIN: &[u8] = b"tari-cc-private-ballot/transport-receipt/v2\0";
+const MAX_RECEIPT_KEY_ID_BYTES: usize = 128;
+/// Bounded canonical size of a serialized authenticated receipt. Even the
+/// largest well-formed receipt is far below this; the bound rejects a hostile
+/// oversized collector response before parsing.
+pub const MAX_AUTHENTICATED_RECEIPT_BYTES: usize = 4 * 1024;
+
+/// Authenticated, wire-serializable transport receipt.
+///
+/// This is the voter-side authority for promoting a private-transport release
+/// from `CAST_PENDING` to `CAST`: the organizer collector returns these exact
+/// canonical bytes, and the voter promotes only after
+/// [`Self::verify_for_descriptor`] succeeds against a descriptor-authorized
+/// receipt-verification key, the authenticated `descriptor_fingerprint` equals
+/// the exact current descriptor's fingerprint, AND the authenticated
+/// `package_digest` matches the released package.
+///
+/// The signed `descriptor_fingerprint` is the load-bearing binding: the
+/// canonical descriptor fingerprint is a BLAKE3 hash over the descriptor's
+/// entire canonical CBOR (including its signature), so it already commits to the
+/// election/manifest, route, onion endpoints, gateway/receiver public key,
+/// receipt-verification keys, and validity metadata. Signing that fingerprint
+/// therefore binds the receipt to one specific descriptor even if a receipt
+/// verification key is reused across descriptors. An unauthenticated HTTP status
+/// code is never sufficient.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedTransportReceiptV1 {
+    receipt: VoterTransportReceiptV1,
+    descriptor_fingerprint: [u8; 32],
+    package_digest: [u8; 32],
+    batch_root: Option<[u8; 32]>,
+    key_id: String,
+    signature: [u8; 64],
+}
+
+impl AuthenticatedTransportReceiptV1 {
+    /// Voter-safe receipt view (state + retry status only).
+    #[must_use]
+    pub fn receipt(&self) -> &VoterTransportReceiptV1 {
+        &self.receipt
+    }
+
+    /// Authenticated descriptor fingerprint this receipt is bound to.
+    #[must_use]
+    pub fn descriptor_fingerprint(&self) -> [u8; 32] {
+        self.descriptor_fingerprint
+    }
+
+    /// Authenticated package digest this receipt acknowledges.
+    #[must_use]
+    pub fn package_digest(&self) -> [u8; 32] {
+        self.package_digest
+    }
+
+    /// The signing key id the collector selected. Non-secret.
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    /// Signs a receipt. Named for provisioning/test/organizer use; the private
+    /// signing key never lives on the voter side.
+    #[must_use]
+    pub fn sign_for_test_or_ceremony(
+        receipt: VoterTransportReceiptV1,
+        descriptor_fingerprint: [u8; 32],
+        package_digest: [u8; 32],
+        batch_root: Option<[u8; 32]>,
+        key_id: String,
+        signing_key: &SigningKey,
+    ) -> Self {
+        let mut output = Self {
+            receipt,
+            descriptor_fingerprint,
+            package_digest,
+            batch_root,
+            key_id,
+            signature: [0; 64],
+        };
+        output.signature = signing_key.sign(&output.message()).to_bytes();
+        output
+    }
+
+    /// Verifies that the receipt is bound to THIS exact descriptor and is signed
+    /// by a receipt-verification key the descriptor authorizes. The descriptor's
+    /// trust must already be established (root-pinned, manifest-bound) by the
+    /// caller. The fingerprint check runs first so a receipt minted for a
+    /// different descriptor (even under a reused key) is rejected before any
+    /// signature comparison.
+    pub fn verify_for_descriptor(
+        &self,
+        descriptor: &TransportDescriptorV1,
+    ) -> Result<(), TransportError> {
+        if self.descriptor_fingerprint != descriptor.fingerprint()? {
+            return Err(TransportError::WrongDescriptor);
+        }
+        let message = self.message();
+        let signature = Signature::from_bytes(&self.signature);
+        for key_bytes in descriptor.receipt_verification_keys() {
+            let Ok(key) = VerifyingKey::from_bytes(key_bytes) else {
+                continue;
+            };
+            if key.verify_strict(&message, &signature).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(TransportError::CryptoFailure)
+    }
+
+    fn message(&self) -> Vec<u8> {
+        let mut message = AUTHENTICATED_RECEIPT_DOMAIN.to_vec();
+        message.push(self.receipt.state as u8);
+        message.push(self.receipt.retry_status as u8);
+        // The exact descriptor binding: signed, mandatory, fixed 32 bytes.
+        message.extend_from_slice(&self.descriptor_fingerprint);
+        message.extend_from_slice(&self.package_digest);
+        if let Some(root) = self.batch_root {
+            message.push(1);
+            message.extend_from_slice(&root);
+        } else {
+            message.push(0);
+        }
+        message.extend_from_slice(self.key_id.as_bytes());
+        message
+    }
+
+    pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, TransportError> {
+        if self.key_id.is_empty() || self.key_id.len() > MAX_RECEIPT_KEY_ID_BYTES {
+            return Err(TransportError::InvalidEnvelope);
+        }
+        let mut w = CanonicalCborWriter::new();
+        w.write_array_len(8)
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        w.write_unsigned(AUTHENTICATED_RECEIPT_VERSION);
+        w.write_unsigned(receipt_state_code(self.receipt.state));
+        w.write_unsigned(retry_status_code(self.receipt.retry_status));
+        w.write_byte_string(&self.descriptor_fingerprint)
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        w.write_byte_string(&self.package_digest)
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        // Empty byte string = no batch root; a 32-byte string = a root.
+        w.write_byte_string(self.batch_root.as_ref().map_or(&[][..], |root| &root[..]))
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        w.write_text_string(&self.key_id)
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        w.write_byte_string(&self.signature)
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        Ok(w.into_bytes())
+    }
+
+    pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, TransportError> {
+        if bytes.len() > MAX_AUTHENTICATED_RECEIPT_BYTES {
+            return Err(TransportError::OversizedPayload);
+        }
+        let mut r = CanonicalCborReader::new(bytes);
+        if r.read_array_len()
+            .map_err(|_| TransportError::InvalidEnvelope)?
+            != 8
+            || r.read_unsigned()
+                .map_err(|_| TransportError::InvalidEnvelope)?
+                != AUTHENTICATED_RECEIPT_VERSION
+        {
+            return Err(TransportError::InvalidEnvelope);
+        }
+        let state = receipt_state_from_code(
+            r.read_unsigned()
+                .map_err(|_| TransportError::InvalidEnvelope)?,
+        )?;
+        let retry_status = retry_status_from_code(
+            r.read_unsigned()
+                .map_err(|_| TransportError::InvalidEnvelope)?,
+        )?;
+        let descriptor_fingerprint = read_fixed(&mut r)?;
+        let package_digest = read_fixed(&mut r)?;
+        let batch_root_bytes = r
+            .read_byte_string()
+            .map_err(|_| TransportError::InvalidEnvelope)?;
+        let batch_root = match batch_root_bytes.len() {
+            0 => None,
+            32 => Some(
+                batch_root_bytes
+                    .try_into()
+                    .map_err(|_| TransportError::InvalidEnvelope)?,
+            ),
+            _ => return Err(TransportError::InvalidEnvelope),
+        };
+        let key_id = r
+            .read_text_string()
+            .map_err(|_| TransportError::InvalidEnvelope)?
+            .to_owned();
+        let signature = read_fixed(&mut r)?;
+        r.finish().map_err(|_| TransportError::InvalidEnvelope)?;
+        let output = Self {
+            receipt: VoterTransportReceiptV1 {
+                state,
+                retry_status,
+            },
+            descriptor_fingerprint,
+            package_digest,
+            batch_root,
+            key_id,
+            signature,
+        };
+        if output.key_id.is_empty()
+            || output.key_id.len() > MAX_RECEIPT_KEY_ID_BYTES
+            || output.to_canonical_cbor()? != bytes
+        {
+            return Err(TransportError::InvalidEnvelope);
+        }
+        Ok(output)
+    }
+}
+
+const fn receipt_state_code(state: VoterReceiptStateV1) -> u64 {
+    match state {
+        VoterReceiptStateV1::Received => 0,
+        VoterReceiptStateV1::Accepted => 1,
+        VoterReceiptStateV1::Rejected => 2,
+    }
+}
+
+fn receipt_state_from_code(code: u64) -> Result<VoterReceiptStateV1, TransportError> {
+    match code {
+        0 => Ok(VoterReceiptStateV1::Received),
+        1 => Ok(VoterReceiptStateV1::Accepted),
+        2 => Ok(VoterReceiptStateV1::Rejected),
+        _ => Err(TransportError::InvalidEnvelope),
+    }
+}
+
+const fn retry_status_code(status: RetryStatusV1) -> u64 {
+    match status {
+        RetryStatusV1::NewDelivery => 0,
+        RetryStatusV1::PreviousDeliveryAccepted => 1,
+        RetryStatusV1::PreviousDeliveryRejected => 2,
+        RetryStatusV1::GenericDuplicate => 3,
+    }
+}
+
+fn retry_status_from_code(code: u64) -> Result<RetryStatusV1, TransportError> {
+    match code {
+        0 => Ok(RetryStatusV1::NewDelivery),
+        1 => Ok(RetryStatusV1::PreviousDeliveryAccepted),
+        2 => Ok(RetryStatusV1::PreviousDeliveryRejected),
+        3 => Ok(RetryStatusV1::GenericDuplicate),
+        _ => Err(TransportError::InvalidEnvelope),
+    }
+}
+
 fn envelope_aad(
     manifest: ManifestHash,
     fingerprint: [u8; 32],
@@ -951,6 +1219,110 @@ mod tests {
             store
                 .accept(&mutated, &root, ManifestHash::new([7; 32]))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn authenticated_receipt_round_trips_and_rejects_untrusted_or_tampered() {
+        let (descriptor, _) = descriptor();
+        // The descriptor authorizes receipt key [3; 32]'s verifying key? No: it
+        // lists `[3; 32]` as a receipt-verification key bytes literal, which is
+        // not a valid Ed25519 point in general, so build a descriptor whose
+        // receipt key we control.
+        let receipt_signer = SigningKey::from_bytes(&[41; 32]);
+        let authority = SigningKey::from_bytes(&[9; 32]);
+        let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
+            descriptor.election_id().to_vec(),
+            descriptor.manifest_hash(),
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec!["x.onion".to_owned()],
+            Vec::new(),
+            descriptor.gateway_public_key(),
+            "gw".to_owned(),
+            vec![receipt_signer.verifying_key().to_bytes()],
+            PaddingPolicyV1 {
+                id: "fixed-8192".to_owned(),
+                padded_bytes: 8192,
+            },
+            BatchPolicyV1 {
+                id: "accepted-1".to_owned(),
+                accepted_unique_floor: 1,
+            },
+            None,
+            "test-root-2026".to_owned(),
+            &authority,
+        )
+        .expect("descriptor signs");
+
+        let digest = [7u8; 32];
+        let fingerprint = descriptor.fingerprint().expect("descriptor fingerprint");
+        let receipt = AuthenticatedTransportReceiptV1::sign_for_test_or_ceremony(
+            VoterTransportReceiptV1 {
+                state: VoterReceiptStateV1::Accepted,
+                retry_status: RetryStatusV1::NewDelivery,
+            },
+            fingerprint,
+            digest,
+            None,
+            "receipt-1".to_owned(),
+            &receipt_signer,
+        );
+        let encoded = receipt.to_canonical_cbor().expect("canonical receipt");
+        let decoded =
+            AuthenticatedTransportReceiptV1::from_canonical_cbor(&encoded).expect("strict decode");
+        assert_eq!(decoded, receipt);
+        assert_eq!(decoded.package_digest(), digest);
+        assert_eq!(decoded.descriptor_fingerprint(), fingerprint);
+        decoded
+            .verify_for_descriptor(&descriptor)
+            .expect("authorized receipt verifies");
+
+        // A receipt signed by an unauthorized key is rejected.
+        let forged = AuthenticatedTransportReceiptV1::sign_for_test_or_ceremony(
+            VoterTransportReceiptV1 {
+                state: VoterReceiptStateV1::Accepted,
+                retry_status: RetryStatusV1::NewDelivery,
+            },
+            fingerprint,
+            digest,
+            None,
+            "receipt-1".to_owned(),
+            &SigningKey::from_bytes(&[200; 32]),
+        );
+        assert!(forged.verify_for_descriptor(&descriptor).is_err());
+
+        // A receipt validly signed but bound to a DIFFERENT descriptor
+        // fingerprint (even by the authorized key) must be rejected before any
+        // signature comparison — this is the reused-key protection.
+        let wrong_fingerprint = AuthenticatedTransportReceiptV1::sign_for_test_or_ceremony(
+            VoterTransportReceiptV1 {
+                state: VoterReceiptStateV1::Accepted,
+                retry_status: RetryStatusV1::NewDelivery,
+            },
+            [0xEE; 32],
+            digest,
+            None,
+            "receipt-1".to_owned(),
+            &receipt_signer,
+        );
+        assert_eq!(
+            wrong_fingerprint.verify_for_descriptor(&descriptor),
+            Err(TransportError::WrongDescriptor),
+        );
+
+        // Flipping a signature byte keeps a canonical shape (still decodes) but
+        // fails signature verification — it must never authenticate.
+        let mut mutated = encoded.clone();
+        let last = mutated.len() - 1;
+        mutated[last] ^= 1;
+        let mutated_receipt =
+            AuthenticatedTransportReceiptV1::from_canonical_cbor(&mutated).expect("shape decodes");
+        assert!(mutated_receipt.verify_for_descriptor(&descriptor).is_err());
+        // Malformed framing is rejected outright.
+        assert!(
+            AuthenticatedTransportReceiptV1::from_canonical_cbor(&[0x80]).is_err(),
+            "an empty array is not a receipt"
         );
     }
 

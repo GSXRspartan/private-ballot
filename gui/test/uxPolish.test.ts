@@ -204,7 +204,7 @@ describe("prepared ballot save action", () => {
   });
 
   it("states the offline next step without overclaiming", () => {
-    assert.match(vote, /Ballot file saved\. Deliver this file through the election's approved\s+intake method\./);
+    assert.match(vote, /Deliver the exported ballot file through the election's approved intake\s+method\./);
     assert.doesNotMatch(vote, /vote (has been |is )?(counted|recorded|anchored)/i);
     assert.doesNotMatch(vote, /submitted to Ootle/i);
   });
@@ -559,5 +559,70 @@ describe("finalized archive error wording", () => {
       display.nextStep,
       "Finalize the verified election before writing the final archive.",
     );
+  });
+});
+
+// -------------------------------------------------------------------------
+// Create → Manage lifecycle steering (Phase E)
+// -------------------------------------------------------------------------
+
+describe("create election steers to Manage Election", () => {
+  const create = readProjectFile("src/screens/CreateElection.tsx");
+  it("makes Continue to Manage Election the primary post-freeze action", () => {
+    assert.match(create, />\s*Continue to Manage Election\s*</);
+    // Open Voting is demoted to a secondary action here; Manage Election is the
+    // authoritative lifecycle place.
+    assert.match(create, /Manage Election.*lifecycle|lifecycle.*Manage Election/s);
+  });
+});
+
+// -------------------------------------------------------------------------
+// Home local-workspace management: Resume + safe Delete (Phase F)
+// -------------------------------------------------------------------------
+
+describe("home workspace resume and delete", () => {
+  it("offers Resume and Delete per workspace", () => {
+    assert.match(home, />\s*Resume\s*</);
+    assert.match(home, />\s*Delete\s*</);
+    assert.match(home, /deleteElectionWorkspace\(/);
+  });
+
+  it("guards delete behind an explicit confirmation naming the local workspace", () => {
+    assert.match(home, /Delete local election workspace\?/);
+    assert.match(home, /removes the local organizer workspace from this device/);
+    assert.match(home, /finalized archives outside the app-data workspace are not/);
+    assert.match(home, /confirmTone="danger"/);
+  });
+
+  it("wires the delete command through the shell with a confined backend", () => {
+    assert.match(client, /"delete_election_workspace"/);
+    assert.match(tauriShell, /fn delete_election_workspace\(/);
+    // The backend refuses to delete the workspace currently loaded in-session.
+    assert.match(tauriShell, /GUI_WORKSPACE_DELETE_ACTIVE/);
+  });
+});
+
+// -------------------------------------------------------------------------
+// One-folder election loader with a manual fallback (Phase G)
+// -------------------------------------------------------------------------
+
+describe("one-folder election loader", () => {
+  it("offers Select Election Folder as the primary Manage Election load flow", () => {
+    assert.match(manage, />\s*Select Election Folder\s*</);
+    assert.match(manage, /loadElectionFolder\(/);
+    // The three-file loader is kept under an Advanced / manual section.
+    assert.match(manage, /Advanced \/ manual load/);
+    // The picker copy warns not to open the folder first (folder-picker UX fix).
+    assert.match(manage, /do not open it first/);
+  });
+
+  it("wires the folder command and reuses the shared backend validation", () => {
+    assert.match(client, /"load_election_folder"/);
+    assert.match(tauriShell, /fn load_election_folder\(/);
+    // No election validation is duplicated in TypeScript; the backend resolves
+    // the three canonical files and reuses the shared load path.
+    assert.match(tauriShell, /load_election_from_paths\(/);
+    assert.match(tauriShell, /election-manifest\.cbor/);
+    assert.match(tauriShell, /GUI_ELECTION_FOLDER_INCOMPLETE/);
   });
 });

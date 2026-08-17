@@ -201,6 +201,30 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
       context: error.context,
     };
   }
+  if (error.code === "GUI_BALLOT_EXPORT_DESTINATION_UNSUPPORTED") {
+    return {
+      title: "This location can't be used for ballot export",
+      message:
+        "This location does not support the safe ballot finalization required by Tari Private Ballot.",
+      nextStep:
+        "Choose another location, such as a local folder on your computer's main drive where you have permission to save files.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_BALLOT_EXPORT_PROBE_FAILED") {
+    return {
+      title: "Ballot export location could not be verified",
+      message:
+        "Tari Private Ballot could not verify the chosen location supports safe ballot finalization.",
+      nextStep:
+        "Choose another location, such as a local folder on your computer's main drive, then try again.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
   return {
     title: CATEGORY_TITLES[error.category] ?? FALLBACK_TITLE,
     message: error.message,

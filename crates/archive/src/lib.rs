@@ -30,14 +30,12 @@ pub use transport_binding::{
     TRANSPORT_BATCH_SET_ALGORITHM_ID_V1, TransportArchiveBatchV1, TransportArchiveBindingV1,
 };
 pub use verifier::{
-    CANDIDATE_SET_ARCHIVE_PATH, ELECTION_MANIFEST_ARCHIVE_PATH,
-    GOVERNANCE_DOCUMENT_ARCHIVE_PATH, MAX_GOVERNANCE_DOCUMENT_BYTES, STAGE_ARCHIVE_HASH,
-    STAGE_ARCHIVE_MANIFEST, STAGE_BALLOT_REPLAY, STAGE_CATALOG_FILES,
-    STAGE_ELECTION_ARTIFACTS, STAGE_GOVERNANCE_PIN, STAGE_TRANSPORT_BINDING,
-    SUBMISSIONS_ARCHIVE_DIR, VOTER_REGISTRY_ARCHIVE_PATH, ArchiveDirectoryFileCheckV1,
-    ArchiveDirectoryVerificationV1, ArchiveGovernancePinFactV1, ArchiveLeadingResultV1,
-    ArchiveTallyCountV1, ArchiveTallySummaryV1, ArchiveVerifierError,
-    verify_archive_directory_v1,
+    ArchiveDirectoryFileCheckV1, ArchiveDirectoryVerificationV1, ArchiveGovernancePinFactV1,
+    ArchiveLeadingResultV1, ArchiveTallyCountV1, ArchiveTallySummaryV1, ArchiveVerifierError,
+    CANDIDATE_SET_ARCHIVE_PATH, ELECTION_MANIFEST_ARCHIVE_PATH, GOVERNANCE_DOCUMENT_ARCHIVE_PATH,
+    MAX_GOVERNANCE_DOCUMENT_BYTES, STAGE_ARCHIVE_HASH, STAGE_ARCHIVE_MANIFEST, STAGE_BALLOT_REPLAY,
+    STAGE_CATALOG_FILES, STAGE_ELECTION_ARTIFACTS, STAGE_GOVERNANCE_PIN, STAGE_TRANSPORT_BINDING,
+    SUBMISSIONS_ARCHIVE_DIR, VOTER_REGISTRY_ARCHIVE_PATH, verify_archive_directory_v1,
 };
 
 /// First metadata-minimized archive replay-model version.

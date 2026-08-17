@@ -65,6 +65,15 @@ export interface GuiBallotIntakeResultV1 {
   package_digest_hex: string;
 }
 
+/** Aggregate result of one durable private-intake inbox sync pass. Counts only;
+ *  no plaintext, proof, nullifier, credential, or network identity. */
+export interface GuiPrivateIntakeSyncSummaryV1 {
+  discovered: number;
+  newly_accepted: number;
+  duplicates: number;
+  rejected: number;
+}
+
 export interface GuiTallyCountV1 {
   candidate_id_hex: string;
   candidate_id_text: string | null;
@@ -72,8 +81,14 @@ export interface GuiTallyCountV1 {
   approvals: number;
 }
 
+// `GuiLeadingResultV1` is an externally-tagged serde enum. Its unit variant
+// `NoApprovals` serializes as the BARE STRING "NoApprovals" (not an object),
+// while the data-bearing variants serialize as single-key objects. Modelling
+// the unit variant as an object here previously caused a render-time crash:
+// `"NoApprovals" in tally.leading` throws a TypeError when `tally.leading` is a
+// string primitive, which is exactly the zero-approvals / zero-ballot case.
 export type GuiLeadingResultV1 =
-  | { NoApprovals: null }
+  | "NoApprovals"
   | { SingleLeader: { candidate_id_hex: string; display_name: string; approvals: number } }
   | { Tie: { candidate_ids_hex: string[]; approvals: number } };
 
@@ -531,7 +546,15 @@ export type GuiVoterWorkflowStateV1 =
   | "SelectionIncomplete"
   | "SelectionReady"
   | "PreparingProof"
-  | "PreparedBallotReady";
+  | "PreparedBallotReady"
+  | "BallotCast"
+  | "CastPending";
+
+/** Durable local cast state for the loaded election + credential. Defence in
+ *  depth only: the election-scoped nullifier remains the authoritative one-vote
+ *  rule. `NOT_CAST` while the ballot may still be reconsidered; `CAST` once it
+ *  has been exported/cast; `CAST_PENDING` during crash recovery (locked). */
+export type GuiVoterCastLockStateV1 = "NOT_CAST" | "CAST_PENDING" | "CAST";
 
 export interface GuiVoterElectionBindingV1 {
   election_id_hex: string;
@@ -615,4 +638,43 @@ export interface GuiVoterWorkflowStatusV1 {
   selection_revision: number;
   preparation_generation: number;
   preparation_notice: string;
+  cast_lock_state: GuiVoterCastLockStateV1;
+}
+
+// ---------------------------------------------------------------------------
+// managed-tor-test: controlled-test managed Tor transport (voter side).
+//
+// These DTOs are produced only when the Tauri shell is compiled with the
+// `managed-tor-test` feature AND the user has explicitly configured a test
+// transport. No secret material crosses the boundary.
+// ---------------------------------------------------------------------------
+
+/** Safe metadata returned after a private-transport release attempt. `CAST`
+ *  only once an authenticated receipt is verified and persisted; otherwise
+ *  `CAST_PENDING`. `released` is delivery authentication, NOT organizer
+ *  acceptance, tally inclusion, or Ootle anchoring. */
+export interface GuiPrivateReleaseResultV1 {
+  cast_lock_state: string;
+  receipt_state: string;
+  released: boolean;
+  package_digest_hex: string;
+  /**
+   * Bounded, privacy-safe stage label describing why an uncertain
+   * (CAST_PENDING) attempt did not complete, for the controlled-test Advanced/
+   * diagnostics panel only. `null` on success. Never carries any secret,
+   * ballot, or network-identity material — only which processing stage
+   * classified the outcome.
+   */
+  diagnostic_stage: string | null;
+}
+
+/** Status of the voter-side managed-Tor test transport. */
+export interface ManagedTorTestStatusV1 {
+  configured: boolean;
+  tor_running: boolean;
+  socks_ready: boolean;
+  socks_addr: string | null;
+  onion_hostname: string | null;
+  descriptor_fingerprint: string | null;
+  message: string;
 }

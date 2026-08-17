@@ -18,6 +18,7 @@ import type {
   GuiArchiveWriteResultV1,
   GuiBallotPresentationType,
   GuiBallotIntakeResultV1,
+  GuiPrivateIntakeSyncSummaryV1,
   GuiCommandError,
   GuiElectionCreationResultV1,
   GuiElectionDraftPreviewV1,
@@ -28,6 +29,7 @@ import type {
   GuiGovernanceDocumentDigestV1,
   GuiGovernanceDocumentStatusV1,
   GuiParticipationSummaryV1,
+  GuiPrivateReleaseResultV1,
   GuiPrivateRouteV1,
   GuiPrivateSubmissionResultV1,
   GuiPrivateTransportAvailabilityV1,
@@ -42,6 +44,7 @@ import type {
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
+  ManagedTorTestStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
 } from "./types";
@@ -105,6 +108,10 @@ export const api = {
       registryPath,
       optionSetPath,
     }),
+  loadElectionFolder: (folderPath: string) =>
+    call<GuiElectionSummaryV1>("load_election_folder", {
+      folderPath,
+    }),
 
   unloadElection: () => call<void>("unload_election"),
 
@@ -116,6 +123,10 @@ export const api = {
     call<GuiElectionWorkspaceResumeResultV1>("resume_election_workspace", {
       workspaceId,
     }),
+  deleteElectionWorkspace: (workspaceId: string) =>
+    call<GuiElectionWorkspaceSummaryV1[]>("delete_election_workspace", {
+      workspaceId,
+    }),
 
   openVoting: () => call<GuiElectionSummaryV1>("open_voting"),
   closeVoting: () => call<GuiElectionSummaryV1>("close_voting"),
@@ -124,6 +135,12 @@ export const api = {
 
   intakeBallotPackage: (packagePath: string) =>
     call<GuiBallotIntakeResultV1>("intake_ballot_package", { packagePath }),
+
+  privateIntakeInboxPath: () =>
+    call<string>("private_intake_inbox_path"),
+
+  syncPrivateIntake: () =>
+    call<GuiPrivateIntakeSyncSummaryV1>("sync_private_intake"),
 
   currentTally: () => call<GuiTallySummaryV1>("current_tally"),
 
@@ -261,14 +278,33 @@ export const api = {
     }),
   clearVoterBallotSelection: () =>
     call<GuiVoterSelectionStatusV1>("clear_voter_ballot_selection"),
+  changeMyBallotChoice: () =>
+    call<GuiPreparedBallotStatusV1>("change_my_ballot_choice"),
   prepareVoterBallot: () => call<GuiPreparedBallotStatusV1>("prepare_voter_ballot"),
   exportPreparedVoterBallot: (packagePath: string) =>
     call<GuiPreparedBallotExportV1>("export_prepared_voter_ballot", { packagePath }),
   privateTransportAvailability: () =>
     call<GuiPrivateTransportAvailabilityV1>("private_transport_availability"),
   submitPreparedVoterBallotPrivately: (route: GuiPrivateRouteV1) =>
-    call<GuiPrivateSubmissionResultV1>("submit_prepared_voter_ballot_privately", { route }),
+    call<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1>(
+      "submit_prepared_voter_ballot_privately",
+      { route },
+    ),
   resetVoterWorkflow: () => call<GuiVoterWorkflowStatusV1>("reset_voter_workflow"),
+  // managed-tor-test commands (no-ops/fail-closed when the feature is absent).
+  configureManagedTorTest: (
+    torExePath: string,
+    voterTorDataDir: string,
+    voterPublicBundlePath: string,
+  ) =>
+    call<ManagedTorTestStatusV1>("configure_managed_tor_test", {
+      input: { tor_exe_path: torExePath, voter_tor_data_dir: voterTorDataDir, voter_public_bundle_path: voterPublicBundlePath },
+    }),
+  startManagedTor: () => call<ManagedTorTestStatusV1>("start_managed_tor"),
+  stopManagedTor: () => call<ManagedTorTestStatusV1>("stop_managed_tor"),
+  managedTorTestStatus: () => call<ManagedTorTestStatusV1>("managed_tor_test_status"),
+  retryPrivateSubmission: () =>
+    call<GuiPrivateReleaseResultV1>("retry_private_submission"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,
     governanceDocumentPath: string | null,

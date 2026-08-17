@@ -44,11 +44,13 @@ pub mod inspect;
 pub mod intake;
 pub mod live_anchor_config;
 pub mod participation;
+pub mod private_intake_inbox;
 pub mod session;
 pub mod summary;
 pub mod tally;
 pub mod transport;
 pub mod transport_anchor;
+pub mod voter_cast_lock;
 pub mod voter_confirmation;
 pub mod voter_credential;
 pub mod voter_credential_container;
@@ -94,17 +96,40 @@ pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
     ResultVisibility, SMALL_ELECTORATE_THRESHOLD,
 };
+pub use private_intake_inbox::{
+    GuiPrivateIntakeSyncSummaryV1, MAX_PRIVATE_INTAKE_INBOX_FILES_V1,
+    PRIVATE_INTAKE_INBOX_DIRECTORY_NAME, append_accepted_ballot_package_to_inbox_v1,
+    ballot_package_digest_hex_v1, ensure_private_intake_inbox_directory_v1,
+    ingest_private_intake_inbox_into_session_v1, private_intake_inbox_directory_v1,
+};
 pub use session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 pub use transport::{
-    BatchPolicyV1, DescriptorConsistencyStoreV1, EnvelopeOpeningMaterialV1, PaddingPolicyV1,
+    AuthenticatedTransportReceiptV1, BatchPolicyV1, DescriptorConsistencyStoreV1,
+    EnvelopeOpeningMaterialV1, MAX_AUTHENTICATED_RECEIPT_BYTES, PaddingPolicyV1,
     PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
     TransportDescriptorV1, TransportError, TransportRoutePolicyV1, VoterReceiptStateV1,
     VoterTransportReceiptV1, production_transport_authority_root_v1,
 };
 pub use transport_anchor::{GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1};
+pub use voter_cast_lock::{
+    GuiVoterCastLockStateV1, MAX_STAGED_RELEASE_ENVELOPE_BYTES, PendingReleaseRetryHandleV1,
+    ProbePhaseALinkGuardV1, VOTER_CAST_LOCKS_DIRECTORY_NAME, cast_record_exists_v1,
+    classify_cast_destination_probe_failure_v1, classify_cast_destination_probe_phase_a_v1,
+    classify_cast_destination_probe_phase_b_v1, ensure_voter_cast_locks_directory_v1,
+    finalize_verified_cast_temp_without_overwrite, load_pending_release_retry_handle_v1,
+    persist_release_receipt_evidence_v1, probe_cast_export_destination_supports_no_overwrite_v1,
+    probe_phase_a_create_link_v1, promote_cast_record_to_cast_v1,
+    public_credential_fingerprint_hex_v1, read_and_verify_staged_release_envelope_v1,
+    read_staged_release_envelope_v1, release_receipt_evidence_path_v1,
+    resolve_and_recover_cast_lock_state_v1,
+    resolve_and_recover_private_transport_cast_lock_state_v1, stage_release_envelope_v1,
+    staged_release_envelope_digest_hex_v1, staged_release_envelope_path_v1,
+    voter_cast_locks_directory_v1, write_cast_record_pending_private_transport_v1,
+    write_cast_record_pending_v1,
+};
 pub use voter_confirmation::{
     GuiVoterAdvancedDetailsV1, GuiVoterBoundFieldsV1, GuiVoterElectionConfirmationV1,
     VOTER_NEXT_STAGE_PLACEHOLDER, build_voter_election_confirmation,
@@ -140,17 +165,18 @@ pub use voter_credential_store::{
 };
 pub use voter_session::{
     GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1, GuiPreparedBallotSummaryV1,
-    GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1, GuiVoterSelectionStatusV1,
-    GuiVoterSessionV1, GuiVoterWorkflowStateV1, GuiVoterWorkflowStatusV1,
-    PROOF_GENERATION_DEFERRED_NOTICE, voter_selectable_options,
+    GuiPrivateReleaseResultV1, GuiVoterElectionBindingV1, GuiVoterPreparationTokenV1,
+    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStateV1,
+    GuiVoterWorkflowStatusV1, PROOF_GENERATION_DEFERRED_NOTICE, PrivateReleaseCarrierV1,
+    voter_selectable_options,
 };
 pub use workspace::{
     ELECTION_WORKSPACES_DIRECTORY_NAME, GuiElectionWorkspaceResumeResultV1,
     GuiElectionWorkspaceSummaryV1, LoadedElectionWorkspaceV1, MAX_BALLOT_PACKAGE_BYTES_V1,
     MAX_ELECTION_WORKSPACES_V1, MAX_WORKSPACE_PACKAGE_COUNT_V1, MAX_WORKSPACE_REVISION_BYTES_V1,
-    create_draft_workspace_id_v1, election_workspaces_directory_v1,
+    create_draft_workspace_id_v1, delete_election_workspace_v1, election_workspaces_directory_v1,
     ensure_election_workspaces_directory_v1, list_election_workspaces_v1,
-    read_ballot_package_file_bounded_v1, resume_election_workspace_v1, validate_workspace_id_v1,
-    workspace_id_for_session_v1, write_draft_workspace_revision_v1,
-    write_session_workspace_revision_v1,
+    mark_draft_workspace_superseded_v1, read_ballot_package_file_bounded_v1,
+    resume_election_workspace_v1, validate_workspace_id_v1, workspace_id_for_session_v1,
+    write_draft_workspace_revision_v1, write_session_workspace_revision_v1,
 };

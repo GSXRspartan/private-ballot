@@ -261,7 +261,10 @@ fn tally_is_sealed_while_frozen() {
         Ok(_) => panic!("tally must be sealed while FROZEN"),
         Err(error) => {
             assert_eq!(error.code(), "GUI_TALLY_NOT_AVAILABLE_BEFORE_CLOSE");
-            assert_eq!(error.message(), "Tally results are not available until voting is closed.");
+            assert_eq!(
+                error.message(),
+                "Tally results are not available until voting is closed."
+            );
             assert_eq!(error.context(), Some("tally"));
             assert_no_tally_leak(&error);
         }

@@ -274,13 +274,19 @@ fn finalized_governance_archive_path_keeps_finalized_gate() {
     assert_eq!(error.code(), "GUI_ARCHIVE_NOT_FINALIZED");
 
     let mut finalized = verified;
-    finalized.finalize().expect("session should reach FINALIZED");
+    finalized
+        .finalize()
+        .expect("session should reach FINALIZED");
     let target = dir.join("finalized");
     write_finalized_archive_v1_with_governance_document(&finalized, &target, Some(doc))
         .expect("FINALIZED session must write finalized archive with governance document");
 
     let verification = verify_archive_directory_v1(&target).expect("archive must verify");
-    assert!(verification.verified, "failure: {:?}", verification.failure_code);
+    assert!(
+        verification.verified,
+        "failure: {:?}",
+        verification.failure_code
+    );
     assert!(verification.finalized);
     assert!(
         verification

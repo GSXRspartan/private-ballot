@@ -211,3 +211,21 @@ export function isMultiApprovalBallot(_tally: GuiTallySummaryV1): boolean {
   // override it.
   return true;
 }
+
+/** Human-facing description of a tally's leading outcome (never an invented
+ *  winner). `leading` is an externally-tagged serde enum: its unit variant is
+ *  the BARE STRING "NoApprovals", while the data-bearing variants are
+ *  single-key objects. The string form MUST be handled before any `in` check —
+ *  `"x" in aString` throws a TypeError — which was the zero-ballot Compute-tally
+ *  crash. This single shared helper keeps both the field text and the result
+ *  bars in agreement and pins the behavior in one testable place. */
+export function describeLeadingOutcome(tally: GuiTallySummaryV1): string {
+  const leading = tally.leading;
+  if (leading === "NoApprovals") return "No approvals recorded.";
+  if ("SingleLeader" in leading) {
+    const leader = leading.SingleLeader;
+    return `Leading: ${leader.display_name || leader.candidate_id_hex} (${leader.approvals} approvals).`;
+  }
+  const tie = leading.Tie;
+  return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} approvals each).`;
+}

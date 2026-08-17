@@ -22,6 +22,7 @@ import {
 } from "../src/ballot/ballotTypes.ts";
 import {
   approvalBps,
+  describeLeadingOutcome,
   approvalLabel,
   canWriteFinalArchive,
   canShowTally,
@@ -347,6 +348,44 @@ describe("multi-approval result labeling", () => {
     assert.equal(approvalBps(2, 3), 6666);
     const label = approvalLabel("option", 2, 3);
     assert.match(label, /66\.6% of accepted ballots/);
+  });
+});
+
+describe("tally leading outcome (zero-ballot ErrorBoundary regression)", () => {
+  // `NoApprovals` is a serde unit variant: it deserializes to the BARE STRING
+  // "NoApprovals", not an object. The old code did `"NoApprovals" in
+  // tally.leading`, which throws `TypeError: Cannot use 'in' operator ... in a
+  // string` during render and tripped the Manage Election ErrorBoundary the
+  // moment an organizer computed the tally with zero accepted ballots.
+  it("describes the string NoApprovals variant without throwing", () => {
+    const tally = {
+      accepted_ballots: 0,
+      abstentions: 0,
+      counts: [],
+      leading: "NoApprovals",
+    } as unknown as Parameters<typeof describeLeadingOutcome>[0];
+    assert.doesNotThrow(() => describeLeadingOutcome(tally));
+    assert.match(describeLeadingOutcome(tally), /No approvals recorded/);
+  });
+
+  it("describes the object SingleLeader variant", () => {
+    const tally = {
+      accepted_ballots: 3,
+      abstentions: 0,
+      counts: [],
+      leading: { SingleLeader: { candidate_id_hex: "a", display_name: "Alice", approvals: 2 } },
+    } as unknown as Parameters<typeof describeLeadingOutcome>[0];
+    assert.match(describeLeadingOutcome(tally), /Leading: Alice \(2 approvals\)/);
+  });
+
+  it("describes the object Tie variant", () => {
+    const tally = {
+      accepted_ballots: 4,
+      abstentions: 0,
+      counts: [],
+      leading: { Tie: { candidate_ids_hex: ["a", "b"], approvals: 2 } },
+    } as unknown as Parameters<typeof describeLeadingOutcome>[0];
+    assert.match(describeLeadingOutcome(tally), /Unresolved tie between 2 options/);
   });
 });
 

@@ -321,10 +321,16 @@ a {
   align-items: center;
   gap: 0.5rem;
 }
+/* The election name is the only elastic item in the toolbar: it yields space
+   first (min-width:0 + flex-shrink) and truncates with an ellipsis, so the
+   lifecycle pill and theme control are never pushed out of the header. The
+   full name is available via the hover tooltip and on Home/Manage. */
 .toolbar-election {
   font-size: 0.8125rem;
   color: var(--text-secondary);
-  max-width: 18rem;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 16rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -422,9 +428,13 @@ a {
 /* ------------------------------------------------------------------ */
 /* Components                                                          */
 /* ------------------------------------------------------------------ */
+/* Content cards (election overview, lifecycle controls, archive/anchor
+   status). A wider minimum keeps these to two comfortable columns at desktop
+   width instead of three cramped ones, and lets them stack to a single column
+   as the window narrows before their contents get squeezed. */
 .card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr));
   gap: 1rem;
   margin: 1rem 0;
 }
@@ -617,6 +627,25 @@ a {
   margin: 0.625rem 0;
   max-width: 34rem;
 }
+/* Full-content-width rows for long filesystem paths (e.g. the managed-Tor test
+   configuration), so a long absolute path is not squeezed into a narrow column
+   with its Browse button. One value per row: label above, full-width input +
+   Browse beside it. */
+.form-row--full {
+  max-width: none;
+}
+/* Single-column configuration stack (e.g. the managed-Tor private-connection
+   form). Unlike `.field-list` — a two-column label/value grid — this lays each
+   row out full width in a vertical stack, so a long absolute path row (label
+   above, full-width input + Browse beside) is never squeezed into a narrow grid
+   column. This is the PARENT-layout fix; `.form-row--full` alone cannot widen a
+   row that a two-column grid parent has already confined to one cell. */
+.config-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
 .form-row label {
   font-weight: 500;
   font-size: 0.9375rem;
@@ -775,6 +804,29 @@ table.data th {
   color: var(--text-secondary);
 }
 
+/* Guide workflow overview diagram: the theme-matched "How Private Ballot
+   Works" artwork near the top of the Guide. It uses the full content width,
+   keeps its aspect ratio, and scales down responsively without overflow.
+   The artwork carries its own visual hierarchy, so it sits directly in the
+   content flow with only the standard border/radius treatment — no nested
+   card decoration. */
+/* The artwork is comfortably readable well below the content column width, so
+   the figure is capped and centered rather than stretched edge to edge at wide
+   desktop sizes. The image itself keeps width/height:auto + max-width:100% so
+   it scales down cleanly inside the cap on narrow windows. */
+.guide-flow {
+  margin: 1rem auto;
+  max-width: 880px;
+}
+.guide-flow-diagram {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
 /* Ballot-selection instruction: the primary voter call to action, derived
    from the actual election rules. */
 .selection-instruction {
@@ -844,6 +896,16 @@ table.data th {
   margin-left: 0.5rem;
   padding: 0.125rem 0.5rem;
   font-size: 0.75rem;
+}
+
+/* Distinct heading for the two mutually-exclusive submission routes (offline
+   file save vs private online over Tor), so a voter can never confuse "save a
+   file locally" with "send to the organizer". */
+.submission-route-heading {
+  margin: 1rem 0 0.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .file-row {
@@ -1424,5 +1486,41 @@ table.data th {
   }
   .option-edit-label {
     flex: 1 1 12rem;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Dashboard reflow: stack cards to a single column before their       */
+/* contents become cramped, and stack label/value rows on small        */
+/* windows. Long hashes already wrap (overflow-wrap: anywhere), so no   */
+/* horizontal page scrolling is ever introduced.                       */
+/* ------------------------------------------------------------------ */
+@media (max-width: 52rem) {
+  .card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 44rem) {
+  .analytics-grid {
+    grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  }
+  .field-list {
+    grid-template-columns: minmax(7rem, auto) 1fr;
+  }
+  .toolbar-election {
+    max-width: 8rem;
+  }
+}
+@media (max-width: 34rem) {
+  .analytics-grid {
+    grid-template-columns: 1fr;
+  }
+  /* Stack each label above its value so long values keep full width. */
+  .field-list {
+    grid-template-columns: 1fr;
+    gap: 0.125rem 0;
+  }
+  .field-label {
+    margin-top: 0.25rem;
   }
 }

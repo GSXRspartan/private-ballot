@@ -1,4 +1,14 @@
 import { Card, Notice } from "../components/ui";
+import { useTheme } from "../theme/ThemeProvider";
+
+import flowDiagramDark from "../assets/guide/private-ballot-flow-dark.png";
+import flowDiagramLight from "../assets/guide/private-ballot-flow-light.png";
+
+/** Alt text for the workflow overview diagram. The diagram communicates the
+ *  essential credential workflow, so the description states it fully; the
+ *  same text serves both theme variants. */
+const FLOW_DIAGRAM_ALT =
+  "Private Ballot workflow: voters create and keep their own private credentials, share only public enrollment keys with the ballot office, create anonymous ballot packages, and the ballot office verifies, tallies, finalizes, and may anchor the final archive to Ootle.";
 
 /**
  * Guide — the built-in, role-based walkthrough for the intended finished
@@ -12,6 +22,8 @@ import { Card, Notice } from "../components/ui";
  * wording says "intended" rather than pretending it works now.
  */
 export function Guide() {
+  const { resolved } = useTheme();
+  const flowDiagram = resolved === "dark" ? flowDiagramDark : flowDiagramLight;
   return (
     <>
       <h1 className="screen-header">Guide</h1>
@@ -19,6 +31,15 @@ export function Guide() {
         How Tari Private Ballot is meant to be used, by role. Pick the path that matches what
         you are doing: voting in an election, or running one as the organizer.
       </p>
+
+      <figure className="guide-flow">
+        <img
+          className="guide-flow-diagram"
+          src={flowDiagram}
+          alt={FLOW_DIAGRAM_ALT}
+          draggable={false}
+        />
+      </figure>
 
       <Card title="Voter">
         <ol className="guide-steps">

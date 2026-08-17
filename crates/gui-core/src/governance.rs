@@ -133,11 +133,7 @@ impl GuiGovernanceSourcePinV1 {
 /// share one digest identity.
 #[must_use]
 pub fn governance_document_digest_for_bytes(bytes: &[u8]) -> [u8; 32] {
-    hash_domain_separated(
-        &Blake3HashProviderV1,
-        HashDomain::ArchiveFileV1,
-        bytes,
-    )
+    hash_domain_separated(&Blake3HashProviderV1, HashDomain::ArchiveFileV1, bytes)
 }
 
 /// Metadata for one selected governance document (non-secret).
@@ -666,7 +662,8 @@ mod tests {
 
     const VALID_BLAKE3_HEX: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const VALID_BLAKE3: &str = "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const VALID_BLAKE3: &str =
+        "blake3:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     const VALID_GIT: &str = "git:0123456789abcdef0123456789abcdef01234567";
 
     fn strip_blake3(pin: &str) -> &str {
@@ -707,7 +704,10 @@ mod tests {
 
     #[test]
     fn non_hex_blake3_is_rejected() {
-        let bad = format!("{GOVERNANCE_PIN_PREFIX_BLAKE3}{}", "z".repeat(BLAKE3_DIGEST_HEX_LEN));
+        let bad = format!(
+            "{GOVERNANCE_PIN_PREFIX_BLAKE3}{}",
+            "z".repeat(BLAKE3_DIGEST_HEX_LEN)
+        );
         let pin = validate_governance_source_pin(&bad);
         assert!(!pin.format_valid);
     }
@@ -773,7 +773,10 @@ mod tests {
     #[test]
     fn zero_byte_document_has_explicit_digest() {
         let pin = content_digest_pin_for_bytes(b"");
-        assert_eq!(pin.len(), GOVERNANCE_PIN_PREFIX_BLAKE3.len() + BLAKE3_DIGEST_HEX_LEN);
+        assert_eq!(
+            pin.len(),
+            GOVERNANCE_PIN_PREFIX_BLAKE3.len() + BLAKE3_DIGEST_HEX_LEN
+        );
         // A zero-byte document is a valid (if unusual) immutable document; its
         // digest is well-defined and pinning it is not blocked.
         let status = match_governance_document(&pin, Some(&compute_status_doc(&pin)));
@@ -835,7 +838,10 @@ mod tests {
     #[test]
     fn git_sha_without_document_is_unverified_reference() {
         let status = match_governance_document(VALID_GIT, None);
-        assert_eq!(status.status, GuiGovernanceMatchStatusV1::UnverifiedReference);
+        assert_eq!(
+            status.status,
+            GuiGovernanceMatchStatusV1::UnverifiedReference
+        );
     }
 
     #[test]
@@ -855,6 +861,9 @@ mod tests {
         let path = tari_cc_private_ballot_archive::ArchivePathV1::new(
             GOVERNANCE_DOCUMENT_ARCHIVE_PATH.to_owned(),
         );
-        assert!(path.is_ok(), "governance archive path must satisfy the portable profile");
+        assert!(
+            path.is_ok(),
+            "governance archive path must satisfy the portable profile"
+        );
     }
 }

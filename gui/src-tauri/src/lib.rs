@@ -27,30 +27,37 @@ use tari_cc_private_ballot_gui_core::{
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
     GuiLiveAnchorConfigResultV1, GuiParticipationSummaryV1, GuiPreparedBallotExportV1,
     GuiPreparedBallotStatusV1, GuiSavedVoterCredentialDeleteResultV1, GuiSavedVoterCredentialsV1,
-    GuiTallySummaryV1, GuiTransportAnchorVerificationV1, GuiVoterCredentialBackupResultV1,
-    GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1, GuiVoterElectionConfirmationV1,
-    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
-    LoadedElectionWorkspaceV1, VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
+    GuiTallySummaryV1, GuiTransportAnchorVerificationV1, GuiVoterCastLockStateV1,
+    GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1,
+    GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
+    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, LoadedElectionWorkspaceV1,
+    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
     copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
-    delete_saved_voter_credential_v1, ensure_election_workspaces_directory_v1,
-    ensure_voter_credentials_directory_v1, file_summary_for_public_key,
-    import_voter_credential_from_path_v1, inspect_anchor_config_v1, inspect_anchor_evidence_v1,
+    delete_election_workspace_v1, delete_saved_voter_credential_v1,
+    ensure_election_workspaces_directory_v1, ensure_voter_cast_locks_directory_v1,
+    ensure_private_intake_inbox_directory_v1, ensure_voter_credentials_directory_v1,
+    file_summary_for_public_key, ingest_private_intake_inbox_into_session_v1,
+    GuiPrivateIntakeSyncSummaryV1, import_voter_credential_from_path_v1, inspect_anchor_config_v1,
+    inspect_anchor_evidence_v1,
     inspect_anchor_snapshot_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
-    parse_public_governance_key_hex_v1, read_ballot_package_file_bounded_v1,
-    resume_election_workspace_v1, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
-    verify_archive_directory_v1, verify_transport_archive_anchor_v1,
+    mark_draft_workspace_superseded_v1, parse_public_governance_key_hex_v1,
+    public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
+    resolve_and_recover_cast_lock_state_v1, resume_election_workspace_v1,
+    unlock_saved_voter_credential_v1, validate_workspace_id_v1, verify_archive_directory_v1,
+    verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
     voter_credentials_directory_v1, workspace_id_for_session_v1, write_archive_directory_v1,
     write_draft_workspace_revision_v1, write_election_artifacts_v1,
     write_finalized_archive_v1_with_governance_document,
     write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
     write_session_workspace_revision_v1,
 };
-use tari_cc_private_ballot_transport_gateway::{
-    PrivateSubmissionCarrierV1, PrivateSubmissionCoordinatorV1,
-};
+use tari_cc_private_ballot_transport_gateway::PrivateSubmissionCoordinatorV1;
 use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
+
+#[cfg(feature = "managed-tor-test")]
+mod managed_tor_test;
 
 /// Serializable command error: a bounded copy of the gui-core error model.
 ///
@@ -123,6 +130,7 @@ impl CommandError {
         )
     }
 
+    #[cfg(not(feature = "managed-tor-test"))]
     fn private_transport_unavailable() -> Self {
         Self::new(
             "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
@@ -206,6 +214,8 @@ struct AppState {
     voter: Mutex<Option<GuiVoterSessionV1>>,
     pending_voter_credential: Mutex<Option<PendingVoterCredentialV1>>,
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
+    #[cfg(feature = "managed-tor-test")]
+    managed_tor_test: Mutex<Option<managed_tor_test::ManagedTorTestState>>,
 }
 
 impl Default for AppState {
@@ -218,6 +228,8 @@ impl Default for AppState {
             voter: Mutex::new(None),
             pending_voter_credential: Mutex::new(None),
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test: Mutex::new(None),
         }
     }
 }
@@ -248,32 +260,13 @@ struct GuiPrivateTransportAvailabilityV1 {
     message: &'static str,
 }
 
+#[cfg(not(feature = "managed-tor-test"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct GuiPrivateSubmissionResultV1 {
     route: &'static str,
     receipt_state: &'static str,
     retry_status: &'static str,
     reduced_anonymity: bool,
-}
-
-struct ProductionUnavailableCarrier;
-
-impl PrivateSubmissionCarrierV1 for ProductionUnavailableCarrier {
-    fn send_managed_tor(
-        &mut self,
-        _: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
-        _: &[u8],
-    ) -> Result<(), tari_cc_private_ballot_gui_core::TransportError> {
-        Err(tari_cc_private_ballot_gui_core::TransportError::Unavailable)
-    }
-
-    fn send_split_trust_relay(
-        &mut self,
-        _: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
-        _: &[u8],
-    ) -> Result<(), tari_cc_private_ballot_gui_core::TransportError> {
-        Err(tari_cc_private_ballot_gui_core::TransportError::Unavailable)
-    }
 }
 
 impl AppState {
@@ -796,6 +789,45 @@ fn credentials_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
     Ok(credentials_dir)
 }
 
+fn cast_locks_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let cast_locks_dir = voter_cast_locks_directory_v1(&app_data_root);
+    ensure_voter_cast_locks_directory_v1(&cast_locks_dir)?;
+    Ok(cast_locks_dir)
+}
+
+/// Resolves the durable cast-lock state for the loaded election + credential
+/// and applies it to the voter session, so every gated voter command decides
+/// against the authoritative on-disk record (surviving restart, navigation, and
+/// credential lock/unlock). Absent a loaded credential, the session is NotCast.
+fn apply_voter_cast_lock(
+    app: &AppHandle,
+    artifacts: &GuiElectionArtifactsV1,
+    voter: &mut GuiVoterSessionV1,
+) -> Result<GuiVoterCastLockStateV1, CommandError> {
+    let Some(public_key_hex) = voter.credential_public_key_hex() else {
+        voter.apply_cast_lock_state(GuiVoterCastLockStateV1::NotCast);
+        return Ok(GuiVoterCastLockStateV1::NotCast);
+    };
+    let Some(fingerprint) = public_credential_fingerprint_hex_v1(&public_key_hex) else {
+        voter.apply_cast_lock_state(GuiVoterCastLockStateV1::NotCast);
+        return Ok(GuiVoterCastLockStateV1::NotCast);
+    };
+    let cast_locks_dir = cast_locks_directory(app)?;
+    let manifest_hash_hex = GuiVoterElectionBindingV1::from_artifacts(artifacts).manifest_hash_hex;
+    let state = resolve_and_recover_cast_lock_state_v1(
+        &cast_locks_dir,
+        &manifest_hash_hex,
+        &fingerprint,
+        artifacts,
+    )?;
+    voter.apply_cast_lock_state(state);
+    Ok(state)
+}
+
 fn external_credential_path(path: String) -> Result<PathBuf, CommandError> {
     let path = PathBuf::from(path);
     if !path.is_absolute() {
@@ -835,13 +867,65 @@ fn load_election(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
-    let artifacts = GuiElectionArtifactsV1::from_paths(
+    load_election_from_paths(
         Path::new(&manifest_path),
         Path::new(&registry_path),
         Path::new(&option_set_path),
-    )?;
+        &app,
+        &state,
+    )
+}
+
+/// Canonical filenames the app writes when exporting an election's public
+/// artifacts. The one-folder loader looks for exactly these three names.
+const ELECTION_FOLDER_MANIFEST_FILE: &str = "election-manifest.cbor";
+const ELECTION_FOLDER_REGISTRY_FILE: &str = "voter-registry.cbor";
+const ELECTION_FOLDER_CANDIDATE_SET_FILE: &str = "candidate-set.cbor";
+
+/// Loads an election from ONE folder containing the three canonical export
+/// files, reusing the EXACT same validation/loading path as the manual
+/// three-file loader (no election validation is duplicated here). Fails closed
+/// if the chosen path is not a directory or is missing any of the three files;
+/// the canonical decode + same-election binding checks then run unchanged.
+#[tauri::command]
+fn load_election_folder(
+    folder_path: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    let folder = Path::new(&folder_path);
+    if !folder.is_dir() {
+        return Err(CommandError::new(
+            "GUI_ELECTION_FOLDER_NOT_A_DIRECTORY",
+            "INVALID_INPUT",
+            "choose an existing election folder",
+        ));
+    }
+    let manifest = folder.join(ELECTION_FOLDER_MANIFEST_FILE);
+    let registry = folder.join(ELECTION_FOLDER_REGISTRY_FILE);
+    let option_set = folder.join(ELECTION_FOLDER_CANDIDATE_SET_FILE);
+    if !manifest.is_file() || !registry.is_file() || !option_set.is_file() {
+        return Err(CommandError::new(
+            "GUI_ELECTION_FOLDER_INCOMPLETE",
+            "INVALID_INPUT",
+            "the election folder must contain election-manifest.cbor, voter-registry.cbor, and candidate-set.cbor",
+        ));
+    }
+    load_election_from_paths(&manifest, &registry, &option_set, &app, &state)
+}
+
+/// Shared implementation for the manual three-file and one-folder loaders.
+fn load_election_from_paths(
+    manifest_path: &Path,
+    registry_path: &Path,
+    option_set_path: &Path,
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    let artifacts =
+        GuiElectionArtifactsV1::from_paths(manifest_path, registry_path, option_set_path)?;
     let session = GuiElectionSessionV1::new(artifacts)?;
-    let workspaces_dir = workspaces_directory(&app)?;
+    let workspaces_dir = workspaces_directory(app)?;
     let workspace_id = workspace_id_for_session_v1(&session);
     write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
     // Preserve a same-process credential across an explicit reload. Its
@@ -976,6 +1060,45 @@ fn resume_election_workspace(
     }
 }
 
+/// Deletes one local election workspace by backend-issued id and returns the
+/// refreshed list. Deletion is confined to app-owned durable workspace storage
+/// (the id is strictly validated so the target is always a direct child of the
+/// workspaces root, and a symlink/reparse-point target is refused); exported
+/// canonical election files and finalized archives stored elsewhere are never
+/// touched. The workspace currently loaded in this session cannot be deleted.
+#[tauri::command]
+fn delete_election_workspace(
+    workspace_id: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, CommandError> {
+    // Refuse to delete the workspace this session currently has loaded (session
+    // or draft) so a cleanup never pulls durable state out from under the
+    // active election.
+    let active_session = state
+        .session_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .clone();
+    let active_draft = state
+        .draft_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .clone();
+    if active_session.as_deref() == Some(workspace_id.as_str())
+        || active_draft.as_deref() == Some(workspace_id.as_str())
+    {
+        return Err(CommandError::new(
+            "GUI_WORKSPACE_DELETE_ACTIVE",
+            "INVALID_INPUT",
+            "close or switch away from this election before deleting its local workspace",
+        ));
+    }
+    let workspaces_dir = workspaces_directory(&app)?;
+    delete_election_workspace_v1(&workspaces_dir, &workspace_id)?;
+    Ok(list_election_workspaces_v1(&workspaces_dir)?)
+}
+
 /// Opens the frozen election for ballot intake (lifecycle delegation).
 #[tauri::command]
 fn open_voting(
@@ -1066,6 +1189,80 @@ fn intake_ballot_package(
             Ok(session.intake_ballot_package_bytes(&package_bytes)?)
         })?;
     Ok(result)
+}
+
+/// Resolves the app-owned, election-scoped durable private-intake inbox
+/// directory for the active session, creating it if necessary. This is the
+/// SAME path the controlled Tor intake process must be pointed at (via the
+/// organizer app-data root) so accepted ballots are handed off to this GUI.
+fn private_intake_inbox_dir(
+    app: &AppHandle,
+    session: &GuiElectionSessionV1,
+) -> Result<PathBuf, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let manifest_hash_hex = session.summary().manifest_hash_hex;
+    Ok(ensure_private_intake_inbox_directory_v1(
+        &app_data_root,
+        &manifest_hash_hex,
+    )?)
+}
+
+/// Returns the app-owned durable private-intake inbox directory path for the
+/// active election. The operator passes their app-data root to the controlled
+/// Tor intake process, which writes accepted ballots into exactly this
+/// election-scoped inbox; this GUI ingests them via `sync_private_intake`.
+#[tauri::command]
+fn private_intake_inbox_path(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, CommandError> {
+    let inbox_dir = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        private_intake_inbox_dir(&app, session)?
+    };
+    Ok(inbox_dir.to_string_lossy().into_owned())
+}
+
+/// Ingests every accepted ballot the controlled Tor intake process handed off
+/// into the app-owned durable inbox, through the SAME gui-core intake boundary
+/// (proof verification, election binding, first-valid-nullifier acceptance) an
+/// offline ballot uses, then persists the session as a new durable workspace
+/// revision. Idempotent: a package already accepted is rejected as a duplicate
+/// nullifier and never re-counted, so repeated syncs and exact Tor retries keep
+/// the accepted count truthful. The accepted Tor ballot thereby becomes part of
+/// the ONE authoritative durable organizer workspace used by participation,
+/// close, tally, verify, and finalize — and survives restart.
+#[tauri::command]
+fn sync_private_intake(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPrivateIntakeSyncSummaryV1, CommandError> {
+    let inbox_dir = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        private_intake_inbox_dir(&app, session)?
+    };
+    let (summary, _election_summary, _lifecycle_state) =
+        mutate_session_transactionally(&app, &state, |session| {
+            Ok(ingest_private_intake_inbox_into_session_v1(
+                &inbox_dir, session,
+            )?)
+        })?;
+    Ok(summary)
 }
 
 /// Computes the deterministic tally over the currently accepted ballots.
@@ -1394,9 +1591,26 @@ fn freeze_election(
         };
         draft.replayed_clone()?
     };
+    // Read the originating draft workspace id before any mutation so it can be
+    // retired only after the frozen session is durably committed.
+    let originating_draft_workspace_id = state
+        .draft_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .clone();
     let (result, session) = draft.freeze()?;
     let workspace_id = workspace_id_for_session_v1(&session);
     write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+    // The authoritative session workspace is now durably committed. Retiring
+    // the originating draft from resume discovery is best-effort and MUST NOT
+    // fail the freeze: the successor already exists, and a failed marker only
+    // means the (harmless, non-rollback-capable) stale draft may reappear until
+    // the next successful freeze/list. Crash-safe by construction: the marker
+    // is written strictly after the successor commit.
+    if let Some(draft_workspace_id) = originating_draft_workspace_id {
+        let _ =
+            mark_draft_workspace_superseded_v1(&workspaces_dir, &draft_workspace_id, &workspace_id);
+    }
     {
         let mut guard = state
             .draft
@@ -1729,6 +1943,7 @@ fn reset_pending_voter_governance_credential(
 #[tauri::command]
 fn voter_workflow_status(
     review_confirmed: bool,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
     let session_guard = state
@@ -1738,13 +1953,14 @@ fn voter_workflow_status(
     let Some(session) = session_guard.as_ref() else {
         return Err(CommandError::no_session());
     };
-    let voter_guard = state
+    let mut voter_guard = state
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(voter) = voter_guard.as_ref() else {
+    let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
+    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
     Ok(voter.workflow_status(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -1780,6 +1996,7 @@ fn voter_ballot_selection_status(
 fn set_voter_ballot_selection(
     selected_option_ids_hex: Vec<String>,
     abstain: bool,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
     let session_guard = state
@@ -1796,6 +2013,7 @@ fn set_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
+    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
     Ok(voter.set_selection(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -1808,6 +2026,7 @@ fn set_voter_ballot_selection(
 /// prepared-ballot state.
 #[tauri::command]
 fn clear_voter_ballot_selection(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
     let session_guard = state
@@ -1824,7 +2043,35 @@ fn clear_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
+    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
     Ok(voter.clear_selection(session.artifacts(), session.lifecycle_state_v1())?)
+}
+
+/// Discards the prepared ballot so the voter can reconsider before export
+/// ("Change my choice"). Refused once a durable cast lock is active. Rust
+/// authoritatively drops the old package/proof; a new preparation builds a
+/// brand-new election-bound package and nullifier.
+#[tauri::command]
+fn change_my_ballot_choice(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Err(CommandError::no_session());
+    };
+    let mut voter_guard = state
+        .voter
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(voter) = voter_guard.as_mut() else {
+        return Err(CommandError::no_voter_session());
+    };
+    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    Ok(voter.discard_prepared_ballot(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
 /// Generates a real local Triptych proof and canonical ballot package while
@@ -1832,6 +2079,7 @@ fn clear_voter_ballot_selection(
 /// only; neither proof bytes nor credential material cross to TypeScript.
 #[tauri::command]
 fn prepare_voter_ballot(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
     let (artifacts, lifecycle_state) = {
@@ -1851,16 +2099,21 @@ fn prepare_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
+    apply_voter_cast_lock(&app, &artifacts, voter)?;
     Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
 }
 
-/// Writes a prepared canonical ballot package to the user-selected new path.
-/// Rust performs the no-overwrite write and full read-back verification.
+/// Exports a prepared canonical ballot package to the user-selected new path
+/// AND records an irrevocable local cast for this election + credential. Rust
+/// performs the no-overwrite write, full read-back verification, and the
+/// crash-safe cast-lock journal. This is the irreversible local cast boundary.
 #[tauri::command]
 fn export_prepared_voter_ballot(
     package_path: String,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotExportV1, CommandError> {
+    let cast_locks_dir = cast_locks_directory(&app)?;
     let session_guard = state
         .session
         .lock()
@@ -1868,17 +2121,19 @@ fn export_prepared_voter_ballot(
     let Some(session) = session_guard.as_ref() else {
         return Err(CommandError::no_session());
     };
-    let voter_guard = state
+    let mut voter_guard = state
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(voter) = voter_guard.as_ref() else {
+    let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    Ok(voter.export_prepared_ballot(
+    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    Ok(voter.export_and_cast_prepared_ballot(
         session.artifacts(),
         session.lifecycle_state_v1(),
         Path::new(&package_path),
+        &cast_locks_dir,
     )?)
 }
 
@@ -1907,66 +2162,73 @@ fn private_transport_availability(
     })
 }
 
-/// Submits the existing Rust-owned Ready ballot through one explicit route.
-/// JavaScript supplies no ballot bytes and receives no secret or organizer
-/// intake fields. Offline export stays the separate canonical file command.
-#[tauri::command]
-fn submit_prepared_voter_ballot_privately(
-    route: GuiPrivateRouteV1,
-    state: tauri::State<'_, AppState>,
+/// Pure decision for the private-submission command while managed private
+/// transport is not yet wired through the shared durable release boundary.
+///
+/// SECURITY: this deliberately does NOT seal an envelope, invoke the transport
+/// coordinator's `submit`, invoke any carrier, or write a PENDING release
+/// record. Online routes fail closed as unavailable. This removes the legacy
+/// bypass in which a later-provisioned carrier on the old coordinator path could
+/// release ballot bytes without crossing the durable cast boundary. The next
+/// managed-Tor slice rewires this command to
+/// `GuiVoterSessionV1::release_prepared_ballot_via_private_transport` plus the
+/// real Tor carrier. Offline export remains the separate, deliberate file
+/// command; the offline branch here only reports availability.
+#[cfg(not(feature = "managed-tor-test"))]
+fn resolve_private_submission_command_v1(
+    route: VoterPrivateRouteV1,
 ) -> Result<GuiPrivateSubmissionResultV1, CommandError> {
-    let selected: VoterPrivateRouteV1 = route.into();
-    if selected == VoterPrivateRouteV1::OfflineExport {
-        return Ok(GuiPrivateSubmissionResultV1 {
+    match route {
+        VoterPrivateRouteV1::OfflineExport => Ok(GuiPrivateSubmissionResultV1 {
             route: "OfflineExport",
             receipt_state: "OFFLINE_EXPORT",
             retry_status: "NOT_APPLICABLE",
             reduced_anonymity: false,
-        });
+        }),
+        VoterPrivateRouteV1::ManagedTor | VoterPrivateRouteV1::SplitTrustRelay => {
+            Err(CommandError::private_transport_unavailable())
+        }
     }
-    let mut session = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let session = session.as_mut().ok_or_else(CommandError::no_session)?;
-    let voter = state
-        .voter
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let voter = voter.as_ref().ok_or_else(CommandError::no_voter_session)?;
-    let ballot_bytes =
-        voter.prepared_canonical_ballot_bytes(session.artifacts(), session.lifecycle_state_v1())?;
-    let mut transport = state
-        .transport
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let mut carrier = ProductionUnavailableCarrier;
-    let result = transport
-        .submit(selected, ballot_bytes, session, &mut carrier)
-        .map_err(|_| CommandError::private_transport_unavailable())?;
-    Ok(GuiPrivateSubmissionResultV1 {
-        route: match result.route {
-            VoterPrivateRouteV1::ManagedTor => "ManagedTor",
-            VoterPrivateRouteV1::SplitTrustRelay => "SplitTrustRelay",
-            VoterPrivateRouteV1::OfflineExport => "OfflineExport",
-        },
-        receipt_state: match result.receipt.state {
-            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Received => "RECEIVED",
-            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Accepted => "ACCEPTED",
-            tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Rejected => "REJECTED",
-        },
-        retry_status: match result.receipt.retry_status {
-            tari_cc_private_ballot_gui_core::RetryStatusV1::NewDelivery => "NEW_DELIVERY",
-            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryAccepted => {
-                "PREVIOUS_ACCEPTED"
-            }
-            tari_cc_private_ballot_gui_core::RetryStatusV1::PreviousDeliveryRejected => {
-                "PREVIOUS_REJECTED"
-            }
-            tari_cc_private_ballot_gui_core::RetryStatusV1::GenericDuplicate => "GENERIC_DUPLICATE",
-        },
-        reduced_anonymity: result.reduced_anonymity,
-    })
+}
+
+/// Reports private online-route availability without ever sealing or sending a
+/// ballot. JavaScript supplies no ballot bytes and receives no secret or
+/// organizer intake fields. Offline export stays the separate canonical file
+/// command. Online routes fail closed until the managed-Tor carrier is wired
+/// through the shared release boundary (see
+/// [`resolve_private_submission_command_v1`]).
+#[cfg(not(feature = "managed-tor-test"))]
+#[tauri::command]
+fn submit_prepared_voter_ballot_privately(
+    route: GuiPrivateRouteV1,
+    _state: tauri::State<'_, AppState>,
+) -> Result<GuiPrivateSubmissionResultV1, CommandError> {
+    resolve_private_submission_command_v1(route.into())
+}
+
+/// WITH `managed-tor-test`: rewires private submission through the shared
+/// durable release boundary
+/// (`GuiVoterSessionV1::release_prepared_ballot_via_private_transport`) using
+/// `TorSocksPrivateReleaseCarrierV1` and the SAME verified descriptor. No
+/// legacy coordinator.submit path may return; no PENDING logic is duplicated in
+/// Tauri.
+#[cfg(feature = "managed-tor-test")]
+#[tauri::command]
+fn submit_prepared_voter_ballot_privately(
+    route: GuiPrivateRouteV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<tari_cc_private_ballot_gui_core::GuiPrivateReleaseResultV1, CommandError> {
+    // Offline export is the separate canonical file command; reject it here so
+    // the caller uses `export_prepared_voter_ballot` instead.
+    if matches!(route, GuiPrivateRouteV1::OfflineExport) {
+        return Err(CommandError::new(
+            "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+            "UNAVAILABLE",
+            "use the offline export command for offline submission",
+        ));
+    }
+    managed_tor_test::submit_prepared_voter_ballot_privately_via_managed_tor(&app, &state)
 }
 
 /// Resets the whole voter workflow for the current election.
@@ -2049,6 +2311,33 @@ mod tests {
         draft
             .set_presentation(GuiBallotPresentationType::GovernanceProposal)
             .expect("valid presentation");
+    }
+
+    // SECURITY (Blocker C): the registered private-submission command must never
+    // reach the legacy coordinator/carrier path. Its whole decision is a pure
+    // function of the route that takes no AppState, coordinator, or carrier, so a
+    // real carrier can never become active by merely provisioning AppState. It
+    // fails closed for online routes and only reports availability for offline.
+    #[cfg(not(feature = "managed-tor-test"))]
+    #[test]
+    fn private_submission_command_never_seals_or_sends_online_routes() {
+        assert_eq!(
+            resolve_private_submission_command_v1(VoterPrivateRouteV1::ManagedTor)
+                .expect_err("managed tor is unavailable")
+                .code,
+            "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+        );
+        assert_eq!(
+            resolve_private_submission_command_v1(VoterPrivateRouteV1::SplitTrustRelay)
+                .expect_err("relay is unavailable")
+                .code,
+            "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+        );
+        let offline = resolve_private_submission_command_v1(VoterPrivateRouteV1::OfflineExport)
+            .expect("offline route reports availability without sealing");
+        assert_eq!(offline.route, "OfflineExport");
+        assert_eq!(offline.receipt_state, "OFFLINE_EXPORT");
+        assert!(!offline.reduced_anonymity);
     }
 
     #[test]
@@ -2598,15 +2887,19 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             shell_info,
             load_election,
+            load_election_folder,
             unload_election,
             election_summary,
             list_election_workspaces,
             resume_election_workspace,
+            delete_election_workspace,
             open_voting,
             close_voting,
             mark_verified,
             finalize_election,
             intake_ballot_package,
+            private_intake_inbox_path,
+            sync_private_intake,
             current_tally,
             participation_summary,
             write_archive,
@@ -2652,12 +2945,23 @@ pub fn run() {
             voter_ballot_selection_status,
             set_voter_ballot_selection,
             clear_voter_ballot_selection,
+            change_my_ballot_choice,
             prepare_voter_ballot,
             export_prepared_voter_ballot,
             private_transport_availability,
             submit_prepared_voter_ballot_privately,
             reset_voter_workflow,
             write_archive_with_governance_document,
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::configure_managed_tor_test,
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::start_managed_tor,
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::stop_managed_tor,
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::managed_tor_test_status,
+            #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::retry_private_submission,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Tari Private Ballot shell");

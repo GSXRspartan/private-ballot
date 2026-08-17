@@ -56,6 +56,10 @@ const MAX_STRING_FIELD_BYTES: usize = 1024;
 const REVISION_FILE_SUFFIX: &str = ".workspace";
 const COMMIT_FILE_SUFFIX: &str = ".commit";
 const MAX_WORKSPACE_COMMIT_BYTES_V1: usize = 1024;
+const SUPERSEDED_MAGIC_V1: &[u8] = b"TARI_PRIVATE_BALLOT_DURABLE_ELECTION_WORKSPACE_SUPERSEDED_V1";
+const SUPERSEDED_FILE_NAME: &str = "superseded";
+const SUPERSEDED_TMP_FILE_NAME: &str = "superseded.tmp";
+const MAX_SUPERSEDED_MARKER_BYTES_V1: usize = 1024;
 
 /// Public, organizer-safe discovery summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -262,7 +266,18 @@ pub fn list_election_workspaces_v1(
             continue;
         }
         match load_newest_workspace(workspaces_root, &workspace_id) {
-            Ok(Some(record)) => summaries.push(summarize_workspace(&record)?),
+            // A draft that was frozen into an authoritative session workspace is
+            // retired from resume discovery once that successor session is
+            // durably committed. The supersession decision is made on the
+            // loaded record (see `draft_superseding_session_v1`): only a real
+            // Draft, with a valid marker pointing to a committed *Session*, is
+            // hidden. Fail-open otherwise, so a crash between freeze and marking
+            // (or a stray marker on a non-draft) never orphans a workspace.
+            Ok(Some(record)) => {
+                if draft_superseding_session_v1(workspaces_root, &record).is_none() {
+                    summaries.push(summarize_workspace(&record)?);
+                }
+            }
             Ok(None) => {}
             Err(_) => {}
         }
@@ -290,6 +305,20 @@ pub fn resume_election_workspace_v1(
             "no valid election workspace revision was found",
         )
     })?;
+    // Resume-by-id must honor the same supersession rule as discovery: a stale
+    // draft that was already frozen into a committed session must never be
+    // revived as an active mutable draft, even when the caller already knows
+    // its workspace id. Fail-open cases (malformed marker, missing/uncommitted
+    // successor, non-session successor, self-reference) fall through and the
+    // draft resumes normally.
+    if draft_superseding_session_v1(workspaces_root, &record).is_some() {
+        return Err(GuiCoreError::new(
+            "GUI_WORKSPACE_SUPERSEDED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("election-workspace"),
+            "this draft was superseded by a frozen election workspace; resume the successor election instead",
+        ));
+    }
     let workspace = summarize_workspace(&record)?;
     match record.body {
         DurableElectionWorkspaceBodyV1::Draft(snapshot) => {
@@ -303,9 +332,215 @@ pub fn resume_election_workspace_v1(
     }
 }
 
+/// Deletes one local election workspace directory by backend-issued id.
+///
+/// Safety: the id is validated by [`validate_workspace_id_v1`] (ASCII
+/// alphanumeric, `-`, `_` only, bounded length), so `workspaces_root.join(id)`
+/// is always a DIRECT child of the app-owned workspaces root — it can never
+/// contain `.`, `..`, `/`, `\`, a drive letter, or a colon, and therefore can
+/// never traverse outside app-owned storage. The target is additionally
+/// required to be a real directory that is NOT a symlink / Windows reparse
+/// point, so a redirected entry can never redirect the recursive removal
+/// outside the workspaces root. Only the durable workspace under the app-data
+/// root is removed; exported canonical election files and finalized archives
+/// stored elsewhere are never touched. A missing workspace is treated as
+/// already-deleted (idempotent success).
+pub fn delete_election_workspace_v1(
+    workspaces_root: &Path,
+    workspace_id: &str,
+) -> Result<(), GuiCoreError> {
+    validate_workspace_id_v1(workspace_id)?;
+    let dir = workspaces_root.join(workspace_id);
+    let metadata = match fs::symlink_metadata(&dir) {
+        Ok(metadata) => metadata,
+        // Already gone → idempotent success (nothing left to delete).
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(workspace_delete_error()),
+    };
+    if metadata.file_type().is_symlink()
+        || is_workspace_reparse_point_v1(&metadata)
+        || !metadata.is_dir()
+    {
+        return Err(GuiCoreError::new(
+            "GUI_WORKSPACE_DELETE_REFUSED",
+            GuiErrorCategory::InvalidInput,
+            Some("election-workspace"),
+            "refusing to delete a workspace entry that is not an app-owned directory",
+        ));
+    }
+    fs::remove_dir_all(&dir).map_err(|_| workspace_delete_error())
+}
+
+fn workspace_delete_error() -> GuiCoreError {
+    GuiCoreError::new(
+        "GUI_WORKSPACE_DELETE_FAILED",
+        GuiErrorCategory::FileIo,
+        Some("election-workspace"),
+        "the local election workspace could not be deleted",
+    )
+}
+
+#[cfg(windows)]
+fn is_workspace_reparse_point_v1(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    // FILE_ATTRIBUTE_REPARSE_POINT (0x400): junctions and mount points that
+    // could otherwise redirect a recursive delete outside app-owned storage.
+    (metadata.file_attributes() & 0x400) != 0
+}
+
+#[cfg(not(windows))]
+fn is_workspace_reparse_point_v1(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// Reads one ballot package with a pre-allocation size bound.
 pub fn read_ballot_package_file_bounded_v1(path: &Path) -> Result<Vec<u8>, GuiCoreError> {
     read_bounded_file(path, MAX_BALLOT_PACKAGE_BYTES_V1, "ballot-package")
+}
+
+/// Durably records that a draft workspace has been superseded by the frozen
+/// session workspace it produced.
+///
+/// The marker binds the draft to the authoritative session workspace id
+/// (`election-<manifest-hash>`). Discovery then retires the draft from the
+/// resumable list once that successor is durably committed, so a successfully
+/// frozen election never appears twice on Home.
+///
+/// # Crash safety
+///
+/// This MUST be called only *after* the superseding session workspace revision
+/// is durably committed. A crash between the freeze commit and this marker
+/// leaves the draft resumable (fail-open), never orphaned. The marker itself is
+/// written atomically (temp file, then rename) so a partial write is never
+/// observed as a valid marker.
+///
+/// # Errors
+///
+/// Returns a bounded error if either id is not a valid backend-issued
+/// identifier, the draft workspace path is unsafe, or the marker cannot be
+/// written.
+pub fn mark_draft_workspace_superseded_v1(
+    workspaces_root: &Path,
+    draft_workspace_id: &str,
+    superseded_by_workspace_id: &str,
+) -> Result<(), GuiCoreError> {
+    validate_workspace_id_v1(draft_workspace_id)?;
+    validate_workspace_id_v1(superseded_by_workspace_id)?;
+    let workspace_dir = workspaces_root.join(draft_workspace_id);
+    match fs::symlink_metadata(&workspace_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+                return Err(unsafe_workspace_path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GuiCoreError::new(
+                "GUI_WORKSPACE_NOT_FOUND",
+                GuiErrorCategory::FileIo,
+                Some("election-workspace"),
+                "no draft election workspace exists to supersede",
+            ));
+        }
+        Err(_) => return Err(GuiCoreError::io_failure("election-workspace")),
+    }
+
+    let marker_path = workspace_dir.join(SUPERSEDED_FILE_NAME);
+    // Idempotent: re-marking with the same successor (e.g. a re-freeze) is a
+    // no-op rather than an error.
+    if read_supersession_marker(&marker_path).as_deref() == Some(superseded_by_workspace_id) {
+        return Ok(());
+    }
+
+    let payload = encode_supersession_marker(superseded_by_workspace_id)?;
+    let tmp_path = workspace_dir.join(SUPERSEDED_TMP_FILE_NAME);
+    let _ = fs::remove_file(&tmp_path);
+    write_create_new_sync(&tmp_path, &payload, "election-workspace")?;
+    if fs::rename(&tmp_path, &marker_path).is_err() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(GuiCoreError::io_failure("election-workspace"));
+    }
+    sync_directory_best_effort(&workspace_dir);
+    Ok(())
+}
+
+/// Reads and validates the supersession marker for one workspace directory,
+/// returning the recorded successor session workspace id. Fail-open: any
+/// missing, unreadable, or malformed marker yields `None` so a draft is only
+/// hidden when a positively valid marker exists.
+fn read_supersession_marker_for(workspaces_root: &Path, workspace_id: &str) -> Option<String> {
+    let marker_path = workspaces_root
+        .join(workspace_id)
+        .join(SUPERSEDED_FILE_NAME);
+    read_supersession_marker(&marker_path)
+}
+
+fn read_supersession_marker(marker_path: &Path) -> Option<String> {
+    let bytes = read_bounded_file(
+        marker_path,
+        MAX_SUPERSEDED_MARKER_BYTES_V1,
+        "election-workspace",
+    )
+    .ok()?;
+    let mut reader = BinaryReader::new(&bytes);
+    reader.expect_bytes(SUPERSEDED_MAGIC_V1).ok()?;
+    if reader.u32().ok()? != FORMAT_VERSION_V1 {
+        return None;
+    }
+    let successor_id = reader.string(MAX_WORKSPACE_ID_BYTES).ok()?;
+    validate_workspace_id_v1(&successor_id).ok()?;
+    Some(successor_id)
+}
+
+fn encode_supersession_marker(superseded_by_workspace_id: &str) -> Result<Vec<u8>, GuiCoreError> {
+    let mut writer = BinaryWriter::new();
+    writer.bytes(SUPERSEDED_MAGIC_V1);
+    writer.u32(FORMAT_VERSION_V1);
+    writer.string(superseded_by_workspace_id, MAX_WORKSPACE_ID_BYTES)?;
+    Ok(writer.into_bytes())
+}
+
+/// Decides whether `record` is a Draft that has been genuinely superseded by a
+/// committed successor Session, returning that successor's workspace id.
+///
+/// This is the single authoritative supersession gate shared by discovery and
+/// resume-by-id. It returns `Some(successor_id)` **only** when every condition
+/// holds; otherwise it fails open (`None`) so a workspace is never wrongly
+/// hidden or blocked:
+///
+/// 1. `record` itself loads/validates as a Draft (a Session is never hidden,
+///    even if a marker file is present in its directory).
+/// 2. The draft's supersession marker is well-formed and valid.
+/// 3. The successor id is not the draft itself (a self-reference is invalid).
+/// 4. The successor exists and has a valid committed head.
+/// 5. The successor loads/validates as a Session (a Draft successor does not
+///    supersede).
+///
+/// Identity binding is authoritative: the marker is the freeze-written binding
+/// from this specific draft to this specific committed session, and the
+/// successor type is confirmed by loading it — no election-question text is
+/// used.
+fn draft_superseding_session_v1(
+    workspaces_root: &Path,
+    record: &DurableElectionWorkspaceV1,
+) -> Option<String> {
+    // Only a real Draft can be superseded.
+    if !matches!(record.body, DurableElectionWorkspaceBodyV1::Draft(_)) {
+        return None;
+    }
+    let successor_id = read_supersession_marker_for(workspaces_root, &record.workspace_id)?;
+    // A marker pointing at the draft's own id is invalid.
+    if successor_id == record.workspace_id {
+        return None;
+    }
+    // The successor must exist, have a committed head, and be a Session.
+    match load_newest_workspace(workspaces_root, &successor_id) {
+        Ok(Some(successor))
+            if matches!(successor.body, DurableElectionWorkspaceBodyV1::Session(_)) =>
+        {
+            Some(successor_id)
+        }
+        _ => None,
+    }
 }
 
 fn write_workspace_revision(

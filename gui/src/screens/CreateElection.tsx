@@ -530,7 +530,7 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
   // ---- Export ------------------------------------------------------------
   async function onExport() {
-    const dir = await pickDirectory("Choose export directory");
+    const dir = await pickDirectory("Choose export directory", "electionExport");
     if (!dir) return;
     const result = await run(() => api.exportElectionArtifacts(dir));
     if (result) {
@@ -1481,26 +1481,28 @@ function FrozenView(props: {
         )}
       </Card>
 
-      <Card title="Open voting">
+      <Card title="Next: manage this election">
         <p className="field-value">
-          Opening voting is a separate deliberate action: it means the election starts accepting
-          ballots from eligible voters. You can also do this later from Manage Election.
+          Your election is created and frozen. Continue to Manage Election — the single place
+          that controls this election&rsquo;s lifecycle: open voting, then close, tally, verify,
+          and finalize. Opening voting is a separate deliberate action that means the election
+          starts accepting ballots from eligible voters.
         </p>
         <div className="action-row">
           <button
             type="button"
             className="btn btn-primary"
-            onClick={props.onOpenVoting}
-            disabled={props.busy}
+            onClick={props.onManage}
           >
-            Open Voting
+            Continue to Manage Election
           </button>
           <button
             type="button"
             className="btn btn-secondary"
-            onClick={props.onManage}
+            onClick={props.onOpenVoting}
+            disabled={props.busy}
           >
-            Go to Manage Election
+            Open Voting now
           </button>
           <button type="button" className="btn btn-secondary" onClick={props.onRestart}>
             Start another

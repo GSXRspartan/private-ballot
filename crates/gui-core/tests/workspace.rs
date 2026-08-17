@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_gui_core::{
     GuiElectionDraftV1, GuiElectionSessionV1, LoadedElectionWorkspaceV1,
-    MAX_WORKSPACE_REVISION_BYTES_V1, create_draft_workspace_id_v1,
+    MAX_WORKSPACE_REVISION_BYTES_V1, create_draft_workspace_id_v1, delete_election_workspace_v1,
     ensure_election_workspaces_directory_v1, list_election_workspaces_v1,
-    resume_election_workspace_v1, workspace_id_for_session_v1, write_draft_workspace_revision_v1,
-    write_session_workspace_revision_v1,
+    mark_draft_workspace_superseded_v1, resume_election_workspace_v1, workspace_id_for_session_v1,
+    write_draft_workspace_revision_v1, write_session_workspace_revision_v1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider, ValidationCode};
 
@@ -180,6 +180,102 @@ fn workspace_root_is_derived_from_injected_app_data_root() {
 
     assert_eq!(root, dir.path().join("election-workspaces"));
     assert!(root.is_dir());
+}
+
+#[test]
+fn delete_removes_only_the_named_workspace_and_leaves_others() {
+    let dir = TestDir::new("workspace-delete");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let (workspace_id, _session) = two_revision_workspace(&root);
+    // A second, unrelated workspace that must survive the delete.
+    let other_id = ok(create_draft_workspace_id_v1(&root), "other id");
+    let mut other = GuiElectionDraftV1::new();
+    ok(
+        other.set_basics(
+            "other-election".to_owned(),
+            "Other?".to_owned(),
+            "other-revision".to_owned(),
+        ),
+        "other basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &other_id, &other),
+        "write other",
+    );
+    assert!(root.join(&workspace_id).is_dir());
+    assert!(root.join(&other_id).is_dir());
+
+    ok(
+        delete_election_workspace_v1(&root, &workspace_id),
+        "delete target",
+    );
+
+    assert!(
+        !root.join(&workspace_id).exists(),
+        "the named workspace directory is removed",
+    );
+    assert!(
+        root.join(&other_id).is_dir(),
+        "an unrelated workspace is untouched",
+    );
+    let remaining = ok(list_election_workspaces_v1(&root), "list after delete");
+    assert!(
+        remaining.iter().all(|w| w.workspace_id != workspace_id),
+        "the deleted workspace no longer appears in discovery",
+    );
+}
+
+#[test]
+fn delete_is_idempotent_for_a_missing_workspace() {
+    let dir = TestDir::new("workspace-delete-missing");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    // A valid-but-absent id deletes to a no-op success (idempotent recovery).
+    ok(
+        delete_election_workspace_v1(&root, "never-created-workspace-id"),
+        "idempotent delete",
+    );
+}
+
+#[test]
+fn delete_refuses_ids_that_could_escape_app_owned_storage() {
+    let dir = TestDir::new("workspace-delete-traversal");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    // A sibling directory OUTSIDE the workspaces root that a traversal id would
+    // target; it must never be touched.
+    let outside = dir.path().join("outside-secret");
+    ok(fs::create_dir_all(&outside), "outside dir");
+    // Every id containing a path separator, parent ref, drive letter, or colon
+    // is rejected by the strict validator BEFORE any filesystem action.
+    for bad in [
+        "../outside-secret",
+        "..\\outside-secret",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "C:",
+        "with space",
+        "",
+    ] {
+        let error = err(
+            delete_election_workspace_v1(&root, bad),
+            &format!("id {bad:?} must be rejected"),
+        );
+        assert_eq!(error.code(), "GUI_WORKSPACE_INVALID_ID", "id {bad:?}");
+    }
+    assert!(
+        outside.is_dir(),
+        "a directory outside the workspaces root is never deleted",
+    );
 }
 
 #[test]
@@ -393,6 +489,364 @@ fn lifecycle_resume_preserves_state_and_reconstructs_tally() {
         }
         LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
     }
+}
+
+#[test]
+fn frozen_draft_is_retired_from_resume_discovery_while_session_reaches_finalized() {
+    let dir = TestDir::new("workspace-supersede");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+
+    // A pre-freeze draft workspace exists on disk.
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "supersede-election".to_owned(),
+            "Should the frozen draft vanish from resume?".to_owned(),
+            "draft-revision".to_owned(),
+        ),
+        "draft basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "write draft",
+    );
+
+    // The draft is frozen into its authoritative session workspace, which is
+    // durably committed first (mirroring `freeze_election`).
+    let mut session = ok(GuiElectionSessionV1::new(artifacts()), "frozen session");
+    let session_id = workspace_id_for_session_v1(&session);
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write frozen session",
+    );
+
+    // Before marking, a crash would leave BOTH resumable (fail-open); nothing
+    // is retired until the successor is durably committed AND marked.
+    let before = ok(list_election_workspaces_v1(&root), "list before mark");
+    assert!(before.iter().any(|w| w.workspace_id == draft_id));
+    assert!(before.iter().any(|w| w.workspace_id == session_id));
+
+    // Retire the originating draft, binding it to the authoritative session id.
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &draft_id, &session_id),
+        "supersede draft",
+    );
+
+    // The stale draft no longer competes with the authoritative session.
+    let after_freeze = ok(list_election_workspaces_v1(&root), "list after mark");
+    assert!(
+        !after_freeze.iter().any(|w| w.workspace_id == draft_id),
+        "a successfully frozen draft must be retired from resume discovery",
+    );
+    let session_summary = after_freeze
+        .iter()
+        .find(|w| w.workspace_id == session_id)
+        .expect("authoritative session must remain discoverable");
+    assert_eq!(session_summary.lifecycle_state, "FROZEN");
+
+    // Advance the authoritative session through the full lifecycle: the draft
+    // must stay retired and the session must remain monotonic to FINALIZED.
+    ok(session.open(), "open");
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write open",
+    );
+    ok(session.close(), "close");
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write closed",
+    );
+    ok(session.mark_verified(), "verify");
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write verified",
+    );
+    ok(session.finalize(), "finalize");
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write finalized",
+    );
+
+    let finalized = ok(list_election_workspaces_v1(&root), "list finalized");
+    assert!(
+        !finalized.iter().any(|w| w.workspace_id == draft_id),
+        "the retired draft must not reappear beside the finalized election",
+    );
+    let final_summary = finalized
+        .iter()
+        .find(|w| w.workspace_id == session_id)
+        .expect("finalized session must remain discoverable");
+    assert_eq!(final_summary.lifecycle_state, "FINALIZED");
+    assert!(final_summary.finalized);
+
+    // Resuming the retired draft directly by id (a caller that still knows the
+    // stale id) must be refused, not revive the draft over the finalized
+    // election.
+    let resume_stale = err(
+        resume_election_workspace_v1(&root, &draft_id),
+        "superseded draft must not resume by id after finalization",
+    );
+    assert_eq!(resume_stale.code(), "GUI_WORKSPACE_SUPERSEDED");
+
+    // The authoritative finalized workspace still resumes as terminal FINALIZED.
+    match ok(
+        resume_election_workspace_v1(&root, &session_id),
+        "resume finalized",
+    ) {
+        LoadedElectionWorkspaceV1::Session { workspace, session } => {
+            assert_eq!(workspace.lifecycle_state, "FINALIZED");
+            assert!(workspace.finalized);
+            assert_eq!(session.lifecycle_state(), "FINALIZED");
+        }
+        LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
+    }
+}
+
+/// Finding 2: a superseded draft must not be resumable by id, even directly.
+#[test]
+fn superseded_draft_cannot_resume_by_id() {
+    let dir = TestDir::new("workspace-supersede-resume");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "resume-guard".to_owned(),
+            "Can a superseded draft resume by id?".to_owned(),
+            "draft-revision".to_owned(),
+        ),
+        "draft basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "write draft",
+    );
+
+    let session = ok(GuiElectionSessionV1::new(artifacts()), "frozen session");
+    let session_id = workspace_id_for_session_v1(&session);
+    ok(
+        write_session_workspace_revision_v1(&root, &session_id, &session),
+        "write session",
+    );
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &draft_id, &session_id),
+        "supersede draft",
+    );
+
+    // Direct resume-by-id of the stale draft is refused with a bounded code.
+    let error = err(
+        resume_election_workspace_v1(&root, &draft_id),
+        "superseded draft must not resume by id",
+    );
+    assert_eq!(error.code(), "GUI_WORKSPACE_SUPERSEDED");
+
+    // The authoritative successor session still resumes.
+    match ok(
+        resume_election_workspace_v1(&root, &session_id),
+        "resume successor session",
+    ) {
+        LoadedElectionWorkspaceV1::Session { .. } => {}
+        LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
+    }
+}
+
+/// Finding 3: a non-draft (Session) workspace that happens to contain a
+/// well-formed marker must NOT be hidden by supersession discovery.
+#[test]
+fn session_workspace_with_marker_is_still_listed_and_resumable() {
+    let dir = TestDir::new("workspace-session-marker");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+
+    // A committed session that the marker will (spuriously) point at.
+    let other_session = ok(GuiElectionSessionV1::new(artifacts()), "other session");
+    let other_session_id = workspace_id_for_session_v1(&other_session);
+    ok(
+        write_session_workspace_revision_v1(&root, &other_session_id, &other_session),
+        "write other session",
+    );
+
+    // A distinct committed session (different manifest revision -> different
+    // workspace id) that carries a stray marker in its directory.
+    let marked_session = ok(
+        GuiElectionSessionV1::new(common::artifacts_with_revision("stray-marker-rev")),
+        "marked session",
+    );
+    let marked_session_id = workspace_id_for_session_v1(&marked_session);
+    ok(
+        write_session_workspace_revision_v1(&root, &marked_session_id, &marked_session),
+        "write marked session",
+    );
+    // Place a syntactically valid marker inside the SESSION directory.
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &marked_session_id, &other_session_id),
+        "write stray marker in session",
+    );
+
+    // The marker must not hide the Session: it is not a Draft.
+    let listed = ok(list_election_workspaces_v1(&root), "list");
+    assert!(
+        listed.iter().any(|w| w.workspace_id == marked_session_id),
+        "a Session workspace must never be hidden by a marker file",
+    );
+
+    // And it still resumes as a Session (marker does not block non-drafts).
+    match ok(
+        resume_election_workspace_v1(&root, &marked_session_id),
+        "resume marked session",
+    ) {
+        LoadedElectionWorkspaceV1::Session { .. } => {}
+        LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
+    }
+}
+
+/// Finding 3: a draft whose marker points to another Draft (not a Session) is
+/// NOT superseded — it stays discoverable and resumable.
+#[test]
+fn draft_with_draft_successor_is_not_superseded() {
+    let dir = TestDir::new("workspace-draft-successor");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "draft-one".to_owned(),
+            "Draft one".to_owned(),
+            "rev".to_owned(),
+        ),
+        "draft one basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "write draft one",
+    );
+
+    // A second, committed DRAFT workspace used (incorrectly) as the successor.
+    let successor_draft_id = ok(create_draft_workspace_id_v1(&root), "successor draft id");
+    let mut successor_draft = GuiElectionDraftV1::new();
+    ok(
+        successor_draft.set_basics(
+            "draft-two".to_owned(),
+            "Draft two".to_owned(),
+            "rev".to_owned(),
+        ),
+        "draft two basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &successor_draft_id, &successor_draft),
+        "write draft two",
+    );
+
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &draft_id, &successor_draft_id),
+        "mark superseded by a draft",
+    );
+
+    // A Draft successor does not supersede: the original draft stays listed.
+    let listed = ok(list_election_workspaces_v1(&root), "list");
+    assert!(
+        listed.iter().any(|w| w.workspace_id == draft_id),
+        "a draft whose successor is another Draft must remain discoverable",
+    );
+
+    // And it still resumes as a Draft.
+    match ok(
+        resume_election_workspace_v1(&root, &draft_id),
+        "resume draft with draft successor",
+    ) {
+        LoadedElectionWorkspaceV1::Draft { .. } => {}
+        LoadedElectionWorkspaceV1::Session { .. } => panic!("expected draft workspace"),
+    }
+}
+
+/// Finding 2 fail-open: a marker pointing at a never-committed successor must
+/// leave the draft resumable by id (not error).
+#[test]
+fn superseded_marker_with_uncommitted_successor_still_resumes_draft() {
+    let dir = TestDir::new("workspace-supersede-resume-failopen");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "failopen-resume".to_owned(),
+            "Recoverable draft?".to_owned(),
+            "rev".to_owned(),
+        ),
+        "draft basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "write draft",
+    );
+    let phantom_session_id = format!("election-{}", "0".repeat(64));
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &draft_id, &phantom_session_id),
+        "mark superseded by phantom",
+    );
+
+    // Resume-by-id fails open: the draft is still recoverable.
+    match ok(
+        resume_election_workspace_v1(&root, &draft_id),
+        "fail-open resume of draft with uncommitted successor",
+    ) {
+        LoadedElectionWorkspaceV1::Draft { .. } => {}
+        LoadedElectionWorkspaceV1::Session { .. } => panic!("expected draft workspace"),
+    }
+}
+
+#[test]
+fn supersession_marker_fails_open_when_successor_is_not_committed() {
+    let dir = TestDir::new("workspace-supersede-failopen");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "failopen-election".to_owned(),
+            "Is this draft still recoverable?".to_owned(),
+            "draft-revision".to_owned(),
+        ),
+        "draft basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "write draft",
+    );
+
+    // Mark the draft as superseded by a session id that was never committed.
+    // The real ordering never produces this, but discovery MUST fail open so a
+    // corrupt or premature marker never orphans a genuinely recoverable draft.
+    let phantom_session_id = format!("election-{}", "0".repeat(64));
+    ok(
+        mark_draft_workspace_superseded_v1(&root, &draft_id, &phantom_session_id),
+        "mark superseded by phantom",
+    );
+
+    let listed = ok(list_election_workspaces_v1(&root), "list");
+    assert!(
+        listed.iter().any(|w| w.workspace_id == draft_id),
+        "a draft whose successor is not committed must remain resumable",
+    );
 }
 
 #[test]

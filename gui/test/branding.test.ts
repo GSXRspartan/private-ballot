@@ -379,7 +379,10 @@ describe("prerequisite guidance", () => {
   it("explains why Manage Election controls are unavailable before loading", () => {
     const manage = readProjectFile("src/screens/ManageElection.tsx");
     assert.match(manage, /Load an election to enable these controls\./);
-    assert.match(manage, /Choose all required election files to continue\./);
+    // The manual three-file loader now lives under Advanced; the folder loader
+    // is the primary path.
+    assert.match(manage, /Choose all three election files to load manually\./);
+    assert.match(manage, />\s*Select Election Folder\s*</);
   });
 
   it("explains missing-file prerequisites on Vote, Archive, Anchor, and Evidence", () => {

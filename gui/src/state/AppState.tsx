@@ -5,6 +5,11 @@ import {
   newCreateElectionSession,
   type CreateElectionSessionState,
 } from "../creation";
+import { recallDirectory } from "../api/directoryMemory";
+import type {
+  ArchiveVerificationBindingV1,
+  TransportAnchorBindingV1,
+} from "../archive/archiveBinding";
 import { RequestGenerationGate } from "../requestGeneration";
 import type {
   GuiCommandError,
@@ -34,6 +39,22 @@ export interface SelectedArtifactPaths {
   optionSet: string;
 }
 
+/** Session-only Archive screen state so a just-verified archive is not
+ *  forgotten when navigating away and back. Held in application memory only:
+ *  it is cleared on restart, so a cached verification is never treated as
+ *  proof that the archive still verifies across an application restart — the
+ *  authoritative Rust verifier must run again in a new session. Each result is
+ *  bound to the inputs that produced it (see the binding types above), so a
+ *  result is only ever shown for the exact inputs it was computed from. The
+ *  remembered directory is a location hint only. No secret or artifact bytes
+ *  are held. */
+export interface ArchiveViewState {
+  directory: string;
+  anchorEvidencePath: string;
+  verification: ArchiveVerificationBindingV1 | null;
+  transportAnchor: TransportAnchorBindingV1 | null;
+}
+
 interface AppStateValue {
   shellAvailable: boolean;
   election: GuiElectionSummaryV1 | null;
@@ -48,6 +69,9 @@ interface AppStateValue {
   backendError: GuiCommandError | null;
   /** Paths chosen for the loaded election (session-only, not persisted). */
   selectedArtifactPaths: SelectedArtifactPaths | null;
+  /** Session-only Archive screen state, retained across navigation. */
+  archiveView: ArchiveViewState;
+  updateArchiveView: (patch: Partial<ArchiveViewState>) => void;
   setSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
   refreshElection: () => Promise<void>;
   refreshWorkspaces: () => Promise<void>;
@@ -60,9 +84,15 @@ interface AppStateValue {
     registryPath: string,
     optionSetPath: string,
   ) => Promise<void>;
+  /** Loads an election from ONE folder containing the three canonical export
+   *  files, reusing the same backend validation as the manual loader. */
+  loadElectionFolder: (folderPath: string) => Promise<void>;
   resumeElectionWorkspace: (
     workspaceId: string,
   ) => Promise<GuiElectionWorkspaceResumeResultV1>;
+  /** Deletes one local election workspace (confined to app-owned storage) and
+   *  refreshes the list. Never touches exported files or finalized archives. */
+  deleteElectionWorkspace: (workspaceId: string) => Promise<void>;
   unloadElection: () => Promise<void>;
   dismissError: () => void;
   recordAction: (label: string) => void;
@@ -116,6 +146,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     useState<SelectedArtifactPaths | null>(null);
   const [createElectionSession, setCreateElectionSession] =
     useState<CreateElectionSessionState | null>(null);
+  const [archiveView, setArchiveView] = useState<ArchiveViewState>(() => ({
+    directory: recallDirectory("archive") ?? "",
+    verification: null,
+    anchorEvidencePath: "",
+    transportAnchor: null,
+  }));
   // Monotonic token for non-authoritative presentation refreshes. A late
   // response must never overwrite a newer election or lifecycle state.
   const participationRequestGenerationRef = useRef(new RequestGenerationGate());
@@ -151,6 +187,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     (next: CreateElectionSessionState | null) => setCreateElectionSession(next),
     [],
   );
+
+  const updateArchiveView = useCallback((patch: Partial<ArchiveViewState>) => {
+    setArchiveView((prev) => ({ ...prev, ...patch }));
+  }, []);
 
   const refreshElection = useCallback(async () => {
     try {
@@ -235,6 +275,28 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     [captureError, recordAction, refreshParticipation, refreshWorkspaces],
   );
 
+  const loadElectionFolder = useCallback(
+    async (folderPath: string) => {
+      try {
+        const summary = await api.loadElectionFolder(folderPath);
+        setElection(summary);
+        setTally(null);
+        setParticipation(null);
+        setBackendError(null);
+        // The backend resolved the three canonical files inside the folder; no
+        // per-file paths are surfaced here.
+        setSelectedArtifactPaths(null);
+        recordAction(`Loaded election ${summary.election_id_text ?? summary.election_id_hex}`);
+        void refreshParticipation();
+        void refreshWorkspaces();
+      } catch (error) {
+        captureError(error);
+        throw error;
+      }
+    },
+    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
+  );
+
   const resumeElectionWorkspace = useCallback(
     async (workspaceId: string) => {
       try {
@@ -261,6 +323,21 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [captureError, recordAction, refreshParticipation, refreshWorkspaces],
+  );
+
+  const deleteElectionWorkspace = useCallback(
+    async (workspaceId: string) => {
+      try {
+        const summaries = await api.deleteElectionWorkspace(workspaceId);
+        setWorkspaces(summaries);
+        setBackendError(null);
+        recordAction("Deleted local election workspace");
+      } catch (error) {
+        captureError(error);
+        throw error;
+      }
+    },
+    [captureError, recordAction],
   );
 
   const unloadElection = useCallback(async () => {
@@ -339,13 +416,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       settings,
       backendError,
       selectedArtifactPaths,
+      archiveView,
+      updateArchiveView,
       setSetting,
       refreshElection,
       refreshWorkspaces,
       refreshParticipation,
       runLifecycle,
       loadElection,
+      loadElectionFolder,
       resumeElectionWorkspace,
+      deleteElectionWorkspace,
       unloadElection,
       dismissError,
       recordAction,
@@ -363,13 +444,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       settings,
       backendError,
       selectedArtifactPaths,
+      archiveView,
+      updateArchiveView,
       setSetting,
       refreshElection,
       refreshWorkspaces,
       refreshParticipation,
       runLifecycle,
       loadElection,
+      loadElectionFolder,
       resumeElectionWorkspace,
+      deleteElectionWorkspace,
       unloadElection,
       dismissError,
       recordAction,

@@ -8,5 +8,9 @@ publish = false
 [dependencies]
 tari-cc-private-ballot-gui-core = { path = "../gui-core" }
 
+[dev-dependencies]
+ed25519-dalek = { version = "=3.0.0", default-features = false }
+tari-cc-private-ballot-protocol = { path = "../protocol" }
+
 [lints]
 workspace = true

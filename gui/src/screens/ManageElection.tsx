@@ -18,6 +18,7 @@ import {
   canShowTally,
   canWriteFinalArchive,
   coarseBucketLabel,
+  describeLeadingOutcome,
   formatPercent,
   participationAccessibleText,
   participationIsDisclosed,
@@ -40,16 +41,6 @@ import { LockIcon } from "../components/icons";
 import { ParticipationTrack } from "../components/ParticipationTrack";
 import { ResultBars } from "../components/ResultBars";
 
-function describeLeading(tally: GuiTallySummaryV1): string {
-  if ("NoApprovals" in tally.leading) return "No approvals recorded";
-  if ("SingleLeader" in tally.leading) {
-    const leader = tally.leading.SingleLeader;
-    return `Leading: ${leader.display_name || leader.candidate_id_hex} (${leader.approvals} approvals)`;
-  }
-  const tie = tally.leading.Tie;
-  return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} approvals each)`;
-}
-
 function basename(path: string): string {
   if (!path) return "";
   const parts = path.split(/[\\/]/);
@@ -71,6 +62,7 @@ export function ManageElection() {
     backendError,
     shellAvailable,
     loadElection,
+    loadElectionFolder,
     unloadElection,
     runLifecycle,
     recordAction,
@@ -78,6 +70,7 @@ export function ManageElection() {
     selectedArtifactPaths,
   } = useAppState();
 
+  const [folderBusy, setFolderBusy] = useState(false);
   const [manifestPath, setManifestPath] = useState("");
   const [registryPath, setRegistryPath] = useState("");
   const [optionSetPath, setOptionSetPath] = useState("");
@@ -86,6 +79,10 @@ export function ManageElection() {
   const [archiveGovernanceDocPath, setArchiveGovernanceDocPath] = useState<string | null>(null);
   const [lastIntake, setLastIntake] = useState<Awaited<ReturnType<typeof api.intakeBallotPackage>> | null>(null);
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
+  const [syncSummary, setSyncSummary] =
+    useState<Awaited<ReturnType<typeof api.syncPrivateIntake>> | null>(null);
+  const [inboxPath, setInboxPath] = useState<string | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -150,6 +147,23 @@ export function ManageElection() {
     }
   };
 
+  const onOpenElectionFolder = async () => {
+    clearLocalError();
+    const folder = await pickDirectory("Select the election folder itself (do not open it)");
+    if (folder === null) return;
+    setFolderBusy(true);
+    try {
+      await loadElectionFolder(folder);
+      setTally(null);
+      setArchiveResult(null);
+      setLastIntake(null);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
   const onIntake = async () => {
     clearLocalError();
     try {
@@ -174,6 +188,34 @@ export function ManageElection() {
       const result = await api.currentTally();
       setTally(result);
       recordAction("Computed tally");
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onSyncPrivateIntake = async () => {
+    clearLocalError();
+    setSyncBusy(true);
+    try {
+      const summary = await api.syncPrivateIntake();
+      setSyncSummary(summary);
+      await refreshParticipation();
+      recordAction(
+        summary.newly_accepted > 0
+          ? `Synced ${summary.newly_accepted} ballot(s) from private intake`
+          : "Synced private intake (no new ballots)",
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const onRevealInboxPath = async () => {
+    clearLocalError();
+    try {
+      setInboxPath(await api.privateIntakeInboxPath());
     } catch (error) {
       showError(error);
     }
@@ -205,7 +247,7 @@ export function ManageElection() {
 
   const onPickArchiveDir = async () => {
     clearLocalError();
-    const picked = await pickDirectory("Choose archive output directory");
+    const picked = await pickDirectory("Choose archive output directory", "archive");
     if (picked !== null) setArchiveDir(picked);
   };
 
@@ -240,12 +282,39 @@ export function ManageElection() {
 
       <Card title="Load Election">
         <p className="card-body">
-          Select the three election files produced when the election was created: the election
-          definition, the eligible voter list, and the ballot options. Loading checks that the
-          files are complete, unaltered, and belong to the same election. After loading, the
-          election is ready to review before voting is opened.
+          The simplest way to load an election is to choose the folder that contains its three
+          exported files. Loading checks that the files are complete, unaltered, and belong to
+          the same election, then freezes the session for review before voting is opened.
         </p>
-        <DetailsSection summary="Technical details">
+        <p className="card-body">
+          Select the election folder itself — do not open it first. In the picker, click the
+          folder once to highlight it, then confirm; opening it makes the dialog look empty
+          because it only shows sub-folders. The folder must contain election-manifest.cbor,
+          voter-registry.cbor, and candidate-set.cbor.
+        </p>
+        <div className="btn-row">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!shellAvailable || folderBusy}
+            onClick={() => void onOpenElectionFolder()}
+          >
+            Select Election Folder
+          </button>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={!canAct}
+            onClick={() => void unloadElection()}
+          >
+            Unload Election
+          </button>
+        </div>
+        <p className="form-hint">
+          The folder must contain election-manifest.cbor, voter-registry.cbor, and
+          candidate-set.cbor. Identity is derived from the decoded bytes, not the filenames.
+        </p>
+        <DetailsSection summary="Advanced / manual load (choose three files)">
           <p className="card-body">
             The election definition is the manifest file, the eligible voter list is the
             registry file, and the ballot options are the candidate/option set file. Loading
@@ -254,7 +323,6 @@ export function ManageElection() {
             starts in FROZEN. Filenames are shown for convenience only — identity is derived
             from the decoded bytes.
           </p>
-        </DetailsSection>
         <div className="form-row">
           <label htmlFor="manifest-path">Election definition</label>
           <div className="file-row">
@@ -318,23 +386,25 @@ export function ManageElection() {
         <div className="btn-row">
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-secondary"
             disabled={!canLoad}
             onClick={() => void onLoad()}
           >
             Load and Validate Election
           </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!canAct}
-            onClick={() => void unloadElection()}
-          >
-            Unload Election
-          </button>
         </div>
-        {shellAvailable && !canLoad && (
-          <p className="form-hint">Choose all required election files to continue.</p>
+        {shellAvailable && !election && !canLoad && (
+          <p className="form-hint">Choose all three election files to load manually.</p>
+        )}
+        </DetailsSection>
+        {shellAvailable && election && !selectedArtifactPaths && (
+          <Notice tone="info">
+            An election is already loaded from durable recovery state
+            {election.election_id_text ? ` (${election.election_id_text})` : ""}. Its lifecycle,
+            ballot intake, and tally controls below operate on that recovered session. The
+            original source files are not needed to continue — choose files here only to load a
+            different election.
+          </Notice>
         )}
       </Card>
 
@@ -532,6 +602,58 @@ export function ManageElection() {
           )}
         </Card>
 
+        <Card title="Private ballot intake">
+          <p className="card-body">
+            Ballots submitted privately over Tor are handed off into an app-owned intake inbox
+            for this election. Sync brings them into this authoritative election record through
+            the same checks as an imported ballot: a ballot is accepted only once, and an exact
+            resend is never counted twice.
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!canAct || lifecycle !== "OPEN" || syncBusy}
+            onClick={() => void onSyncPrivateIntake()}
+          >
+            {syncBusy ? "Syncing…" : "Sync accepted ballots"}
+          </button>
+          {syncSummary && (
+            <div className="field-list">
+              <Field label="Newly accepted">{syncSummary.newly_accepted}</Field>
+              <Field label="Already counted">{syncSummary.duplicates}</Field>
+              {syncSummary.rejected > 0 && (
+                <Field label="Rejected">{syncSummary.rejected}</Field>
+              )}
+            </div>
+          )}
+          {lifecycle !== "OPEN" && lifecycle !== null && (
+            <p className="card-body">
+              Private intake sync is available only while voting is open.
+            </p>
+          )}
+          <DetailsSection summary="Operator setup (advanced)">
+            <p className="card-body">
+              Point the controlled Tor intake process at this app-data root so accepted ballots
+              are written into the election intake inbox this app reads. The election sub-folder
+              is derived from the election manifest, so a different election can never reuse it.
+            </p>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct}
+              onClick={() => void onRevealInboxPath()}
+            >
+              Show intake inbox folder
+            </button>
+            {inboxPath && (
+              <div className="form-row">
+                <label htmlFor="inbox-path">Intake inbox folder</label>
+                <input id="inbox-path" type="text" readOnly value={inboxPath} />
+              </div>
+            )}
+          </DetailsSection>
+        </Card>
+
         <Card title="Close Voting">
           <p className="card-body">
             Closing voting is permanent: after voting is closed, no new ballots can be accepted
@@ -622,7 +744,7 @@ export function ManageElection() {
             <div className="field-list">
               <Field label="Accepted ballots">{tally.accepted_ballots}</Field>
               <Field label="Abstentions">{tally.abstentions}</Field>
-              <Field label="Outcome">{describeLeading(tally)}</Field>
+              <Field label="Outcome">{describeLeadingOutcome(tally)}</Field>
             </div>
           )}
           {tally && tallyAvailable && (

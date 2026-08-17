@@ -233,9 +233,7 @@ fn restart_at_finalized_accept_is_terminal_idempotent() {
     assert!(restored.phase().is_terminal());
 
     // Re-driving any step is an idempotent no-op.
-    let Ok(report) = restored
-        .advance_one_poll(&mut FakeIndexerReceiptClientLike::new())
-    else {
+    let Ok(report) = restored.advance_one_poll(&mut FakeIndexerReceiptClientLike::new()) else {
         panic!("poll on terminal is no-op")
     };
     assert_eq!(report.phase(), UnifiedAnchorLifecyclePhase::FinalizedAccept);

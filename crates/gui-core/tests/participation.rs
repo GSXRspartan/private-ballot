@@ -304,7 +304,10 @@ fn participation_visibility_and_result_visibility_are_consistent_with_tally_gate
     }
     // CLOSED: live participation, disclosed results, tally succeeds.
     let summary = session.participation_summary();
-    assert_eq!(summary.participation_visibility, ParticipationVisibility::Live);
+    assert_eq!(
+        summary.participation_visibility,
+        ParticipationVisibility::Live
+    );
     assert_eq!(summary.result_visibility, ResultVisibility::Disclosed);
     assert!(session.tally().is_ok());
 }
@@ -325,7 +328,10 @@ fn verified_and_finalized_disclose_participation_and_results() {
     }
     let verified = session.participation_summary();
     assert_eq!(verified.lifecycle_state, "VERIFIED");
-    assert_eq!(verified.participation_visibility, ParticipationVisibility::Live);
+    assert_eq!(
+        verified.participation_visibility,
+        ParticipationVisibility::Live
+    );
     assert_eq!(verified.result_visibility, ResultVisibility::Disclosed);
     assert_eq!(verified.accepted_ballots, Some(1));
     assert!(session.tally().is_ok());
@@ -335,7 +341,10 @@ fn verified_and_finalized_disclose_participation_and_results() {
     }
     let finalized = session.participation_summary();
     assert_eq!(finalized.lifecycle_state, "FINALIZED");
-    assert_eq!(finalized.participation_visibility, ParticipationVisibility::Live);
+    assert_eq!(
+        finalized.participation_visibility,
+        ParticipationVisibility::Live
+    );
     assert_eq!(finalized.result_visibility, ResultVisibility::Disclosed);
     assert_eq!(finalized.accepted_ballots, Some(1));
     assert!(session.tally().is_ok());
@@ -348,8 +357,8 @@ fn participation_summary_does_not_alter_canonical_bytes_or_archive_hash() {
     // We verify by computing the summary twice and asserting the archive hash
     // (which covers manifest, registry, candidates, submissions, and the
     // archive manifest) is unaffected.
-    use tari_cc_private_ballot_gui_core::archive_writer::write_archive_directory_v1;
     use common::TestDir;
+    use tari_cc_private_ballot_gui_core::archive_writer::write_archive_directory_v1;
 
     let mut session = open_session();
     let package = triptych_package_bytes(0, &[b"candidate-a"]);

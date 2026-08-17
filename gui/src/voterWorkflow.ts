@@ -22,8 +22,9 @@ export function selectionSummaryText(
 export function workflowTone(
   state: GuiVoterWorkflowStateV1 | null | undefined,
 ): "ok" | "warn" | "neutral" {
-  if (state === "SelectionReady" || state === "PreparedBallotReady") return "ok";
-  if (state === "CredentialNotEligible") return "warn";
+  if (state === "SelectionReady" || state === "PreparedBallotReady" || state === "BallotCast")
+    return "ok";
+  if (state === "CredentialNotEligible" || state === "CastPending") return "warn";
   return "neutral";
 }
 
@@ -44,6 +45,10 @@ export function workflowStateText(
       return "Preparing your ballot…";
     case "PreparedBallotReady":
       return "Your ballot is prepared.";
+    case "BallotCast":
+      return "Your ballot was exported and cast on this device for this election.";
+    case "CastPending":
+      return "Finishing your ballot submission. Your choice is locked for this election.";
     case "ReviewRequired":
       return "Review the election to continue.";
     case "CredentialMissing":

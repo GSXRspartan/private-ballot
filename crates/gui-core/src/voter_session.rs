@@ -16,6 +16,21 @@ use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::{GuiCoreError, GuiErrorCategory};
 use crate::hex::{from_hex, to_lower_hex};
 use crate::summary::GuiCandidateSummaryV1;
+use crate::transport::{
+    AuthenticatedTransportReceiptV1, DescriptorConsistencyStoreV1, PrivateBallotEnvelopeV1,
+    TransportAuthorityRootSetV1, TransportDescriptorV1, TransportRoutePolicyV1,
+    VoterReceiptStateV1,
+};
+use crate::voter_cast_lock::{
+    GuiVoterCastLockStateV1, PendingReleaseRetryHandleV1, cast_record_exists_v1,
+    finalize_verified_cast_temp_without_overwrite, load_pending_release_retry_handle_v1,
+    persist_release_receipt_evidence_v1, probe_cast_export_destination_supports_no_overwrite_v1,
+    promote_cast_record_to_cast_v1, public_credential_fingerprint_hex_v1,
+    read_and_verify_staged_release_envelope_v1, release_receipt_evidence_path_v1,
+    stage_release_envelope_v1, staged_release_envelope_digest_hex_v1,
+    staged_release_envelope_path_v1, write_cast_record_pending_private_transport_v1,
+    write_cast_record_pending_v1,
+};
 use crate::voter_credential::{
     GuiVoterCredentialOriginV1, GuiVoterCredentialSessionV1, GuiVoterCredentialStatusV1,
     GuiVoterEligibilityV1, VoterGovernanceCredentialV1,
@@ -42,6 +57,11 @@ pub enum GuiVoterWorkflowStateV1 {
     PreparingProof,
     /// Future ready state. Not reachable in production in Slice 5A10A.
     PreparedBallotReady,
+    /// The ballot was exported and irrevocably cast locally for this election.
+    BallotCast,
+    /// A cast export is durably committed but awaiting safe finalization; the
+    /// voter is locked out of preparing a different ballot.
+    CastPending,
 }
 
 impl GuiVoterWorkflowStateV1 {
@@ -56,6 +76,8 @@ impl GuiVoterWorkflowStateV1 {
             Self::SelectionReady => "SelectionReady",
             Self::PreparingProof => "PreparingProof",
             Self::PreparedBallotReady => "PreparedBallotReady",
+            Self::BallotCast => "BallotCast",
+            Self::CastPending => "CastPending",
         }
     }
 }
@@ -184,6 +206,71 @@ pub struct GuiPreparedBallotExportV1 {
     pub package_digest_hex: String,
 }
 
+/// The single carrier operation the shared release boundary invokes: deliver an
+/// already-authenticated opaque submission envelope to the organizer collector
+/// and return the raw authenticated receipt bytes it produced.
+///
+/// This trait is the ONLY point at which ballot bytes may leave the process, and
+/// it is invoked strictly after the durable `CAST_PENDING` release record is
+/// written. A carrier must never fall back to a direct/clearnet route; a
+/// delivery or receipt failure is surfaced as `Err`, keeping the voter locked
+/// and the SAME staged envelope retriable. Implementations must not log the
+/// envelope or receipt bytes.
+///
+/// The delivery receives the SAME already-verified `TransportDescriptorV1` the
+/// release boundary authenticated (root-pinned, manifest-bound, route-checked,
+/// fingerprint-pinned) and the staged envelope was sealed to. A network carrier
+/// MUST derive its destination route from this descriptor, never from an
+/// independently supplied address, so the transmitted ciphertext can only ever
+/// reach the destination the verified descriptor names. Route confusion is thus
+/// structurally impossible rather than detected after the fact.
+pub trait PrivateReleaseCarrierV1 {
+    /// Sends the exact opaque envelope bytes to the destination named by the
+    /// verified `descriptor` and returns the raw authenticated receipt bytes on
+    /// success. Any inability to obtain an authenticated receipt is an error;
+    /// there is no direct-network fallback and no destination other than the
+    /// one derived from `descriptor`.
+    fn deliver_opaque_envelope(
+        &mut self,
+        descriptor: &TransportDescriptorV1,
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, GuiCoreError>;
+}
+
+/// Safe metadata returned after a private-transport release attempt. It exposes
+/// only the durable local release state and the voter-safe receipt projection;
+/// no descriptor, endpoint, envelope, or organizer intake field crosses it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiPrivateReleaseResultV1 {
+    /// Durable local cast state after this attempt: `CAST` only once an
+    /// authenticated receipt is verified and persisted; otherwise `CAST_PENDING`.
+    pub cast_lock_state: &'static str,
+    /// Voter-safe transport receipt state, or `PENDING` when delivery is
+    /// uncertain (no authenticated receipt yet).
+    pub receipt_state: &'static str,
+    /// Whether the ballot has irreversibly left local control (delivery
+    /// authenticated). This is NOT organizer acceptance, tally inclusion, or
+    /// anchoring.
+    pub released: bool,
+    /// Canonical package digest of the released ballot.
+    pub package_digest_hex: String,
+    /// A bounded, PRIVACY-SAFE stage label describing WHY an uncertain
+    /// (`CAST_PENDING`) attempt did not complete, for the controlled-test
+    /// Advanced/diagnostics panel only. `None` on success and whenever there is
+    /// no safe stage to report. It NEVER carries plaintext choice, ballot
+    /// package, proof, witness, credential/HPKE/receipt-signing secret,
+    /// passphrase, member index, private nullifier, staged envelope bytes, or
+    /// any voter IP / Tor circuit / network identity — only which processing
+    /// stage classified the outcome. The durable state semantics are unchanged:
+    /// this field is purely additive diagnostics and never alters `CAST_PENDING`
+    /// fail-closed behavior. Vocabulary:
+    /// `PRIVATE_TRANSPORT_UNAVAILABLE`, `RECEIPT_PARSE_FAILED`,
+    /// `RECEIPT_SIGNATURE_INVALID`, `RECEIPT_DESCRIPTOR_MISMATCH`,
+    /// `RECEIPT_PACKAGE_MISMATCH`, `RECEIPT_REJECTED_BY_ORGANIZER`,
+    /// `RECEIPT_PERSIST_FAILED`, `CAST_PROMOTION_FAILED`.
+    pub diagnostic_stage: Option<&'static str>,
+}
+
 /// Safe public summary of the whole Rust-owned voter workflow.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuiVoterWorkflowStatusV1 {
@@ -207,6 +294,11 @@ pub struct GuiVoterWorkflowStatusV1 {
     pub preparation_generation: u64,
     /// Fixed notice about local-only proof preparation.
     pub preparation_notice: &'static str,
+    /// Durable local cast state for this election + credential. `NOT_CAST` while
+    /// the ballot may still be reconsidered; `CAST` once exported/cast;
+    /// `CAST_PENDING` during crash recovery. Defense-in-depth only — the
+    /// election-scoped nullifier remains the authoritative one-vote rule.
+    pub cast_lock_state: &'static str,
 }
 
 /// Non-secret token captured before future expensive proof work.
@@ -238,6 +330,11 @@ enum PreparedBallotStateV1 {
     Ready {
         canonical_bytes: Vec<u8>,
         summary: GuiPreparedBallotSummaryV1,
+    },
+    /// The ballot was exported and cast; the canonical bytes are intentionally
+    /// dropped so a cast session cannot re-export or reconsider.
+    Cast {
+        package_digest_hex: Option<String>,
     },
     #[cfg(test)]
     TestReady {
@@ -282,6 +379,13 @@ impl PreparedBallotStateV1 {
                 } else {
                     "Election is no longer open; this prepared ballot is not exportable."
                 },
+            },
+            Self::Cast { .. } => GuiPreparedBallotStatusV1 {
+                state: "Cast",
+                operation_id: None,
+                ready_to_export: false,
+                summary: None,
+                message: "This ballot was exported and cast on this device for this election.",
             },
             #[cfg(test)]
             Self::TestReady { .. } => GuiPreparedBallotStatusV1 {
@@ -361,6 +465,10 @@ pub struct GuiVoterSessionV1 {
     selection_revision: u64,
     preparation_generation: u64,
     prepared_ballot: PreparedBallotStateV1,
+    /// Local durable-cast cache. Authoritative durable state lives on disk; the
+    /// shell re-applies it via [`Self::apply_cast_lock_state`] before every
+    /// gated operation, so this cache never overrides the durable record.
+    cast_lock: GuiVoterCastLockStateV1,
 }
 
 impl GuiVoterSessionV1 {
@@ -375,6 +483,7 @@ impl GuiVoterSessionV1 {
             selection_revision: 0,
             preparation_generation: 0,
             prepared_ballot: PreparedBallotStateV1::None,
+            cast_lock: GuiVoterCastLockStateV1::NotCast,
         }
     }
 
@@ -522,6 +631,7 @@ impl GuiVoterSessionV1 {
         abstain: bool,
     ) -> Result<GuiVoterSelectionStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
+        self.ensure_not_cast_locked()?;
         if abstain && !selected_option_ids_hex.is_empty() {
             return Err(GuiCoreError::new(
                 "GUI_ABSTENTION_WITH_SELECTIONS",
@@ -561,6 +671,7 @@ impl GuiVoterSessionV1 {
         lifecycle_state: ElectionLifecycleStateV1,
     ) -> Result<GuiVoterSelectionStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
+        self.ensure_not_cast_locked()?;
         self.selection = None;
         self.selection_revision = self.selection_revision.saturating_add(1);
         self.invalidate_prepared("Selection cleared; prepared ballot state was cleared.");
@@ -624,6 +735,7 @@ impl GuiVoterSessionV1 {
             selection_revision: self.selection_revision,
             preparation_generation: self.preparation_generation,
             preparation_notice: PROOF_GENERATION_DEFERRED_NOTICE,
+            cast_lock_state: self.cast_lock.as_str(),
         }
     }
 
@@ -633,6 +745,7 @@ impl GuiVoterSessionV1 {
         &mut self,
         lifecycle_state: ElectionLifecycleStateV1,
     ) -> Result<GuiVoterPreparationTokenV1, GuiCoreError> {
+        self.ensure_not_cast_locked()?;
         if !self.can_prepare_ballot(lifecycle_state) {
             return Err(GuiCoreError::new(
                 ValidationCode::ElectionNotOpen.as_str(),
@@ -786,7 +899,9 @@ impl GuiVoterSessionV1 {
     }
 
     /// Writes a verified package without overwrite, then verifies exact bytes
-    /// read back from disk through the existing verifier path.
+    /// read back from disk through the existing verifier path. This is the pure
+    /// file export with no cast-lock semantics; the shell uses
+    /// [`Self::export_and_cast_prepared_ballot`] for the voter-facing action.
     pub fn export_prepared_ballot(
         &self,
         artifacts: &GuiElectionArtifactsV1,
@@ -814,79 +929,595 @@ impl GuiVoterSessionV1 {
                 "no locally verified ballot package is available",
             ));
         };
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    GuiCoreError::new(
-                        "GUI_BALLOT_EXPORT_COLLISION",
-                        GuiErrorCategory::FileIo,
-                        Some("export-ballot"),
-                        "For safety, ballot exports never overwrite an existing file. Choose a new filename.",
-                    )
-                } else {
-                    GuiCoreError::io_failure("export-ballot")
-                }
-            })?;
-        file.write_all(canonical_bytes)
-            .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
-        file.sync_all()
-            .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
-        let read_back =
-            std::fs::read(path).map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
-        if read_back != *canonical_bytes {
+        let written = write_and_verify_ballot_package_to_path(canonical_bytes, artifacts, path)?;
+        Ok(GuiPreparedBallotExportV1 {
+            canonical_package_bytes: written,
+            package_digest_hex: summary.package_digest_hex.clone(),
+        })
+    }
+
+    /// Exports the prepared ballot AND records an irrevocable local cast for the
+    /// (election, public-credential) pair.
+    ///
+    /// Crash-safe ordering (fail closed after the boundary is durably crossed):
+    ///
+    /// 1. Refuse if already locked, if the durable record already exists, or if
+    ///    the final path exists (fail fast — no lock written on a trivial error).
+    /// 2. Probe the destination directory supports no-overwrite hard-link
+    ///    finalization; on an unsupported filesystem (e.g. FAT32/exFAT) refuse
+    ///    BEFORE any durable cast state, so the voter stays `NOT_CAST` and may
+    ///    choose another location.
+    /// 3. Write the ballot bytes to a sibling temp file, sync, read back, and
+    ///    verify the exact bytes + proof.
+    /// 4. Durably write a PENDING cast record binding election + fingerprint +
+    ///    package digest + temp/final paths.
+    /// 5. Expose the final file via `hard_link(temp, final)` — atomic
+    ///    create-or-fail, never overwriting an existing target.
+    /// 6. Promote the record to CAST and mark the session cast.
+    ///
+    /// A crash before step 4 leaves the voter free; a crash after step 4 keeps
+    /// the voter locked, and recovery (in [`crate::voter_cast_lock`]) finalizes
+    /// the same ballot when it can prove it, never a different one.
+    pub fn export_and_cast_prepared_ballot(
+        &mut self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+        final_path: &std::path::Path,
+        cast_locks_dir: &std::path::Path,
+    ) -> Result<GuiPreparedBallotExportV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        self.ensure_not_cast_locked()?;
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
             return Err(GuiCoreError::new(
-                "GUI_BALLOT_EXPORT_READBACK_FAILED",
-                GuiErrorCategory::FileIo,
+                "GUI_PREPARED_BALLOT_NOT_EXPORTABLE",
+                GuiErrorCategory::InvalidLifecycleTransition,
                 Some("export-ballot"),
-                "ballot package read-back did not match the prepared bytes",
+                "a prepared ballot can be exported only while the election is open",
             ));
         }
-        let provider = Blake3HashProviderV1;
-        let verifier =
-            build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
-                .map_err(|_| {
-                    GuiCoreError::new(
-                        "GUI_BALLOT_EXPORT_READBACK_FAILED",
-                        GuiErrorCategory::ProofFailure,
-                        Some("export-ballot"),
-                        "ballot package read-back verification failed",
-                    )
-                })?;
-        let package = BallotPackageV1::from_canonical_cbor(
-            &read_back,
-            artifacts.candidates(),
-            artifacts.manifest().approval_limits(),
-        )
-        .map_err(|_| {
-            GuiCoreError::new(
-                "GUI_BALLOT_EXPORT_READBACK_FAILED",
-                GuiErrorCategory::ProofFailure,
+        let (canonical_bytes, package_digest_hex) = match &self.prepared_ballot {
+            PreparedBallotStateV1::Ready {
+                canonical_bytes,
+                summary,
+            } => (canonical_bytes.clone(), summary.package_digest_hex.clone()),
+            _ => {
+                return Err(GuiCoreError::new(
+                    "GUI_NO_PREPARED_BALLOT",
+                    GuiErrorCategory::InvalidInput,
+                    Some("export-ballot"),
+                    "no locally verified ballot package is available",
+                ));
+            }
+        };
+        let fingerprint = self.credential_fingerprint()?;
+        let manifest_hash_hex = self.election_binding.manifest_hash_hex.clone();
+
+        // Defense in depth: never overwrite an existing durable cast for this
+        // pair (this also fails closed if a record is present from a prior run).
+        if cast_record_exists_v1(cast_locks_dir, &manifest_hash_hex, &fingerprint)? {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Err(GuiCoreError::new(
+                "GUI_BALLOT_ALREADY_CAST",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("voter-cast-lock"),
+                "a ballot has already been cast for this election with this credential",
+            ));
+        }
+
+        // Fail fast on a final-path collision BEFORE any durable lock is written,
+        // preserving the existing no-overwrite guarantee.
+        if final_path.exists() {
+            return Err(GuiCoreError::new(
+                "GUI_BALLOT_EXPORT_COLLISION",
+                GuiErrorCategory::FileIo,
                 Some("export-ballot"),
-                "ballot package read-back verification failed",
-            )
-        })?;
-        verify_approval_proof(
-            artifacts.manifest(),
-            package.payload(),
-            package.proof(),
-            &provider,
-            &verifier,
-        )
-        .map_err(|_| {
-            GuiCoreError::new(
-                "GUI_BALLOT_EXPORT_READBACK_FAILED",
-                GuiErrorCategory::ProofFailure,
-                Some("export-ballot"),
-                "ballot package read-back verification failed",
-            )
-        })?;
+                "For safety, ballot exports never overwrite an existing file. Choose a new filename.",
+            ));
+        }
+
+        // Preflight: confirm the destination directory supports the
+        // no-overwrite hard-link finalization the real export path requires.
+        // This MUST run before any durable cast state (and before the real
+        // ballot temp is written) so an unsupported destination such as a
+        // FAT32/exFAT removable drive is rejected with the voter left NOT_CAST
+        // and no PENDING record on disk. The probe uses throwaway files in the
+        // destination directory and never touches the real final path.
+        probe_cast_export_destination_supports_no_overwrite_v1(final_path)?;
+
+        // Write + verify the ballot to a sibling temp file (same directory, so
+        // the later no-overwrite finalization stays on one filesystem).
+        let temp_path = cast_temp_path(final_path);
+        let _ = std::fs::remove_file(&temp_path);
+        let written =
+            write_and_verify_ballot_package_to_path(&canonical_bytes, artifacts, &temp_path)?;
+
+        // The irreversible boundary: durably record the pending cast BEFORE the
+        // final file is exposed.
+        write_cast_record_pending_v1(
+            cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            &package_digest_hex,
+            final_path,
+            &temp_path,
+        )?;
+
+        // Expose the final export file WITHOUT overwriting an existing target
+        // (atomic create-or-fail via hard link — closes the former
+        // exists()-then-rename TOCTOU). On collision or any finalize failure the
+        // PENDING record is durable and the verified temp is preserved, so the
+        // voter stays locked and recovery can finalize the SAME ballot later.
+        if let Err(error) = finalize_verified_cast_temp_without_overwrite(&temp_path, final_path) {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Err(error);
+        }
+
+        // The final file now holds our ballot and the record is durable-PENDING.
+        // If promotion is interrupted, recovery promotes the same cast; keep the
+        // voter locked (CastPending) rather than reporting success.
+        if promote_cast_record_to_cast_v1(cast_locks_dir, &manifest_hash_hex, &fingerprint).is_err()
+        {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Err(GuiCoreError::io_failure("export-ballot"));
+        }
+        self.cast_lock = GuiVoterCastLockStateV1::Cast;
+        self.prepared_ballot = PreparedBallotStateV1::Cast {
+            package_digest_hex: Some(package_digest_hex.clone()),
+        };
         Ok(GuiPreparedBallotExportV1 {
-            canonical_package_bytes: read_back.len(),
-            package_digest_hex: summary.package_digest_hex.clone(),
+            canonical_package_bytes: written,
+            package_digest_hex,
+        })
+    }
+
+    /// Releases the prepared ballot through a private online transport carrier,
+    /// crossing the SAME durable irreversible cast boundary as offline export.
+    ///
+    /// Crash-safe ordering (fail closed once the boundary is durably crossed):
+    ///
+    /// 1. Refuse if already locked or a durable record already exists (fail fast,
+    ///    NOT_CAST preserved).
+    /// 2. Verify the descriptor is root-pinned, manifest/election-bound, and
+    ///    permits an online route — BEFORE any staging or PENDING. A bad/untrusted
+    ///    descriptor leaves the voter NOT_CAST with no bytes transmitted.
+    /// 3. Construct the EXACT opaque submission envelope from the canonical
+    ///    prepared package via the existing HPKE transport layer.
+    /// 4. Durably stage that exact envelope for retry.
+    /// 5. Durably write a PENDING private-transport release record.
+    /// 6. Invoke the carrier (the FIRST point ballot bytes can leave the process).
+    /// 7. Verify the returned receipt is authenticated by the descriptor and
+    ///    acknowledges the exact released package; persist it durably.
+    /// 8. Promote to CAST.
+    ///
+    /// Any failure at or after step 5 keeps the voter `CAST_PENDING` (locked)
+    /// with the SAME staged envelope retriable; it never unlocks and never
+    /// produces a different ballot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn release_prepared_ballot_via_private_transport(
+        &mut self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+        descriptor: &TransportDescriptorV1,
+        roots: &TransportAuthorityRootSetV1,
+        consistency: &mut DescriptorConsistencyStoreV1,
+        cast_locks_dir: &std::path::Path,
+        staging_dir: &std::path::Path,
+        carrier: &mut dyn PrivateReleaseCarrierV1,
+    ) -> Result<GuiPrivateReleaseResultV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        self.ensure_not_cast_locked()?;
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+            return Err(GuiCoreError::new(
+                "GUI_PREPARED_BALLOT_NOT_SUBMITTABLE",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("private-release"),
+                "a prepared ballot can be released only while the election is open",
+            ));
+        }
+        let (canonical_bytes, package_digest_hex) = match &self.prepared_ballot {
+            PreparedBallotStateV1::Ready {
+                canonical_bytes,
+                summary,
+            } => (canonical_bytes.clone(), summary.package_digest_hex.clone()),
+            _ => {
+                return Err(GuiCoreError::new(
+                    "GUI_NO_PREPARED_BALLOT",
+                    GuiErrorCategory::InvalidInput,
+                    Some("private-release"),
+                    "no locally verified ballot package is available",
+                ));
+            }
+        };
+        let fingerprint = self.credential_fingerprint()?;
+        let manifest_hash_hex = self.election_binding.manifest_hash_hex.clone();
+
+        // Defense in depth: never overwrite an existing durable cast for this
+        // pair. Fail closed (locked) if a record is already present.
+        if cast_record_exists_v1(cast_locks_dir, &manifest_hash_hex, &fingerprint)? {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Err(GuiCoreError::new(
+                "GUI_BALLOT_ALREADY_CAST",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("voter-cast-lock"),
+                "a ballot has already been cast for this election with this credential",
+            ));
+        }
+
+        // Verify descriptor trust + election/route binding BEFORE staging,
+        // PENDING, or any transmission. A failure here leaves the voter
+        // NOT_CAST; no ballot bytes are staged or sent.
+        let descriptor_fingerprint_hex =
+            self.verify_release_descriptor(artifacts, descriptor, roots, consistency)?;
+
+        // Construct the EXACT opaque submission envelope via the existing HPKE
+        // transport layer; this is what will be staged, sent, and (on retry)
+        // retransmitted byte-for-byte.
+        let envelope = PrivateBallotEnvelopeV1::seal(descriptor, &canonical_bytes)
+            .and_then(|sealed| sealed.to_canonical_cbor())
+            .map_err(map_release_transport_error)?;
+        // Digest the EXACT bytes that are staged (and later delivered); this is
+        // the primary exact-retry integrity invariant recorded in the durable
+        // PENDING record.
+        let staged_envelope_digest_hex = staged_release_envelope_digest_hex_v1(&envelope);
+
+        let staged_envelope_path =
+            staged_release_envelope_path_v1(staging_dir, &manifest_hash_hex, &fingerprint);
+        let receipt_evidence_path =
+            release_receipt_evidence_path_v1(staging_dir, &manifest_hash_hex, &fingerprint);
+
+        // Durably stage the exact envelope, then durably record PENDING (with the
+        // staged digest). After this point the boundary is crossed: every path
+        // stays locked.
+        stage_release_envelope_v1(&staged_envelope_path, &envelope)?;
+        write_cast_record_pending_private_transport_v1(
+            cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            &package_digest_hex,
+            &staged_envelope_path,
+            &staged_envelope_digest_hex,
+            &descriptor_fingerprint_hex,
+            &receipt_evidence_path,
+        )?;
+        self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+
+        // Initial send and retry share one authoritative path: both re-read the
+        // staged file and verify its exact bytes/canonical form/public bindings
+        // before the carrier is ever invoked, so their semantics cannot drift.
+        self.verify_staged_then_deliver_release(
+            descriptor,
+            cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            &package_digest_hex,
+            &staged_envelope_path,
+            &staged_envelope_digest_hex,
+            &descriptor_fingerprint_hex,
+            &receipt_evidence_path,
+            carrier,
+        )
+    }
+
+    /// Retries the SAME durably staged private-transport release after a crash
+    /// or an uncertain send. It retransmits the EXACT staged opaque envelope; it
+    /// never re-seals or produces a different ballot. Fail-closed: any failure
+    /// keeps the voter `CAST_PENDING`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn retry_pending_private_transport_release(
+        &mut self,
+        artifacts: &GuiElectionArtifactsV1,
+        descriptor: &TransportDescriptorV1,
+        roots: &TransportAuthorityRootSetV1,
+        consistency: &mut DescriptorConsistencyStoreV1,
+        cast_locks_dir: &std::path::Path,
+        carrier: &mut dyn PrivateReleaseCarrierV1,
+    ) -> Result<GuiPrivateReleaseResultV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        let fingerprint = self.credential_fingerprint()?;
+        let manifest_hash_hex = self.election_binding.manifest_hash_hex.clone();
+
+        let Some(handle) =
+            load_pending_release_retry_handle_v1(cast_locks_dir, &manifest_hash_hex, &fingerprint)
+        else {
+            return Err(GuiCoreError::new(
+                "GUI_NO_PENDING_RELEASE",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("private-release"),
+                "there is no pending private-transport release to retry",
+            ));
+        };
+        // We are (correctly) locked while a PENDING release exists.
+        self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+
+        // Re-establish descriptor trust and confirm it is the SAME descriptor
+        // the staged envelope was sealed to, before retransmitting.
+        let descriptor_fingerprint_hex =
+            self.verify_release_descriptor(artifacts, descriptor, roots, consistency)?;
+        if descriptor_fingerprint_hex != handle.descriptor_fingerprint_hex {
+            return Err(GuiCoreError::new(
+                "GUI_RELEASE_DESCRIPTOR_CHANGED",
+                GuiErrorCategory::BindingMismatch,
+                Some("private-release"),
+                "the transport descriptor changed; the pending ballot remains cast-pending",
+            ));
+        }
+
+        // Retransmit the EXACT staged bytes; a missing or altered staged artifact
+        // keeps the voter locked (fail closed) and is never transmitted.
+        let PendingReleaseRetryHandleV1 {
+            staged_envelope_path,
+            staged_envelope_digest_hex,
+            package_digest_hex,
+            receipt_evidence_path,
+            ..
+        } = handle;
+
+        self.verify_staged_then_deliver_release(
+            descriptor,
+            cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            &package_digest_hex,
+            &staged_envelope_path,
+            &staged_envelope_digest_hex,
+            &descriptor_fingerprint_hex,
+            &receipt_evidence_path,
+            carrier,
+        )
+    }
+
+    /// Re-reads and verifies the EXACT staged opaque envelope (byte digest +
+    /// strict canonical form + public descriptor bindings) BEFORE any carrier is
+    /// invoked, then delivers it. A tampered or missing staged artifact is never
+    /// transmitted: the carrier is not called, the voter stays `CAST_PENDING`,
+    /// and a bounded tamper/recovery error is returned. Shared by initial send
+    /// and retry so the two cannot diverge and both send exactly the recorded
+    /// artifact.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_staged_then_deliver_release(
+        &mut self,
+        descriptor: &TransportDescriptorV1,
+        cast_locks_dir: &std::path::Path,
+        manifest_hash_hex: &str,
+        fingerprint: &str,
+        package_digest_hex: &str,
+        staged_envelope_path: &std::path::Path,
+        staged_envelope_digest_hex: &str,
+        descriptor_fingerprint_hex: &str,
+        receipt_evidence_path: &std::path::Path,
+        carrier: &mut dyn PrivateReleaseCarrierV1,
+    ) -> Result<GuiPrivateReleaseResultV1, GuiCoreError> {
+        let envelope = match read_and_verify_staged_release_envelope_v1(
+            staged_envelope_path,
+            staged_envelope_digest_hex,
+            descriptor,
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                // Fail closed: stay locked, never transmit, never reseal.
+                self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+                return Err(error);
+            }
+        };
+        self.deliver_and_finalize_release(
+            descriptor,
+            cast_locks_dir,
+            manifest_hash_hex,
+            fingerprint,
+            package_digest_hex,
+            descriptor_fingerprint_hex,
+            receipt_evidence_path,
+            &envelope,
+            carrier,
+        )
+    }
+
+    /// Shared tail of release + retry: invoke the carrier, authenticate and
+    /// persist the receipt, and promote to CAST. Every failure branch leaves the
+    /// voter `CAST_PENDING` (locked) with the staged envelope retained.
+    #[allow(clippy::too_many_arguments)]
+    fn deliver_and_finalize_release(
+        &mut self,
+        descriptor: &TransportDescriptorV1,
+        cast_locks_dir: &std::path::Path,
+        manifest_hash_hex: &str,
+        fingerprint: &str,
+        package_digest_hex: &str,
+        descriptor_fingerprint_hex: &str,
+        receipt_evidence_path: &std::path::Path,
+        envelope: &[u8],
+        carrier: &mut dyn PrivateReleaseCarrierV1,
+    ) -> Result<GuiPrivateReleaseResultV1, GuiCoreError> {
+        // The FIRST point ballot bytes can leave the process. A durable PENDING
+        // record already exists. The carrier receives the SAME verified
+        // descriptor the envelope was sealed to and derives its route from it.
+        //
+        // A carrier failure keeps the coarse voter-facing behavior (locked,
+        // retriable) but records a bounded safe stage for the Advanced panel.
+        // The carrier's own coarse code is intentionally NOT reflected verbatim
+        // (it could vary); the authoritative finer network picture is on the
+        // organizer's local terminal (Phase C), which is not a remote oracle.
+        let receipt_bytes = match carrier.deliver_opaque_envelope(descriptor, envelope) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+                return Ok(self.pending_release_result(
+                    package_digest_hex,
+                    Some("PRIVATE_TRANSPORT_UNAVAILABLE"),
+                ));
+            }
+        };
+
+        // Promote only on an authenticated receipt that acknowledges the exact
+        // released package. An unauthenticated success code is never sufficient.
+        let receipt = match AuthenticatedTransportReceiptV1::from_canonical_cbor(&receipt_bytes) {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+                return Ok(
+                    self.pending_release_result(package_digest_hex, Some("RECEIPT_PARSE_FAILED"))
+                );
+            }
+        };
+        // Authenticated binding: signed by a descriptor receipt key, bound to
+        // THIS exact descriptor fingerprint (verify_for_descriptor enforces
+        // receipt.descriptor_fingerprint == descriptor.fingerprint()), and
+        // acknowledging the exact released package. The explicit fingerprint
+        // comparison against the pending record's descriptor is defense in depth.
+        // Each failing check maps to a distinct, privacy-safe stage (none reveals
+        // any secret — only which receipt check failed).
+        if receipt.verify_for_descriptor(descriptor).is_err() {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(
+                self.pending_release_result(package_digest_hex, Some("RECEIPT_SIGNATURE_INVALID"))
+            );
+        }
+        if to_lower_hex(&receipt.descriptor_fingerprint()) != descriptor_fingerprint_hex {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(self
+                .pending_release_result(package_digest_hex, Some("RECEIPT_DESCRIPTOR_MISMATCH")));
+        }
+        if to_lower_hex(&receipt.package_digest()) != package_digest_hex {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(
+                self.pending_release_result(package_digest_hex, Some("RECEIPT_PACKAGE_MISMATCH"))
+            );
+        }
+        // A rejected/duplicate delivery is authenticated but must not promote to
+        // CAST; the ballot has still irreversibly left local control, so the
+        // voter stays locked (CAST_PENDING) and the truthful receipt is shown.
+        if !matches!(
+            receipt.receipt().state,
+            VoterReceiptStateV1::Accepted | VoterReceiptStateV1::Received
+        ) {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(GuiPrivateReleaseResultV1 {
+                cast_lock_state: GuiVoterCastLockStateV1::CastPending.as_str(),
+                receipt_state: receipt_state_str(receipt.receipt().state),
+                released: false,
+                package_digest_hex: package_digest_hex.to_owned(),
+                diagnostic_stage: Some("RECEIPT_REJECTED_BY_ORGANIZER"),
+            });
+        }
+
+        // Persist the authenticated receipt so a crash before promotion recovers
+        // by re-verifying it; then promote to the terminal CAST state. A failure
+        // here means the ballot WAS accepted by the organizer but the local
+        // finalization did not complete — the voter stays locked and can retry.
+        if persist_release_receipt_evidence_v1(receipt_evidence_path, &receipt_bytes).is_err() {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(
+                self.pending_release_result(package_digest_hex, Some("RECEIPT_PERSIST_FAILED"))
+            );
+        }
+        if promote_cast_record_to_cast_v1(cast_locks_dir, manifest_hash_hex, fingerprint).is_err() {
+            self.cast_lock = GuiVoterCastLockStateV1::CastPending;
+            return Ok(
+                self.pending_release_result(package_digest_hex, Some("CAST_PROMOTION_FAILED"))
+            );
+        }
+
+        self.cast_lock = GuiVoterCastLockStateV1::Cast;
+        self.prepared_ballot = PreparedBallotStateV1::Cast {
+            package_digest_hex: Some(package_digest_hex.to_owned()),
+        };
+        Ok(GuiPrivateReleaseResultV1 {
+            cast_lock_state: GuiVoterCastLockStateV1::Cast.as_str(),
+            receipt_state: receipt_state_str(receipt.receipt().state),
+            released: true,
+            package_digest_hex: package_digest_hex.to_owned(),
+            diagnostic_stage: None,
+        })
+    }
+
+    fn pending_release_result(
+        &self,
+        package_digest_hex: &str,
+        diagnostic_stage: Option<&'static str>,
+    ) -> GuiPrivateReleaseResultV1 {
+        GuiPrivateReleaseResultV1 {
+            cast_lock_state: GuiVoterCastLockStateV1::CastPending.as_str(),
+            receipt_state: "PENDING",
+            released: false,
+            package_digest_hex: package_digest_hex.to_owned(),
+            diagnostic_stage,
+        }
+    }
+
+    /// Verifies a transport descriptor is trusted (root-pinned, manifest-bound),
+    /// bound to THIS election, and permits an online route. Returns the
+    /// descriptor's canonical fingerprint (lowercase hex) on success.
+    fn verify_release_descriptor(
+        &self,
+        artifacts: &GuiElectionArtifactsV1,
+        descriptor: &TransportDescriptorV1,
+        roots: &TransportAuthorityRootSetV1,
+        consistency: &mut DescriptorConsistencyStoreV1,
+    ) -> Result<String, GuiCoreError> {
+        roots
+            .verify_and_accept_descriptor(descriptor, artifacts.manifest_hash(), consistency)
+            .map_err(map_release_transport_error)?;
+        if descriptor.election_id() != artifacts.manifest().election_id().as_bytes() {
+            return Err(GuiCoreError::new(
+                "GUI_RELEASE_WRONG_ELECTION",
+                GuiErrorCategory::BindingMismatch,
+                Some("private-release"),
+                "the transport descriptor is bound to a different election",
+            ));
+        }
+        if matches!(descriptor.route(), TransportRoutePolicyV1::OfflineOnly) {
+            return Err(GuiCoreError::new(
+                "GUI_RELEASE_ROUTE_UNSUPPORTED",
+                GuiErrorCategory::InvalidInput,
+                Some("private-release"),
+                "the transport descriptor does not permit an online route",
+            ));
+        }
+        descriptor
+            .fingerprint()
+            .map(|fingerprint| to_lower_hex(&fingerprint))
+            .map_err(map_release_transport_error)
+    }
+
+    /// Discards the prepared ballot so the voter can reconsider ("Change my
+    /// choice"). Refused once a durable cast lock is active. This authoritatively
+    /// drops the old canonical package and proof in Rust; a subsequent
+    /// preparation builds a brand-new package with the normal election-bound
+    /// proof and nullifier mechanism.
+    pub fn discard_prepared_ballot(
+        &mut self,
+        artifacts: &GuiElectionArtifactsV1,
+        lifecycle_state: ElectionLifecycleStateV1,
+    ) -> Result<GuiPreparedBallotStatusV1, GuiCoreError> {
+        self.ensure_bound(artifacts)?;
+        self.ensure_not_cast_locked()?;
+        self.invalidate_prepared(
+            "Ballot discarded so you can change your choice; prepare a new ballot when ready.",
+        );
+        Ok(self.prepared_ballot.status(lifecycle_state))
+    }
+
+    /// Returns the domain-separated fingerprint of the loaded credential's
+    /// public governance key, for cast-lock keying.
+    fn credential_fingerprint(&self) -> Result<String, GuiCoreError> {
+        let public_key_hex = self
+            .credential_status()
+            .public_governance_key_hex
+            .ok_or_else(|| {
+                GuiCoreError::new(
+                    "GUI_NO_VOTER_CREDENTIAL",
+                    GuiErrorCategory::InvalidInput,
+                    Some("export-ballot"),
+                    "a voter credential is required to cast a ballot",
+                )
+            })?;
+        public_credential_fingerprint_hex_v1(&public_key_hex).ok_or_else(|| {
+            GuiCoreError::new(
+                "GUI_CAST_LOCK_FINGERPRINT_FAILED",
+                GuiErrorCategory::InvalidInput,
+                Some("voter-cast-lock"),
+                "the credential public key could not be fingerprinted",
+            )
         })
     }
 
@@ -952,6 +1583,33 @@ impl GuiVoterSessionV1 {
         }
     }
 
+    /// Refuses selection/preparation/export changes once a durable local cast
+    /// lock is active. This is enforced in Rust so a modified frontend cannot
+    /// change or re-prepare a ballot after export.
+    fn ensure_not_cast_locked(&self) -> Result<(), GuiCoreError> {
+        if self.cast_lock.is_locked() {
+            return Err(GuiCoreError::new(
+                "GUI_BALLOT_ALREADY_CAST",
+                GuiErrorCategory::InvalidLifecycleTransition,
+                Some("voter-cast-lock"),
+                "this ballot was already exported and cast for this election; it cannot be changed",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Applies the durable cast state resolved by the shell. Cached only for
+    /// reporting/gating; the on-disk record remains authoritative.
+    pub fn apply_cast_lock_state(&mut self, state: GuiVoterCastLockStateV1) {
+        self.cast_lock = state;
+    }
+
+    /// Returns the current cached cast-lock state.
+    #[must_use]
+    pub fn cast_lock_state(&self) -> GuiVoterCastLockStateV1 {
+        self.cast_lock
+    }
+
     fn workflow_state(
         &self,
         review_confirmed: bool,
@@ -959,6 +1617,13 @@ impl GuiVoterSessionV1 {
     ) -> GuiVoterWorkflowStateV1 {
         if !review_confirmed {
             return GuiVoterWorkflowStateV1::ReviewRequired;
+        }
+        // A durable local cast overrides ordinary selection/preparation states:
+        // the ballot has been released and cannot be reconsidered here.
+        match self.cast_lock {
+            GuiVoterCastLockStateV1::Cast => return GuiVoterWorkflowStateV1::BallotCast,
+            GuiVoterCastLockStateV1::CastPending => return GuiVoterWorkflowStateV1::CastPending,
+            GuiVoterCastLockStateV1::NotCast => {}
         }
         match self.credential_status().eligibility {
             GuiVoterEligibilityV1::NotChecked => GuiVoterWorkflowStateV1::CredentialMissing,
@@ -1008,6 +1673,104 @@ impl GuiVoterSessionV1 {
         self.preparation_generation = self.preparation_generation.saturating_add(1);
         self.prepared_ballot = PreparedBallotStateV1::Invalidated { reason };
     }
+}
+
+/// Maps a bounded transport error to a bounded, voter-safe gui-core error for
+/// the release path. It intentionally coarsens all transport failures to a
+/// single unavailable-style message so no descriptor/endpoint/crypto detail
+/// leaks; the voter is directed to retry or use offline export.
+fn map_release_transport_error(_error: crate::transport::TransportError) -> GuiCoreError {
+    GuiCoreError::new(
+        "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+        GuiErrorCategory::Unavailable,
+        Some("private-release"),
+        "private transport is unavailable for this ballot; retry later or use offline export",
+    )
+}
+
+/// Stable voter-safe string for a transport receipt state.
+const fn receipt_state_str(state: VoterReceiptStateV1) -> &'static str {
+    match state {
+        VoterReceiptStateV1::Received => "RECEIVED",
+        VoterReceiptStateV1::Accepted => "ACCEPTED",
+        VoterReceiptStateV1::Rejected => "REJECTED",
+    }
+}
+
+/// Writes exact canonical ballot bytes to a new path (never overwriting), syncs,
+/// reads them back, and re-verifies the read-back package and proof through the
+/// authoritative verifier. Returns the number of bytes read back.
+fn write_and_verify_ballot_package_to_path(
+    canonical_bytes: &[u8],
+    artifacts: &GuiElectionArtifactsV1,
+    path: &std::path::Path,
+) -> Result<usize, GuiCoreError> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                GuiCoreError::new(
+                    "GUI_BALLOT_EXPORT_COLLISION",
+                    GuiErrorCategory::FileIo,
+                    Some("export-ballot"),
+                    "For safety, ballot exports never overwrite an existing file. Choose a new filename.",
+                )
+            } else {
+                GuiCoreError::io_failure("export-ballot")
+            }
+        })?;
+    file.write_all(canonical_bytes)
+        .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+    file.sync_all()
+        .map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+    let read_back = std::fs::read(path).map_err(|_| GuiCoreError::io_failure("export-ballot"))?;
+    if read_back != *canonical_bytes {
+        return Err(GuiCoreError::new(
+            "GUI_BALLOT_EXPORT_READBACK_FAILED",
+            GuiErrorCategory::FileIo,
+            Some("export-ballot"),
+            "ballot package read-back did not match the prepared bytes",
+        ));
+    }
+    let provider = Blake3HashProviderV1;
+    let verifier = build_tari_triptych_verifier_from_registry_v1(artifacts.registry(), &provider)
+        .map_err(|_| readback_verification_failed())?;
+    let package = BallotPackageV1::from_canonical_cbor(
+        &read_back,
+        artifacts.candidates(),
+        artifacts.manifest().approval_limits(),
+    )
+    .map_err(|_| readback_verification_failed())?;
+    verify_approval_proof(
+        artifacts.manifest(),
+        package.payload(),
+        package.proof(),
+        &provider,
+        &verifier,
+    )
+    .map_err(|_| readback_verification_failed())?;
+    Ok(read_back.len())
+}
+
+fn readback_verification_failed() -> GuiCoreError {
+    GuiCoreError::new(
+        "GUI_BALLOT_EXPORT_READBACK_FAILED",
+        GuiErrorCategory::ProofFailure,
+        Some("export-ballot"),
+        "ballot package read-back verification failed",
+    )
+}
+
+/// Returns the sibling temp path for a crash-safe cast export. Keeping it in the
+/// same directory as the final path keeps the no-overwrite finalization (a hard
+/// link) on one filesystem.
+fn cast_temp_path(final_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = final_path.as_os_str().to_owned();
+    name.push(".castpart");
+    std::path::PathBuf::from(name)
 }
 
 /// Returns candidate summaries in canonical order for frontend selection.

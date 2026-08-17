@@ -33,6 +33,10 @@ pub enum GuiErrorCategory {
     /// An anchor config, snapshot, or evidence artifact failed integrity or
     /// semantic validation.
     AnchorArtifactIntegrity,
+    /// A private online transport route is unavailable (e.g. Tor not ready, a
+    /// delivery failed, or no authenticated receipt was obtained). Offline
+    /// export remains a separate, deliberate action.
+    Unavailable,
 }
 
 impl GuiErrorCategory {
@@ -49,6 +53,7 @@ impl GuiErrorCategory {
             Self::ArchiveIntegrity => "ARCHIVE_INTEGRITY",
             Self::FileIo => "FILE_IO",
             Self::AnchorArtifactIntegrity => "ANCHOR_ARTIFACT_INTEGRITY",
+            Self::Unavailable => "UNAVAILABLE",
         }
     }
 }

@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { NavSection } from "../components/AppFrame";
 import {
@@ -12,7 +14,9 @@ import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
   Card,
+  ConfirmDialog,
   CopyButton,
+  DetailsSection,
   Field,
   HashValue,
   LifecyclePill,
@@ -40,7 +44,14 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     workspaces,
     dismissError,
     resumeElectionWorkspace,
+    deleteElectionWorkspace,
   } = useAppState();
+  // The workspace pending an explicit delete confirmation (null = no dialog).
+  const [pendingDelete, setPendingDelete] = useState<{
+    workspaceId: string;
+    label: string;
+  } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const presentation = presentationFor(election);
   const sealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
@@ -56,6 +67,20 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
       return;
     }
     onNavigate?.("manage");
+  }
+
+  async function confirmDeleteWorkspace() {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    try {
+      await deleteElectionWorkspace(pendingDelete.workspaceId);
+      setPendingDelete(null);
+    } catch {
+      // The backend error is surfaced by AppState's BackendErrorNotice; keep the
+      // dialog open so the user can see it failed and retry or cancel.
+    } finally {
+      setDeleteBusy(false);
+    }
   }
 
   return (
@@ -80,67 +105,95 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
         <div className="card-grid">
           <Card title="Current election">
             <div className="card-value">
-              {election.election_id_text ?? "Untitled election"}
+              {election.proposal_question ??
+                election.election_id_text ??
+                "Untitled election"}
             </div>
             <div className="field-list">
-              <Field label="Election ID">
-                <HashValue value={election.election_id_hex} />
-                <CopyButton value={election.election_id_hex} label="Copy ID" />
-              </Field>
+              {election.proposal_question && election.election_id_text && (
+                <Field label="Election">{election.election_id_text}</Field>
+              )}
               <Field label="Lifecycle">
                 <LifecyclePill state={election.lifecycle_state} />
               </Field>
-              <Field label="Recovery">Recovery state saved locally</Field>
-              <Field label="Manifest schema">
-                ElectionManifestV{election.manifest_schema_version}
-              </Field>
-              {election.proposal_question && (
-                <Field label="Ballot question">{election.proposal_question}</Field>
-              )}
-              <Field label="Ballot kind">{election.ballot_kind}</Field>
               <Field label="Eligible voters">{election.voter_count}</Field>
+              <Field label="Ballot kind">{election.ballot_kind}</Field>
               <Field label={presentation.optionSetNoun}>
                 {election.candidates.length}
               </Field>
+              <Field label="Recovery">Recovery state saved locally</Field>
             </div>
-          </Card>
-
-          <Card title="Election fingerprints">
-            <div className="field-list">
-              <Field label="Manifest hash">
-                <HashValue value={election.manifest_hash_hex} />
-                <CopyButton value={election.manifest_hash_hex} label="Copy" />
-              </Field>
-              <Field label="Registry commitment">
-                <HashValue value={election.registry_commitment_hex} />
-                <CopyButton value={election.registry_commitment_hex} label="Copy" />
-              </Field>
-              <Field label="Option-set commitment">
-                <HashValue value={election.candidate_set_commitment_hex} />
-                <CopyButton value={election.candidate_set_commitment_hex} label="Copy" />
-              </Field>
-            </div>
+            {onNavigate && (
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => onNavigate("manage")}
+                >
+                  Open Manage Election
+                </button>
+              </div>
+            )}
+            <DetailsSection summary="Technical details & fingerprints">
+              <div className="field-list">
+                <Field label="Election ID">
+                  <HashValue value={election.election_id_hex} />
+                  <CopyButton value={election.election_id_hex} label="Copy ID" />
+                </Field>
+                <Field label="Manifest schema">
+                  ElectionManifestV{election.manifest_schema_version}
+                </Field>
+                <Field label="Manifest hash">
+                  <HashValue value={election.manifest_hash_hex} />
+                  <CopyButton value={election.manifest_hash_hex} label="Copy" />
+                </Field>
+                <Field label="Registry commitment">
+                  <HashValue value={election.registry_commitment_hex} />
+                  <CopyButton value={election.registry_commitment_hex} label="Copy" />
+                </Field>
+                <Field label="Option-set commitment">
+                  <HashValue value={election.candidate_set_commitment_hex} />
+                  <CopyButton value={election.candidate_set_commitment_hex} label="Copy" />
+                </Field>
+                <Field label="Proof suite">{election.proof_suite_id}</Field>
+                <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
+                <Field label="Governance source">
+                  {election.governance_source_revision}
+                </Field>
+              </div>
+            </DetailsSection>
           </Card>
 
           <Card title="Voting rules">
             <div className="field-list">
-              <Field label="Proof suite">{election.proof_suite_id}</Field>
-              <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
               <Field label="Approval rule">{approvalRuleText(election)}</Field>
               <Field label="Abstention">
                 {election.abstention_allowed ? "permitted" : "not permitted"}
-              </Field>
-              <Field label="Governance source">
-                {election.governance_source_revision}
               </Field>
             </div>
           </Card>
 
           <Card title="Archive status">
-            <div className="card-body">No archive loaded in this session</div>
-            <p className="card-body">
-              Write an offline archive from Manage Election after the election is verified.
-            </p>
+            {election.lifecycle_state === "FINALIZED" ? (
+              <>
+                <div className="card-body">
+                  Election finalized — ready to write the final archive.
+                </div>
+                <p className="card-body">
+                  Write the final offline archive from Manage Election, then verify it on the
+                  Archive screen. Archive integrity is confirmed by the verifier in the session
+                  where you run it, separately from the election being finalized.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="card-body">No final archive yet</div>
+                <p className="card-body">
+                  The final archive is written from Manage Election after the election is
+                  finalized (close, tally, mark verified, then finalize).
+                </p>
+              </>
+            )}
           </Card>
 
           <Card title="Anchor status">
@@ -263,8 +316,8 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
               </div>
             ) : (
               <p className="card-body">
-                Results are disclosed. Open Manage Election to compute the tally and view final
-                result bars.
+                Results are available. Open Manage Election to view the final result bars; the
+                tally is recomputed deterministically from the accepted ballots.
               </p>
             )}
           </Card>
@@ -296,23 +349,44 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                       </td>
                       <td>{workspace.accepted_ballot_count}</td>
                       <td>
-                        <button
-                          type="button"
-                          className="btn btn-secondary"
-                          onClick={() =>
-                            void resumeWorkspace(
-                              workspace.workspace_id,
-                              workspace.lifecycle_state,
-                            )
-                          }
-                        >
-                          Resume
-                        </button>
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            onClick={() =>
+                              void resumeWorkspace(
+                                workspace.workspace_id,
+                                workspace.lifecycle_state,
+                              )
+                            }
+                          >
+                            Resume
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            onClick={() =>
+                              setPendingDelete({
+                                workspaceId: workspace.workspace_id,
+                                label:
+                                  workspace.question_preview ??
+                                  workspace.election_manifest_hash_hex ??
+                                  workspace.workspace_id,
+                              })
+                            }
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              <p className="form-hint">
+                Delete removes only the local organizer workspace from this device. Exported
+                canonical election files and finalized archives are not affected.
+              </p>
             </Card>
           )}
 
@@ -365,6 +439,31 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
           </table>
         )}
       </Card>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete local election workspace?"
+          body={
+            <>
+              <p>
+                Election:
+                <br />
+                <strong>{pendingDelete.label}</strong>
+              </p>
+              <p>
+                This removes the local organizer workspace from this device. Exported canonical
+                election files or finalized archives outside the app-data workspace are not
+                deleted.
+              </p>
+            </>
+          }
+          confirmLabel="Delete election"
+          confirmTone="danger"
+          busy={deleteBusy}
+          onConfirm={() => void confirmDeleteWorkspace()}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </>
   );
 }

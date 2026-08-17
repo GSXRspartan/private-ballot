@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
 import { pickCborFile, pickDirectory } from "../api/dialog";
-import type {
-  GuiArchiveVerificationV1,
-  GuiCommandError,
-  GuiTransportAnchorVerificationV1,
-} from "../api/types";
+import { rememberDirectory } from "../api/directoryMemory";
+import {
+  archiveResultIsStale,
+  boundArchiveResult,
+  boundTransportAnchorResult,
+  transportAnchorResultIsStale,
+} from "../archive/archiveBinding";
+import type { GuiCommandError } from "../api/types";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -26,13 +29,48 @@ import { aggregateStateText } from "../voterWorkflow";
  * status). The offline archive is authoritative.
  */
 export function Archive() {
-  const { shellAvailable, settings, recordAction } = useAppState();
-  const [directory, setDirectory] = useState(settings.exportDirectory);
-  const [result, setResult] = useState<GuiArchiveVerificationV1 | null>(null);
-  const [anchorEvidencePath, setAnchorEvidencePath] = useState("");
-  const [transportAnchor, setTransportAnchor] = useState<GuiTransportAnchorVerificationV1 | null>(null);
+  const { shellAvailable, recordAction, archiveView, updateArchiveView } = useAppState();
+  // Verification state is retained across navigation via AppState (session
+  // memory only) so a just-verified archive is not forgotten when leaving and
+  // returning to this screen. It is intentionally NOT persisted across restart:
+  // a cached "verified" boolean is never treated as proof the archive still
+  // verifies; the authoritative Rust verifier must run again in a new session.
+  const directory = archiveView.directory;
+  const anchorEvidencePath = archiveView.anchorEvidencePath;
+
+  // Each verification result is bound to the inputs that produced it and is
+  // rendered ONLY while those inputs still match the current inputs. So a
+  // result can never be shown for a directory/evidence path other than the one
+  // actually checked. Changing an input clears the dependent binding outright,
+  // and the bound-render gate additionally rejects a stale async result.
+  const result = boundArchiveResult(archiveView.verification, directory);
+  const transportAnchor = boundTransportAnchorResult(
+    archiveView.transportAnchor,
+    directory,
+    anchorEvidencePath,
+  );
+
+  // Changing the archive directory invalidates BOTH results (they were computed
+  // against the old directory); changing the evidence path invalidates the
+  // transport-anchor result.
+  const setDirectory = (value: string) =>
+    updateArchiveView({ directory: value, verification: null, transportAnchor: null });
+  const setAnchorEvidencePath = (value: string) =>
+    updateArchiveView({ anchorEvidencePath: value, transportAnchor: null });
+
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [running, setRunning] = useState(false);
+
+  // Always-current inputs, read at async-resolve time to detect a response that
+  // became stale because the user changed inputs while it was in flight.
+  const currentInputsRef = useRef({ directory, anchorEvidencePath });
+  currentInputsRef.current = { directory, anchorEvidencePath };
+
+  // A directory remembered from a previous session (or a directory typed in)
+  // that has not been verified in THIS session. Distinguishes "we remember
+  // where your archive is" from "this archive verifies", which requires a
+  // fresh run of the authoritative verifier.
+  const unverifiedRemembered = directory !== "" && result === null;
 
   const showError = (err: unknown) =>
     setError(
@@ -47,7 +85,7 @@ export function Archive() {
     );
 
   const onPickDirectory = async () => {
-    const picked = await pickDirectory("Choose archive directory");
+    const picked = await pickDirectory("Choose archive directory", "archive");
     if (picked !== null) setDirectory(picked);
   };
 
@@ -57,32 +95,71 @@ export function Archive() {
   };
 
   const onVerify = async () => {
+    // Capture the exact directory submitted so a response arriving after the
+    // user changed the directory is not installed for the new input.
+    const submittedDirectory = directory;
     setError(null);
     setRunning(true);
     try {
-      const verification = await api.verifyArchive(directory);
-      setResult(verification);
+      const verification = await api.verifyArchive(submittedDirectory);
+      if (archiveResultIsStale(submittedDirectory, currentInputsRef.current.directory)) {
+        // The directory changed while this ran: discard the UI result. The
+        // backend verification still ran authoritatively; only display is
+        // suppressed for the now-mismatched input.
+        return;
+      }
+      updateArchiveView({
+        verification: { result: verification, verifiedDirectory: submittedDirectory },
+      });
+      // Remember the location (directory only) so it reopens here next session;
+      // the cached result itself is never persisted across restart.
+      rememberDirectory("archive", submittedDirectory);
       recordAction(
         verification.verified ? "Archive verification passed" : "Archive verification failed",
       );
     } catch (err) {
-      setResult(null);
-      showError(err);
+      // A failed verification must not leave a previous success visible for
+      // this input.
+      if (!archiveResultIsStale(submittedDirectory, currentInputsRef.current.directory)) {
+        updateArchiveView({ verification: null });
+        showError(err);
+      }
     } finally {
       setRunning(false);
     }
   };
 
   const onVerifyTransportAnchor = async () => {
+    const submitted = { archiveDirectory: directory, evidencePath: anchorEvidencePath };
     setError(null);
     setRunning(true);
     try {
-      const verification = await api.verifyTransportArchiveAnchor(directory, anchorEvidencePath);
-      setTransportAnchor(verification);
+      const verification = await api.verifyTransportArchiveAnchor(
+        submitted.archiveDirectory,
+        submitted.evidencePath,
+      );
+      const current = {
+        archiveDirectory: currentInputsRef.current.directory,
+        evidencePath: currentInputsRef.current.anchorEvidencePath,
+      };
+      if (transportAnchorResultIsStale(submitted, current)) return;
+      updateArchiveView({
+        transportAnchor: {
+          result: verification,
+          checkedArchiveDirectory: submitted.archiveDirectory,
+          checkedEvidencePath: submitted.evidencePath,
+        },
+      });
       recordAction(`Transport archive anchor is ${verification.state}`);
     } catch (err) {
-      setTransportAnchor(null);
-      showError(err);
+      const current = {
+        archiveDirectory: currentInputsRef.current.directory,
+        evidencePath: currentInputsRef.current.anchorEvidencePath,
+      };
+      if (!transportAnchorResultIsStale(submitted, current)) {
+        updateArchiveView({ transportAnchor: null });
+        showError(err);
+      }
     } finally {
       setRunning(false);
     }
@@ -142,6 +219,13 @@ export function Archive() {
         </div>
         {shellAvailable && !directory && (
           <p className="form-hint">Choose an archive directory to continue.</p>
+        )}
+        {shellAvailable && unverifiedRemembered && (
+          <Notice tone="info">
+            This archive location is remembered from an earlier selection. Its integrity is not
+            confirmed until you run Verify archive in this session — a remembered location is
+            never treated as proof that the archive still verifies.
+          </Notice>
         )}
       </Card>
 

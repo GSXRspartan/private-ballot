@@ -38,7 +38,13 @@ pub const SMALL_ELECTORATE_THRESHOLD: usize = 25;
 /// variant from lifecycle state (and, in the future, an operator or manifest
 /// policy when one exists). The conservative default while open is
 /// [`Self::SealedUntilClose`].
+// The JSON projection uses the stable SCREAMING_SNAKE_CASE identifiers (the
+// same strings [`Self::as_str`] documents and the frontend DTO mirror
+// expects), not the serde-default variant names. Without this rename the
+// wire value would be `"SealedUntilClose"` while the frontend looks for
+// `"SEALED_UNTIL_CLOSE"`, silently defeating every visibility comparison.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ParticipationVisibility {
     /// Exact accepted count and percentage may be shown (post-close only by
     /// default).
@@ -64,7 +70,10 @@ impl ParticipationVisibility {
 }
 
 /// Result-disclosure state, mirroring the 5A4 tally gate.
+// See [`ParticipationVisibility`]: serialize as the stable
+// SCREAMING_SNAKE_CASE identifiers the frontend DTO mirror expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ResultVisibility {
     /// Per-option results are sealed (DRAFT/FROZEN/OPEN).
     Sealed,
@@ -367,5 +376,32 @@ mod tests {
         );
         assert_eq!(ResultVisibility::Sealed.as_str(), "SEALED");
         assert_eq!(ResultVisibility::Disclosed.as_str(), "DISCLOSED");
+    }
+
+    /// The JSON projection consumed by the frontend must match the stable
+    /// `as_str` identifiers, not the serde-default variant names. A regression
+    /// here silently breaks every frontend visibility comparison (the
+    /// `Policy: .` and `Results: Sealed` presentation bugs).
+    #[test]
+    fn visibility_enums_serialize_as_stable_identifiers() {
+        // `.ok()` (not `.unwrap()`) keeps this within the workspace clippy
+        // policy that denies `unwrap_used`/`expect_used`; serialization of a
+        // fieldless enum cannot fail, so `Some(_)` is always taken.
+        for variant in [
+            ParticipationVisibility::Live,
+            ParticipationVisibility::Coarse,
+            ParticipationVisibility::SealedUntilClose,
+        ] {
+            assert_eq!(
+                serde_json::to_value(variant).ok(),
+                Some(serde_json::Value::String(variant.as_str().to_owned())),
+            );
+        }
+        for variant in [ResultVisibility::Sealed, ResultVisibility::Disclosed] {
+            assert_eq!(
+                serde_json::to_value(variant).ok(),
+                Some(serde_json::Value::String(variant.as_str().to_owned())),
+            );
+        }
     }
 }

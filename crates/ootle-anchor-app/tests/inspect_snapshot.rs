@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use tari_cc_private_ballot_ootle_anchor_app::inspect_snapshot;
 use tari_cc_private_ballot_ootle_anchor_app::snapshot_store::write_snapshot_atomic;
 use tari_cc_private_ballot_ootle_anchor_app::{
-    read_snapshot, SnapshotFileError, SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1,
-    SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1,
+    SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1, SNAPSHOT_HASH_ALGORITHM_ID_V1,
+    SNAPSHOT_RECORD_TYPE_ID_V1, SnapshotFileError, read_snapshot,
 };
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{
     AnchorLifecycleRecoverySnapshot, PollingPolicy, UnifiedAnchorLifecyclePhase,
