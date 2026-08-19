@@ -229,3 +229,128 @@ export function describeLeadingOutcome(tally: GuiTallySummaryV1): string {
   const tie = leading.Tie;
   return `Unresolved tie between ${tie.candidate_ids_hex.length} options (${tie.approvals} approvals each).`;
 }
+
+// ---------------------------------------------------------------------------
+// Organizer lifecycle progression + next-step guidance (presentation only).
+//
+// These helpers mirror the REAL append-only lifecycle
+// (DRAFT → FROZEN → OPEN → CLOSED → VERIFIED → FINALIZED). They never invent
+// states and never mark a stage complete unless the backend lifecycle says it
+// has actually been reached; irreversible states are presented as one-way.
+// ---------------------------------------------------------------------------
+
+export interface OrganizerLifecycleStep {
+  key: string;
+  label: string;
+  state: "done" | "current" | "todo";
+}
+
+const ORGANIZER_STEP_ORDER = [
+  "DRAFT",
+  "FROZEN",
+  "OPEN",
+  "CLOSED",
+  "VERIFIED",
+  "FINALIZED",
+] as const;
+
+const ORGANIZER_STEP_LABELS = [
+  "Created",
+  "Frozen",
+  "Open",
+  "Closed",
+  "Verified",
+  "Finalized",
+] as const;
+
+/**
+ * Maps the actual lifecycle state onto the organizer progression:
+ *   Created → Frozen → Open → Closed → Verified → Finalized
+ * Past stages are done, the current stage is emphasized, future stages stay
+ * subdued. FINALIZED is terminal and shows as genuinely complete; an
+ * unrecognized state falls back to the first stage without claiming progress.
+ */
+export function organizerLifecycleSteps(
+  state: string | null | undefined,
+): OrganizerLifecycleStep[] {
+  const index = state
+    ? (ORGANIZER_STEP_ORDER as readonly string[]).indexOf(state)
+    : -1;
+  const currentIndex = index >= 0 ? index : 0;
+  const terminalComplete = state === "FINALIZED";
+  return ORGANIZER_STEP_LABELS.map((label, i) => ({
+    key: ORGANIZER_STEP_ORDER[i],
+    label,
+    state:
+      i < currentIndex || (terminalComplete && i === currentIndex)
+        ? "done"
+        : i === currentIndex
+          ? "current"
+          : "todo",
+  }));
+}
+
+export interface OrganizerNextStep {
+  title: string;
+  body: string;
+}
+
+/**
+ * Plain-language "what should I do next" for the organizer, derived ONLY from
+ * the actual lifecycle state plus whether a tally/archive has been produced
+ * this session. It never fabricates lifecycle states and never implies an
+ * irreversible transition has already happened.
+ */
+export function nextOrganizerStep(input: {
+  lifecycle: string | null | undefined;
+  tallyComputed: boolean;
+  archiveWritten: boolean;
+}): OrganizerNextStep {
+  switch (input.lifecycle) {
+    case "FROZEN":
+      return {
+        title: "Get ready to open voting",
+        body: "Start private intake, distribute the voter materials, then open voting.",
+      };
+    case "OPEN":
+      return {
+        title: "Voting is open",
+        body: "Private intake can receive ballots while voting is open. Close voting when the voting period ends — closing is permanent.",
+      };
+    case "CLOSED":
+      return input.tallyComputed
+        ? {
+            title: "Review the result",
+            body: "Review the computed tally below, then mark verification complete.",
+          }
+        : {
+            title: "Voting is closed",
+            body: "No additional ballots can be accepted. Compute the tally when ready.",
+          };
+    case "VERIFIED":
+      return {
+        title: "Verification recorded",
+        body: "Finalize the election when the verification is complete. Finalizing is permanent.",
+      };
+    case "FINALIZED":
+      return input.archiveWritten
+        ? {
+            title: "Final archive written",
+            body: "Verify the final archive independently on the Archive screen before publishing it.",
+          }
+        : {
+            title: "Election finalized",
+            body: "Write the final archive below, then verify it independently on the Archive screen.",
+          };
+    case "DRAFT":
+      return {
+        title: "Election draft",
+        body: "Finish setting up the election and freeze it on the Create Election screen.",
+      };
+    default:
+      return {
+        title: "No election loaded",
+        body: "Load an election to see what to do next.",
+      };
+  }
+}

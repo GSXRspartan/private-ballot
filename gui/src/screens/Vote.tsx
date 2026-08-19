@@ -61,6 +61,7 @@ import {
 import { BallotSaveDialogError, requestAndExportPreparedBallot } from "../voterExport";
 import { useAppState } from "../state/AppState";
 import { RequestGenerationGate } from "../requestGeneration";
+import { voterStages } from "../voterProgress";
 import {
   BackendErrorNotice,
   Card,
@@ -73,6 +74,7 @@ import {
   Notice,
   Pill,
 } from "../components/ui";
+import { ProgressSteps } from "../components/ProgressSteps";
 import { VoterCredentialCard } from "../components/VoterCredentialCard";
 
 /**
@@ -142,6 +144,11 @@ export function Vote() {
   // continues in the background.
   const [autoRetryAttempt, setAutoRetryAttempt] = useState(0);
   const autoRetryCancelRef = useRef(false);
+  // True only while a private submit/retry orchestration is in flight, so the
+  // "Sending your encrypted ballot privately…" status paints only during an
+  // actual submission and never during an unrelated busy operation (proof
+  // creation, offline export, connect). Button disabling still uses `busy`.
+  const [submitting, setSubmitting] = useState(false);
   // Local, voter-safe error for the private-submission controls only, shown next
   // to those controls instead of only at the top of the screen (Issue 5). It
   // never carries transport internals beyond the backend's coarsened codes.
@@ -578,6 +585,7 @@ export function Vote() {
     initialAttempt: () => Promise<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1>,
   ) {
     setBusy(true);
+    setSubmitting(true);
     setError(null);
     setPrivateError(null);
     setPrivateResult(null);
@@ -617,6 +625,7 @@ export function Vote() {
       await refreshManagedTorStatus().catch(() => {});
     } finally {
       setAutoRetryAttempt(0);
+      setSubmitting(false);
       setBusy(false);
     }
   }
@@ -794,7 +803,7 @@ export function Vote() {
     castState,
     configured: managedTorStatus?.configured ?? false,
     torRunning: managedTorStatus?.tor_running ?? false,
-    busy,
+    busy: submitting,
     lastReceiptState:
       privateResult && "receipt_state" in privateResult ? privateResult.receipt_state : null,
   });
@@ -895,6 +904,24 @@ export function Vote() {
         onOperationSuccess={() => setCredentialError(null)}
         onOperationErrorDismiss={() => setCredentialError(null)}
       />
+
+      {/* Guided voter progression, derived entirely from the existing workflow
+          /session state (no new backend state). Completed stages carry a
+          checkmark, the current stage is emphasized, future stages subdued. */}
+      {election && (
+        <ProgressSteps
+          label="Voting progress"
+          steps={voterStages({
+            electionLoaded: election !== null,
+            reviewPassed: credentialStage,
+            identityReady: canProceedAfterCredential(credential),
+            voteEntered: selectionStage,
+            choiceMade: !!selection?.selection_loaded && selection.valid,
+            ballotReady: workflow?.prepared_ballot.state === "Ready",
+            castState,
+          })}
+        />
+      )}
 
       {!election && (
         <Card title="Load Election">
@@ -1021,6 +1048,11 @@ export function Vote() {
                   </span>
                 </Field>
               )}
+              <Field label="How many to choose">
+                <span className="field-value">
+                  {selectionInstructionText(confirmation.bound)}
+                </span>
+              </Field>
               <Field label="Choices on the ballot">
                 <ul className="option-list bound-labels" aria-label="Ballot choices, read-only">
                   {confirmation.bound.option_display_labels.map((label, i) => (
@@ -1031,11 +1063,6 @@ export function Vote() {
                   ))}
                 </ul>
               </Field>
-              <Field label="How many to choose">
-                <span className="field-value">
-                  {selectionInstructionText(confirmation.bound)}
-                </span>
-              </Field>
             </div>
             <p className="form-hint">
               This list is read-only. You choose your response after confirming the election.
@@ -1043,7 +1070,7 @@ export function Vote() {
             {confirmation.no_proposal_question_notice && (
               <p className="form-hint">{confirmation.no_proposal_question_notice}</p>
             )}
-            <DetailsSection summary="Technical details">
+            <DetailsSection summary="Election details">
               <div className="field-list">
                 <Field label="Election ID (canonical)">
                   <HashValue value={confirmation.bound.election_id_hex} />
@@ -1187,28 +1214,27 @@ export function Vote() {
 
           {credentialStage && (
             <>
-              <Card title="Eligibility">
-                <p className="form-hint">
-                  The election defines who is eligible to vote. The app checks your public voting
-                  key against the election&rsquo;s eligible voter list.
+              <Card title="Confirm you are eligible to vote">
+                <p className="card-body">
+                  Your private voting credential stays under your control. The ballot office
+                  receives only your public enrollment key. The app checks that key against the
+                  election&rsquo;s eligible voter list.
                 </p>
+                {credential?.credential_loaded && (
+                  <Notice tone="ok">Voting credential found ✓</Notice>
+                )}
                 <div className="field-list">
-                  <Field label="Your public voting key">
-                    {credential?.public_governance_key_hex ? (
-                      <>
-                        <span className="field-value">{publicKeyDisplay(credential)}</span>
-                        <CopyButton value={credential.public_governance_key_hex} />
-                      </>
-                    ) : (
-                      <span className="field-value">Not loaded</span>
-                    )}
-                  </Field>
                   <Field label="Eligibility status">
                     <Pill tone={eligibilityTone}>
                       {credential?.eligibility_label ?? "No credential loaded"}
                     </Pill>
                   </Field>
                 </div>
+                {!credential?.credential_loaded && (
+                  <p className="form-hint">
+                    Create or unlock your voting credential above, then continue.
+                  </p>
+                )}
                 {credential?.eligibility === "NotEligible" && (
                   <Notice tone="warn">
                     This voting key is not on the election&rsquo;s eligible voter list. Check that
@@ -1231,6 +1257,20 @@ export function Vote() {
                     Continue
                   </button>
                 </div>
+                <DetailsSection summary="Technical details">
+                  <div className="field-list">
+                    <Field label="Your public voting key">
+                      {credential?.public_governance_key_hex ? (
+                        <>
+                          <span className="field-value">{publicKeyDisplay(credential)}</span>
+                          <CopyButton value={credential.public_governance_key_hex} />
+                        </>
+                      ) : (
+                        <span className="field-value">Not loaded</span>
+                      )}
+                    </Field>
+                  </div>
+                </DetailsSection>
               </Card>
 
               {selectionStage && confirmation && (
@@ -1299,8 +1339,8 @@ export function Vote() {
                       <span>{selectionLiveText}</span>
                     </div>
                     <p className="form-hint">
-                      Choosing a response does not submit a vote. You can change your response at
-                      any time before creating the proof.
+                      Choosing a response does not submit a vote. You can change your choice
+                      until you submit or save your anonymous ballot.
                     </p>
                     {selection && !selection.valid && (
                       <Notice tone="warn">{selection.message}</Notice>
@@ -1353,15 +1393,38 @@ export function Vote() {
                           {castViaAuthenticatedOnline ? (
                             <>
                               <Notice tone="ok">
-                                Your encrypted ballot was submitted privately and an authenticated
-                                organizer receipt was verified. Your vote is locked for this
-                                election and your choice can no longer be changed here.
+                                <strong>Your ballot was accepted ✓</strong>
+                                <br />
+                                The ballot office returned an authenticated receipt for this exact
+                                ballot. Your vote is locked for this election and your choice can
+                                no longer be changed here.
                               </Notice>
                               <p className="card-body">
-                                An authenticated receipt confirms the organizer received your
-                                encrypted ballot. Acceptance, counting, final-record inclusion, and
-                                Ootle anchoring are confirmed separately from the published record.
+                                Final inclusion can be independently checked from the published
+                                election archive after voting closes.
                               </p>
+                              <DetailsSection summary="Receipt details">
+                                <p className="card-body">
+                                  An authenticated receipt confirms the organizer received your
+                                  encrypted ballot. Acceptance, counting, final-record inclusion,
+                                  and Ootle anchoring are confirmed separately from the published
+                                  record.
+                                </p>
+                                {privateResult && "receipt_state" in privateResult && (
+                                  <div className="field-list">
+                                    <Field label="Receipt">
+                                      <span className="field-value">
+                                        {receiptStateText(privateResult.receipt_state)}
+                                      </span>
+                                    </Field>
+                                    {"package_digest_hex" in privateResult && (
+                                      <Field label="Ballot package digest">
+                                        <HashValue value={privateResult.package_digest_hex} />
+                                      </Field>
+                                    )}
+                                  </div>
+                                )}
+                              </DetailsSection>
                             </>
                           ) : (
                             <>
@@ -1416,7 +1479,18 @@ export function Vote() {
                       )}
                     </Card>
                   ) : (
-                  <Card title="Anonymous eligibility proof">
+                  <Card title="Protect your vote">
+                    <p className="card-body">
+                      Create the anonymous eligibility proof for your ballot:
+                    </p>
+                    <ul className="privacy-notice-list">
+                      <li>✓ Your eligibility is proven anonymously.</li>
+                      <li>✓ Your identity is not included with your choice.</li>
+                      <li>
+                        ✓ The same credential cannot produce two accepted ballots in this
+                        election.
+                      </li>
+                    </ul>
                     <Notice tone="info">
                       This proves that your credential belongs to the eligible voter set without
                       revealing which eligible voter you are. Your ballot choice is not
@@ -1434,9 +1508,9 @@ export function Vote() {
                         </span>
                       </Field>
                     </div>
-                    {busy && (
+                    {busy && workflow?.prepared_ballot.state !== "Ready" && (
                       <Notice tone="info">
-                        Creating anonymous eligibility proof… This can take a moment.
+                        Creating your anonymous eligibility proof… This can take a moment.
                       </Notice>
                     )}
                     <div className="action-row">
@@ -1453,7 +1527,7 @@ export function Vote() {
                         Create anonymous eligibility proof
                       </button>
                     </div>
-                    <DetailsSection summary="Technical details">
+                    <DetailsSection summary="How does anonymous eligibility work?">
                       <p className="card-body">
                         Eligibility is proven with the Tari Triptych implementation. The proof is
                         bound to this election and carries a unique election-scoped linking tag,
@@ -1463,18 +1537,24 @@ export function Vote() {
                       </p>
                     </DetailsSection>
                     {workflow?.prepared_ballot.summary && (
-                      <Card title="Ballot prepared">
+                      <Card title="Your anonymous ballot is ready">
                         <div className="field-list">
+                          <Field label="Election">
+                            <span className="field-value">
+                              {confirmation.bound.election_id_text ??
+                                confirmation.bound.election_id_hex}
+                            </span>
+                          </Field>
+                          <Field label="Your choice">
+                            <span className="field-value">
+                              {workflow.prepared_ballot.summary.selected_display_labels.join(", ") || "Abstention"}
+                            </span>
+                          </Field>
                           <Field label="Status">
                             <Pill tone="ok">Ballot prepared</Pill>
                           </Field>
                           <Field label="Local verification">
                             <Pill tone="ok">Verified</Pill>
-                          </Field>
-                          <Field label="Your response">
-                            <span className="field-value">
-                              {workflow.prepared_ballot.summary.selected_display_labels.join(", ") || "Abstention"}
-                            </span>
                           </Field>
                         </div>
                         <DetailsSection summary="Technical details">
@@ -1494,11 +1574,26 @@ export function Vote() {
                             </Field>
                           </div>
                         </DetailsSection>
-                        <h3 className="submission-route-heading">Offline submission</h3>
+                        <div className="action-row">
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={busy}
+                            onClick={() => void onChangeChoice()}
+                          >
+                            Change my choice
+                          </button>
+                        </div>
+                        <p className="form-hint">
+                          Continue to private delivery below to submit now. You can still change
+                          your choice until you submit or save your anonymous ballot.
+                        </p>
+
+                        <h3 className="submission-route-heading">Other delivery options</h3>
                         <p className="card-body">
-                          Save an encrypted ballot file to deliver manually through the
-                          election&rsquo;s approved intake method. Nothing is sent over the network
-                          when you save.
+                          Offline submission: save an encrypted ballot file and deliver it through
+                          the election&rsquo;s approved manual method. Nothing is sent over the
+                          network when you save.
                         </p>
                         <Notice tone="warn">
                           Once you save or send this ballot for submission, your vote is locked on
@@ -1509,19 +1604,11 @@ export function Vote() {
                         <div className="action-row">
                           <button
                             type="button"
-                            className="btn btn-secondary"
-                            disabled={busy}
-                            onClick={() => void onChangeChoice()}
-                          >
-                            Change my choice
-                          </button>
-                          <button
-                            type="button"
                             className="btn btn-primary"
                             disabled={busy || !workflow.prepared_ballot.ready_to_export}
                             onClick={() => setConfirmCast(true)}
                           >
-                            Save ballot file
+                            Save encrypted ballot file
                           </button>
                         </div>
                         {transport &&
@@ -1572,7 +1659,7 @@ export function Vote() {
                                   }
                                   onClick={() => void onSubmitPrivately()}
                                 >
-                                  Submit privately over Tor
+                                  Submit vote privately
                                 </button>
                               </div>
                             </>
@@ -1625,7 +1712,7 @@ export function Vote() {
                     preparedReady: workflow?.prepared_ballot.state === "Ready",
                     castState,
                   }) && (
-                    <Card title="Private submission (controlled test)">
+                    <Card title="Submit your ballot privately">
                       {/* Unmistakable, authoritative status derived from the
                           DURABLE cast state (Issues 4/17), so SUCCESS and PENDING
                           survive navigation/restart without any transient result. */}
@@ -1641,9 +1728,12 @@ export function Vote() {
                       {autoRetryAttempt > 0 && (
                         <div className="config-stack">
                           <p className="form-hint" role="status" aria-live="polite">
-                            Connecting to ballot office… (attempt {autoRetryAttempt} of{" "}
-                            {PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length}). Retrying the same
-                            encrypted submission — no new ballot is created.
+                            The private route is taking longer than expected. Retrying the same
+                            ballot… (Retry {autoRetryAttempt} of{" "}
+                            {PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length})
+                            <br />
+                            Your vote is locked. The app is retrying the same encrypted ballot,
+                            not creating another vote.
                           </p>
                           <div className="action-row">
                             <button
@@ -1668,19 +1758,21 @@ export function Vote() {
                         <div className="config-stack">
                           <p className="form-hint">
                             Connecting privately runs Tor for you — there is no port, torrc, or
-                            Tor data directory to set up. You only need the organizer&rsquo;s
-                            transport bundle for this election. Nothing is sent until you submit.
+                            Tor data directory to set up. You only need the ballot-office
+                            connection file for this election. Nothing is sent until you submit.
                           </p>
                           <div className="field-list">
                             <Field label="Tor installed">
                               {voterTorStatus === null
                                 ? "Checking…"
                                 : voterTorStatus.tor_found
-                                  ? "Found"
+                                  ? "Found ✓"
                                   : "Not found"}
                             </Field>
-                            <Field label="Organizer transport">
-                              {voterBundlePath ? "Verified for this election" : "Required"}
+                            <Field label="Ballot office">
+                              {voterBundlePath
+                                ? "Verified for this election ✓"
+                                : "Connection file required"}
                             </Field>
                           </div>
 
@@ -1706,8 +1798,8 @@ export function Vote() {
                           {!voterBundlePath && (
                             <>
                               <Notice tone="info">
-                                Organizer transport bundle required. Ask the ballot office for the
-                                voter transport bundle file, then select it here.
+                                Ballot-office connection file required. Ask the ballot office for
+                                the voter transport bundle file, then select it here.
                               </Notice>
                               <div className="action-row">
                                 <button
@@ -1716,7 +1808,7 @@ export function Vote() {
                                   disabled={busy || !shellAvailable}
                                   onClick={() => void onBrowseVoterBundle()}
                                 >
-                                  Select transport bundle
+                                  Select ballot-office connection file
                                 </button>
                               </div>
                             </>
@@ -1841,7 +1933,7 @@ export function Vote() {
                             disabled={busy || !workflow?.prepared_ballot.ready_to_export}
                             onClick={() => void onSubmitPrivately()}
                           >
-                            Submit privately over Tor
+                            Submit vote privately
                           </button>
                           <button
                             type="button"
@@ -1858,40 +1950,48 @@ export function Vote() {
                           only; it never prepares or sends a new ballot. No fresh
                           Submit is shown here (Issue 3). */}
                       {castPending && (
-                        <div className="action-row">
-                          <button
-                            type="button"
-                            className="btn btn-primary"
-                            disabled={busy}
-                            onClick={() => void onRetryPrivateSubmission()}
-                          >
-                            Retry private submission
-                          </button>
-                          {managedTorStatus?.tor_running ? (
+                        <div className="config-stack">
+                          {managedTorStatus?.configured && !managedTorStatus.tor_running && (
+                            <Notice tone="info">
+                              Private connection stopped. Reconnect privately, then retry the
+                              exact same encrypted ballot — a new vote will not be created.
+                            </Notice>
+                          )}
+                          <div className="action-row">
                             <button
                               type="button"
-                              className="btn btn-secondary"
+                              className="btn btn-primary"
                               disabled={busy}
-                              onClick={() => void onStopManagedTor()}
+                              onClick={() => void onRetryPrivateSubmission()}
                             >
-                              Stop private connection
+                              Retry private submission
                             </button>
-                          ) : (
-                            managedTorStatus?.configured && (
+                            {managedTorStatus?.tor_running ? (
                               <button
                                 type="button"
                                 className="btn btn-secondary"
                                 disabled={busy}
-                                onClick={() => void onStartManagedTor()}
+                                onClick={() => void onStopManagedTor()}
                               >
-                                Start private connection
+                                Stop private connection
                               </button>
-                            )
-                          )}
+                            ) : (
+                              managedTorStatus?.configured && (
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy}
+                                  onClick={() => void onStartManagedTor()}
+                                >
+                                  Reconnect privately
+                                </button>
+                              )
+                            )}
+                          </div>
                         </div>
                       )}
 
-                      <DetailsSection summary="Advanced / diagnostics">
+                      <DetailsSection summary="Advanced connection details">
                         {privateStageLabel && (
                           <Notice tone="info">
                             <strong>Last attempt diagnostic</strong>
@@ -1899,6 +1999,23 @@ export function Vote() {
                             {privateStageLabel}
                           </Notice>
                         )}
+                        <p className="form-hint">
+                          Connection process:{" "}
+                          {managedTorStatus?.tor_running
+                            ? managedTorStatus.socks_ready
+                              ? "running (local private endpoint ready)"
+                              : "running"
+                            : "not running"}
+                        </p>
+                        {voterTorStatus?.resolved_tor_path && (
+                          <p className="form-hint">
+                            Tor executable: <code>{voterTorStatus.resolved_tor_path}</code>
+                          </p>
+                        )}
+                        <p className="form-hint">
+                          Tor data directory:{" "}
+                          {torDataDir ? <code>{torDataDir}</code> : "automatic (app-owned, election-scoped)"}
+                        </p>
                         {managedTorStatus?.socks_addr && (
                           <p className="form-hint">
                             Local SOCKS endpoint: <code>{managedTorStatus.socks_addr}</code>
@@ -1963,7 +2080,7 @@ export function Vote() {
               </p>
             </>
           }
-          confirmLabel="Save ballot file"
+          confirmLabel="Save encrypted ballot file"
           confirmTone="danger"
           busy={busy}
           onConfirm={() => {

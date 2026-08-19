@@ -25,9 +25,9 @@ describe("voter one-click Tor connect", () => {
     assert.match(vote, /onConnectPrivately/);
   });
 
-  it("shows a Tor installed status line and a bundle status line", () => {
+  it("shows a Tor installed status line and a ballot-office file status line", () => {
     assert.match(vote, /Tor installed/);
-    assert.match(vote, /Organizer transport/);
+    assert.match(vote, /Ballot office/);
   });
 
   it("auto-derives the Tor data directory (passes an empty dir to the backend)", () => {
@@ -44,9 +44,9 @@ describe("voter one-click Tor connect", () => {
     assert.match(vote, /summary="Advanced"/);
   });
 
-  it("offers Select Tor executable and Select transport bundle when needed", () => {
+  it("offers Select Tor executable and a ballot-office connection file picker when needed", () => {
     assert.match(vote, /Select Tor executable/);
-    assert.match(vote, /Select transport bundle/);
+    assert.match(vote, /Select ballot-office connection file/);
     assert.match(vote, /never downloads or installs Tor/);
   });
 

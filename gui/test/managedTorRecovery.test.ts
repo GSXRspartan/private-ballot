@@ -52,8 +52,8 @@ describe("privateSubmissionStatus derives from durable cast state", () => {
     const s = privateSubmissionStatus({ ...base, castState: "CAST" });
     assert.equal(s.phase, "SUCCESS");
     assert.equal(s.tone, "ok");
-    assert.match(s.title, /submitted successfully/i);
-    assert.match(s.detail, /receipt verified/i);
+    assert.match(s.title, /ballot was accepted/i);
+    assert.match(s.detail, /authenticated receipt/i);
     // Success is delivery-only: it never claims counting/inclusion/anchoring.
     assert.doesNotMatch(`${s.title} ${s.detail}`, /counted|included|anchored/i);
   });
@@ -73,9 +73,9 @@ describe("privateSubmissionStatus derives from durable cast state", () => {
     const s = privateSubmissionStatus({ ...base, castState: "CAST_PENDING" });
     assert.equal(s.phase, "PENDING");
     assert.equal(s.tone, "warn");
-    assert.match(s.title, /could not be confirmed/i);
-    assert.match(s.detail, /remains safely locked/i);
-    assert.match(s.detail, /No new ballot will be created/i);
+    assert.match(s.title, /wasn't confirmed/i);
+    assert.match(s.detail, /safely locked/i);
+    assert.match(s.detail, /no new ballot will be created/i);
   });
 
   it("CAST_PENDING never claims success", () => {
@@ -213,7 +213,7 @@ describe("controlled-test recovery card gating", () => {
     // flag, never on prepared-ballot/cast state alone.
     assert.match(
       vote,
-      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*\(\s*<Card title="Private submission \(controlled test\)">/,
+      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
     );
     // managedTorFeaturePresent is derived from the presence of the status DTO,
     // which is null in a production build without the feature.
@@ -275,7 +275,7 @@ describe("production offline/unavailable guidance", () => {
       /Save the\s+ballot file above and deliver it through the election's approved/,
     );
     // The offline file-save path is still the primary save action.
-    assert.match(vote, />\s*Save ballot file\s*</);
+    assert.match(vote, />\s*Save encrypted ballot file\s*</);
   });
 });
 
@@ -287,7 +287,7 @@ describe("private submit/retry gating", () => {
   it("offers a fresh Submit only when nothing is durably locked", () => {
     assert.match(
       vote,
-      /managedTorStatus\?\.tor_running && !castLocked && \([\s\S]*?Submit privately/,
+      /managedTorStatus\?\.tor_running && !castLocked && \([\s\S]*?Submit vote privately/,
     );
   });
 
@@ -483,8 +483,8 @@ describe("private submission safe diagnostic stage", () => {
     assert.match(vote, /privateSubmissionStageLabel\(/);
     // The stage is read from the release result's diagnostic_stage field.
     assert.match(vote, /"diagnostic_stage" in privateResult/);
-    // It renders inside the Advanced/diagnostics details section.
-    const advancedIdx = vote.indexOf("Advanced / diagnostics");
+    // It renders inside the Advanced connection details disclosure.
+    const advancedIdx = vote.indexOf("Advanced connection details");
     const stageIdx = vote.indexOf("privateStageLabel &&");
     assert.ok(advancedIdx >= 0 && stageIdx > advancedIdx, "stage renders within Advanced section");
   });
@@ -498,7 +498,7 @@ describe("offline vs online submission clarity", () => {
   it("labels the offline route and states nothing is sent", () => {
     assert.match(vote, /Offline submission/);
     assert.match(vote, /Nothing is sent over the network/);
-    assert.match(vote, />\s*Save ballot file\s*</);
+    assert.match(vote, />\s*Save encrypted ballot file\s*</);
     // The misleading "Export and cast" wording is gone from the offline button.
     assert.doesNotMatch(vote, />\s*Export and cast ballot\s*</);
   });
@@ -506,6 +506,6 @@ describe("offline vs online submission clarity", () => {
   it("labels the online route as Tor and requires an authenticated receipt", () => {
     assert.match(vote, /Private online submission · Tor/);
     assert.match(vote, /confirmed only after an authenticated\s+organizer receipt is verified/);
-    assert.match(vote, />\s*Submit privately over Tor\s*</);
+    assert.match(vote, />\s*Submit vote privately\s*</);
   });
 });

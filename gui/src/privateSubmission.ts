@@ -170,9 +170,9 @@ export function privateSubmissionStatus(
     return {
       phase: "SUCCESS",
       tone: "ok",
-      title: "Vote submitted successfully",
+      title: "Your ballot was accepted ✓",
       detail:
-        "Authenticated organizer receipt verified. Your vote is locked for this election.",
+        "The ballot office returned an authenticated receipt for this exact ballot. Your vote is locked for this election.",
     };
   }
 
@@ -181,7 +181,7 @@ export function privateSubmissionStatus(
       return {
         phase: "SUBMITTING",
         tone: "info",
-        title: "Submitting ballot privately…",
+        title: "Sending your encrypted ballot privately…",
         detail: "Waiting for the authenticated organizer receipt.",
       };
     }
@@ -197,9 +197,9 @@ export function privateSubmissionStatus(
     return {
       phase: "PENDING",
       tone: "warn",
-      title: "Submission could not be confirmed.",
+      title: "Delivery wasn't confirmed",
       detail:
-        "Your ballot remains safely locked and the same encrypted submission can be retried. No new ballot will be created.",
+        "Your anonymous ballot is safely locked. You can retry the exact same encrypted submission — no new ballot will be created.",
     };
   }
 
@@ -208,7 +208,7 @@ export function privateSubmissionStatus(
     return {
       phase: "SUBMITTING",
       tone: "info",
-      title: "Submitting ballot privately…",
+      title: "Sending your encrypted ballot privately…",
       detail: "Waiting for the authenticated organizer receipt.",
     };
   }
@@ -231,7 +231,7 @@ export function privateSubmissionStatus(
   return {
     phase: "READY",
     tone: "ok",
-    title: "Private connection ready.",
+    title: "Private connection ready ✓",
     detail: "You can submit your ballot privately.",
   };
 }

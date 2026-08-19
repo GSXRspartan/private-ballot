@@ -26,6 +26,8 @@ import {
   coarseBucketLabel,
   describeLeadingOutcome,
   formatPercent,
+  nextOrganizerStep,
+  organizerLifecycleSteps,
   participationAccessibleText,
   participationIsDisclosed,
   participationVisibilityLabel,
@@ -41,9 +43,11 @@ import {
   HashValue,
   LifecyclePill,
   Notice,
+  Pill,
   Placeholder,
 } from "../components/ui";
 import { LockIcon } from "../components/icons";
+import { ProgressSteps } from "../components/ProgressSteps";
 import { ParticipationTrack } from "../components/ParticipationTrack";
 import { ResultBars } from "../components/ResultBars";
 
@@ -107,6 +111,7 @@ export function ManageElection() {
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
+  const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
   const presentation = presentationFor(election);
@@ -124,6 +129,13 @@ export function ManageElection() {
   const participationSealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
   const participationDisclosed = participationIsDisclosed(participation);
+  // Plain-language organizer guidance derived ONLY from the real lifecycle
+  // state plus this session's tally/archive results. Never invents states.
+  const nextStep = nextOrganizerStep({
+    lifecycle,
+    tallyComputed: tally !== null,
+    archiveWritten: archiveResult !== null,
+  });
 
   const showError = (error: unknown) => {
     setLocalError(
@@ -457,6 +469,19 @@ export function ManageElection() {
     }
   };
 
+  // Finalizing is likewise irreversible: the verified result and finalized
+  // election record become permanent. Same presentation-only safeguard; the
+  // backend lifecycle state machine remains authoritative.
+  const onConfirmFinalize = async () => {
+    setConfirmFinalize(false);
+    setLifecycleBusy(true);
+    try {
+      await runLifecycle("finalize");
+    } finally {
+      setLifecycleBusy(false);
+    }
+  };
+
   // Shared load controls (folder picker, unload, advanced manual load). Rendered
   // inline in the full "Load Election" card when no election is loaded, and
   // tucked inside a "Load a different election" disclosure once one is loaded, so
@@ -604,6 +629,13 @@ export function ManageElection() {
               <LifecyclePill state={lifecycle} />
             </Field>
           </div>
+          {/* The real append-only lifecycle, derived from the backend state.
+              Past stages are done, the current stage is emphasized, and
+              irreversible stages never appear reversible. */}
+          <ProgressSteps
+            label="Election lifecycle"
+            steps={organizerLifecycleSteps(lifecycle)}
+          />
           {!selectedArtifactPaths && (
             <p className="form-hint">
               Recovered from durable session state. Its lifecycle, ballot intake, and tally
@@ -633,136 +665,14 @@ export function ManageElection() {
       )}
 
       {election && (
-        <>
-          <Card title="Election overview">
-            <div className="field-list">
-              <Field label="Election">
-                {election.election_id_text ?? election.election_id_hex}
-              </Field>
-              <Field label="Lifecycle">
-                <LifecyclePill state={lifecycle} />
-              </Field>
-              <Field label="Manifest schema">
-                ElectionManifestV{election.manifest_schema_version}
-              </Field>
-              {election.proposal_question && (
-                <Field label="Ballot question">{election.proposal_question}</Field>
-              )}
-              <Field label="Proof suite">{election.proof_suite_id}</Field>
-              <Field label="Ballot kind">{election.ballot_kind}</Field>
-              <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
-            </div>
-            <p className="form-hint">
-              Manifest hash and other canonical identifiers are under Advanced details below.
-            </p>
-          </Card>
-
-          <div className="card-grid">
-            <Card title="Eligibility">
-              <div className="field-list">
-                <Field label="Eligible voters">{election.voter_count}</Field>
-                <Field label="Registry commitment">
-                  <HashValue value={election.registry_commitment_hex} />
-                  <CopyButton value={election.registry_commitment_hex} />
-                </Field>
-              </div>
-            </Card>
-
-            <Card title="Voting rules">
-              <div className="field-list">
-                <Field label="Approval rule">{approvalRuleText(election)}</Field>
-                <Field label="Abstention">
-                  {election.abstention_allowed ? "permitted" : "not permitted"}
-                </Field>
-              <Field label="Governance source">
-                {election.governance_source_revision}
-              </Field>
-              {election.proposal_question && (
-                <Field label="Ballot question">{election.proposal_question}</Field>
-              )}
-              <Field label="Quorum">No quorum rule is represented in this election manifest.</Field>
-              </div>
-              <p className="card-body">
-                The version-one manifest carries no quorum, minimum-participation, or passing
-                threshold field. No governance rule is inferred from community conventions.
-              </p>
-            </Card>
-          </div>
-
-          <Card title={presentation.optionSetNoun}>
-            <table className="data">
-              <thead>
-                <tr>
-                  <th scope="col">Display label</th>
-                  <th scope="col">Machine ID</th>
-                </tr>
-              </thead>
-              <tbody>
-                {election.candidates.map((option) => (
-                  <tr key={option.machine_id_hex}>
-                    <td>{option.display_name}</td>
-                    <td>
-                      <span className="hash">
-                        {option.machine_id_text ?? option.machine_id_hex}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
-
-          <Card title="Advanced details">
-            <div className="field-list">
-              <Field label="Manifest hash">
-                <HashValue value={election.manifest_hash_hex} />
-                <CopyButton value={election.manifest_hash_hex} />
-              </Field>
-              <Field label="Manifest schema">
-                ElectionManifestV{election.manifest_schema_version}
-              </Field>
-              <Field label="Registry commitment">
-                <HashValue value={election.registry_commitment_hex} />
-                <CopyButton value={election.registry_commitment_hex} />
-              </Field>
-              <Field label="Option-set commitment">
-                <HashValue value={election.candidate_set_commitment_hex} />
-                <CopyButton value={election.candidate_set_commitment_hex} />
-              </Field>
-              <Field label="Proof-suite identifier">{election.proof_suite_id}</Field>
-              <Field label="Election ID (canonical)">
-                <HashValue value={election.election_id_hex} />
-                <CopyButton value={election.election_id_hex} />
-              </Field>
-            </div>
-            <DetailsSection summary="Canonical option IDs">
-              <ul className="option-list">
-                {election.candidates.map((option) => (
-                  <li key={option.machine_id_hex} className="option-item">
-                    <span className="option-marker" aria-hidden="true" />
-                    <span>{option.display_name}</span>
-                    <span className="hash form-hint">
-                      {option.machine_id_text ?? option.machine_id_hex}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </DetailsSection>
-          </Card>
-
-          {selectedArtifactPaths && (
-            <Card title="Loaded artifacts (session only)">
-              <div className="field-list">
-                <Field label="Manifest">{basename(selectedArtifactPaths.manifest)}</Field>
-                <Field label="Registry">{basename(selectedArtifactPaths.registry)}</Field>
-                <Field label="Option set">{basename(selectedArtifactPaths.optionSet)}</Field>
-              </div>
-              <p className="form-hint">
-                Paths are held in session memory only and are not persisted. Unloading clears them.
-              </p>
-            </Card>
-          )}
-        </>
+        // Plain-language guidance derived from the real lifecycle state; it
+        // never fabricates states or implies an irreversible step has happened.
+        <Card title="Next step">
+          <p className="card-body">
+            <strong>{nextStep.title}</strong>
+          </p>
+          <p className="card-body">{nextStep.body}</p>
+        </Card>
       )}
 
       {shellAvailable && !election && (
@@ -775,6 +685,10 @@ export function ManageElection() {
             Opening voting means the election starts accepting ballots from eligible voters.
             The election definition stays locked. Voting stays open until you close it.
           </p>
+          <p className="card-body">
+            <strong>Opening voting cannot be undone.</strong> Start private intake and share the
+            voter materials first, then open voting when you are ready to accept ballots.
+          </p>
           <button
             type="button"
             className="btn btn-primary"
@@ -785,44 +699,19 @@ export function ManageElection() {
           </button>
         </Card>
 
-        <Card title="Ballot office">
+        <Card title="Close Voting">
           <p className="card-body">
-            Import submitted ballot files here. Each ballot is checked before it is accepted
-            into the election; a ballot that fails a check is rejected, and a ballot that was
-            already accepted is never counted twice.
+            Closing voting is permanent: no additional ballots can be accepted after this
+            election is closed. This cannot be undone.
           </p>
-          <DetailsSection summary="Technical details">
-            <p className="card-body">
-              The file is only a carrier for exact package bytes; canonical parsing, proof
-              verification, lifecycle checks, and duplicate (nullifier) detection happen in the
-              Rust backend through the authoritative intake path.
-            </p>
-          </DetailsSection>
-          <div className="form-row">
-            <label htmlFor="package-path">Last selected package</label>
-            <input
-              id="package-path"
-              type="text"
-              readOnly
-              value={packagePath}
-              placeholder="no ballot package selected"
-            />
-          </div>
           <button
             type="button"
-            className="btn btn-primary"
-            disabled={!canImportBallot}
-            onClick={() => void onIntake()}
+            className="btn btn-danger"
+            disabled={!canAct || lifecycle !== "OPEN" || lifecycleBusy}
+            onClick={() => setConfirmClose(true)}
           >
-            Import ballot package
+            Close voting
           </button>
-          <div className="field-list">
-            <Field label="Last intake">{intakeResultTitle(lastIntake)}</Field>
-            {lastIntake && <Field label="Result">{intakeResultMessage(lastIntake)}</Field>}
-          </div>
-          {lifecycle !== "OPEN" && lifecycle !== null && (
-            <p className="card-body">Ballot intake is available only while voting is open.</p>
-          )}
         </Card>
 
         <Card title="Private ballot intake">
@@ -833,8 +722,20 @@ export function ManageElection() {
             accepted only once, and an exact resend is never counted twice.
           </p>
 
-          {/* Near-one-click status line. */}
+          {/* Near-one-click status line: a plain Ready pill first, then the
+              plain Tor/transport lines. The two accepted-ballot counters stay
+              DISTINCT on purpose: the election total is authoritative and
+              survives restarts; the per-session receiver count does not. */}
           <div className="field-list">
+            <Field label="Status">
+              {organizerStatus === null ? (
+                <Pill tone="neutral">Checking…</Pill>
+              ) : organizerStatus.intake_running && organizerStatus.ready ? (
+                <Pill tone="ok">Ready ✓</Pill>
+              ) : (
+                <Pill tone="neutral">Not running</Pill>
+              )}
+            </Field>
             <Field label="Tor">
               {organizerStatus === null
                 ? "Checking…"
@@ -925,48 +826,38 @@ export function ManageElection() {
                 {organizerBusy ? "Starting…" : "Start private intake"}
               </button>
             )}
-            <button
-              type="button"
-              className="btn btn-secondary"
-              disabled={
-                !canAct ||
-                organizerBusy ||
-                !(organizerStatus?.transport_provisioned ?? false)
-              }
-              onClick={() => void onExportVoterBundle()}
-            >
-              Export voter transport bundle
-            </button>
           </div>
-          {bundleExportPath && (
-            <Notice tone="ok">
-              Voter transport bundle exported
-              <br />
-              <span className="hash">{bundleExportPath}</span>
-            </Notice>
-          )}
-
           <p className="form-hint">
             Starting intake does not open voting. Open voting separately when you are ready to
             accept ballots.
           </p>
 
           {/* Auto-sync (bounded) runs while intake is ready and voting is OPEN,
-              using the SAME authoritative path as this manual button. */}
+              using the SAME authoritative path as the manual Sync below. */}
           {autoSyncActive && (
             <p className="form-hint">
               Accepted ballots sync into this election automatically while intake is running.
               You can also sync now.
             </p>
           )}
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!canAct || lifecycle !== "OPEN" || syncBusy}
-            onClick={() => void onSyncPrivateIntake()}
-          >
-            {syncBusy ? "Syncing…" : "Sync accepted ballots"}
-          </button>
+
+          {/* Manual sync stays available but is recovery-oriented: normal
+              operation auto-reconciles, so this is not part of the main flow. */}
+          <h3 className="card-section-heading">Recovery / manual actions</h3>
+          <p className="form-hint">
+            Accepted ballots reconcile automatically during normal operation. Use this only to
+            reconcile manually after a restart or a problem.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || lifecycle !== "OPEN" || syncBusy}
+              onClick={() => void onSyncPrivateIntake()}
+            >
+              {syncBusy ? "Syncing…" : "Sync accepted ballots"}
+            </button>
+          </div>
           {syncSummary && (
             <div className="field-list">
               <Field label="Newly accepted">{syncSummary.newly_accepted}</Field>
@@ -982,7 +873,7 @@ export function ManageElection() {
             </p>
           )}
 
-          <DetailsSection summary="Advanced / diagnostics">
+          <DetailsSection summary="Advanced Tor diagnostics">
             <div className="field-list">
               {organizerStatus?.onion_hostname && (
                 <Field label="Verified onion">
@@ -1026,19 +917,88 @@ export function ManageElection() {
           </DetailsSection>
         </Card>
 
-        <Card title="Close Voting">
+        <Card title="Voter materials">
           <p className="card-body">
-            Closing voting is permanent: after voting is closed, no new ballots can be accepted
-            for this election. This cannot be undone.
+            Voters need two things from the ballot office before they can vote:
           </p>
+          <ul className="guide-facts">
+            <li>
+              <strong>The frozen election package</strong> — the election definition, eligible
+              voter list, and ballot options, exported when the election was created and frozen
+              (Create Election screen).
+            </li>
+            <li>
+              <strong>The voter transport bundle</strong> — lets each voter&rsquo;s app verify
+              and reach this ballot office over the private route.
+            </li>
+          </ul>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={
+                !canAct ||
+                organizerBusy ||
+                !(organizerStatus?.transport_provisioned ?? false)
+              }
+              onClick={() => void onExportVoterBundle()}
+            >
+              Export voter transport bundle
+            </button>
+          </div>
+          {!(organizerStatus?.transport_provisioned ?? false) && (
+            <p className="form-hint">
+              The bundle can be exported once this election&rsquo;s private transport is
+              provisioned — start private intake once, then export.
+            </p>
+          )}
+          {bundleExportPath && (
+            <Notice tone="ok">
+              Voter transport bundle exported
+              <br />
+              <span className="hash">{bundleExportPath}</span>
+            </Notice>
+          )}
+        </Card>
+
+        <Card title="Ballot office">
+          <p className="card-body">
+            Import submitted ballot files here. Each ballot is checked before it is accepted
+            into the election; a ballot that fails a check is rejected, and a ballot that was
+            already accepted is never counted twice.
+          </p>
+          <DetailsSection summary="Technical details">
+            <p className="card-body">
+              The file is only a carrier for exact package bytes; canonical parsing, proof
+              verification, lifecycle checks, and duplicate (nullifier) detection happen in the
+              Rust backend through the authoritative intake path.
+            </p>
+          </DetailsSection>
+          <div className="form-row">
+            <label htmlFor="package-path">Last selected package</label>
+            <input
+              id="package-path"
+              type="text"
+              readOnly
+              value={packagePath}
+              placeholder="no ballot package selected"
+            />
+          </div>
           <button
             type="button"
-            className="btn btn-danger"
-            disabled={!canAct || lifecycle !== "OPEN" || lifecycleBusy}
-            onClick={() => setConfirmClose(true)}
+            className="btn btn-primary"
+            disabled={!canImportBallot}
+            onClick={() => void onIntake()}
           >
-            Close voting
+            Import ballot package
           </button>
+          <div className="field-list">
+            <Field label="Last intake">{intakeResultTitle(lastIntake)}</Field>
+            {lastIntake && <Field label="Result">{intakeResultMessage(lastIntake)}</Field>}
+          </div>
+          {lifecycle !== "OPEN" && lifecycle !== null && (
+            <p className="card-body">Ballot intake is available only while voting is open.</p>
+          )}
         </Card>
 
         <Card title="Participation">
@@ -1076,7 +1036,10 @@ export function ManageElection() {
               </div>
               <ParticipationTrack summary={participation} />
               {participationSealed && lifecycle === "OPEN" && (
-                <p className="card-body">Voting is in progress. Participation is hidden until voting closes.</p>
+                <p className="card-body">
+                  Participation is hidden while voting is open — this is intentional, not missing
+                  data. Participation is disclosed after voting closes.
+                </p>
               )}
               {participation.small_electorate && !participationSealed && lifecycle === "OPEN" && (
                 <p className="card-body">
@@ -1096,7 +1059,19 @@ export function ManageElection() {
             <p className="card-body">No participation data available in this session.</p>
           )}
         </Card>
+      </div>
 
+      {/* Results workflow, in order: the gates on each button remain the
+          authoritative lifecycle gates; the heading only makes the existing
+          progression obvious. */}
+      <h2 className="screen-section">Results</h2>
+      <p className="form-hint">
+        After voting closes: compute the tally, review the result, mark verification complete,
+        finalize the election, then write the final archive and verify it independently on the
+        Archive screen.
+      </p>
+
+      <div className="card-grid">
         <Card title="Tally">
           <p className="card-body">
             Deterministic approval tally over accepted ballots. A tie is reported as a tie.
@@ -1229,11 +1204,11 @@ export function ManageElection() {
           <div className="btn-row">
             <button
               type="button"
-              className="btn btn-secondary"
-              disabled={!canAct || lifecycle !== "VERIFIED"}
-              onClick={() => void runLifecycle("finalize")}
+              className="btn btn-danger"
+              disabled={!canAct || lifecycle !== "VERIFIED" || lifecycleBusy}
+              onClick={() => setConfirmFinalize(true)}
             >
-              Finalize
+              Finalize election
             </button>
             <button
               type="button"
@@ -1265,12 +1240,150 @@ export function ManageElection() {
 
         <Card title="Anchor">
           <Placeholder>
-            Anchor submission runs through the Phase 4 operator application, not this screen.
-            Inspect the resulting snapshot and evidence on the Anchor and Evidence screens.
-            Anchoring is optional and non-binding.
+            Optional public integrity anchor: anchor the aggregate finalized archive commitment
+            on Tari Ootle. Individual votes are not written to Ootle. Anchor submission runs
+            through the Phase 4 operator application, not this screen — inspect the resulting
+            snapshot and evidence on the Anchor and Evidence screens. Anchoring is optional and
+            non-binding.
           </Placeholder>
         </Card>
       </div>
+
+      {/* Reference details for the loaded election, kept below the workflow so
+          the action path stays first. Nothing here changes election state. */}
+      {election && (
+        <>
+          <h2 className="screen-section">Election details</h2>
+          <Card title="Election overview">
+            <div className="field-list">
+              <Field label="Election">
+                {election.election_id_text ?? election.election_id_hex}
+              </Field>
+              <Field label="Lifecycle">
+                <LifecyclePill state={lifecycle} />
+              </Field>
+              <Field label="Manifest schema">
+                ElectionManifestV{election.manifest_schema_version}
+              </Field>
+              {election.proposal_question && (
+                <Field label="Ballot question">{election.proposal_question}</Field>
+              )}
+              <Field label="Proof suite">{election.proof_suite_id}</Field>
+              <Field label="Ballot kind">{election.ballot_kind}</Field>
+              <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
+            </div>
+            <p className="form-hint">
+              Manifest hash and other canonical identifiers are under Advanced details below.
+            </p>
+          </Card>
+
+          <div className="card-grid">
+            <Card title="Eligibility">
+              <div className="field-list">
+                <Field label="Eligible voters">{election.voter_count}</Field>
+                <Field label="Registry commitment">
+                  <HashValue value={election.registry_commitment_hex} />
+                  <CopyButton value={election.registry_commitment_hex} />
+                </Field>
+              </div>
+            </Card>
+
+            <Card title="Voting rules">
+              <div className="field-list">
+                <Field label="Approval rule">{approvalRuleText(election)}</Field>
+                <Field label="Abstention">
+                  {election.abstention_allowed ? "permitted" : "not permitted"}
+                </Field>
+              <Field label="Governance source">
+                {election.governance_source_revision}
+              </Field>
+              {election.proposal_question && (
+                <Field label="Ballot question">{election.proposal_question}</Field>
+              )}
+              <Field label="Quorum">No quorum rule is represented in this election manifest.</Field>
+              </div>
+              <p className="card-body">
+                The version-one manifest carries no quorum, minimum-participation, or passing
+                threshold field. No governance rule is inferred from community conventions.
+              </p>
+            </Card>
+          </div>
+
+          <Card title={presentation.optionSetNoun}>
+            <table className="data">
+              <thead>
+                <tr>
+                  <th scope="col">Display label</th>
+                  <th scope="col">Machine ID</th>
+                </tr>
+              </thead>
+              <tbody>
+                {election.candidates.map((option) => (
+                  <tr key={option.machine_id_hex}>
+                    <td>{option.display_name}</td>
+                    <td>
+                      <span className="hash">
+                        {option.machine_id_text ?? option.machine_id_hex}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+
+          <Card title="Advanced details">
+            <div className="field-list">
+              <Field label="Manifest hash">
+                <HashValue value={election.manifest_hash_hex} />
+                <CopyButton value={election.manifest_hash_hex} />
+              </Field>
+              <Field label="Manifest schema">
+                ElectionManifestV{election.manifest_schema_version}
+              </Field>
+              <Field label="Registry commitment">
+                <HashValue value={election.registry_commitment_hex} />
+                <CopyButton value={election.registry_commitment_hex} />
+              </Field>
+              <Field label="Option-set commitment">
+                <HashValue value={election.candidate_set_commitment_hex} />
+                <CopyButton value={election.candidate_set_commitment_hex} />
+              </Field>
+              <Field label="Proof-suite identifier">{election.proof_suite_id}</Field>
+              <Field label="Election ID (canonical)">
+                <HashValue value={election.election_id_hex} />
+                <CopyButton value={election.election_id_hex} />
+              </Field>
+            </div>
+            <DetailsSection summary="Canonical option IDs">
+              <ul className="option-list">
+                {election.candidates.map((option) => (
+                  <li key={option.machine_id_hex} className="option-item">
+                    <span className="option-marker" aria-hidden="true" />
+                    <span>{option.display_name}</span>
+                    <span className="hash form-hint">
+                      {option.machine_id_text ?? option.machine_id_hex}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </DetailsSection>
+          </Card>
+
+          {selectedArtifactPaths && (
+            <Card title="Loaded artifacts (session only)">
+              <div className="field-list">
+                <Field label="Manifest">{basename(selectedArtifactPaths.manifest)}</Field>
+                <Field label="Registry">{basename(selectedArtifactPaths.registry)}</Field>
+                <Field label="Option set">{basename(selectedArtifactPaths.optionSet)}</Field>
+              </div>
+              <p className="form-hint">
+                Paths are held in session memory only and are not persisted. Unloading clears them.
+              </p>
+            </Card>
+          )}
+        </>
+      )}
 
       {confirmClose && (
         <ConfirmDialog
@@ -1278,18 +1391,39 @@ export function ManageElection() {
           body={
             <>
               <p>
-                After voting is closed, no new ballots can be accepted for this election.
+                No additional ballots can be accepted after this election is closed.
               </p>
               <p>
                 <strong>This cannot be undone.</strong>
               </p>
             </>
           }
-          confirmLabel="Close Voting"
+          confirmLabel="Close voting permanently"
           confirmTone="danger"
           busy={lifecycleBusy}
           onConfirm={() => void onConfirmClose()}
           onCancel={() => setConfirmClose(false)}
+        />
+      )}
+
+      {confirmFinalize && (
+        <ConfirmDialog
+          title="Finalize this election?"
+          body={
+            <>
+              <p>
+                The verified result and finalized election record become permanent.
+              </p>
+              <p>
+                <strong>This cannot be undone.</strong>
+              </p>
+            </>
+          }
+          confirmLabel="Finalize election"
+          confirmTone="danger"
+          busy={lifecycleBusy}
+          onConfirm={() => void onConfirmFinalize()}
+          onCancel={() => setConfirmFinalize(false)}
         />
       )}
     </>

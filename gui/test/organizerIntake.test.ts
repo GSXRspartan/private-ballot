@@ -38,8 +38,8 @@ describe("organizer one-click private intake controls", () => {
     assert.doesNotMatch(manage, /app-data root/i);
   });
 
-  it("keeps the crowded operator details under an Advanced / diagnostics disclosure", () => {
-    assert.match(manage, /Advanced \/ diagnostics/);
+  it("keeps the crowded operator details under an Advanced Tor diagnostics disclosure", () => {
+    assert.match(manage, /Advanced Tor diagnostics/);
     // The onion, fingerprint, collector address and Tor data dir are diagnostics,
     // not primary UI.
     assert.match(manage, /Verified onion/);

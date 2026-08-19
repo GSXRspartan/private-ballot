@@ -384,7 +384,7 @@ test("election-loaded Vote flow still works and does not render duplicate creden
   );
 
   assert.equal(matches.length, 1);
-  assert.match(vote, /<Card title="Eligibility">/);
+  assert.match(vote, /<Card title="Confirm you are eligible to vote">/);
   assert.match(vote, /disabled=\{!canProceedAfterCredential\(credential\) \|\| busy\}/);
   assert.doesNotMatch(credentialStage, /<VoterCredentialCard/);
 });

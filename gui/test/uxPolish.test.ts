@@ -195,10 +195,10 @@ describe("privacy notice accuracy", () => {
 // -------------------------------------------------------------------------
 
 describe("prepared ballot save action", () => {
-  it("has exactly one primary Save ballot file action", () => {
-    const matches = vote.match(/>\s*Save ballot file\s*</g) ?? [];
-    assert.equal(matches.length, 1, "expected exactly one 'Save ballot file' action");
-    const idx = vote.indexOf("Save ballot file");
+  it("has exactly one primary Save encrypted ballot file action", () => {
+    const matches = vote.match(/>\s*Save encrypted ballot file\s*</g) ?? [];
+    assert.equal(matches.length, 1, "expected exactly one 'Save encrypted ballot file' action");
+    const idx = vote.indexOf("Save encrypted ballot file");
     const before = vote.slice(Math.max(0, idx - 400), idx);
     assert.match(before, /btn btn-primary/);
   });
