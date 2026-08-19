@@ -14,6 +14,8 @@ import {
   rememberManagedTorConfig,
 } from "../api/managedTorConfigMemory";
 import {
+  PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS,
+  isTransientPrivateReleaseResult,
   managedTorTestCardVisible,
   privateSubmissionStageLabel,
   privateSubmissionStatus,
@@ -31,6 +33,7 @@ import type {
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
   ManagedTorTestStatusV1,
+  VoterTorStatusV1,
 } from "../api/types";
 import { selectionInstructionText } from "../ballot/ballotTypes";
 import { lifecyclePlainText } from "../lifecycle";
@@ -84,6 +87,25 @@ import { VoterCredentialCard } from "../components/VoterCredentialCard";
  * Rust backend; this screen never implements protocol logic, never holds
  * secret material, and never submits ballot bytes itself.
  */
+
+/**
+ * Sleeps up to `ms`, polling a cancel flag so a stop/cancel takes effect
+ * promptly (within one poll interval) instead of after the full delay. Resolves
+ * `true` if the delay elapsed, `false` if it was cancelled. Never a tight loop.
+ */
+function abortableSleep(ms: number, cancelRef: { current: boolean }): Promise<boolean> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const step = 150;
+    const tick = () => {
+      if (cancelRef.current) return resolve(false);
+      if (Date.now() - start >= ms) return resolve(true);
+      setTimeout(tick, step);
+    };
+    setTimeout(tick, Math.min(step, ms));
+  });
+}
+
 export function Vote() {
   const { election, shellAvailable, loadElection } = useAppState();
   const [loadManifestPath, setLoadManifestPath] = useState("");
@@ -109,6 +131,17 @@ export function Vote() {
   const [privateRoute, setPrivateRoute] = useState<GuiPrivateRouteV1>("ManagedTor");
   const [privateResult, setPrivateResult] = useState<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1 | null>(null);
   const [managedTorStatus, setManagedTorStatus] = useState<ManagedTorTestStatusV1 | null>(null);
+  // Read-only voter Tor availability (auto-detected from the reviewed allowlist
+  // or a remembered/selected path). Drives the "Tor installed: Found" line and
+  // the one-click Connect flow; never starts Tor by itself.
+  const [voterTorStatus, setVoterTorStatus] = useState<VoterTorStatusV1 | null>(null);
+  // Bounded automatic-retry state for a private submission whose only failure is
+  // transient transport/onion reachability. `autoRetryAttempt` is the 1-based
+  // automatic-retry number currently in progress (0 = none). The cancel ref is
+  // flipped by Stop retrying / stopping Tor / leaving the screen so no retry
+  // continues in the background.
+  const [autoRetryAttempt, setAutoRetryAttempt] = useState(0);
+  const autoRetryCancelRef = useRef(false);
   // Local, voter-safe error for the private-submission controls only, shown next
   // to those controls instead of only at the top of the screen (Issue 5). It
   // never carries transport internals beyond the backend's coarsened codes.
@@ -143,7 +176,19 @@ export function Vote() {
     setPrivateRoute("ManagedTor");
     setPrivateResult(null);
     setPrivateError(null);
+    // Leaving/switching elections cancels any in-progress automatic retry so it
+    // never continues against a stale election.
+    autoRetryCancelRef.current = true;
+    setAutoRetryAttempt(0);
   }, [election]);
+
+  // On unmount (voter leaves the screen), cancel any in-progress automatic retry
+  // so no submission continues in the background.
+  useEffect(() => {
+    return () => {
+      autoRetryCancelRef.current = true;
+    };
+  }, []);
 
   // Re-hydrate the remembered controlled-test paths whenever the election
   // identity changes. The GLOBAL tor.exe is restored; the ELECTION-SPECIFIC
@@ -240,6 +285,32 @@ export function Vote() {
     if (election && shellAvailable) void refreshManagedTorStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
+
+  // Probe voter Tor availability (read-only) so the one-click Connect flow can
+  // show "Tor installed: Found" without the voter typing a path. Re-runs when
+  // the remembered/selected tor.exe changes.
+  useEffect(() => {
+    if (election && shellAvailable) void refreshVoterTorStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election, shellAvailable, torExePath]);
+
+  // Truthful ready-state: while the managed-Tor connection is configured and the
+  // ballot is not yet durably CAST, re-read the AUTHORITATIVE status on a bounded
+  // interval. The backend status checks the owned Tor child's liveness (try_wait)
+  // and a fresh SOCKS probe, so if the child has exited, tor_running flips to
+  // false and the banner stops claiming "Private connection ready" and reveals
+  // Reconnect instead — the UI can never simultaneously show "ready" and a dead
+  // child. Not a tight loop; the Rust status runs off the main thread.
+  useEffect(() => {
+    if (!shellAvailable) return;
+    if (!managedTorStatus?.configured) return;
+    if (workflow?.cast_lock_state === "CAST") return;
+    const intervalId = setInterval(() => {
+      void refreshManagedTorStatus();
+    }, 5000);
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shellAvailable, managedTorStatus?.configured, workflow?.cast_lock_state]);
 
   async function onSelectGovernanceDocument() {
     const path = await pickGovernanceDocument("Select local governance document to inspect");
@@ -486,12 +557,50 @@ export function Vote() {
       await onExportBallot();
       return;
     }
+    await runBoundedPrivateSubmission(() =>
+      api.submitPreparedVoterBallotPrivately(privateRoute),
+    );
+  }
+
+  // Runs a private submission with a SMALL, BOUNDED automatic retry that reacts
+  // ONLY to a transient transport/onion-reachability failure. The very first
+  // attempt is `initialAttempt` (a fresh submit, or a manual retry); every
+  // automatic retry after that re-sends the EXACT same staged encrypted
+  // submission through `retry_private_submission` — the existing exact-retry
+  // path. It never prepares, re-seals, or re-submits a new ballot, so no new
+  // proof/nullifier/digest is ever created, and an authenticated organizer
+  // receipt stays mandatory for CAST. Any non-transient outcome (authenticated
+  // rejection, receipt/descriptor/package mismatch, invalid receipt, local
+  // finalization failure, or a thrown error) is surfaced immediately and never
+  // retried. The loop is bounded by the backoff schedule and is cancelled the
+  // moment the voter stops retrying, stops Tor, or leaves the screen.
+  async function runBoundedPrivateSubmission(
+    initialAttempt: () => Promise<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1>,
+  ) {
     setBusy(true);
     setError(null);
     setPrivateError(null);
     setPrivateResult(null);
+    setAutoRetryAttempt(0);
+    autoRetryCancelRef.current = false;
     try {
-      setPrivateResult(await api.submitPreparedVoterBallotPrivately(privateRoute));
+      let result = await initialAttempt();
+      setPrivateResult(result);
+      let attempt = 0;
+      while (
+        !autoRetryCancelRef.current &&
+        isTransientPrivateReleaseResult(result) &&
+        attempt < PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length
+      ) {
+        const delayMs = PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS[attempt];
+        attempt += 1;
+        setAutoRetryAttempt(attempt);
+        const elapsed = await abortableSleep(delayMs, autoRetryCancelRef);
+        if (!elapsed || autoRetryCancelRef.current) break;
+        // EXACT same staged encrypted submission (exact-retry path).
+        result = await api.retryPrivateSubmission();
+        setPrivateResult(result);
+      }
       setTransport(await api.privateTransportAvailability());
       await refreshWorkflow(true);
       setManagedTorStatus(await api.managedTorTestStatus());
@@ -501,9 +610,22 @@ export function Vote() {
       // (recovered by refreshWorkflow) remains the authority for locked/pending.
       setPrivateError(commandErrorFromUnknown(err));
       await refreshWorkflow(true).catch(() => {});
+      // Re-read the AUTHORITATIVE managed-Tor status so a failure caused by the
+      // Tor child having exited flips the connection banner out of "ready" (and
+      // reveals Reconnect) instead of leaving a stale "Private connection ready"
+      // contradicting "the managed Tor process has exited".
+      await refreshManagedTorStatus().catch(() => {});
     } finally {
+      setAutoRetryAttempt(0);
       setBusy(false);
     }
+  }
+
+  // Cancels any in-progress automatic retry without stopping Tor. The current
+  // in-flight backend call (if any) completes, but no further retry is scheduled.
+  function onStopAutoRetry() {
+    autoRetryCancelRef.current = true;
+    setAutoRetryAttempt(0);
   }
 
   async function refreshManagedTorStatus() {
@@ -520,8 +642,10 @@ export function Vote() {
     setError(null);
     setPrivateError(null);
     try {
+      // An empty data directory means "auto" — the backend derives an app-owned,
+      // election-scoped directory the voter never has to choose.
       const status = await api.configureManagedTorTest(torExePath, torDataDir, voterBundlePath);
-      // Remember only the three NON-SECRET paths for the next run/navigation.
+      // Remember only the NON-SECRET paths for the next run/navigation.
       rememberManagedTorConfig({
         torExePath,
         torDataDir,
@@ -536,9 +660,55 @@ export function Vote() {
     }
   }
 
+  // Read-only voter Tor availability probe. Never starts Tor.
+  async function refreshVoterTorStatus() {
+    if (!shellAvailable) return;
+    try {
+      setVoterTorStatus(await api.voterTorStatus(torExePath.length > 0 ? torExePath : undefined));
+    } catch {
+      // Best-effort; leave the last known status visible on failure.
+    }
+  }
+
+  // One-click voter connect: configure (auto tor.exe + auto app-owned data dir +
+  // the verified organizer bundle) then start the managed Tor connection. The
+  // Rust shell re-validates every path and re-verifies the bundle against the
+  // loaded election before anything starts; no clearnet fallback exists.
+  async function onConnectPrivately() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      // "" data dir → backend auto-derives the app-owned election-scoped dir.
+      await api.configureManagedTorTest(torExePath, "", voterBundlePath);
+      rememberManagedTorConfig({
+        torExePath,
+        torDataDir: "",
+        voterBundlePath,
+        electionManifestHashHex,
+      });
+      const status = await api.startManagedTor();
+      setManagedTorStatus(status);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onBrowseTorExe() {
     const picked = await pickTorExecutable();
-    if (picked !== null) setTorExePath(picked);
+    if (picked === null) return;
+    setTorExePath(picked);
+    // Remember the tor.exe globally (non-secret convenience) and re-probe so the
+    // "Tor installed" line updates immediately.
+    const current = recallManagedTorConfig(electionManifestHashHex);
+    rememberManagedTorConfig({ ...current, torExePath: picked });
+    try {
+      setVoterTorStatus(await api.voterTorStatus(picked));
+    } catch {
+      // Best-effort probe.
+    }
   }
 
   async function onBrowseVoterBundle() {
@@ -566,6 +736,9 @@ export function Vote() {
   }
 
   async function onStopManagedTor() {
+    // Stopping the connection also cancels any in-progress automatic retry so no
+    // submission continues in the background after the voter stops.
+    autoRetryCancelRef.current = true;
     setBusy(true);
     setError(null);
     setPrivateError(null);
@@ -579,22 +752,11 @@ export function Vote() {
     }
   }
 
+  // Manual retry fallback: same bounded exact-retry runner, seeded with an
+  // immediate exact-retry attempt. Remains available after automatic retries
+  // are exhausted.
   async function onRetryPrivateSubmission() {
-    setBusy(true);
-    setError(null);
-    setPrivateError(null);
-    try {
-      const result = await api.retryPrivateSubmission();
-      setPrivateResult(result);
-      await refreshWorkflow(true);
-      setManagedTorStatus(await api.managedTorTestStatus());
-    } catch (err) {
-      // Show retry failures next to the controls; durable state stays authoritative.
-      setPrivateError(commandErrorFromUnknown(err));
-      await refreshWorkflow(true).catch(() => {});
-    } finally {
-      setBusy(false);
-    }
+    await runBoundedPrivateSubmission(() => api.retryPrivateSubmission());
   }
 
   const docStatus = confirmation?.governance_document_status ?? null;
@@ -1081,6 +1243,17 @@ export function Vote() {
                       instead. */}
                   {!castLocked && (
                   <Card title="Choose your response">
+                    {/* The CURRENT CANONICAL ballot question, read straight from
+                        the confirmed election binding (the SAME source as the
+                        choices below), so the question and responses are never
+                        separated by scrolling. It is never a second editable copy
+                        and it clears/updates on election switch or unload because
+                        `confirmation` is reset per election. */}
+                    {confirmation.bound.proposal_question && (
+                      <p className="selection-question">
+                        {confirmation.bound.proposal_question}
+                      </p>
+                    )}
                     <p className="selection-instruction">
                       {selectionInstructionText(selection ?? confirmation.bound)}
                     </p>
@@ -1462,6 +1635,28 @@ export function Vote() {
                         {privateStatus.detail}
                       </Notice>
 
+                      {/* Bounded automatic retry of the EXACT same encrypted
+                          submission while the onion route is transiently
+                          unreachable. No new ballot is created. */}
+                      {autoRetryAttempt > 0 && (
+                        <div className="config-stack">
+                          <p className="form-hint" role="status" aria-live="polite">
+                            Connecting to ballot office… (attempt {autoRetryAttempt} of{" "}
+                            {PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length}). Retrying the same
+                            encrypted submission — no new ballot is created.
+                          </p>
+                          <div className="action-row">
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() => onStopAutoRetry()}
+                            >
+                              Stop retrying
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Private-submission errors are shown HERE, next to the
                           controls, not only at the top of the screen (Issue 5). */}
                       <BackendErrorNotice
@@ -1472,80 +1667,153 @@ export function Vote() {
                       {!managedTorStatus?.configured && !ballotCast && (
                         <div className="config-stack">
                           <p className="form-hint">
-                            Configure the private connection with an already-installed tor.exe, the
-                            organizer&rsquo;s voter transport bundle, and a voter Tor data directory
-                            outside the repository. Configuring never starts Tor or sends anything.
+                            Connecting privately runs Tor for you — there is no port, torrc, or
+                            Tor data directory to set up. You only need the organizer&rsquo;s
+                            transport bundle for this election. Nothing is sent until you submit.
                           </p>
-                          <div className="form-row form-row--full">
-                            <label htmlFor="tor-exe-path">Tor executable</label>
-                            <div className="file-row">
-                              <input
-                                id="tor-exe-path"
-                                type="text"
-                                value={torExePath}
-                                onChange={(e) => setTorExePath(e.target.value)}
-                                placeholder="C:\path\to\tor.exe"
-                              />
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={busy || !shellAvailable}
-                                onClick={() => void onBrowseTorExe()}
-                              >
-                                Browse
-                              </button>
-                            </div>
+                          <div className="field-list">
+                            <Field label="Tor installed">
+                              {voterTorStatus === null
+                                ? "Checking…"
+                                : voterTorStatus.tor_found
+                                  ? "Found"
+                                  : "Not found"}
+                            </Field>
+                            <Field label="Organizer transport">
+                              {voterBundlePath ? "Verified for this election" : "Required"}
+                            </Field>
                           </div>
-                          <div className="form-row form-row--full">
-                            <label htmlFor="voter-bundle-path">Voter transport bundle</label>
-                            <div className="file-row">
-                              <input
-                                id="voter-bundle-path"
-                                type="text"
-                                value={voterBundlePath}
-                                onChange={(e) => setVoterBundlePath(e.target.value)}
-                                placeholder="C:\test-root\voter-public-bundle.cbor"
-                              />
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={busy || !shellAvailable}
-                                onClick={() => void onBrowseVoterBundle()}
-                              >
-                                Browse
-                              </button>
-                            </div>
-                          </div>
-                          <div className="form-row form-row--full">
-                            <label htmlFor="tor-data-dir">Voter Tor data directory</label>
-                            <div className="file-row">
-                              <input
-                                id="tor-data-dir"
-                                type="text"
-                                value={torDataDir}
-                                onChange={(e) => setTorDataDir(e.target.value)}
-                                placeholder="C:\test-root\voter-tor"
-                              />
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={busy || !shellAvailable}
-                                onClick={() => void onBrowseTorDataDir()}
-                              >
-                                Browse
-                              </button>
-                            </div>
-                          </div>
+
+                          {voterTorStatus !== null && !voterTorStatus.tor_found && (
+                            <>
+                              <Notice tone="info">
+                                Tor was not found automatically. Select a Tor executable once; the
+                                app remembers it and never downloads or installs Tor.
+                              </Notice>
+                              <div className="action-row">
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy || !shellAvailable}
+                                  onClick={() => void onBrowseTorExe()}
+                                >
+                                  Select Tor executable
+                                </button>
+                              </div>
+                            </>
+                          )}
+
+                          {!voterBundlePath && (
+                            <>
+                              <Notice tone="info">
+                                Organizer transport bundle required. Ask the ballot office for the
+                                voter transport bundle file, then select it here.
+                              </Notice>
+                              <div className="action-row">
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy || !shellAvailable}
+                                  onClick={() => void onBrowseVoterBundle()}
+                                >
+                                  Select transport bundle
+                                </button>
+                              </div>
+                            </>
+                          )}
+
                           <div className="action-row">
                             <button
                               type="button"
-                              className="btn btn-secondary"
-                              disabled={busy || !torExePath || !torDataDir || !voterBundlePath}
-                              onClick={() => void onConfigureManagedTor()}
+                              className="btn btn-primary"
+                              disabled={
+                                busy ||
+                                !voterBundlePath ||
+                                !(voterTorStatus?.tor_found ?? false)
+                              }
+                              onClick={() => void onConnectPrivately()}
                             >
-                              Configure private connection
+                              Connect privately
                             </button>
                           </div>
+
+                          <DetailsSection summary="Advanced">
+                            <p className="form-hint">
+                              Override the auto-detected Tor executable or supply a manual Tor data
+                              directory. Normal use needs neither — leave them blank for the
+                              app-owned, election-scoped defaults.
+                            </p>
+                            <div className="form-row form-row--full">
+                              <label htmlFor="tor-exe-path">Tor executable (optional override)</label>
+                              <div className="file-row">
+                                <input
+                                  id="tor-exe-path"
+                                  type="text"
+                                  value={torExePath}
+                                  onChange={(e) => setTorExePath(e.target.value)}
+                                  placeholder="auto-detected"
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy || !shellAvailable}
+                                  onClick={() => void onBrowseTorExe()}
+                                >
+                                  Browse
+                                </button>
+                              </div>
+                            </div>
+                            <div className="form-row form-row--full">
+                              <label htmlFor="voter-bundle-path">Voter transport bundle</label>
+                              <div className="file-row">
+                                <input
+                                  id="voter-bundle-path"
+                                  type="text"
+                                  value={voterBundlePath}
+                                  onChange={(e) => setVoterBundlePath(e.target.value)}
+                                  placeholder="C:\test-root\voter-public-bundle.cbor"
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy || !shellAvailable}
+                                  onClick={() => void onBrowseVoterBundle()}
+                                >
+                                  Browse
+                                </button>
+                              </div>
+                            </div>
+                            <div className="form-row form-row--full">
+                              <label htmlFor="tor-data-dir">Voter Tor data directory (optional)</label>
+                              <div className="file-row">
+                                <input
+                                  id="tor-data-dir"
+                                  type="text"
+                                  value={torDataDir}
+                                  onChange={(e) => setTorDataDir(e.target.value)}
+                                  placeholder="auto (app-owned, election-scoped)"
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={busy || !shellAvailable}
+                                  onClick={() => void onBrowseTorDataDir()}
+                                >
+                                  Browse
+                                </button>
+                              </div>
+                            </div>
+                            <div className="action-row">
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy || !voterBundlePath}
+                                onClick={() => void onConfigureManagedTor()}
+                              >
+                                Configure only (do not start)
+                              </button>
+                            </div>
+                          </DetailsSection>
                         </div>
                       )}
 

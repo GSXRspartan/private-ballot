@@ -167,9 +167,31 @@ describe("resumed durable session recognition", () => {
   });
 
   it("recognizes an authoritative resumed session without selected paths", () => {
-    assert.match(manage, /shellAvailable && election && !selectedArtifactPaths/);
-    assert.match(manage, /already loaded from durable recovery state/);
-    assert.match(manage, /original source files are not needed to continue/);
+    // The recovered session shows a compact banner and keeps the same reassurance
+    // that the original source files are not needed to continue.
+    assert.match(manage, /!selectedArtifactPaths &&/);
+    assert.match(manage, /Election recovered/);
+    assert.match(manage, /original source files are\s*\n?\s*not needed to continue/);
+  });
+
+  it("collapses the full load tutorial once an election is loaded", () => {
+    // The verbose folder-selection tutorial ("choose the folder that contains
+    // its three exported files") appears only in the no-election branch. When an
+    // election is loaded the load controls live under a disclosure.
+    assert.match(manage, /election \? \(/);
+    assert.match(manage, /Load a different election/);
+    assert.match(manage, /choose the folder that contains its three/);
+    // The compact loaded/recovered banner distinguishes the two states.
+    assert.match(manage, /Election loaded ✓/);
+    assert.match(manage, /Election recovered ✓/);
+  });
+
+  it("keeps the full load instructions available when no election is loaded", () => {
+    // The shared load controls (folder picker + advanced manual load) are always
+    // reachable; the manual-load disclosure and unload button are preserved.
+    assert.match(manage, /Select Election Folder/);
+    assert.match(manage, /Unload Election/);
+    assert.match(manage, /Advanced \/ manual load \(choose three files\)/);
   });
 });
 

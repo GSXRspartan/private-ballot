@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
 import {
@@ -6,11 +6,17 @@ import {
   pickDirectory,
   pickElectionArtifact,
   pickGovernanceDocument,
+  pickTorExecutable,
 } from "../api/dialog";
+import {
+  recallManagedTorConfig,
+  rememberManagedTorConfig,
+} from "../api/managedTorConfigMemory";
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
   GuiTallySummaryV1,
+  OrganizerIntakeStatusV1,
 } from "../api/types";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
@@ -83,6 +89,21 @@ export function ManageElection() {
     useState<Awaited<ReturnType<typeof api.syncPrivateIntake>> | null>(null);
   const [inboxPath, setInboxPath] = useState<string | null>(null);
   const [syncBusy, setSyncBusy] = useState(false);
+  // Organizer near-one-click private intake. torExePath is a GLOBAL convenience
+  // path the backend re-validates and may fall back from to its allowlist; the
+  // frontend never chooses ports, torrc, onion, or the inbox path.
+  const [organizerStatus, setOrganizerStatus] = useState<OrganizerIntakeStatusV1 | null>(null);
+  const [organizerBusy, setOrganizerBusy] = useState(false);
+  const [intakeTorExePath, setIntakeTorExePath] = useState(
+    () => recallManagedTorConfig().torExePath,
+  );
+  const [bundleExportPath, setBundleExportPath] = useState<string | null>(null);
+  // Bounded automatic inbox sync: a single in-flight guard and the last observed
+  // intake-worker accepted count. Auto-sync calls the SAME authoritative
+  // sync_private_intake path only when a NEW Tor delivery is observed, so it
+  // never churns workspace revisions while idle and never becomes a busy loop.
+  const autoSyncBusyRef = useRef(false);
+  const prevAcceptedRef = useRef<number | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
@@ -221,6 +242,178 @@ export function ManageElection() {
     }
   };
 
+  // Read-only organizer intake status. Never starts Tor or provisions anything.
+  const refreshOrganizerStatus = async () => {
+    if (!shellAvailable || !election) return;
+    try {
+      setOrganizerStatus(await api.organizerTorStatus(intakeTorExepathOrUndefined()));
+    } catch {
+      // Status is best-effort; a failure leaves the last known status visible.
+    }
+  };
+
+  const intakeTorExepathOrUndefined = () =>
+    intakeTorExePath.length > 0 ? intakeTorExePath : undefined;
+
+  // Load intake status when an election is loaded so the operator sees the
+  // Tor/transport state without acting. Read-only. Also reset the per-election
+  // auto-sync observation baseline so the next tick performs a first-observation
+  // reconciliation for the newly loaded/recovered election.
+  useEffect(() => {
+    prevAcceptedRef.current = null;
+    if (election && shellAvailable) void refreshOrganizerStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election?.manifest_hash_hex, shellAvailable]);
+
+  // Restart reconciliation: when an OPEN election is loaded/recovered, run ONE
+  // authoritative reconciliation so a durable inbox package accepted before an
+  // application restart is imported into the organizer workspace even if the Tor
+  // intake worker is not (yet) running again. Best-effort and idempotent: the
+  // backend writes a workspace revision only when a package is newly accepted, so
+  // an empty/duplicate-only inbox changes nothing; a not-open lifecycle simply
+  // has nothing to reconcile and is skipped.
+  useEffect(() => {
+    if (!shellAvailable || !election || lifecycle !== "OPEN") return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const summary = await api.syncPrivateIntake();
+        if (cancelled) return;
+        if (summary.newly_accepted > 0) {
+          setSyncSummary(summary);
+          await refreshParticipation();
+          recordAction(
+            `Reconciled ${summary.newly_accepted} durable ballot(s) from private intake`,
+          );
+        }
+      } catch {
+        // Best-effort recovery pass; the manual Sync button remains the fallback.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election?.manifest_hash_hex, lifecycle, shellAvailable]);
+
+  // One bounded auto-sync tick: re-read the read-only intake status; when the
+  // intake worker reports MORE accepted ballots than the previous observation (a
+  // new Tor delivery), ingest through the SAME authoritative sync_private_intake
+  // path. Idempotent (duplicates never re-count); a single in-flight guard
+  // prevents overlap. Failures are surfaced, not swallowed.
+  const autoSyncTick = async () => {
+    if (autoSyncBusyRef.current) return;
+    autoSyncBusyRef.current = true;
+    try {
+      const status = await api.organizerTorStatus(intakeTorExepathOrUndefined());
+      setOrganizerStatus(status);
+      const prev = prevAcceptedRef.current;
+      prevAcceptedRef.current = status.accepted_ballots;
+      // Reconcile on the FIRST observation of a bound worker (prev === null), then
+      // on every subsequent INCREASE. The first-observation reconciliation is the
+      // restart/first-mount fix: the process-local intake worker counter restarts
+      // at 0, so a durable inbox package already accepted before restart would
+      // otherwise never trigger a delta and would sit unsynced until a manual
+      // Sync. The authoritative sync is idempotent and writes a workspace revision
+      // only when a package is newly accepted, so this never double-counts and
+      // never churns revisions on an empty/duplicate-only inbox.
+      const firstObservation = prev === null;
+      if (firstObservation || status.accepted_ballots > prev) {
+        const summary = await api.syncPrivateIntake();
+        setSyncSummary(summary);
+        await refreshParticipation();
+        recordAction(
+          summary.newly_accepted > 0
+            ? `Auto-synced ${summary.newly_accepted} ballot(s) from private intake`
+            : "Auto-synced private intake",
+        );
+      }
+    } catch (error) {
+      // Surface the failure next to the controls; stop the busy guard so the next
+      // interval can retry once the operator has seen it.
+      showError(error);
+    } finally {
+      autoSyncBusyRef.current = false;
+    }
+  };
+
+  // Bounded automatic inbox sync runs ONLY while an election is loaded, voting is
+  // OPEN, and a ready intake worker is bound to THIS election. A fixed interval
+  // (never a tight loop) polls the read-only status; the authoritative writer
+  // boundary is unchanged. The manual "Sync accepted ballots" button remains.
+  const autoSyncActive =
+    shellAvailable &&
+    election !== null &&
+    lifecycle === "OPEN" &&
+    (organizerStatus?.intake_running ?? false) &&
+    (organizerStatus?.election_bound ?? false);
+  useEffect(() => {
+    if (!autoSyncActive) return;
+    const intervalId = setInterval(() => {
+      void autoSyncTick();
+    }, 4000);
+    return () => clearInterval(intervalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSyncActive]);
+
+  const onSelectIntakeTorExe = async () => {
+    clearLocalError();
+    const picked = await pickTorExecutable();
+    if (picked === null) return;
+    setIntakeTorExePath(picked);
+    // Remember the tor.exe globally (non-secret convenience); election-specific
+    // fields are left untouched.
+    const current = recallManagedTorConfig();
+    rememberManagedTorConfig({ ...current, torExePath: picked });
+    try {
+      setOrganizerStatus(await api.organizerTorStatus(picked));
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onStartIntake = async () => {
+    clearLocalError();
+    setOrganizerBusy(true);
+    try {
+      const status = await api.startPrivateIntake(intakeTorExepathOrUndefined());
+      setOrganizerStatus(status);
+      recordAction("Started private ballot intake");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
+  const onStopIntake = async () => {
+    clearLocalError();
+    setOrganizerBusy(true);
+    try {
+      const status = await api.stopPrivateIntake();
+      setOrganizerStatus(status);
+      recordAction("Stopped private ballot intake");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
+  const onExportVoterBundle = async () => {
+    clearLocalError();
+    setBundleExportPath(null);
+    const dir = await pickDirectory("Choose a folder for the voter transport bundle", "electionExport");
+    if (dir === null) return;
+    try {
+      const result = await api.exportVoterTransportBundle(dir);
+      setBundleExportPath(result.written_path);
+      recordAction("Exported voter transport bundle");
+    } catch (error) {
+      showError(error);
+    }
+  };
+
   const onWriteArchive = async () => {
     clearLocalError();
     setArchiveResult(null);
@@ -264,65 +457,43 @@ export function ManageElection() {
     }
   };
 
-  return (
+  // Shared load controls (folder picker, unload, advanced manual load). Rendered
+  // inline in the full "Load Election" card when no election is loaded, and
+  // tucked inside a "Load a different election" disclosure once one is loaded, so
+  // a recovered/loaded session is not buried under the folder-selection tutorial.
+  const loadElectionControls = (
     <>
-      <h1 className="screen-header">Manage Election</h1>
-      <p className="screen-lede">
-        Organizer tools for one election: load the election files, open and close voting,
-        accept submitted ballots, compute the tally, and write the verifiable election record.
+      <div className="btn-row">
+        <button
+          type="button"
+          className="btn btn-primary"
+          disabled={!shellAvailable || folderBusy}
+          onClick={() => void onOpenElectionFolder()}
+        >
+          Select Election Folder
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={!canAct}
+          onClick={() => void unloadElection()}
+        >
+          Unload Election
+        </button>
+      </div>
+      <p className="form-hint">
+        The folder must contain election-manifest.cbor, voter-registry.cbor, and
+        candidate-set.cbor. Identity is derived from the decoded bytes, not the filenames.
       </p>
-
-      <BackendErrorNotice error={backendError} onDismiss={dismissError} />
-      <BackendErrorNotice error={finalArchiveError ? null : localError} onDismiss={clearLocalError} />
-      {!shellAvailable && (
-        <Notice tone="info">
-          Browser preview: commands are disabled because the desktop shell is not running.
-        </Notice>
-      )}
-
-      <Card title="Load Election">
+      <DetailsSection summary="Advanced / manual load (choose three files)">
         <p className="card-body">
-          The simplest way to load an election is to choose the folder that contains its three
-          exported files. Loading checks that the files are complete, unaltered, and belong to
-          the same election, then freezes the session for review before voting is opened.
+          The election definition is the manifest file, the eligible voter list is the
+          registry file, and the ballot options are the candidate/option set file. Loading
+          validates canonical encodings, recomputes both commitments and the manifest hash,
+          enforces the production proof-suite policy, and freezes the lifecycle. The session
+          starts in FROZEN. Filenames are shown for convenience only — identity is derived
+          from the decoded bytes.
         </p>
-        <p className="card-body">
-          Select the election folder itself — do not open it first. In the picker, click the
-          folder once to highlight it, then confirm; opening it makes the dialog look empty
-          because it only shows sub-folders. The folder must contain election-manifest.cbor,
-          voter-registry.cbor, and candidate-set.cbor.
-        </p>
-        <div className="btn-row">
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!shellAvailable || folderBusy}
-            onClick={() => void onOpenElectionFolder()}
-          >
-            Select Election Folder
-          </button>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!canAct}
-            onClick={() => void unloadElection()}
-          >
-            Unload Election
-          </button>
-        </div>
-        <p className="form-hint">
-          The folder must contain election-manifest.cbor, voter-registry.cbor, and
-          candidate-set.cbor. Identity is derived from the decoded bytes, not the filenames.
-        </p>
-        <DetailsSection summary="Advanced / manual load (choose three files)">
-          <p className="card-body">
-            The election definition is the manifest file, the eligible voter list is the
-            registry file, and the ballot options are the candidate/option set file. Loading
-            validates canonical encodings, recomputes both commitments and the manifest hash,
-            enforces the production proof-suite policy, and freezes the lifecycle. The session
-            starts in FROZEN. Filenames are shown for convenience only — identity is derived
-            from the decoded bytes.
-          </p>
         <div className="form-row">
           <label htmlFor="manifest-path">Election definition</label>
           <div className="file-row">
@@ -396,17 +567,70 @@ export function ManageElection() {
         {shellAvailable && !election && !canLoad && (
           <p className="form-hint">Choose all three election files to load manually.</p>
         )}
-        </DetailsSection>
-        {shellAvailable && election && !selectedArtifactPaths && (
-          <Notice tone="info">
-            An election is already loaded from durable recovery state
-            {election.election_id_text ? ` (${election.election_id_text})` : ""}. Its lifecycle,
-            ballot intake, and tally controls below operate on that recovered session. The
-            original source files are not needed to continue — choose files here only to load a
-            different election.
+      </DetailsSection>
+    </>
+  );
+
+  return (
+    <>
+      <h1 className="screen-header">Manage Election</h1>
+      <p className="screen-lede">
+        Organizer tools for one election: load the election files, open and close voting,
+        accept submitted ballots, compute the tally, and write the verifiable election record.
+      </p>
+
+      <BackendErrorNotice error={backendError} onDismiss={dismissError} />
+      <BackendErrorNotice error={finalArchiveError ? null : localError} onDismiss={clearLocalError} />
+      {!shellAvailable && (
+        <Notice tone="info">
+          Browser preview: commands are disabled because the desktop shell is not running.
+        </Notice>
+      )}
+
+      {election ? (
+        // An election is already loaded (this session) or recovered from durable
+        // state. Collapse the full folder-selection tutorial into a compact
+        // status banner; the tutorial + manual load stay one click away under
+        // "Load a different election" so they never dominate a resumed session.
+        <Card title="Election">
+          <Notice tone="ok">
+            {selectedArtifactPaths ? "Election loaded ✓" : "Election recovered ✓"}
           </Notice>
-        )}
-      </Card>
+          <div className="field-list">
+            <Field label="Election">
+              {election.election_id_text ?? election.election_id_hex}
+            </Field>
+            <Field label="Status">
+              <LifecyclePill state={lifecycle} />
+            </Field>
+          </div>
+          {!selectedArtifactPaths && (
+            <p className="form-hint">
+              Recovered from durable session state. Its lifecycle, ballot intake, and tally
+              controls below operate on that recovered session; the original source files are
+              not needed to continue. Load different files only to switch elections.
+            </p>
+          )}
+          <DetailsSection summary="Load a different election">
+            {loadElectionControls}
+          </DetailsSection>
+        </Card>
+      ) : (
+        <Card title="Load Election">
+          <p className="card-body">
+            The simplest way to load an election is to choose the folder that contains its three
+            exported files. Loading checks that the files are complete, unaltered, and belong to
+            the same election, then freezes the session for review before voting is opened.
+          </p>
+          <p className="card-body">
+            Select the election folder itself — do not open it first. In the picker, click the
+            folder once to highlight it, then confirm; opening it makes the dialog look empty
+            because it only shows sub-folders. The folder must contain election-manifest.cbor,
+            voter-registry.cbor, and candidate-set.cbor.
+          </p>
+          {loadElectionControls}
+        </Card>
+      )}
 
       {election && (
         <>
@@ -427,11 +651,10 @@ export function ManageElection() {
               <Field label="Proof suite">{election.proof_suite_id}</Field>
               <Field label="Ballot kind">{election.ballot_kind}</Field>
               <Field label="Confidentiality">{election.ballot_confidentiality}</Field>
-              <Field label="Manifest hash">
-                <HashValue value={election.manifest_hash_hex} />
-                <CopyButton value={election.manifest_hash_hex} />
-              </Field>
             </div>
+            <p className="form-hint">
+              Manifest hash and other canonical identifiers are under Advanced details below.
+            </p>
           </Card>
 
           <div className="card-grid">
@@ -604,14 +827,141 @@ export function ManageElection() {
 
         <Card title="Private ballot intake">
           <p className="card-body">
-            Ballots submitted privately over Tor are handed off into an app-owned intake inbox
-            for this election. Sync brings them into this authoritative election record through
-            the same checks as an imported ballot: a ballot is accepted only once, and an exact
-            resend is never counted twice.
+            Accept ballots submitted privately over Tor. Starting intake runs Tor and the
+            private receiver for you — no terminal, torrc, or network settings. Ballots are
+            accepted into this election through the same checks as an imported ballot: each is
+            accepted only once, and an exact resend is never counted twice.
           </p>
+
+          {/* Near-one-click status line. */}
+          <div className="field-list">
+            <Field label="Tor">
+              {organizerStatus === null
+                ? "Checking…"
+                : organizerStatus.tor_found
+                  ? "Found"
+                  : "Not found"}
+            </Field>
+            <Field label="Election transport">
+              {organizerStatus === null
+                ? "Checking…"
+                : organizerStatus.intake_running && organizerStatus.ready
+                  ? "Private intake ready"
+                  : organizerStatus.transport_provisioned
+                    ? "Ready"
+                    : "Not provisioned"}
+            </Field>
+            {/* AUTHORITATIVE election accepted count comes from the durable
+                session/workspace (participation), NOT the Tor worker. A Tor
+                worker restart resets its own counter to 0 but must never make an
+                already-accepted, durably-recorded ballot appear to disappear. */}
+            <Field label="Election accepted ballots">
+              {participationDisclosed && participation?.accepted_ballots != null
+                ? participation.accepted_ballots
+                : participationSealed
+                  ? "Hidden while voting is open"
+                  : "—"}
+            </Field>
+            {organizerStatus?.intake_running && (
+              <Field label="Received this intake session">
+                {organizerStatus.accepted_ballots}
+              </Field>
+            )}
+          </div>
+          {organizerStatus?.intake_running && (
+            <p className="form-hint">
+              “Received this intake session” is the running Tor receiver’s own count and resets
+              to 0 whenever intake restarts. The authoritative election total above is kept in the
+              durable workspace and survives restarts; accepted ballots are reconciled into it
+              automatically.
+            </p>
+          )}
+
+          {organizerStatus !== null && !organizerStatus.tor_found && (
+            <>
+              <Notice tone="info">
+                Tor was not found automatically. Select a Tor executable once; the app remembers
+                it and never downloads or installs Tor.
+              </Notice>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={!canAct || organizerBusy}
+                onClick={() => void onSelectIntakeTorExe()}
+              >
+                Select Tor executable
+              </button>
+            </>
+          )}
+
+          {organizerStatus?.intake_running && !organizerStatus.election_bound && (
+            <Notice tone="warn">
+              Private intake is running for a different election. Stop it before starting intake
+              for this election.
+            </Notice>
+          )}
+
+          <div className="btn-row">
+            {organizerStatus?.intake_running ? (
+              <button
+                type="button"
+                className="btn btn-danger"
+                disabled={!canAct || organizerBusy}
+                onClick={() => void onStopIntake()}
+              >
+                {organizerBusy ? "Stopping…" : "Stop private intake"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  !canAct ||
+                  organizerBusy ||
+                  (organizerStatus !== null && !organizerStatus.tor_found)
+                }
+                onClick={() => void onStartIntake()}
+              >
+                {organizerBusy ? "Starting…" : "Start private intake"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={
+                !canAct ||
+                organizerBusy ||
+                !(organizerStatus?.transport_provisioned ?? false)
+              }
+              onClick={() => void onExportVoterBundle()}
+            >
+              Export voter transport bundle
+            </button>
+          </div>
+          {bundleExportPath && (
+            <Notice tone="ok">
+              Voter transport bundle exported
+              <br />
+              <span className="hash">{bundleExportPath}</span>
+            </Notice>
+          )}
+
+          <p className="form-hint">
+            Starting intake does not open voting. Open voting separately when you are ready to
+            accept ballots.
+          </p>
+
+          {/* Auto-sync (bounded) runs while intake is ready and voting is OPEN,
+              using the SAME authoritative path as this manual button. */}
+          {autoSyncActive && (
+            <p className="form-hint">
+              Accepted ballots sync into this election automatically while intake is running.
+              You can also sync now.
+            </p>
+          )}
           <button
             type="button"
-            className="btn btn-primary"
+            className="btn btn-secondary"
             disabled={!canAct || lifecycle !== "OPEN" || syncBusy}
             onClick={() => void onSyncPrivateIntake()}
           >
@@ -631,11 +981,33 @@ export function ManageElection() {
               Private intake sync is available only while voting is open.
             </p>
           )}
-          <DetailsSection summary="Operator setup (advanced)">
+
+          <DetailsSection summary="Advanced / diagnostics">
+            <div className="field-list">
+              {organizerStatus?.onion_hostname && (
+                <Field label="Verified onion">
+                  <span className="hash">{organizerStatus.onion_hostname}</span>
+                </Field>
+              )}
+              {organizerStatus?.descriptor_fingerprint && (
+                <Field label="Descriptor fingerprint">
+                  <HashValue value={organizerStatus.descriptor_fingerprint} />
+                </Field>
+              )}
+              {organizerStatus?.collector_addr && (
+                <Field label="Loopback collector">
+                  <span className="hash">{organizerStatus.collector_addr}</span>
+                </Field>
+              )}
+              {organizerStatus?.tor_data_dir && (
+                <Field label="Tor data directory">
+                  <span className="hash">{organizerStatus.tor_data_dir}</span>
+                </Field>
+              )}
+            </div>
             <p className="card-body">
-              Point the controlled Tor intake process at this app-data root so accepted ballots
-              are written into the election intake inbox this app reads. The election sub-folder
-              is derived from the election manifest, so a different election can never reuse it.
+              These details are managed for you and are shown only for troubleshooting. No
+              private key material is ever displayed or exported.
             </p>
             <button
               type="button"

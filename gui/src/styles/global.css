@@ -810,13 +810,28 @@ table.data th {
    The artwork carries its own visual hierarchy, so it sits directly in the
    content flow with only the standard border/radius treatment — no nested
    card decoration. */
-/* The artwork is comfortably readable well below the content column width, so
-   the figure is capped and centered rather than stretched edge to edge at wide
-   desktop sizes. The image itself keeps width/height:auto + max-width:100% so
-   it scales down cleanly inside the cap on narrow windows. */
+/* Dedicated WIDE wrapper for the workflow diagram. The replacement artwork is
+   substantially wider and denser than the old asset, so — unlike prose and
+   cards, which keep the comfortable ~62rem reading column of .main-inner — the
+   figure deliberately BREAKS OUT to use essentially the full available content
+   width, up to a large-desktop cap. The old ~880px cap is intentionally gone: it
+   made the new multi-step diagram artificially small.
+
+   Centered breakout: margin-inline:50% places the box's start at the centre of
+   the reading column and translateX(-50%) recentres it on that column's centre,
+   so the figure stays centred in the content area while extending symmetrically
+   past the prose width. The width is bounded by the ACTUAL available content
+   width (viewport minus the nav column and page padding, with a small buffer for
+   the scrollbar), so it never produces a page-level horizontal scrollbar and
+   scales down gracefully on narrower desktop/tablet windows. The dark and light
+   diagrams share this exact wrapper and identical layout dimensions, so
+   switching theme never causes a layout jump or overflow. */
 .guide-flow {
-  margin: 1rem auto;
-  max-width: 880px;
+  width: min(1240px, calc(100vw - var(--nav-width) - 4rem));
+  max-width: 1240px;
+  margin-block: 1.25rem;
+  margin-inline: 50%;
+  transform: translateX(-50%);
 }
 .guide-flow-diagram {
   display: block;
@@ -833,6 +848,18 @@ table.data th {
   margin: 0 0 0.25rem;
   font-size: 1.0625rem;
   font-weight: 600;
+}
+
+/* The canonical ballot question, shown directly above the response choices so
+   the question and the options are never separated by scrolling. Long questions
+   wrap cleanly and never overflow their card. */
+.selection-question {
+  margin: 0 0 0.5rem;
+  font-size: 1.1875rem;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* ------------------------------------------------------------------ */

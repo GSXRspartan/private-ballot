@@ -229,6 +229,41 @@ describe("controlled-test recovery card gating", () => {
 });
 
 // -------------------------------------------------------------------------
+// Truthful ready-state: child liveness is authoritative (real-test blocker C)
+// -------------------------------------------------------------------------
+
+describe("managed-Tor ready state cannot go stale", () => {
+  it("polls the authoritative status while configured and not yet CAST", () => {
+    // A bounded interval re-reads managedTorTestStatus so a Tor child that exits
+    // flips tor_running to false and the banner stops claiming "ready". The Rust
+    // status checks child liveness (try_wait) + a fresh SOCKS probe.
+    assert.match(vote, /setInterval\(\s*\(\)\s*=>\s*\{\s*void refreshManagedTorStatus\(\)/);
+    assert.match(vote, /workflow\?\.cast_lock_state === "CAST"/);
+    assert.match(vote, /managedTorStatus\?\.configured/);
+  });
+
+  it("re-reads status after a submission failure so a dead child is not shown ready", () => {
+    // The catch branch refreshes managed-Tor status so a "process has exited"
+    // failure flips the connection banner out of "ready" and reveals Reconnect.
+    const runner = vote.slice(
+      vote.indexOf("async function runBoundedPrivateSubmission"),
+      vote.indexOf("function onStopAutoRetry"),
+    );
+    assert.match(runner, /catch \(err\)[\s\S]*refreshManagedTorStatus\(\)/);
+  });
+
+  it("reveals a reconnect action when configured but the connection is down", () => {
+    // When the child is not running, the configured card offers Start (reconnect)
+    // without requiring a new ballot/proof/nullifier or re-entering any Tor field.
+    assert.match(
+      vote,
+      /managedTorStatus\?\.configured && !managedTorStatus\.tor_running && !ballotCast/,
+    );
+    assert.match(vote, /Start private connection/);
+  });
+});
+
+// -------------------------------------------------------------------------
 // 6. Production offline/unavailable guidance remains present
 // -------------------------------------------------------------------------
 

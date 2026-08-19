@@ -58,6 +58,10 @@ use zeroize::Zeroizing;
 
 #[cfg(feature = "managed-tor-test")]
 mod managed_tor_test;
+#[cfg(feature = "managed-tor-test")]
+mod organizer_tor_intake;
+#[cfg(feature = "managed-tor-test")]
+mod tor_support;
 
 /// Serializable command error: a bounded copy of the gui-core error model.
 ///
@@ -167,6 +171,28 @@ impl From<GuiCoreError> for CommandError {
     }
 }
 
+/// Runs a blocking backend operation on the Tauri blocking thread pool so a
+/// slow, synchronous Tor/process/filesystem call never blocks the main UI
+/// thread (Windows "Not Responding"). The command function stays `async` so
+/// Tauri schedules it off the main thread, and the actual blocking work is moved
+/// onto `spawn_blocking`. A task that fails to run to completion is surfaced as a
+/// bounded error rather than a hang.
+#[cfg(feature = "managed-tor-test")]
+pub(crate) async fn run_blocking_command<T, F>(work: F) -> Result<T, CommandError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, CommandError> + Send + 'static,
+{
+    match tauri::async_runtime::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(_) => Err(CommandError::new(
+            "GUI_COMMAND_TASK_FAILED",
+            "UNAVAILABLE",
+            "the private-transport background task did not complete",
+        )),
+    }
+}
+
 struct PendingVoterCredentialV1 {
     credential: VoterGovernanceCredentialV1,
     origin: GuiVoterCredentialOriginV1,
@@ -216,6 +242,8 @@ struct AppState {
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
     #[cfg(feature = "managed-tor-test")]
     managed_tor_test: Mutex<Option<managed_tor_test::ManagedTorTestState>>,
+    #[cfg(feature = "managed-tor-test")]
+    organizer_intake: Mutex<Option<organizer_tor_intake::OrganizerIntakeState>>,
 }
 
 impl Default for AppState {
@@ -230,6 +258,8 @@ impl Default for AppState {
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
             #[cfg(feature = "managed-tor-test")]
             managed_tor_test: Mutex::new(None),
+            #[cfg(feature = "managed-tor-test")]
+            organizer_intake: Mutex::new(None),
         }
     }
 }
@@ -1256,12 +1286,39 @@ fn sync_private_intake(
         };
         private_intake_inbox_dir(&app, session)?
     };
-    let (summary, _election_summary, _lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
-            Ok(ingest_private_intake_inbox_into_session_v1(
-                &inbox_dir, session,
-            )?)
-        })?;
+
+    // Ingest into a transactional CLONE first. This is the ONE authoritative
+    // reconciliation boundary and it is safe to call unconditionally — on every
+    // election load/restart and on every auto-sync tick — because a durable
+    // workspace revision is written ONLY when a package is NEWLY accepted.
+    //
+    // Restart reconciliation: the durable inbox package survives independently of
+    // the process-local Tor intake worker counter (which restarts at 0), so a
+    // reconciliation pass rediscovers a previously-accepted package even when no
+    // NEW network acceptance has occurred since launch and promotes it into the
+    // authoritative organizer workspace.
+    //
+    // No-churn: an empty inbox, or one holding only exact duplicates / rejected
+    // packages, changes nothing (`newly_accepted == 0`), so no revision is
+    // written and the active session is left untouched — repeated syncs never
+    // churn workspace revisions.
+    let workspaces_dir = workspaces_directory(&app)?;
+    let mut next = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        session.transactional_clone()
+    };
+    let summary = ingest_private_intake_inbox_into_session_v1(&inbox_dir, &mut next)?;
+    if summary.newly_accepted > 0 {
+        let workspace_id = active_or_session_derived_workspace_id(&state, &next)?;
+        write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+        state.replace_active_session(next)?;
+    }
     Ok(summary)
 }
 
@@ -2214,10 +2271,9 @@ fn submit_prepared_voter_ballot_privately(
 /// Tauri.
 #[cfg(feature = "managed-tor-test")]
 #[tauri::command]
-fn submit_prepared_voter_ballot_privately(
+async fn submit_prepared_voter_ballot_privately(
     route: GuiPrivateRouteV1,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<tari_cc_private_ballot_gui_core::GuiPrivateReleaseResultV1, CommandError> {
     // Offline export is the separate canonical file command; reject it here so
     // the caller uses `export_prepared_voter_ballot` instead.
@@ -2228,7 +2284,18 @@ fn submit_prepared_voter_ballot_privately(
             "use the offline export command for offline submission",
         ));
     }
-    managed_tor_test::submit_prepared_voter_ballot_privately_via_managed_tor(&app, &state)
+    // The private release performs a blocking Tor/onion request; run it on the
+    // blocking thread pool so the desktop window stays responsive (no Windows
+    // "Not Responding") while the encrypted ballot is delivered and the
+    // authenticated organizer receipt is awaited.
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        managed_tor_test::submit_prepared_voter_ballot_privately_via_managed_tor(
+            &app,
+            state.inner(),
+        )
+    })
+    .await
 }
 
 /// Resets the whole voter workflow for the current election.
@@ -2815,7 +2882,12 @@ mod tests {
                     break;
                 }
             }
+            // A command may be `fn` or `async fn` (blocking Tor/process work runs
+            // off the main thread via spawn_blocking); strip an optional `async `
+            // before the `fn ` so both forms parse.
             let name = signature
+                .strip_prefix("async ")
+                .unwrap_or(signature.as_str())
                 .strip_prefix("fn ")
                 .and_then(|tail| tail.split('(').next())
                 .expect("command function name")
@@ -2961,8 +3033,33 @@ pub fn run() {
             #[cfg(feature = "managed-tor-test")]
             managed_tor_test::managed_tor_test_status,
             #[cfg(feature = "managed-tor-test")]
+            managed_tor_test::voter_tor_status,
+            #[cfg(feature = "managed-tor-test")]
             managed_tor_test::retry_private_submission,
+            #[cfg(feature = "managed-tor-test")]
+            organizer_tor_intake::organizer_tor_status,
+            #[cfg(feature = "managed-tor-test")]
+            organizer_tor_intake::start_private_intake,
+            #[cfg(feature = "managed-tor-test")]
+            organizer_tor_intake::stop_private_intake,
+            #[cfg(feature = "managed-tor-test")]
+            organizer_tor_intake::export_voter_transport_bundle,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Tari Private Ballot shell");
+        .build(tauri::generate_context!())
+        .expect("error while building the Tari Private Ballot shell")
+        .run(|_app_handle, _event| {
+            // On graceful teardown, reap the owned voter/organizer Tor children so
+            // a normal window close never leaves an orphaned tor.exe holding a
+            // loopback port or data-directory lock into the next launch. Only the
+            // children THIS application launched are touched.
+            #[cfg(feature = "managed-tor-test")]
+            if matches!(
+                _event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                let state = _app_handle.state::<AppState>();
+                managed_tor_test::shutdown_managed_tor_on_exit(state.inner());
+                organizer_tor_intake::shutdown_intake_on_exit(state.inner());
+            }
+        });
 }

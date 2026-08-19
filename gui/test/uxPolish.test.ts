@@ -308,11 +308,17 @@ describe("built-in guide", () => {
     assert.doesNotMatch(guide, /fully anonymous|untraceable|permanently private/i);
   });
 
-  it("documents durable credential recovery without claiming private online transport is always available", () => {
+  it("documents durable credential recovery and describes private online transport as optional with an offline fallback", () => {
     assert.match(guide, /encrypted credential file or backup plus the\s+passphrase/);
-    assert.match(guide, /Private online transport is\s+still shown only when the backend reports it is available/);
+    // The bottom notice describes private online submission as OPTIONAL (Tor can
+    // be managed for both roles) with an offline fallback — no stale
+    // "experimental / conditionally shown" framing.
     const notice = guide.slice(guide.indexOf("<Notice tone=\"info\">"));
+    assert.match(notice, /Private online submission is optional/);
+    assert.match(notice, /Offline encrypted\s+ballot-file delivery remains available as a fallback/);
+    assert.match(notice, /Tor protects the delivery path/);
     assert.doesNotMatch(notice, /intended finished product/);
+    assert.doesNotMatch(notice, /still shown only when the backend reports/);
   });
 });
 

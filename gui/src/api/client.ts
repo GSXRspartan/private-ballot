@@ -45,8 +45,11 @@ import type {
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
   ManagedTorTestStatusV1,
+  OrganizerIntakeStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
+  VoterBundleExportResultV1,
+  VoterTorStatusV1,
 } from "./types";
 
 export class BackendError extends Error {
@@ -303,8 +306,31 @@ export const api = {
   startManagedTor: () => call<ManagedTorTestStatusV1>("start_managed_tor"),
   stopManagedTor: () => call<ManagedTorTestStatusV1>("stop_managed_tor"),
   managedTorTestStatus: () => call<ManagedTorTestStatusV1>("managed_tor_test_status"),
+  // Read-only voter Tor availability (allowlist or remembered/selected path).
+  voterTorStatus: (torExePath?: string) =>
+    call<VoterTorStatusV1>("voter_tor_status", {
+      torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+    }),
   retryPrivateSubmission: () =>
     call<GuiPrivateReleaseResultV1>("retry_private_submission"),
+  // Organizer near-one-click private intake (managed-tor-test). torExePath is an
+  // optional remembered/selected convenience path; the backend re-validates it
+  // and falls back to the reviewed allowlist. All of the crowded operator
+  // details (torrc, ports, onion, fingerprint, inbox path) stay backend-owned.
+  organizerTorStatus: (torExePath?: string) =>
+    call<OrganizerIntakeStatusV1>("organizer_tor_status", {
+      torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+    }),
+  startPrivateIntake: (torExePath?: string) =>
+    call<OrganizerIntakeStatusV1>("start_private_intake", {
+      torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+    }),
+  stopPrivateIntake: () =>
+    call<OrganizerIntakeStatusV1>("stop_private_intake"),
+  exportVoterTransportBundle: (destinationDir: string) =>
+    call<VoterBundleExportResultV1>("export_voter_transport_bundle", {
+      destinationDir,
+    }),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,
     governanceDocumentPath: string | null,

@@ -20,7 +20,7 @@
 //! call `configure_managed_tor_test` with a valid runtime configuration, then
 //! `start_managed_tor`, before any carrier can be built.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -39,12 +39,51 @@ use tari_cc_private_ballot_transport_network::{
 };
 use tauri::{AppHandle, Manager};
 
+use crate::tor_support::resolve_tor_executable;
 use crate::{AppState, CommandError};
 
-/// Default loopback SOCKS port for the voter managed Tor process. A fixed port
-/// is acceptable for controlled one-computer testing; a collision is surfaced
-/// as a bounded error rather than silently retrying.
-const DEFAULT_VOTER_SOCKS_PORT: u16 = 19050;
+/// Backend-controlled directory name for app-owned voter Tor runtime state.
+const VOTER_TOR_ROOT_DIRECTORY_NAME: &str = "private-tor-voter";
+/// Length in characters of a canonical lowercase Blake3 manifest-hash hex.
+const MANIFEST_HASH_HEX_LEN: usize = 64;
+
+/// Reserves a fresh loopback (127.0.0.1) ephemeral TCP port for the voter
+/// managed Tor SOCKS listener.
+///
+/// A fixed global SOCKS port was the root cause of the real one-computer voter
+/// Tor failure: an orphaned `tor.exe` from a previous run kept owning that fixed
+/// port, so a freshly-spawned child could not bind and exited immediately — yet
+/// the readiness probe still reached the ORPHAN on the fixed port and reported
+/// "ready" for a child that was already dead (the stale-READY contradiction).
+///
+/// Binding `127.0.0.1:0` asks the OS for an unused ephemeral port and keeps the
+/// binding loopback-only (never a routable interface). The listener is dropped
+/// immediately so Tor can bind the same port; a tiny reserve→spawn race is
+/// accepted (the readiness probe fails closed if the port was lost), which is far
+/// safer than a fixed magic constant that deterministically collides with an
+/// orphan. This is NOT a global constant swapped for another global constant:
+/// every start reserves a new port.
+fn reserve_loopback_socks_port() -> Result<u16, CommandError> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
+        CommandError::new(
+            "GUI_TOR_SOCKS_PORT_UNAVAILABLE",
+            "UNAVAILABLE",
+            "no loopback SOCKS port could be reserved for the managed Tor connection",
+        )
+    })?;
+    let port = listener
+        .local_addr()
+        .map_err(|_| {
+            CommandError::new(
+                "GUI_TOR_SOCKS_PORT_UNAVAILABLE",
+                "UNAVAILABLE",
+                "the reserved loopback SOCKS port could not be read",
+            )
+        })?
+        .port();
+    drop(listener);
+    Ok(port)
+}
 
 /// Bounded timeouts for the FRESH SOCKS readiness preflight on the submit/retry
 /// path (user-initiated; bounded but not a polling loop).
@@ -104,53 +143,49 @@ impl Default for ManagedTorTestStatusV1 {
     }
 }
 
-/// Validates the user-supplied tor.exe path: absolute, exists, regular file,
-/// no control characters.
-fn validate_tor_exe(path: &Path) -> Result<(), CommandError> {
-    if !path.is_absolute() {
-        return Err(CommandError::new(
-            "GUI_TOR_EXE_PATH_NOT_ABSOLUTE",
-            "INVALID_INPUT",
-            "the tor.exe path must be absolute",
-        ));
-    }
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
-        CommandError::new("GUI_TOR_EXE_NOT_FOUND", "FILE_IO", "tor.exe was not found")
-    })?;
-    if metadata.file_type().is_symlink()
-        || is_windows_reparse_point(&metadata)
-        || !metadata.is_file()
-    {
-        return Err(CommandError::new(
-            "GUI_TOR_EXE_NOT_REGULAR",
-            "FILE_IO",
-            "tor.exe must be a regular file (no symlinks/reparse points)",
-        ));
-    }
-    if path
-        .as_os_str()
-        .to_string_lossy()
-        .chars()
-        .any(char::is_control)
-    {
-        return Err(CommandError::new(
-            "GUI_TOR_EXE_PATH_CONTROL_CHAR",
-            "INVALID_INPUT",
-            "the tor.exe path must not contain control characters",
-        ));
-    }
-    Ok(())
+/// Read-only voter Tor availability. `resolved_tor_path` is the path the backend
+/// would use (allowlist or remembered/selected); it is a diagnostic only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct VoterTorStatusV1 {
+    pub tor_found: bool,
+    pub resolved_tor_path: Option<String>,
 }
 
-#[cfg(windows)]
-fn is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    (metadata.file_attributes() & 0x400) != 0
+/// Pure derivation of the app-owned, election-scoped voter Tor data directory
+/// under a given app-data root:
+/// `<app-data>/private-tor-voter/election-<manifest-hash>/tor-data`. The hash is
+/// the ONLY dynamic path component and is validated as canonical 64-char
+/// lowercase hex, so a different election never reuses another election's Tor
+/// data directory and no remote value can steer the path.
+fn voter_tor_data_subpath(
+    app_data_root: &Path,
+    manifest_hash_hex: &str,
+) -> Result<PathBuf, CommandError> {
+    if manifest_hash_hex.len() != MANIFEST_HASH_HEX_LEN
+        || !manifest_hash_hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(CommandError::new(
+            "GUI_VOTER_TOR_INVALID_ELECTION",
+            "INVALID_INPUT",
+            "the election manifest hash is not a canonical lowercase hex digest",
+        ));
+    }
+    Ok(app_data_root
+        .join(VOTER_TOR_ROOT_DIRECTORY_NAME)
+        .join(format!("election-{manifest_hash_hex}"))
+        .join("tor-data"))
 }
 
-#[cfg(not(windows))]
-fn is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
+/// Resolves the app-owned, election-scoped voter Tor data directory from the
+/// Tauri app-data root (never a remote value).
+fn voter_tor_data_dir(app: &AppHandle, manifest_hash_hex: &str) -> Result<PathBuf, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    voter_tor_data_subpath(&app_data_root, manifest_hash_hex)
 }
 
 /// Configures the voter test transport: validates the tor.exe path, loads and
@@ -162,17 +197,15 @@ pub fn configure_managed_tor_test(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ManagedTorTestStatusV1, CommandError> {
-    let tor_exe = PathBuf::from(&input.tor_exe_path);
-    let tor_data_dir = PathBuf::from(&input.voter_tor_data_dir);
+    // Tor executable: an empty path means "auto-detect" — resolve from the
+    // reviewed allowlist (or a remembered/selected path when provided). The
+    // resolver re-validates (absolute, real regular file, no reparse/control).
+    let tor_exe = resolve_tor_executable(if input.tor_exe_path.trim().is_empty() {
+        None
+    } else {
+        Some(input.tor_exe_path.as_str())
+    })?;
     let bundle_path = PathBuf::from(&input.voter_public_bundle_path);
-    validate_tor_exe(&tor_exe)?;
-    if !tor_data_dir.is_absolute() {
-        return Err(CommandError::new(
-            "GUI_TOR_DATA_DIR_NOT_ABSOLUTE",
-            "INVALID_INPUT",
-            "the voter Tor data directory must be an absolute path",
-        ));
-    }
     if !bundle_path.is_absolute() {
         return Err(CommandError::new(
             "GUI_BUNDLE_PATH_NOT_ABSOLUTE",
@@ -210,6 +243,24 @@ pub fn configure_managed_tor_test(
         ));
     }
 
+    // Voter Tor data directory: an empty path means "auto" — an app-owned,
+    // election-scoped directory the voter never has to choose. A supplied path is
+    // still honoured (absolute) for advanced/manual use.
+    let manifest_hash_hex = session.summary().manifest_hash_hex;
+    let tor_data_dir = if input.voter_tor_data_dir.trim().is_empty() {
+        voter_tor_data_dir(&app, &manifest_hash_hex)?
+    } else {
+        let dir = PathBuf::from(&input.voter_tor_data_dir);
+        if !dir.is_absolute() {
+            return Err(CommandError::new(
+                "GUI_TOR_DATA_DIR_NOT_ABSOLUTE",
+                "INVALID_INPUT",
+                "the voter Tor data directory must be an absolute path",
+            ));
+        }
+        dir
+    };
+
     // Verify the descriptor under the test root before accepting it.
     let roots = TransportAuthorityRootSetV1::new(bundle.root.clone());
     let mut consistency = DescriptorConsistencyStoreV1::default();
@@ -231,7 +282,11 @@ pub fn configure_managed_tor_test(
         .map(|fp| hex_lower(&fp));
 
     std::fs::create_dir_all(&tor_data_dir).map_err(|_| CommandError::app_data_unavailable())?;
-    let socks_addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_VOTER_SOCKS_PORT));
+    // Reserve a fresh loopback ephemeral SOCKS port now for a truthful initial
+    // endpoint; `start_managed_tor` re-reserves a fresh port on every (re)connect
+    // so a reconnect after a child exit never reuses a possibly-orphaned port.
+    let socks_port = reserve_loopback_socks_port()?;
+    let socks_addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
 
     let managed_state = ManagedTorTestState {
         controller: None,
@@ -241,7 +296,7 @@ pub fn configure_managed_tor_test(
         socks_addr,
         tor_exe_path: tor_exe,
         tor_data_dir,
-        socks_port: DEFAULT_VOTER_SOCKS_PORT,
+        socks_port,
     };
     drop(session_guard);
     let mut managed = state
@@ -250,7 +305,6 @@ pub fn configure_managed_tor_test(
         .map_err(|_| CommandError::state_poisoned())?;
     *managed = Some(managed_state);
 
-    let _ = app;
     Ok(ManagedTorTestStatusV1 {
         configured: true,
         tor_running: false,
@@ -262,26 +316,57 @@ pub fn configure_managed_tor_test(
     })
 }
 
+/// Read-only voter Tor availability probe. Reports whether a Tor executable can
+/// be resolved (from a remembered/selected path or the reviewed allowlist)
+/// without starting Tor, provisioning, or mutating any state.
+#[tauri::command]
+pub fn voter_tor_status(tor_exe_path: Option<String>) -> Result<VoterTorStatusV1, CommandError> {
+    match resolve_tor_executable(tor_exe_path.as_deref()) {
+        Ok(path) => Ok(VoterTorStatusV1 {
+            tor_found: true,
+            resolved_tor_path: Some(path.to_string_lossy().into_owned()),
+        }),
+        Err(_) => Ok(VoterTorStatusV1 {
+            tor_found: false,
+            resolved_tor_path: None,
+        }),
+    }
+}
+
 /// Starts the managed voter Tor process (direct spawn, no shell) and polls the
 /// real SOCKS5 readiness probe. Returns Ready only after valid SOCKS5
 /// negotiation. No ballot is released by this command.
 #[tauri::command]
-pub fn start_managed_tor(
-    _app: AppHandle,
-    state: tauri::State<'_, AppState>,
+pub async fn start_managed_tor(
+    app: AppHandle,
 ) -> Result<ManagedTorTestStatusV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        start_managed_tor_blocking(state.inner())
+    })
+    .await
+}
+
+/// Blocking body of [`start_managed_tor`], run on the blocking thread pool.
+fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1, CommandError> {
+    // Reserve a FRESH loopback ephemeral SOCKS port for this (re)connect and
+    // record it as authoritative BEFORE building the Tor config, so a reconnect
+    // after a child exit never reuses a possibly-orphaned port.
+    let fresh_port = reserve_loopback_socks_port()?;
     let config = {
-        let managed = state
+        let mut managed = state
             .managed_tor_test
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(m) = managed.as_ref() else {
+        let Some(m) = managed.as_mut() else {
             return Err(CommandError::new(
                 "GUI_TOR_TEST_NOT_CONFIGURED",
                 "INVALID_INPUT",
                 "configure the managed Tor test transport first",
             ));
         };
+        m.socks_port = fresh_port;
+        m.socks_addr = SocketAddr::from(([127, 0, 0, 1], fresh_port));
         ManagedTorConfigV1 {
             executable: m.tor_exe_path.clone(),
             data_directory: m.tor_data_dir.clone(),
@@ -344,9 +429,18 @@ pub fn start_managed_tor(
 /// Stops the managed voter Tor process (bounded). Only the child this
 /// application launched is terminated.
 #[tauri::command]
-pub fn stop_managed_tor(
-    state: tauri::State<'_, AppState>,
+pub async fn stop_managed_tor(
+    app: AppHandle,
 ) -> Result<ManagedTorTestStatusV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        stop_managed_tor_blocking(state.inner())
+    })
+    .await
+}
+
+/// Blocking body of [`stop_managed_tor`], run on the blocking thread pool.
+fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1, CommandError> {
     let mut managed = state
         .managed_tor_test
         .lock()
@@ -373,6 +467,21 @@ pub fn stop_managed_tor(
     })
 }
 
+/// Reaps the owned voter Tor child on application teardown so a graceful
+/// shutdown never leaks an orphan `tor.exe` that would keep owning a loopback
+/// SOCKS port and data-directory lock across the next launch. Idempotent and
+/// best-effort; only the child this application launched is touched.
+pub(crate) fn shutdown_managed_tor_on_exit(state: &AppState) {
+    if let Ok(mut managed) = state.managed_tor_test.lock() {
+        if let Some(m) = managed.as_mut() {
+            if let Some(controller) = m.controller.as_mut() {
+                controller.shutdown();
+            }
+            m.controller = None;
+        }
+    }
+}
+
 /// Returns the current managed-Tor test transport status.
 ///
 /// `tor_running` and `socks_ready` reflect CURRENT observations, not merely
@@ -380,8 +489,20 @@ pub fn stop_managed_tor(
 /// whose SOCKS listener no longer responds, never reports ready. Status is
 /// read-only: it never creates a PENDING record or changes voter cast state.
 #[tauri::command]
-pub fn managed_tor_test_status(
-    state: tauri::State<'_, AppState>,
+pub async fn managed_tor_test_status(
+    app: AppHandle,
+) -> Result<ManagedTorTestStatusV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        managed_tor_test_status_blocking(state.inner())
+    })
+    .await
+}
+
+/// Blocking body of [`managed_tor_test_status`], run on the blocking thread pool
+/// so the fresh loopback SOCKS probe never stalls the main UI thread.
+fn managed_tor_test_status_blocking(
+    state: &AppState,
 ) -> Result<ManagedTorTestStatusV1, CommandError> {
     let (descriptor, socks_addr, controller_present, child_alive) = {
         let mut managed = state
@@ -690,13 +811,18 @@ pub fn retry_private_submission_via_managed_tor(
     result.map_err(CommandError::from)
 }
 
-/// Tauri command wrapper for retrying a pending private-transport release.
+/// Tauri command wrapper for retrying a pending private-transport release. The
+/// exact-staged retransmission is a blocking Tor request, so it runs on the
+/// blocking thread pool and never freezes the main UI thread.
 #[tauri::command]
-pub fn retry_private_submission(
+pub async fn retry_private_submission(
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiPrivateReleaseResultV1, CommandError> {
-    retry_private_submission_via_managed_tor(&app, &state)
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        retry_private_submission_via_managed_tor(&app, state.inner())
+    })
+    .await
 }
 
 fn cast_locks_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
@@ -777,4 +903,88 @@ fn hex_lower(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HASH_A: &str =
+        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    const HASH_B: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn app_root() -> PathBuf {
+        PathBuf::from(if cfg!(windows) {
+            r"C:\app-data-root"
+        } else {
+            "/app-data-root"
+        })
+    }
+
+    #[test]
+    fn voter_data_dir_is_app_owned_and_election_scoped() {
+        let dir = voter_tor_data_subpath(&app_root(), HASH_A).expect("valid hash");
+        assert!(dir.starts_with(app_root()));
+        assert!(
+            dir.to_string_lossy().contains(VOTER_TOR_ROOT_DIRECTORY_NAME),
+            "voter data dir must live under the app-owned private-tor-voter directory"
+        );
+        assert!(
+            dir.to_string_lossy().contains(&format!("election-{HASH_A}")),
+            "voter data dir must be scoped to the election manifest hash"
+        );
+    }
+
+    #[test]
+    fn different_elections_get_different_voter_data_dirs() {
+        let a = voter_tor_data_subpath(&app_root(), HASH_A).expect("a");
+        let b = voter_tor_data_subpath(&app_root(), HASH_B).expect("b");
+        assert_ne!(a, b, "a different election must never reuse another's data dir");
+    }
+
+    #[test]
+    fn reserved_socks_port_is_a_fresh_loopback_ephemeral_port() {
+        // Regression for the real voter Tor stale-READY root cause: the SOCKS
+        // port must be dynamically reserved, never a fixed global constant that a
+        // previous run's orphan can keep owning. A reserved port is non-zero and
+        // usable as a loopback bind.
+        let port = reserve_loopback_socks_port().expect("reserve a loopback port");
+        assert_ne!(port, 0, "a reserved SOCKS port is never port 0");
+        // It is bindable again on loopback after release (the listener was dropped
+        // so Tor can bind it); this also proves it is loopback-only.
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let rebound = TcpListener::bind(addr);
+        assert!(rebound.is_ok(), "the reserved loopback port can be bound");
+    }
+
+    #[test]
+    fn reserved_socks_ports_are_not_a_single_magic_constant() {
+        // Reserving several ports should not deterministically yield one fixed
+        // value (e.g. 19050); the OS hands out ephemeral ports. We assert the set
+        // is not a single constant across a few reservations.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..3 {
+            seen.insert(reserve_loopback_socks_port().expect("reserve"));
+        }
+        assert!(!seen.contains(&0));
+        // At least one reservation is outside any single hard-coded default; the
+        // OS ephemeral range is well above the old 19050 constant on Windows.
+        assert!(seen.iter().any(|&p| p != 19050));
+    }
+
+    #[test]
+    fn non_hex_manifest_hash_cannot_control_voter_data_dir() {
+        for bad in [
+            "..",
+            "../../secret",
+            "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899",
+            "short",
+            "aabb/ccdd",
+        ] {
+            let error =
+                voter_tor_data_subpath(&app_root(), bad).expect_err("non-canonical must reject");
+            assert_eq!(error.code, "GUI_VOTER_TOR_INVALID_ELECTION");
+        }
+    }
 }

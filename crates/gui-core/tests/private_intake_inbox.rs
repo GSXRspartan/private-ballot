@@ -147,6 +147,95 @@ fn accepted_tor_ballot_survives_workspace_restart_and_tally_sees_it() {
 }
 
 #[test]
+fn restart_reconciliation_discovers_durable_package_without_a_worker_counter() {
+    // Real one-computer regression: before restart a ballot was privately
+    // accepted and written to the durable election-scoped inbox. After a full
+    // application restart the process-local Tor intake worker counter is back at
+    // 0 and NO new network acceptance has occurred — yet the authoritative
+    // reconciliation pass must still rediscover the durable package and promote
+    // it into the organizer session. The gui-core ingest boundary is agnostic to
+    // any worker counter: a fresh session ingesting the pre-existing inbox is
+    // exactly that reconciliation.
+    let dir = TestDir::new("inbox-restart-reconcile");
+    let inbox = dir.join("inbox");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append");
+
+    // Fresh session standing in for the post-restart authoritative workspace.
+    let mut session = open_session();
+    assert_eq!(session.accepted_count(), 0, "worker/session counters start at 0");
+
+    let first = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("reconcile");
+    assert_eq!(first.discovered, 1);
+    assert_eq!(first.newly_accepted, 1, "the durable package is rediscovered");
+    assert_eq!(session.accepted_count(), 1, "election accepted count becomes 1");
+
+    // A second reconciliation pass does not double count.
+    let second =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("reconcile again");
+    assert_eq!(second.newly_accepted, 0, "second reconciliation is a no-op");
+    assert_eq!(second.duplicates, 1);
+    assert_eq!(session.accepted_count(), 1, "no double count on re-reconcile");
+}
+
+#[test]
+fn empty_or_duplicate_only_reconciliation_signals_no_workspace_write() {
+    // The authoritative Tauri sync persists a workspace revision ONLY when a
+    // package is newly accepted (`newly_accepted > 0`). These are the two cases
+    // that must report `newly_accepted == 0`, so a reconciliation on every
+    // election load / auto-sync tick never churns workspace revisions.
+    let dir = TestDir::new("inbox-no-churn");
+    let inbox = dir.join("inbox");
+
+    // 1. An empty (present but empty) inbox: nothing discovered, nothing written.
+    std::fs::create_dir_all(&inbox).expect("create empty inbox");
+    let mut session = open_session();
+    let empty = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("empty");
+    assert_eq!(empty.discovered, 0);
+    assert_eq!(empty.newly_accepted, 0, "empty inbox → no workspace write");
+
+    // 2. A duplicate-only inbox: the sole package was already accepted, so a
+    //    re-sync discovers it but accepts nothing new.
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append");
+    let accepted =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("first accept");
+    assert_eq!(accepted.newly_accepted, 1);
+    let repeat =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("duplicate-only");
+    assert_eq!(repeat.discovered, 1);
+    assert_eq!(repeat.newly_accepted, 0, "duplicate-only inbox → no workspace write");
+    assert_eq!(repeat.duplicates, 1);
+}
+
+#[test]
+fn closed_election_rejects_a_newly_arriving_unsynced_package() {
+    // Once voting is closed the authoritative session must not ingest a package
+    // that arrives (or is reconciled) afterwards. The intake boundary is
+    // fail-closed: a closed session refuses ingest, so a late inbox package can
+    // never become an accepted ballot.
+    let dir = TestDir::new("inbox-closed");
+    let inbox = dir.join("inbox");
+
+    // A first ballot is accepted while OPEN.
+    let ballot_a = triptych_package_bytes(0, &[b"candidate-a"]);
+    append_accepted_ballot_package_to_inbox_v1(&inbox, &ballot_a).expect("append a");
+    let mut session = open_session();
+    ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest a");
+    assert_eq!(session.accepted_count(), 1);
+
+    // Voting closes, then a DISTINCT voter's package lands in the inbox.
+    session.close().expect("close");
+    let ballot_b = triptych_package_bytes(1, &[b"candidate-b"]);
+    append_accepted_ballot_package_to_inbox_v1(&inbox, &ballot_b).expect("append b");
+
+    // Reconciliation after close must fail closed and accept nothing new.
+    let result = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session);
+    assert!(result.is_err(), "a closed election refuses a newly arriving package");
+    assert_eq!(session.accepted_count(), 1, "the closed election gains no new ballot");
+}
+
+#[test]
 fn inbox_file_content_must_match_its_digest_name() {
     let dir = TestDir::new("inbox-tamper");
     let inbox = dir.join("inbox");

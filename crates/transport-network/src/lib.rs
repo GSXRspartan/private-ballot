@@ -215,7 +215,7 @@ pub trait ManagedTorReadinessProbeV1 {
 }
 
 #[derive(Debug)]
-pub struct ManagedTorControllerV1<C> {
+pub struct ManagedTorControllerV1<C: ManagedTorChildV1> {
     child: Option<C>,
     ready: bool,
 }
@@ -274,6 +274,28 @@ impl<C: ManagedTorChildV1> ManagedTorControllerV1<C> {
     pub fn shutdown(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let _ignored = child.kill();
+        }
+        self.ready = false;
+    }
+}
+
+/// Reaping the owned Tor child on drop closes the child-process lifecycle
+/// boundary: when the controller is dropped (state replacement, reconfigure, or
+/// application teardown) the managed `tor.exe` this controller launched is
+/// killed rather than leaked as an orphan. An orphaned child would otherwise
+/// keep owning its loopback SOCKS port and data-directory lock across an
+/// application restart, which is the exact failure that let a stale process
+/// answer a readiness probe for a freshly-spawned child that had already exited.
+/// Only the child THIS controller owns is touched; no global process list is
+/// scanned and no unrelated process is signalled.
+impl<C: ManagedTorChildV1> Drop for ManagedTorControllerV1<C> {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ignored = child.kill();
+            // Best-effort reap so a killed child does not linger as a zombie on
+            // platforms that require it; a still-running kill is asynchronous so
+            // `try_wait` may legitimately report "not yet exited".
+            let _ignored = child.try_wait();
         }
         self.ready = false;
     }
@@ -430,6 +452,77 @@ mod tests {
             socks_port: 19050,
             startup_timeout: Duration::from_secs(2),
         }
+    }
+
+    /// A child that records how many times it was killed into a shared counter,
+    /// so a controller drop can be observed after the controller (and its child)
+    /// have been moved into the drop.
+    struct KillObservingChild {
+        kills: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl ManagedTorChildV1 for KillObservingChild {
+        fn try_wait(&mut self) -> io::Result<Option<i32>> {
+            Ok(None)
+        }
+        fn kill(&mut self) -> io::Result<()> {
+            self.kills.set(self.kills.get() + 1);
+            Ok(())
+        }
+    }
+    struct KillObservingSpawner {
+        kills: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl ManagedTorSpawnerV1 for KillObservingSpawner {
+        type Child = KillObservingChild;
+        fn spawn(&self, _: &Path, _: &Path) -> io::Result<Self::Child> {
+            Ok(KillObservingChild {
+                kills: self.kills.clone(),
+            })
+        }
+    }
+
+    #[test]
+    fn dropping_the_controller_reaps_the_owned_child() {
+        // Regression for the voter Tor stale-READY root cause: a controller that
+        // goes out of scope (state replacement / app teardown) must kill the Tor
+        // child it launched instead of leaking it as an orphan that keeps owning
+        // the loopback SOCKS port across a restart.
+        let kills = std::rc::Rc::new(std::cell::Cell::new(0));
+        let controller = ManagedTorControllerV1::start(
+            &test_config(),
+            &KillObservingSpawner {
+                kills: kills.clone(),
+            },
+            &mut FakeProbe(true),
+            || Duration::ZERO,
+        )
+        .expect("starts");
+        assert_eq!(kills.get(), 0, "a live, ready child is not killed on start");
+        drop(controller);
+        assert!(
+            kills.get() >= 1,
+            "dropping the controller must kill the owned child (no orphan)"
+        );
+    }
+
+    #[test]
+    fn shutdown_then_drop_does_not_double_report_ready() {
+        let kills = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut controller = ManagedTorControllerV1::start(
+            &test_config(),
+            &KillObservingSpawner {
+                kills: kills.clone(),
+            },
+            &mut FakeProbe(true),
+            || Duration::ZERO,
+        )
+        .expect("starts");
+        controller.shutdown();
+        assert!(!controller.is_ready(), "shutdown clears readiness");
+        drop(controller);
+        // Explicit shutdown plus the drop reaper are both fail-safe; a kill after
+        // shutdown is harmless.
+        assert!(kills.get() >= 1);
     }
 
     #[test]

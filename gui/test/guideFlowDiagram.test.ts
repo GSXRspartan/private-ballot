@@ -96,17 +96,22 @@ describe("guide workflow diagram placement", () => {
 // -------------------------------------------------------------------------
 
 describe("guide workflow diagram accessibility", () => {
-  it("provides meaningful, non-empty alt text shared by both theme variants", () => {
+  it("provides meaningful, non-empty alt text describing the current workflow", () => {
     const alt = guide.match(/const FLOW_DIAGRAM_ALT =([\s\S]*?);/);
     assert.ok(alt, "missing FLOW_DIAGRAM_ALT constant");
     assert.doesNotMatch(guide, /alt=""/);
-    // The alt states the essential workflow: voter creates and keeps the
-    // private credential; the organizer/ballot office receives only the
-    // public enrollment key.
-    assert.match(alt[1], /voters create and keep their own private credentials/);
-    assert.match(alt[1], /share only public enrollment keys with the ballot office/);
-    assert.match(alt[1], /anonymous ballot packages/);
-    assert.match(alt[1], /verifies, tallies, finalizes/);
+    // The alt states the essential CURRENT workflow: the voter keeps the private
+    // credential and shares only the public enrollment key; the ballot is
+    // submitted privately over Tor with an offline fallback and an authenticated
+    // organizer receipt; the ballot office tallies/verifies and may anchor the
+    // aggregate finalized commitment to Ootle.
+    assert.match(alt[1], /keeps their own private credential/);
+    assert.match(alt[1], /shares only their public enrollment key/);
+    assert.match(alt[1], /privately over Tor/);
+    assert.match(alt[1], /saves an encrypted ballot file for offline delivery/);
+    assert.match(alt[1], /authenticated organizer receipt/);
+    assert.match(alt[1], /tallies, verifies/);
+    assert.match(alt[1], /anchors the aggregate finalized commitment to Tari Ootle/);
     // A single alt constant feeds the one theme-switched <img>.
     assert.match(guide, /alt=\{FLOW_DIAGRAM_ALT\}/);
   });
@@ -147,19 +152,55 @@ describe("guide workflow diagram has no duplicate privacy callout", () => {
 });
 
 // -------------------------------------------------------------------------
-// Diagram sizing: capped and centered, never edge-to-edge on wide desktop
+// Diagram sizing: a dedicated WIDE, responsive wrapper (replacement artwork)
 // -------------------------------------------------------------------------
 
 describe("guide workflow diagram sizing", () => {
-  it("caps and centers the figure so it is not oversized at desktop width", () => {
-    const rule = css.match(/\.guide-flow\s*\{[^}]*\}/);
+  const rule = css.match(/\.guide-flow\s*\{[^}]*\}/);
+
+  it("no longer retains the obsolete ~880px reading-column cap", () => {
     assert.ok(rule, "missing .guide-flow rule");
-    // Capped in the documented ~850–900px band and horizontally centered.
-    const capMatch = rule[0].match(/max-width:\s*(\d+)px/);
-    assert.ok(capMatch, "guide-flow must cap max-width in px");
-    const cap = Number(capMatch[1]);
-    assert.ok(cap >= 850 && cap <= 900, `cap ${cap}px must be within 850–900px`);
-    assert.match(rule[0], /margin:\s*[^;]*auto/);
+    // The replacement diagram is much wider/denser; the old ~850–900px cap that
+    // made it artificially small must be gone.
+    const caps = [...rule![0].matchAll(/max-width:\s*(\d+)px/g)].map((m) => Number(m[1]));
+    assert.ok(
+      caps.every((cap) => cap < 850 || cap > 900),
+      `the obsolete 850–900px cap must be removed (found ${caps.join(", ")})`,
+    );
+  });
+
+  it("uses a wide desktop cap in the ~1180–1280px band", () => {
+    assert.ok(rule, "missing .guide-flow rule");
+    const caps = [...rule![0].matchAll(/(\d+)px/g)].map((m) => Number(m[1]));
+    assert.ok(
+      caps.some((cap) => cap >= 1180 && cap <= 1280),
+      `guide-flow must cap in ~1180–1280px (found ${caps.join(", ")})`,
+    );
+  });
+
+  it("is responsive: a min()/calc width bounded by available content, never a fixed overflow", () => {
+    assert.ok(rule, "missing .guide-flow rule");
+    // A responsive width (min() over the available content width) means a small
+    // window can never be forced wider by a fixed pixel width.
+    assert.match(rule![0], /width:\s*min\(/);
+    assert.match(rule![0], /calc\(100vw\s*-\s*var\(--nav-width\)/);
+  });
+
+  it("centers the figure via a symmetric breakout, not edge-to-edge", () => {
+    assert.ok(rule, "missing .guide-flow rule");
+    assert.match(rule![0], /margin-inline:\s*50%/);
+    assert.match(rule![0], /transform:\s*translateX\(-50%\)/);
+  });
+
+  it("keeps the image itself fluid so both theme variants share one responsive wrapper", () => {
+    // The single .guide-flow-diagram image rule (used by both PNGs) keeps
+    // width:100% / max-width:100% / height:auto so the wrapper drives width and
+    // the aspect ratio is preserved in both themes without a layout jump.
+    const imgRule = css.match(/\.guide-flow-diagram\s*\{[^}]*\}/);
+    assert.ok(imgRule, "missing .guide-flow-diagram rule");
+    assert.match(imgRule![0], /width:\s*100%/);
+    assert.match(imgRule![0], /max-width:\s*100%/);
+    assert.match(imgRule![0], /height:\s*auto/);
   });
 });
 

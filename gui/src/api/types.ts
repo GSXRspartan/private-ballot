@@ -678,3 +678,38 @@ export interface ManagedTorTestStatusV1 {
   descriptor_fingerprint: string | null;
   message: string;
 }
+
+/** Read-only voter Tor availability probe result. */
+export interface VoterTorStatusV1 {
+  tor_found: boolean;
+  /** The path the backend would use (allowlist or remembered); diagnostic only. */
+  resolved_tor_path: string | null;
+}
+
+/**
+ * Status of the organizer near-one-click private ballot intake. Carries only
+ * organizer-safe aggregates and diagnostics; never any private key material.
+ * The optional diagnostic fields (onion, fingerprint, ports, paths) are surfaced
+ * only under an Advanced disclosure — normal operation needs none of them.
+ */
+export interface OrganizerIntakeStatusV1 {
+  tor_found: boolean;
+  transport_provisioned: boolean;
+  intake_running: boolean;
+  /** The running intake is bound to the CURRENTLY loaded election. */
+  election_bound: boolean;
+  ready: boolean;
+  accepted_ballots: number;
+  onion_hostname: string | null;
+  descriptor_fingerprint: string | null;
+  collector_addr: string | null;
+  tor_data_dir: string | null;
+  voter_bundle_path: string | null;
+  durable_inbox_dir: string | null;
+  message: string;
+}
+
+/** Result of exporting the voter-safe public transport bundle. */
+export interface VoterBundleExportResultV1 {
+  written_path: string;
+}

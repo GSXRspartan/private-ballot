@@ -1,4 +1,57 @@
-import type { GuiVoterCastLockStateV1 } from "./api/types";
+import type {
+  GuiPrivateReleaseResultV1,
+  GuiPrivateSubmissionResultV1,
+  GuiVoterCastLockStateV1,
+} from "./api/types";
+
+/**
+ * Bounded automatic-retry backoff schedule (milliseconds) for a private
+ * submission whose ONLY failure so far is transient transport/onion
+ * reachability. One entry per automatic retry, so the schedule length is also
+ * the maximum number of automatic retries. Kept short and small on purpose: a
+ * transient onion route usually becomes reachable within a few seconds, and an
+ * ordinary voter must never be forced to hammer Retry by hand. There is no
+ * indefinite loop — after these are exhausted the truthful CAST_PENDING UI and
+ * the manual Retry button stand.
+ *
+ * Each automatic retry re-sends the EXACT same staged encrypted submission
+ * through the existing exact-retry path (same digest, same nullifier, same
+ * proof, same payload); it never creates a new ballot and an authenticated
+ * organizer receipt remains mandatory for CAST.
+ */
+export const PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS: readonly number[] = [
+  2000, 5000, 8000,
+];
+
+/** The bounded, PRIVACY-SAFE diagnostic stage that means the ballot could not be
+ *  delivered because no authenticated organizer receipt was obtained — i.e. a
+ *  transient transport/onion-reachability failure. This is the ONLY stage an
+ *  automatic retry is allowed to react to. Every other stage means the payload
+ *  reached the organizer (authenticated rejection, receipt/descriptor/package
+ *  mismatch, invalid receipt) or a local finalization issue, and must be
+ *  surfaced immediately, never auto-retried. */
+export const TRANSIENT_TRANSPORT_STAGE = "PRIVATE_TRANSPORT_UNAVAILABLE";
+
+/**
+ * Whether a private-release result is a TRANSIENT transport/reachability failure
+ * that is safe to auto-retry with the exact same staged submission.
+ *
+ * True ONLY when the durable state is `CAST_PENDING` and the diagnostic stage is
+ * exactly {@link TRANSIENT_TRANSPORT_STAGE}. A `CAST` success, any receipt-level
+ * stage (authenticated rejection, signature/descriptor/package mismatch, parse
+ * failure), or a local persist/promotion failure all return `false` so they are
+ * surfaced immediately and never retried. A non-release result (e.g. the offline
+ * export DTO) also returns `false`.
+ */
+export function isTransientPrivateReleaseResult(
+  result: GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1 | null,
+): boolean {
+  if (result === null || !("diagnostic_stage" in result)) return false;
+  return (
+    result.cast_lock_state === "CAST_PENDING" &&
+    result.diagnostic_stage === TRANSIENT_TRANSPORT_STAGE
+  );
+}
 
 /**
  * Voter-facing status of the private (controlled managed-Tor) submission,
