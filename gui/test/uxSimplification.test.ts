@@ -171,13 +171,21 @@ describe("vote response and prepared review presentation", () => {
   });
 
   it("keeps Change my choice available in the review card, before the boundary only", () => {
+    // Exactly one Change my choice ACTION (button) remains, in the prepared
+    // review card; the guided Vote-stage summary additionally offers a
+    // "Change my choice" REVIEW control (a summary label, not a second
+    // button) that re-expands the existing live response editor.
     const matches = vote.match(/>\s*Change my choice\s*</g) ?? [];
     assert.equal(matches.length, 1, "exactly one Change my choice action");
-    // It lives in the prepared review card, i.e. after the ready title.
+    // The action lives in the prepared review card, i.e. after the ready title.
     const readyIdx = vote.indexOf('<Card title="Your anonymous ballot is ready">');
-    const changeIdx = vote.indexOf("Change my choice");
+    const changeIdx = vote.indexOf("Change my choice", readyIdx);
     assert.ok(readyIdx >= 0 && changeIdx > readyIdx, "Change my choice is in the review card");
     assert.match(vote, /void onChangeChoice\(\)/);
+    // The guided summary's review control re-expands the Vote stage in place
+    // (the existing live-editing behavior; no new command path).
+    assert.match(vote, /reviewLabel="Change my choice"/);
+    assert.match(vote, /onReview=\{\(\) => setReviewStage\("Vote"\)\}/);
   });
 });
 

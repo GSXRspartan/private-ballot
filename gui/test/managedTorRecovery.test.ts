@@ -210,11 +210,16 @@ describe("controlled-test recovery card gating", () => {
 
   it("the Vote screen gates the card through the feature-aware predicate", () => {
     // The card is rendered only via managedTorTestCardVisible with the feature
-    // flag, never on prepared-ballot/cast state alone.
+    // flag, never on prepared-ballot/cast state alone. Guided progressive
+    // disclosure additionally gates visibility on the Submit stage being
+    // current (or show-all/a locked ballot) — presentation only.
     assert.match(
       vote,
-      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
+      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*submitStageVisible\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
     );
+    // The guided gate only ADDS presentation conditions; the feature predicate
+    // remains mandatory.
+    assert.match(vote, /const submitStageVisible =/);
     // managedTorFeaturePresent is derived from the presence of the status DTO,
     // which is null in a production build without the feature.
     assert.match(vote, /const managedTorFeaturePresent = managedTorStatus !== null/);

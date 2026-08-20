@@ -27,11 +27,15 @@ import {
   describeLeadingOutcome,
   formatPercent,
   nextOrganizerStep,
+  organizerGuidedControls,
   organizerLifecycleSteps,
+  organizerPhaseHeading,
   participationAccessibleText,
   participationIsDisclosed,
   participationVisibilityLabel,
+  sealedParticipationText,
 } from "../lifecycle";
+import type { OrganizerControlKey } from "../lifecycle";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -113,6 +117,14 @@ export function ManageElection() {
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  // Guided organizer workspace (progressive disclosure, presentation only).
+  // Default = guided mode: the current lifecycle phase's controls are
+  // prominent, completed phases collapse to compact summaries, and future
+  // phases stay out of the main view. `showAllControls` restores the complete
+  // control surface for technical review/debugging; it never changes a gate,
+  // never enables a disabled control, and never creates an alternate command
+  // path.
+  const [showAllControls, setShowAllControls] = useState(false);
 
   const presentation = presentationFor(election);
   const lifecycle = election?.lifecycle_state ?? null;
@@ -136,6 +148,53 @@ export function ManageElection() {
     tallyComputed: tally !== null,
     archiveWritten: archiveResult !== null,
   });
+
+  // Guided progressive disclosure derived ONLY from the real lifecycle state.
+  // `organizerGuidedControls` returns null for no/unknown lifecycle, which is
+  // the safe fallback: the full control surface renders exactly as before.
+  const guidedControls = showAllControls ? null : organizerGuidedControls(lifecycle);
+  const guidedMode = guidedControls !== null;
+  const showControl = (control: OrganizerControlKey): boolean =>
+    guidedControls === null || guidedControls.includes(control);
+  const phaseHeading = guidedMode ? organizerPhaseHeading(lifecycle) : null;
+  const resultsVisible =
+    !guidedMode ||
+    showControl("tally") ||
+    showControl("verify") ||
+    showControl("finalArchive") ||
+    showControl("anchor");
+  // Compact completed-phase summaries, derived only from existing state (the
+  // real lifecycle, the provisioned-transport flag, this session's tally and
+  // archive results). A summary is listed only when its full card is not
+  // currently prominent; Show all election controls remains the way to inspect
+  // any completed step in full.
+  const completedSummaries: string[] = [];
+  if (guidedMode && lifecycle !== null) {
+    if (lifecycle !== "FROZEN") {
+      if (organizerStatus?.transport_provisioned && !showControl("intake")) {
+        completedSummaries.push("Private intake configured");
+      }
+      if (organizerStatus?.transport_provisioned && !showControl("materials")) {
+        completedSummaries.push("Voter materials available");
+      }
+      completedSummaries.push("Voting opened");
+    }
+    if (lifecycle === "CLOSED" || lifecycle === "VERIFIED" || lifecycle === "FINALIZED") {
+      completedSummaries.push("Voting closed");
+    }
+    if (tally !== null && !showControl("tally")) {
+      completedSummaries.push("Tally computed");
+    }
+    if (lifecycle === "VERIFIED" || lifecycle === "FINALIZED") {
+      completedSummaries.push("Result verified");
+    }
+    if (lifecycle === "FINALIZED") {
+      completedSummaries.push("Election finalized");
+    }
+    if (archiveResult !== null && !showControl("finalArchive")) {
+      completedSummaries.push("Final archive written");
+    }
+  }
 
   const showError = (error: unknown) => {
     setLocalError(
@@ -675,45 +734,53 @@ export function ManageElection() {
         </Card>
       )}
 
+      {/* Presentation-only escape hatch: reveals the complete control surface
+          (including future phases and technical controls) for review or
+          debugging. It never changes workflow state, never bypasses a gate,
+          and never enables a disabled control. */}
+      {election && (
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            aria-pressed={showAllControls}
+            onClick={() => setShowAllControls((current) => !current)}
+          >
+            {showAllControls ? "Show guided view" : "Show all election controls"}
+          </button>
+        </div>
+      )}
+
+      {/* Completed-phase summaries (guided mode only): compact, derived from
+          existing state, each inspectable via Show all election controls. */}
+      {guidedMode && completedSummaries.length > 0 && (
+        <Card title="Progress so far">
+          <ul className="guide-facts">
+            {completedSummaries.map((summary) => (
+              <li key={summary}>✓ {summary}</li>
+            ))}
+          </ul>
+          <p className="form-hint">
+            Use Show all election controls to inspect any completed step in full.
+          </p>
+        </Card>
+      )}
+
+      {/* The current lifecycle phase leads the workspace. */}
+      {guidedMode && phaseHeading !== null && (
+        <h2 className="screen-section">{phaseHeading}</h2>
+      )}
+
       {shellAvailable && !election && (
         <Notice tone="info">Load an election to enable these controls.</Notice>
       )}
 
       <div className="card-grid">
-        <Card title="Open Voting">
-          <p className="card-body">
-            Opening voting means the election starts accepting ballots from eligible voters.
-            The election definition stays locked. Voting stays open until you close it.
-          </p>
-          <p className="card-body">
-            <strong>Opening voting cannot be undone.</strong> Start private intake and share the
-            voter materials first, then open voting when you are ready to accept ballots.
-          </p>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!canAct || lifecycle !== "FROZEN"}
-            onClick={() => void runLifecycle("open")}
-          >
-            Open voting
-          </button>
-        </Card>
-
-        <Card title="Close Voting">
-          <p className="card-body">
-            Closing voting is permanent: no additional ballots can be accepted after this
-            election is closed. This cannot be undone.
-          </p>
-          <button
-            type="button"
-            className="btn btn-danger"
-            disabled={!canAct || lifecycle !== "OPEN" || lifecycleBusy}
-            onClick={() => setConfirmClose(true)}
-          >
-            Close voting
-          </button>
-        </Card>
-
+        {/* Guided mode shows only the current phase's cards prominently; the
+            rest stay one toggle away under Show all election controls. Card
+            order serves the current phase: intake and voter materials first,
+            the lifecycle transition actions last. */}
+        {showControl("intake") && (
         <Card title="Private ballot intake">
           <p className="card-body">
             Accept ballots submitted privately over Tor. Starting intake runs Tor and the
@@ -760,7 +827,7 @@ export function ManageElection() {
               {participationDisclosed && participation?.accepted_ballots != null
                 ? participation.accepted_ballots
                 : participationSealed
-                  ? "Hidden while voting is open"
+                  ? sealedParticipationText(lifecycle)
                   : "—"}
             </Field>
             {organizerStatus?.intake_running && (
@@ -916,7 +983,9 @@ export function ManageElection() {
             )}
           </DetailsSection>
         </Card>
+        )}
 
+        {showControl("materials") && (
         <Card title="Voter materials">
           <p className="card-body">
             Voters need two things from the ballot office before they can vote:
@@ -960,7 +1029,9 @@ export function ManageElection() {
             </Notice>
           )}
         </Card>
+        )}
 
+        {showControl("office") && (
         <Card title="Ballot office">
           <p className="card-body">
             Import submitted ballot files here. Each ballot is checked before it is accepted
@@ -1000,7 +1071,9 @@ export function ManageElection() {
             <p className="card-body">Ballot intake is available only while voting is open.</p>
           )}
         </Card>
+        )}
 
+        {showControl("participation") && (
         <Card title="Participation">
           {participation ? (
             <>
@@ -1012,7 +1085,7 @@ export function ManageElection() {
                 {participationSealed ? (
                   <span className="metric-value metric-sealed">
                     <LockIcon label="Hidden" />
-                    Hidden while voting is open
+                    {sealedParticipationText(lifecycle)}
                   </span>
                 ) : participation.participation_visibility === "COARSE" ? (
                   <span className="metric-value">
@@ -1034,7 +1107,10 @@ export function ManageElection() {
                   </span>
                 )}
               </div>
-              <ParticipationTrack summary={participation} />
+              <ParticipationTrack
+                summary={participation}
+                sealedLabel={sealedParticipationText(lifecycle)}
+              />
               {participationSealed && lifecycle === "OPEN" && (
                 <p className="card-body">
                   Participation is hidden while voting is open — this is intentional, not missing
@@ -1059,19 +1135,67 @@ export function ManageElection() {
             <p className="card-body">No participation data available in this session.</p>
           )}
         </Card>
+        )}
+
+        {/* The lifecycle transition actions are the logical final actions of
+            their phases: Open voting ends the FROZEN preparation phase, Close
+            voting ends the OPEN phase. */}
+        {showControl("open") && (
+        <Card title="Open Voting">
+          <p className="card-body">
+            Opening voting means the election starts accepting ballots from eligible voters.
+            The election definition stays locked. Voting stays open until you close it.
+          </p>
+          <p className="card-body">
+            <strong>Opening voting cannot be undone.</strong> Start private intake and share the
+            voter materials first, then open voting when you are ready to accept ballots.
+          </p>
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!canAct || lifecycle !== "FROZEN"}
+            onClick={() => void runLifecycle("open")}
+          >
+            Open voting
+          </button>
+        </Card>
+        )}
+
+        {showControl("close") && (
+        <Card title="Close Voting">
+          <p className="card-body">
+            Closing voting is permanent: no additional ballots can be accepted after this
+            election is closed. This cannot be undone.
+          </p>
+          <button
+            type="button"
+            className="btn btn-danger"
+            disabled={!canAct || lifecycle !== "OPEN" || lifecycleBusy}
+            onClick={() => setConfirmClose(true)}
+          >
+            Close voting
+          </button>
+        </Card>
+        )}
       </div>
 
       {/* Results workflow, in order: the gates on each button remain the
           authoritative lifecycle gates; the heading only makes the existing
-          progression obvious. */}
-      <h2 className="screen-section">Results</h2>
-      <p className="form-hint">
-        After voting closes: compute the tally, review the result, mark verification complete,
-        finalize the election, then write the final archive and verify it independently on the
-        Archive screen.
-      </p>
+          progression obvious. In guided mode the whole section appears only
+          when a results-phase control is relevant to the current lifecycle. */}
+      {resultsVisible && (
+        <>
+          <h2 className="screen-section">Results</h2>
+          <p className="form-hint">
+            After voting closes: compute the tally, review the result, mark verification complete,
+            finalize the election, then write the final archive and verify it independently on the
+            Archive screen.
+          </p>
+        </>
+      )}
 
       <div className="card-grid">
+        {showControl("tally") && (
         <Card title="Tally">
           <p className="card-body">
             Deterministic approval tally over accepted ballots. A tie is reported as a tie.
@@ -1111,7 +1235,9 @@ export function ManageElection() {
             </div>
           )}
         </Card>
+        )}
 
+        {showControl("verify") && (
         <Card title="Verify">
           <p className="card-body">
             Records completion of public verification. Full offline replay verification of an
@@ -1126,7 +1252,9 @@ export function ManageElection() {
             Mark verified
           </button>
         </Card>
+        )}
 
+        {showControl("finalArchive") && (
         <Card title="Final archive">
           <p className="card-body">
             Writes the complete election record to a folder: the election definition, eligible
@@ -1201,6 +1329,15 @@ export function ManageElection() {
               )}
             </div>
           </div>
+          {/* VERIFIED phase: the finalize action is the prominent next step,
+              so its permanence warning sits directly beside it (the explicit
+              confirmation dialog remains the safeguard). */}
+          {lifecycle === "VERIFIED" && (
+            <Notice tone="warn">
+              Finalizing is permanent: the verified result and finalized election record
+              cannot be changed afterward.
+            </Notice>
+          )}
           <div className="btn-row">
             <button
               type="button"
@@ -1237,7 +1374,9 @@ export function ManageElection() {
             </>
           )}
         </Card>
+        )}
 
+        {showControl("anchor") && (
         <Card title="Anchor">
           <Placeholder>
             Optional public integrity anchor: anchor the aggregate finalized archive commitment
@@ -1247,12 +1386,17 @@ export function ManageElection() {
             non-binding.
           </Placeholder>
         </Card>
+        )}
       </div>
 
-      {/* Reference details for the loaded election, kept below the workflow so
-          the action path stays first. Nothing here changes election state. */}
+      {/* Reference details for the loaded election. The entire technical
+          section is collapsed by default so normal ballot-office operation
+          never requires scrolling through cryptographic internals; nothing is
+          removed — every manifest/proof-suite/commitment/identifier field is
+          preserved inside the disclosure. */}
       {election && (
-        <>
+        <DetailsSection summary="Election technical details">
+          <>
           <h2 className="screen-section">Election details</h2>
           <Card title="Election overview">
             <div className="field-list">
@@ -1382,7 +1526,8 @@ export function ManageElection() {
               </p>
             </Card>
           )}
-        </>
+          </>
+        </DetailsSection>
       )}
 
       {confirmClose && (

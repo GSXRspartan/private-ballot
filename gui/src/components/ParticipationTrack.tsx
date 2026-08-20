@@ -15,14 +15,19 @@ import type { GuiParticipationSummaryV1 } from "../api/types";
  * the sole information channel (the numeric label is always rendered).
  *
  * When participation is sealed, the track renders a neutral empty state with
- * a restrained "Hidden while voting is open" label and lock affordance; no
- * numeric value is shown, so a withheld value never appears as a
- * misleading 0%.
+ * a restrained sealed-state label (the OPEN-lifecycle default "Hidden while
+ * voting is open"; callers may pass a lifecycle-aware label) and lock
+ * affordance; no numeric value is shown, so a withheld value never appears as
+ * a misleading 0%.
  */
 export function ParticipationTrack({
   summary,
+  sealedLabel = "Hidden while voting is open",
 }: {
   summary: GuiParticipationSummaryV1 | null;
+  /** Truthful sealed-state label; callers may pass a lifecycle-aware label
+   *  (e.g. "Voting has not opened yet" before voting opens). */
+  sealedLabel?: string;
 }) {
   const disclosed =
     summary !== null &&
@@ -41,7 +46,7 @@ export function ParticipationTrack({
     >
       <div className="participation-track-head">
         <span className="participation-track-value" aria-hidden="true">
-          {disclosed ? pctLabel : "Hidden while voting is open"}
+          {disclosed ? pctLabel : sealedLabel}
         </span>
         {summary?.accepted_ballots !== null && summary?.accepted_ballots !== undefined && (
           <span className="participation-track-sub" aria-hidden="true">

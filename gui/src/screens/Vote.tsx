@@ -108,6 +108,48 @@ function abortableSleep(ms: number, cancelRef: { current: boolean }): Promise<bo
   });
 }
 
+/**
+ * Compact completed-stage summary for the guided voter workflow
+ * (progressive disclosure, presentation only). A finished stage collapses to
+ * a checkmarked summary with a deliberate review control that re-expands the
+ * full stage content in place; collapsing never touches the underlying
+ * workflow/backend state.
+ */
+function GuidedStageSummary({
+  title,
+  lines,
+  reviewLabel,
+  onReview,
+}: {
+  title: string;
+  lines: string[];
+  reviewLabel: string;
+  onReview: () => void;
+}) {
+  return (
+    <section className="card guided-summary" aria-label={title}>
+      <h3 className="card-title">✓ {title}</h3>
+      {lines
+        .filter((line) => line !== "")
+        .map((line) => (
+          <p className="card-body" key={line}>
+            {line}
+          </p>
+        ))}
+      <div className="action-row">
+        <button
+          type="button"
+          className="btn btn-secondary"
+          aria-expanded={false}
+          onClick={onReview}
+        >
+          {reviewLabel}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function Vote() {
   const { election, shellAvailable, loadElection } = useAppState();
   const [loadManifestPath, setLoadManifestPath] = useState("");
@@ -129,6 +171,17 @@ export function Vote() {
   const [credentialError, setCredentialError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmCast, setConfirmCast] = useState(false);
+  // Guided progressive disclosure (presentation only). Default = guided mode:
+  // the current stage is expanded, completed stages collapse to compact
+  // summaries, and future stages stay out of the main workflow. `showAllSteps`
+  // restores the complete control surface for technical review/testing without
+  // touching any workflow state; `reviewStage` re-expands one completed stage
+  // on deliberate voter request.
+  const [showAllSteps, setShowAllSteps] = useState(false);
+  const [reviewStage, setReviewStage] = useState<string | null>(null);
+  // Voter override for the collapsed offline-delivery disclosure; null = the
+  // default (open only when no private online route is available).
+  const [offlineOpenOverride, setOfflineOpenOverride] = useState<boolean | null>(null);
   const [transport, setTransport] = useState<GuiPrivateTransportAvailabilityV1 | null>(null);
   const [privateRoute, setPrivateRoute] = useState<GuiPrivateRouteV1>("ManagedTor");
   const [privateResult, setPrivateResult] = useState<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1 | null>(null);
@@ -179,6 +232,8 @@ export function Vote() {
     setConfirmed(false);
     setCredentialStage(false);
     setSelectionStage(false);
+    setReviewStage(null);
+    setOfflineOpenOverride(null);
     setTransport(null);
     setPrivateRoute("ManagedTor");
     setPrivateResult(null);
@@ -816,6 +871,67 @@ export function Vote() {
       ? privateSubmissionStageLabel(privateResult.diagnostic_stage)
       : null;
 
+  // ---------------------------------------------------------------------
+  // Guided progressive disclosure (presentation only). Derived from the SAME
+  // existing workflow/session inputs as the progress indicator below — no new
+  // state is fetched and no gate changes. Guided mode (default): the current
+  // stage is expanded, completed stages collapse to compact summaries, future
+  // stages stay hidden. Show all steps restores the full control surface.
+  // ---------------------------------------------------------------------
+  const guidedStages = voterStages({
+    electionLoaded: election !== null,
+    reviewPassed: credentialStage,
+    identityReady: canProceedAfterCredential(credential),
+    voteEntered: selectionStage,
+    choiceMade: !!selection?.selection_loaded && selection.valid,
+    ballotReady: workflow?.prepared_ballot.state === "Ready",
+    castState,
+  });
+  const currentStageKey =
+    guidedStages.find((stage) => stage.state === "current")?.key ?? null;
+  const guidedStageDone = (key: string) =>
+    guidedStages.some((stage) => stage.key === key && stage.state === "done");
+  // A stage renders in full when it is current, when the voter deliberately
+  // re-expanded it for review, or in show-all mode.
+  const stageExpanded = (key: string) =>
+    showAllSteps || currentStageKey === key || reviewStage === key;
+  // The private-submission card is the Submit stage; a durably locked ballot
+  // (CAST_PENDING/CAST) keeps its recovery/receipt surface visible.
+  const submitStageVisible =
+    showAllSteps || currentStageKey === "Submit" || castLocked;
+  // Plain-language choice text for the collapsed Vote-stage summary, derived
+  // from the existing confirmed candidates + selection state (never stored
+  // separately).
+  const voteChoiceText = abstaining
+    ? "Abstention"
+    : confirmation
+      ? confirmation.candidates
+          .filter((option) => selectedOptionIds.includes(option.machine_id_hex))
+          .map((option) => option.display_name)
+          .join(", ")
+      : "";
+  // Whether a private online delivery route exists in this build/session; when
+  // none does, the offline delivery disclosure starts open instead of buried.
+  const onlineRouteAvailable =
+    (transport?.managed_tor_available ?? false) ||
+    (transport?.split_trust_relay_available ?? false) ||
+    managedTorFeaturePresent;
+  // "Hide details" control shown above a deliberately re-expanded completed
+  // stage (guided mode only).
+  const hideStageDetails = (key: string) =>
+    !showAllSteps && reviewStage === key ? (
+      <div className="action-row">
+        <button
+          type="button"
+          className="btn btn-secondary"
+          aria-expanded={true}
+          onClick={() => setReviewStage(null)}
+        >
+          Hide details
+        </button>
+      </div>
+    ) : null;
+
   return (
     <>
       <h1 className="screen-header">Vote</h1>
@@ -909,18 +1025,34 @@ export function Vote() {
           /session state (no new backend state). Completed stages carry a
           checkmark, the current stage is emphasized, future stages subdued. */}
       {election && (
-        <ProgressSteps
-          label="Voting progress"
-          steps={voterStages({
-            electionLoaded: election !== null,
-            reviewPassed: credentialStage,
-            identityReady: canProceedAfterCredential(credential),
-            voteEntered: selectionStage,
-            choiceMade: !!selection?.selection_loaded && selection.valid,
-            ballotReady: workflow?.prepared_ballot.state === "Ready",
-            castState,
-          })}
-        />
+        <>
+          <ProgressSteps
+            label="Voting progress"
+            steps={voterStages({
+              electionLoaded: election !== null,
+              reviewPassed: credentialStage,
+              identityReady: canProceedAfterCredential(credential),
+              voteEntered: selectionStage,
+              choiceMade: !!selection?.selection_loaded && selection.valid,
+              ballotReady: workflow?.prepared_ballot.state === "Ready",
+              castState,
+            })}
+          />
+          {/* Presentation-only escape hatch: reveals every stage (including
+              future/technical ones) for review or testing. It never changes
+              workflow state, never bypasses a gate, and never enables a
+              disabled control. */}
+          <div className="action-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              aria-pressed={showAllSteps}
+              onClick={() => setShowAllSteps((current) => !current)}
+            >
+              {showAllSteps ? "Show guided steps" : "Show all steps"}
+            </button>
+          </div>
+        </>
       )}
 
       {!election && (
@@ -1023,6 +1155,22 @@ export function Vote() {
 
       {confirmation && (
         <>
+          {/* Guided stage 1 — Election: full while current; once completed it
+              collapses to a compact summary and can be deliberately re-expanded
+              with Review details. Future stages stay hidden. */}
+          {!showAllSteps && guidedStageDone("Election") && reviewStage !== "Election" ? (
+            <GuidedStageSummary
+              title="Election reviewed"
+              lines={[
+                confirmation.bound.election_id_text ?? confirmation.bound.election_id_hex,
+                confirmation.bound.proposal_question ?? "",
+              ]}
+              reviewLabel="Review details"
+              onReview={() => setReviewStage("Election")}
+            />
+          ) : stageExpanded("Election") ? (
+          <>
+          {hideStageDetails("Election")}
           <Card title={BOUND_SECTION_LABEL}>
             <Notice tone="info">
               These details come straight from the election definition and cannot be changed by
@@ -1211,9 +1359,23 @@ export function Vote() {
               Continuing does not create a proof, cast a vote, or send anything anywhere.
             </p>
           </Card>
+          </>
+          ) : null}
 
           {credentialStage && (
             <>
+              {/* Guided stage 2 — Identity: full while current; once completed
+                  it collapses to a compact eligibility summary. */}
+              {!showAllSteps && guidedStageDone("Identity") && reviewStage !== "Identity" ? (
+                <GuidedStageSummary
+                  title="Eligible to vote"
+                  lines={["Credential verified locally"]}
+                  reviewLabel="Review details"
+                  onReview={() => setReviewStage("Identity")}
+                />
+              ) : stageExpanded("Identity") ? (
+              <>
+              {hideStageDetails("Identity")}
               <Card title="Confirm you are eligible to vote">
                 <p className="card-body">
                   Your private voting credential stays under your control. The ballot office
@@ -1272,16 +1434,32 @@ export function Vote() {
                   </div>
                 </DetailsSection>
               </Card>
+              </>
+              ) : null}
 
               {selectionStage && confirmation && (
                 <>
-                  {/* The editable choice UI is shown only while nothing is durably
-                      locked. After a restart in CAST_PENDING the plaintext choice
-                      is intentionally not restored from the encrypted pending
-                      submission, so a "No selection" editable list would be
-                      misleading (Issue 11); the locked card below is shown
-                      instead. */}
+                  {/* Guided stage 3 — Vote. The editable choice UI is shown
+                      only while nothing is durably locked. After a restart in
+                      CAST_PENDING the plaintext choice is intentionally not
+                      restored from the encrypted pending submission, so a
+                      "No selection" editable list would be misleading
+                      (Issue 11); the locked card below is shown instead. */}
                   {!castLocked && (
+                    !showAllSteps && guidedStageDone("Vote") && reviewStage !== "Vote" ? (
+                      <GuidedStageSummary
+                        title="Response selected"
+                        lines={[
+                          voteChoiceText === ""
+                            ? "Your choice is saved."
+                            : `Your choice: ${voteChoiceText}`,
+                        ]}
+                        reviewLabel="Change my choice"
+                        onReview={() => setReviewStage("Vote")}
+                      />
+                    ) : stageExpanded("Vote") ? (
+                    <>
+                    {hideStageDetails("Vote")}
                   <Card title="Choose your response">
                     {/* The CURRENT CANONICAL ballot question, read straight from
                         the confirmed election binding (the SAME source as the
@@ -1384,6 +1562,8 @@ export function Vote() {
                       </div>
                     </DetailsSection>
                   </Card>
+                    </>
+                    ) : null
                   )}
 
                   {castLocked ? (
@@ -1479,6 +1659,12 @@ export function Vote() {
                       )}
                     </Card>
                   ) : (
+                  <>
+                  {/* Guided stage 4 — Privacy: full while current; once the
+                      anonymous ballot is prepared, the proof-generation card
+                      collapses and the prepared-ballot review below is the
+                      completed-stage summary. */}
+                  {(showAllSteps || currentStageKey === "Privacy") && (
                   <Card title="Protect your vote">
                     <p className="card-body">
                       Create the anonymous eligibility proof for your ballot:
@@ -1536,8 +1722,13 @@ export function Vote() {
                         verified in the Rust backend; this screen never sees secret material.
                       </p>
                     </DetailsSection>
-                    {workflow?.prepared_ballot.summary && (
-                      <Card title="Your anonymous ballot is ready">
+                  </Card>
+                  )}
+                  {/* Completed Privacy-stage summary / Submit-stage lead-in:
+                      the prepared anonymous ballot review with delivery
+                      options. */}
+                  {workflow?.prepared_ballot.summary && (
+                  <Card title="Your anonymous ballot is ready">
                         <div className="field-list">
                           <Field label="Election">
                             <span className="field-value">
@@ -1589,7 +1780,19 @@ export function Vote() {
                           your choice until you submit or save your anonymous ballot.
                         </p>
 
-                        <h3 className="submission-route-heading">Other delivery options</h3>
+                        {/* Offline delivery stays available but collapsed by
+                            default while a private online route exists; when no
+                            online route is available it starts open. The voter
+                            can always open it deliberately. */}
+                        <details
+                          className="details-section"
+                          open={offlineOpenOverride ?? !onlineRouteAvailable}
+                          onToggle={(e) =>
+                            setOfflineOpenOverride((e.target as HTMLDetailsElement).open)
+                          }
+                        >
+                          <summary className="details-summary">Other delivery options</summary>
+                          <div className="details-body">
                         <p className="card-body">
                           Offline submission: save an encrypted ballot file and deliver it through
                           the election&rsquo;s approved manual method. Nothing is sent over the
@@ -1611,6 +1814,8 @@ export function Vote() {
                             Save encrypted ballot file
                           </button>
                         </div>
+                          </div>
+                        </details>
                         {transport &&
                           (transport.managed_tor_available ||
                           transport.split_trust_relay_available ? (
@@ -1694,8 +1899,8 @@ export function Vote() {
                           </Notice>
                         )}
                       </Card>
-                    )}
-                  </Card>
+                  )}
+                  </>
                   )}
 
                   {/* managed-tor-test: private submission controls. Rendered ONLY
@@ -1711,7 +1916,7 @@ export function Vote() {
                     featurePresent: managedTorFeaturePresent,
                     preparedReady: workflow?.prepared_ballot.state === "Ready",
                     castState,
-                  }) && (
+                  }) && submitStageVisible && (
                     <Card title="Submit your ballot privately">
                       {/* Unmistakable, authoritative status derived from the
                           DURABLE cast state (Issues 4/17), so SUCCESS and PENDING

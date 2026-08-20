@@ -151,6 +151,23 @@ export function participationIsDisclosed(
   return summary.accepted_ballots !== null;
 }
 
+/**
+ * Truthful label for sealed/hidden participation counts, derived from the
+ * actual lifecycle. While voting is OPEN the count is intentionally hidden
+ * ("Hidden while voting is open"); before voting opens the truthful statement
+ * is that voting has not opened yet — never the OPEN wording, and never a
+ * fabricated authoritative zero (the sealed DTO does not disclose one).
+ */
+export function sealedParticipationText(
+  lifecycle: string | null | undefined,
+): string {
+  if (lifecycle === "OPEN") return "Hidden while voting is open";
+  if (lifecycle === "FROZEN" || lifecycle === "DRAFT") {
+    return "Voting has not opened yet";
+  }
+  return "Hidden";
+}
+
 /** Builds a screen-reader-friendly textual equivalent for the participation
  *  card so a screen reader can learn the value without interpreting SVG
  *  geometry. */
@@ -352,5 +369,84 @@ export function nextOrganizerStep(input: {
         title: "No election loaded",
         body: "Load an election to see what to do next.",
       };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Guided organizer workspace (progressive disclosure, presentation only).
+//
+// The organizer screen is lifecycle-driven: the cards relevant to the CURRENT
+// lifecycle phase stay prominent, completed steps collapse into compact
+// summaries, and future phases do not occupy full-size cards. Every gate on
+// every control is unchanged — this matrix only decides which EXISTING cards
+// render prominently in guided mode. "Show all election controls" restores the
+// complete surface for technical review without touching any gate.
+// ---------------------------------------------------------------------------
+
+/** Identifiers for the existing Manage Election control cards. */
+export type OrganizerControlKey =
+  | "open"
+  | "close"
+  | "intake"
+  | "materials"
+  | "office"
+  | "participation"
+  | "tally"
+  | "verify"
+  | "finalArchive"
+  | "anchor";
+
+/**
+ * The control cards that are PROMINENT for each lifecycle phase in guided
+ * mode. Cards not listed remain available through "Show all election
+ * controls" (presentation only — their gates never change). Returns null for
+ * null/unknown states so the full control surface shows as a safe fallback.
+ */
+export function organizerGuidedControls(
+  lifecycle: string | null | undefined,
+): readonly OrganizerControlKey[] | null {
+  switch (lifecycle) {
+    case "FROZEN":
+      // Prepare voting: private intake, voter materials, then open voting.
+      return ["intake", "materials", "open"];
+    case "OPEN":
+      // Voting is open: intake health, ballot intake, materials, the
+      // (hidden) participation status, and the lifecycle-ending close action.
+      return ["intake", "office", "materials", "participation", "close"];
+    case "CLOSED":
+      // Verify the result: disclosed participation, tally, verify.
+      return ["participation", "tally", "verify"];
+    case "VERIFIED":
+      // Finish the election: verified result summary + finalize.
+      return ["tally", "finalArchive"];
+    case "FINALIZED":
+      // Publish and verify the record: result, final archive, optional anchor.
+      return ["tally", "finalArchive", "anchor"];
+    default:
+      return null;
+  }
+}
+
+/**
+ * Plain-language primary heading for the current lifecycle phase in guided
+ * organizer mode. Returns null when there is no guided heading (no election
+ * or an unrecognized state), so the screen falls back to its full layout.
+ */
+export function organizerPhaseHeading(
+  lifecycle: string | null | undefined,
+): string | null {
+  switch (lifecycle) {
+    case "FROZEN":
+      return "Prepare voting";
+    case "OPEN":
+      return "Voting is open";
+    case "CLOSED":
+      return "Verify the result";
+    case "VERIFIED":
+      return "Finish the election";
+    case "FINALIZED":
+      return "Publish and verify the record";
+    default:
+      return null;
   }
 }

@@ -348,10 +348,15 @@ describe("no frontend-only election question", () => {
 // -------------------------------------------------------------------------
 
 describe("hidden participation presentation", () => {
-  it("shows 'Hidden while voting is open' instead of a numeric value", () => {
-    assert.match(manage, /Hidden while voting is open/);
+  it("shows a truthful lifecycle-aware sealed label instead of a numeric value", () => {
+    // Manage Election derives the sealed label from the REAL lifecycle: the
+    // "Hidden while voting is open" wording is truthful only while OPEN;
+    // FROZEN says "Voting has not opened yet" and never fabricates a zero.
+    assert.match(manage, /sealedParticipationText\(lifecycle\)/);
     assert.match(home, /Hidden while voting is open/);
-    assert.match(track, /disclosed \? pctLabel : "Hidden while voting is open"/);
+    // The track takes the label as a prop; the OPEN default is unchanged.
+    assert.match(track, /disclosed \? pctLabel : sealedLabel/);
+    assert.match(track, /sealedLabel = "Hidden while voting is open"/);
   });
 
   it("removes the stale present-tense small-electorate message once voting is closed", () => {
