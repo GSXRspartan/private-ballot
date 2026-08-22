@@ -103,7 +103,16 @@ fn untrusted_descriptor_fails_before_pending_and_leaves_voter_free() {
 
     let mut carrier = RecordingCarrier::accepting(vec![0xAA; 8]);
     let error = err(fixture.release(&env, &untrusted, &mut carrier));
-    assert_eq!(error.code(), "GUI_PRIVATE_TRANSPORT_UNAVAILABLE");
+    // A descriptor-authenticity failure is now a distinct, HONEST terminal error
+    // in the descriptor-auth phase — never the transient "transport unavailable"
+    // (retry-later) code, which is reserved for post-staging delivery outages.
+    assert_eq!(error.code(), "GUI_RELEASE_DESCRIPTOR_UNTRUSTED");
+    assert_eq!(error.context(), Some("release-descriptor-auth"));
+    assert_ne!(
+        error.code(),
+        "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+        "a pre-staging auth failure must not masquerade as a transient transport outage",
+    );
     assert!(
         carrier.envelopes.is_empty(),
         "carrier must never be invoked"
@@ -138,12 +147,16 @@ fn wrong_election_descriptor_fails_before_pending() {
 
     let mut carrier = RecordingCarrier::accepting(vec![0xAA; 8]);
     let error = err(fixture.release(&env, &other, &mut carrier));
+    // A wrong-election descriptor fails in the descriptor-auth phase (via the
+    // signed manifest binding) or the explicit election-id guard; either way it
+    // is a distinct terminal binding error, never the transient transport code.
     assert!(
-        error.code() == "GUI_PRIVATE_TRANSPORT_UNAVAILABLE"
+        error.code() == "GUI_RELEASE_DESCRIPTOR_WRONG_ELECTION"
             || error.code() == "GUI_RELEASE_WRONG_ELECTION",
         "unexpected code: {}",
         error.code()
     );
+    assert_ne!(error.code(), "GUI_PRIVATE_TRANSPORT_UNAVAILABLE");
     assert!(carrier.envelopes.is_empty());
     assert!(!ok(cast_record_exists_v1(
         &env.cast_dir,
@@ -215,6 +228,64 @@ fn network_failure_after_pending_stays_locked_and_retains_envelope() {
             .discard_prepared_ballot(&env.artifacts, ElectionLifecycleStateV1::Open),
         "GUI_BALLOT_ALREADY_CAST",
     );
+}
+
+// -------------------------------------------------------------------------
+// C2. Release-phase taxonomy (Failure 7 instrumentation): a PRE-staging
+// descriptor-authenticity failure and a POST-staging delivery outage are
+// DISTINGUISHABLE — different phase label, different durable state, different
+// recoverability — so a runtime failure is attributable to a phase instead of
+// being masked as one ambiguous "transport unavailable". This is the exact
+// distinction the real Crash-Test-3/4 evidence required: only a durable
+// CAST_PENDING is a recoverable retryable state; a pre-staging local failure
+// fails closed as NOT_CAST and is terminal.
+// -------------------------------------------------------------------------
+
+#[test]
+fn pre_staging_auth_failure_and_delivery_outage_are_distinguishable() {
+    // (1) PRE-staging: an unverifiable descriptor fails closed in the
+    //     descriptor-auth phase — terminal, NOT_CAST, nothing staged, and NOT
+    //     the transient transport-unavailable code (so it is never auto-retried
+    //     as if it were a temporary ballot-office outage).
+    let env = ReleaseEnv::new("release-phase-taxonomy-auth");
+    let mut fixture = env.prepared_fixture(b"candidate-a");
+    let untrusted = env.descriptor_signed_by(&fixture, &SigningKey::from_bytes(&[0x71; 32]));
+    let mut carrier = RecordingCarrier::accepting(vec![0xAA; 8]);
+    let error = err(fixture.release(&env, &untrusted, &mut carrier));
+    assert_eq!(error.context(), Some("release-descriptor-auth"));
+    assert!(error.code().starts_with("GUI_RELEASE_DESCRIPTOR_"));
+    assert_ne!(error.code(), "GUI_PRIVATE_TRANSPORT_UNAVAILABLE");
+    assert!(carrier.envelopes.is_empty(), "no bytes may leave pre-staging");
+    assert!(!ok(cast_record_exists_v1(
+        &env.cast_dir,
+        &fixture.manifest_hex,
+        &fixture.fingerprint
+    )));
+    assert_eq!(fixture.session.cast_lock_state(), GuiVoterCastLockStateV1::NotCast);
+
+    // (2) POST-staging: a valid, authenticated descriptor with a dead carrier
+    //     (the ballot office is unreachable) stages the exact envelope, persists
+    //     CAST_PENDING, and RETURNS a recoverable pending result — never a thrown
+    //     terminal error. This is the state Crash Test 4 must reach.
+    let env2 = ReleaseEnv::new("release-phase-taxonomy-delivery");
+    let mut fixture2 = env2.prepared_fixture(b"candidate-a");
+    let descriptor = env2.descriptor(&fixture2);
+    let mut dead = RecordingCarrier::failing();
+    let result = ok(fixture2.release(&env2, &descriptor, &mut dead));
+    assert_eq!(result.cast_lock_state, "CAST_PENDING");
+    assert_eq!(result.diagnostic_stage, Some("PRIVATE_TRANSPORT_UNAVAILABLE"));
+    assert_eq!(dead.envelopes.len(), 1, "the carrier was invoked (post-staging)");
+    assert!(ok(cast_record_exists_v1(
+        &env2.cast_dir,
+        &fixture2.manifest_hex,
+        &fixture2.fingerprint
+    )));
+    assert!(
+        staged_release_envelope_path_v1(&env2.staging_dir, &fixture2.manifest_hex, &fixture2.fingerprint)
+            .exists(),
+        "the exact envelope is durably staged before delivery is attempted",
+    );
+    assert_eq!(fixture2.session.cast_lock_state(), GuiVoterCastLockStateV1::CastPending);
 }
 
 // -------------------------------------------------------------------------

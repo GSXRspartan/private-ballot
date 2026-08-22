@@ -18,7 +18,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { voterStages } from "../src/voterProgress.ts";
+import {
+  reviewStageReached,
+  voteStageReached,
+  voterStages,
+  type VoterStageReconstructionInput,
+} from "../src/voterProgress.ts";
 import {
   organizerGuidedControls,
   organizerPhaseHeading,
@@ -42,17 +47,31 @@ describe("vote guided-mode derivation", () => {
     assert.match(vote, /const currentStageKey =/);
     assert.match(vote, /guidedStages\.find\(\(stage\) => stage\.state === "current"\)/);
     assert.match(vote, /const guidedStageDone =/);
-    // The same inputs as the progress indicator; nothing new is fetched.
+    // The same inputs as the progress indicator; nothing new is fetched. The
+    // review/vote gates are RECONSTRUCTED from durable/session backend signals
+    // so navigation or a restart never snaps the workflow back (Failure 1).
     for (const input of [
       "electionLoaded: election !== null",
-      "reviewPassed: credentialStage",
+      "reviewPassed: reviewReached",
       "identityReady: canProceedAfterCredential(credential)",
-      "voteEntered: selectionStage",
+      "voteEntered: voteReached",
       'ballotReady: workflow?.prepared_ballot.state === "Ready"',
       "castState,",
     ]) {
       assert.ok(vote.includes(input), `guided derivation missing input: ${input}`);
     }
+    // Reconstruction is derived from backend state, not just the mount-reset
+    // in-component gate booleans.
+    assert.match(vote, /reviewStageReached\(credentialStage, stageReconstruction\)/);
+    assert.match(vote, /voteStageReached\(selectionStage, stageReconstruction\)/);
+    assert.match(vote, /credentialLoaded: !!credential\?\.credential_loaded/);
+    assert.match(vote, /selectionLoaded: !!selection\?\.selection_loaded/);
+    // The Vote screen re-reads the authoritative workflow on entry so the
+    // reconstruction has real state to work from after navigation/restart.
+    assert.match(vote, /void refreshWorkflow\(false\)/);
+    // The progress indicator reuses the SAME reconstructed stages (single
+    // source of truth), so the bar and the cards can never disagree.
+    assert.match(vote, /steps=\{guidedStages\}/);
   });
 
   it("keeps the five-stage indicator functional with aria-current", () => {
@@ -68,6 +87,95 @@ describe("vote guided-mode derivation", () => {
     assert.equal(steps.filter((s) => s.state === "current").length, 1);
     const progress = readProjectFile("src/components/ProgressSteps.tsx");
     assert.match(progress, /aria-current=\{step\.state === "current" \? "step" : undefined\}/);
+  });
+});
+
+// -------------------------------------------------------------------------
+// VOTE: guided-stage reconstruction across navigation / restart (Failure 1)
+// -------------------------------------------------------------------------
+
+describe("voter guided-stage reconstruction", () => {
+  const none: VoterStageReconstructionInput = {
+    credentialLoaded: false,
+    identityReady: false,
+    selectionLoaded: false,
+    ballotReady: false,
+    castLocked: false,
+  };
+
+  it("without any backend progress, only the in-component gate advances", () => {
+    assert.equal(reviewStageReached(false, none), false);
+    assert.equal(reviewStageReached(true, none), true);
+    assert.equal(voteStageReached(false, none), false);
+    assert.equal(voteStageReached(true, none), true);
+  });
+
+  it("navigation with an intact backend session keeps the voter past Review and Vote", () => {
+    // Same-process navigation: the backend session still holds the loaded
+    // credential + selection even though credentialStage/selectionStage reset.
+    const intact: VoterStageReconstructionInput = {
+      ...none,
+      credentialLoaded: true,
+      identityReady: true,
+      selectionLoaded: true,
+    };
+    assert.equal(reviewStageReached(false, intact), true);
+    assert.equal(voteStageReached(false, intact), true);
+  });
+
+  it("restart before submission: identity durable, selection lost → back to Vote, not the start", () => {
+    // Only the durable credential survives a restart of an unsubmitted ballot;
+    // the session selection/prepared ballot are gone (no ballot was created).
+    const restarted: VoterStageReconstructionInput = {
+      ...none,
+      credentialLoaded: true,
+      identityReady: true,
+    };
+    assert.equal(reviewStageReached(false, restarted), true, "review stays passed");
+    assert.equal(voteStageReached(false, restarted), false, "returns to Vote to re-select");
+  });
+
+  it("a durable locked ballot (CAST_PENDING/CAST) keeps Review and Vote reached after restart", () => {
+    // A locked ballot implies the credential was used; on restart it is
+    // re-installed from the durable store and re-verified eligible.
+    const locked: VoterStageReconstructionInput = {
+      ...none,
+      credentialLoaded: true,
+      identityReady: true,
+      castLocked: true,
+    };
+    assert.equal(reviewStageReached(false, locked), true);
+    assert.equal(voteStageReached(false, locked), true);
+    // And the derived stages land on Submit, never earlier.
+    const stages = voterStages({
+      electionLoaded: true,
+      reviewPassed: reviewStageReached(false, locked),
+      identityReady: true,
+      voteEntered: voteStageReached(false, locked),
+      choiceMade: false,
+      ballotReady: false,
+      castState: "CAST_PENDING",
+    });
+    const current = stages.filter((s) => s.state === "current");
+    assert.equal(current.length, 1);
+    assert.equal(current[0].key, "Submit");
+  });
+
+  it("reconstruction is monotonic and never fabricates progress beyond signals", () => {
+    // A prepared ballot implies Vote reached; it must NOT imply CAST.
+    const prepared: VoterStageReconstructionInput = { ...none, ballotReady: true };
+    assert.equal(voteStageReached(false, prepared), true);
+    const stages = voterStages({
+      electionLoaded: true,
+      reviewPassed: reviewStageReached(false, prepared),
+      identityReady: true,
+      voteEntered: voteStageReached(false, prepared),
+      choiceMade: false,
+      ballotReady: true,
+      castState: "NOT_CAST",
+    });
+    // Submit is the current (not done) stage; a crash never forges a CAST.
+    assert.ok(stages.every((s) => !(s.key === "Submit" && s.state === "done")));
   });
 });
 

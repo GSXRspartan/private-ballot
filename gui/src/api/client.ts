@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActiveWorkspaceIdsV1,
   GuiAnchorConfigInspectionV1,
   GuiAnchorEvidenceInspectionV1,
   GuiAnchorSnapshotInspectionV1,
@@ -122,6 +123,8 @@ export const api = {
 
   listElectionWorkspaces: () =>
     call<GuiElectionWorkspaceSummaryV1[]>("list_election_workspaces"),
+  activeWorkspaceIds: () =>
+    call<ActiveWorkspaceIdsV1>("active_workspace_ids"),
   resumeElectionWorkspace: (workspaceId: string) =>
     call<GuiElectionWorkspaceResumeResultV1>("resume_election_workspace", {
       workspaceId,

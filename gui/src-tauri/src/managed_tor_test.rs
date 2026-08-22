@@ -22,7 +22,7 @@
 
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::Child;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -33,9 +33,9 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
-    ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1,
-    SystemManagedTorReadinessProbeV1, SystemManagedTorSpawnerV1, TorCarrierTimeoutsV1,
-    TorSocksPrivateReleaseCarrierV1, evaluate_managed_tor_readiness_v1,
+    ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1, ManagedTorSpawnerV1,
+    SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    evaluate_managed_tor_readiness_v1,
 };
 use tauri::{AppHandle, Manager};
 
@@ -85,6 +85,186 @@ fn reserve_loopback_socks_port() -> Result<u16, CommandError> {
     Ok(port)
 }
 
+/// Allocates a fresh, app-owned run directory for ONE managed-Tor start under
+/// the election-scoped base directory.
+///
+/// A hard-killed application can leave an orphaned `tor.exe` still holding the
+/// lock of the run directory it was using — and the orphan is unowned after the
+/// kill (its process handle is gone; a recorded PID could have been reused), so
+/// it can neither be proven ours nor safely signalled. Giving every start its
+/// OWN fresh run directory makes the next start immune to that stale lock
+/// regardless of the orphan: a brand-new directory has no lock. This mirrors the
+/// existing dynamic-SOCKS-port defence (a fresh port each start) for the OTHER
+/// resource an orphan can hold — the data directory — which was the actual
+/// blocker behind the post-hard-kill `GUI_TOR_START_FAILED`.
+///
+/// The directory name is app-generated (nanoseconds + pid + attempt); no remote
+/// value can steer it.
+pub(crate) fn fresh_run_directory(base: &Path) -> Result<PathBuf, CommandError> {
+    std::fs::create_dir_all(base).map_err(|_| CommandError::app_data_unavailable())?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    for attempt in 0_u128..1024 {
+        let run_dir = base.join(format!("run-{nanos:032x}{pid:08x}{attempt:04x}"));
+        match std::fs::create_dir(&run_dir) {
+            Ok(()) => return Ok(run_dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(CommandError::app_data_unavailable()),
+        }
+    }
+    Err(CommandError::new(
+        "GUI_TOR_RUN_DIR_COLLISION",
+        "UNAVAILABLE",
+        "could not allocate a fresh managed-Tor run directory",
+    ))
+}
+
+/// Best-effort, ownership-scoped cleanup of prior managed-Tor run directories.
+///
+/// Removes `run-*` subdirectories under the app-owned base that are NOT the
+/// current run. A directory still held by an orphaned `tor.exe` (its lock/cache
+/// files open) fails to remove and is simply skipped — the orphan is left
+/// untouched and no unrelated process, path, or Tor installation is ever
+/// signalled or deleted. Only directories this application created under its own
+/// election-scoped base are considered.
+pub(crate) fn remove_stale_run_directories(base: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep {
+            continue;
+        }
+        let is_owned_run_dir = path.is_dir()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("run-"));
+        if is_owned_run_dir {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Distinguishable managed-Tor start-failure modes, derived from the child's
+/// captured stderr. The user-facing message stays friendly; this classification
+/// exists so diagnostics and tests can tell the modes apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManagedTorStartFailureKind {
+    /// Tor could not lock its data directory (another Tor holds it).
+    DataDirectoryLock,
+    /// Tor could not bind its configured port.
+    PortBindFailure,
+    /// Tor rejected its configuration.
+    ConfigError,
+    /// Tor started but exited before the SOCKS listener became ready.
+    ExitedEarly,
+    /// Tor stayed up but the SOCKS listener never became ready in time.
+    ReadinessTimeout,
+}
+
+impl ManagedTorStartFailureKind {
+    /// Short, bounded, path-free diagnostic label attached to the error context.
+    pub(crate) const fn as_context_label(self) -> &'static str {
+        match self {
+            Self::DataDirectoryLock => "tor-datadir-lock",
+            Self::PortBindFailure => "tor-port-bind-failure",
+            Self::ConfigError => "tor-config-error",
+            Self::ExitedEarly => "tor-exited-early",
+            Self::ReadinessTimeout => "tor-socks-readiness-timeout",
+        }
+    }
+
+    /// Organizer-side variant of [`Self::as_context_label`]. The organizer
+    /// intake has no SOCKS listener (it publishes a hidden service), so the
+    /// timeout label is worded as a hidden-service readiness timeout. The label
+    /// is bounded, path-free, and secret-free.
+    pub(crate) const fn as_organizer_context_label(self) -> &'static str {
+        match self {
+            Self::DataDirectoryLock => "organizer-tor-datadir-lock",
+            Self::PortBindFailure => "organizer-tor-port-bind-failure",
+            Self::ConfigError => "organizer-tor-config-error",
+            Self::ExitedEarly => "organizer-tor-exited-early",
+            Self::ReadinessTimeout => "organizer-readiness-timeout",
+        }
+    }
+}
+
+/// Pure classifier over a tail of the managed-Tor child's stderr. Never does
+/// I/O, so it is unit-testable without a real Tor binary or network.
+pub(crate) fn classify_managed_tor_start_failure(stderr_tail: &str) -> ManagedTorStartFailureKind {
+    let lower = stderr_tail.to_ascii_lowercase();
+    let has = |needle: &str| lower.contains(needle);
+    let datadir_lock = has("could not lock")
+        || has("another tor process")
+        || has("is another tor")
+        || has("lockfile")
+        || (has("data directory") && has("lock"));
+    let port_bind =
+        has("could not bind") || has("address already in use") || has("in use by another");
+    let config_error = has("failed to parse")
+        || has("unknown option")
+        || (has("config") && has("error"))
+        || (has("invalid") && has("torrc"));
+    if datadir_lock {
+        ManagedTorStartFailureKind::DataDirectoryLock
+    } else if port_bind {
+        ManagedTorStartFailureKind::PortBindFailure
+    } else if config_error {
+        ManagedTorStartFailureKind::ConfigError
+    } else if stderr_tail.trim().is_empty() {
+        // No captured output: Tor stayed up (writes nothing on a clean run) but
+        // never became ready in time, or exited without a message.
+        ManagedTorStartFailureKind::ReadinessTimeout
+    } else if has("[err]") || has("exiting") || has("exit") {
+        ManagedTorStartFailureKind::ExitedEarly
+    } else {
+        ManagedTorStartFailureKind::ReadinessTimeout
+    }
+}
+
+/// Reads the tail of a managed-Tor stderr log and classifies the start failure.
+/// Missing/unreadable log ⇒ treated as an empty tail (readiness timeout).
+pub(crate) fn classify_start_failure_from_log(stderr_log: &Path) -> ManagedTorStartFailureKind {
+    const TAIL_BYTES: usize = 4096;
+    let contents = std::fs::read_to_string(stderr_log).unwrap_or_default();
+    let tail = if contents.len() > TAIL_BYTES {
+        &contents[contents.len() - TAIL_BYTES..]
+    } else {
+        contents.as_str()
+    };
+    classify_managed_tor_start_failure(tail)
+}
+
+/// GUI-local Tor spawner that is identical to the shared reviewed spawner (an
+/// argument-vector spawn, no shell, no PATH resolution) EXCEPT that the child's
+/// stderr is redirected to an app-owned per-run log file instead of being
+/// discarded, so a start failure can be classified (see
+/// [`classify_managed_tor_start_failure`]). Redirecting to a FILE — never a pipe
+/// — avoids any pipe-buffer back-pressure on a long-running healthy child.
+pub(crate) struct DiagnosticTorSpawnerV1 {
+    pub(crate) stderr_log: PathBuf,
+}
+
+impl ManagedTorSpawnerV1 for DiagnosticTorSpawnerV1 {
+    type Child = Child;
+
+    fn spawn(&self, executable: &Path, config_file: &Path) -> std::io::Result<Child> {
+        let log = std::fs::File::create(&self.stderr_log)?;
+        Command::new(executable)
+            .arg("-f")
+            .arg(config_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log))
+            .spawn()
+    }
+}
+
 /// Bounded timeouts for the FRESH SOCKS readiness preflight on the submit/retry
 /// path (user-initiated; bounded but not a polling loop).
 const PREFLIGHT_SOCKS_CONNECT: Duration = Duration::from_secs(5);
@@ -104,6 +284,16 @@ pub(crate) struct ManagedTorTestState {
     tor_exe_path: PathBuf,
     tor_data_dir: PathBuf,
     socks_port: u16,
+}
+
+pub(crate) fn configured_transport_descriptor(
+    state: &AppState,
+) -> Result<Option<TransportDescriptorV1>, CommandError> {
+    let managed = state
+        .managed_tor_test
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    Ok(managed.as_ref().map(|m| m.descriptor.clone()))
 }
 
 /// Serializable runtime configuration supplied by the user.
@@ -353,6 +543,31 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
     // record it as authoritative BEFORE building the Tor config, so a reconnect
     // after a child exit never reuses a possibly-orphaned port.
     let fresh_port = reserve_loopback_socks_port()?;
+    // Clone the election-scoped base directory out of the lock so the directory
+    // I/O below runs unlocked.
+    let base_dir = {
+        let managed = state
+            .managed_tor_test
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(m) = managed.as_ref() else {
+            return Err(CommandError::new(
+                "GUI_TOR_TEST_NOT_CONFIGURED",
+                "INVALID_INPUT",
+                "configure the managed Tor test transport first",
+            ));
+        };
+        m.tor_data_dir.clone()
+    };
+    // Allocate a FRESH, app-owned run directory for THIS start so a stale data-
+    // directory lock left by an orphaned tor.exe (after a hard kill) can never
+    // block the next start — the dynamic SOCKS port alone did not help because
+    // the actual blocker was the data-directory lock, not the port. Then clean
+    // up prior owned run directories that are no longer locked (best-effort;
+    // ownership-scoped; a still-locked orphan directory is simply skipped).
+    let run_dir = fresh_run_directory(&base_dir)?;
+    remove_stale_run_directories(&base_dir, &run_dir);
+    let stderr_log = run_dir.join("tor-stderr.log");
     let config = {
         let mut managed = state
             .managed_tor_test
@@ -369,8 +584,8 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
         m.socks_addr = SocketAddr::from(([127, 0, 0, 1], fresh_port));
         ManagedTorConfigV1 {
             executable: m.tor_exe_path.clone(),
-            data_directory: m.tor_data_dir.clone(),
-            config_file: m.tor_data_dir.join("voter-torrc"),
+            data_directory: run_dir.clone(),
+            config_file: run_dir.join("voter-torrc"),
             socks_port: m.socks_port,
             startup_timeout: Duration::from_secs(60),
         }
@@ -388,17 +603,23 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
             "invalid SOCKS endpoint",
         )
     })?;
+    let spawner = DiagnosticTorSpawnerV1 {
+        stderr_log: stderr_log.clone(),
+    };
     let start = Instant::now();
-    let controller =
-        ManagedTorControllerV1::start(&config, &SystemManagedTorSpawnerV1, &mut probe, || {
-            start.elapsed()
-        })
+    let controller = ManagedTorControllerV1::start(&config, &spawner, &mut probe, || start.elapsed())
         .map_err(|_| {
+            // Classify the failure from the captured child stderr so diagnostics
+            // and tests can distinguish spawn/early-exit/lock/bind/config/timeout.
+            // The user-facing message stays friendly; the bounded kind label is
+            // attached as error context (no path or secret).
+            let kind = classify_start_failure_from_log(&stderr_log);
             CommandError::new(
                 "GUI_TOR_START_FAILED",
                 "UNAVAILABLE",
                 "tor.exe failed to start or the SOCKS5 listener did not become ready",
             )
+            .with_context(kind.as_context_label().to_owned())
         })?;
 
     let mut managed = state
@@ -986,5 +1207,119 @@ mod tests {
                 voter_tor_data_subpath(&app_root(), bad).expect_err("non-canonical must reject");
             assert_eq!(error.code, "GUI_VOTER_TOR_INVALID_ELECTION");
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Hard-kill Tor recovery: fresh per-start run directory + ownership-scoped
+    // cleanup + diagnosable start failure (Failure 3).
+    // ---------------------------------------------------------------------
+
+    fn temp_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "tari-managed-tor-test-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("create temp base");
+        base
+    }
+
+    #[test]
+    fn each_start_gets_an_independent_fresh_run_directory() {
+        // The next start must never reuse a data directory whose lock a prior
+        // (possibly orphaned) tor.exe could still hold: every start allocates a
+        // brand-new, app-owned run directory under the election base.
+        let base = temp_base("fresh-run");
+        let first = fresh_run_directory(&base).expect("first run dir");
+        let second = fresh_run_directory(&base).expect("second run dir");
+        assert_ne!(first, second, "each start gets a distinct run directory");
+        assert!(first.starts_with(&base) && second.starts_with(&base));
+        assert!(first.is_dir() && second.is_dir());
+        for dir in [&first, &second] {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            assert!(name.starts_with("run-"), "run dir name is app-generated: {name}");
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn stale_run_directory_cleanup_is_ownership_scoped() {
+        // Cleanup removes prior owned `run-*` directories but never the current
+        // run and never non-run siblings (e.g. a legacy `tor-data` file or an
+        // unrelated directory). It is best-effort: an un-removable directory is
+        // skipped without error.
+        let base = temp_base("cleanup");
+        let keep = fresh_run_directory(&base).expect("current run dir");
+        let stale = fresh_run_directory(&base).expect("stale run dir");
+        // A non-run sibling that must be preserved.
+        let unrelated = base.join("keep-me");
+        std::fs::create_dir_all(&unrelated).expect("unrelated dir");
+        std::fs::write(base.join("legacy-lock"), b"x").expect("legacy file");
+
+        remove_stale_run_directories(&base, &keep);
+
+        assert!(keep.is_dir(), "the current run directory is never removed");
+        assert!(!stale.exists(), "a prior owned run directory is cleaned up");
+        assert!(unrelated.is_dir(), "unrelated siblings are never touched");
+        assert!(base.join("legacy-lock").exists(), "non-run files are never touched");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn start_failure_modes_are_individually_diagnosable() {
+        use ManagedTorStartFailureKind::*;
+        // Representative real tor.exe stderr signatures for each mode.
+        assert_eq!(
+            classify_managed_tor_start_failure(
+                "[warn] Could not lock data directory. Is another Tor process running?"
+            ),
+            DataDirectoryLock,
+        );
+        assert_eq!(
+            classify_managed_tor_start_failure(
+                "[warn] Could not bind to 127.0.0.1:9050: Address already in use"
+            ),
+            PortBindFailure,
+        );
+        assert_eq!(
+            classify_managed_tor_start_failure("[err] Failed to parse/validate config: unknown option"),
+            ConfigError,
+        );
+        assert_eq!(
+            classify_managed_tor_start_failure("[err] Something fatal happened; exiting"),
+            ExitedEarly,
+        );
+        // A clean Tor writes nothing to stderr; an empty tail means it stayed up
+        // but the SOCKS listener never became ready in time.
+        assert_eq!(classify_managed_tor_start_failure(""), ReadinessTimeout);
+        assert_eq!(classify_managed_tor_start_failure("   \n  "), ReadinessTimeout);
+        // The labels are distinct, bounded, and path-free.
+        let labels = [
+            DataDirectoryLock,
+            PortBindFailure,
+            ConfigError,
+            ExitedEarly,
+            ReadinessTimeout,
+        ]
+        .map(ManagedTorStartFailureKind::as_context_label);
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "each mode has a distinct label");
+        for label in labels {
+            assert!(label.starts_with("tor-") && !label.contains('/') && !label.contains('\\'));
+        }
+    }
+
+    #[test]
+    fn classify_from_missing_log_is_a_bounded_readiness_timeout() {
+        let base = temp_base("missing-log");
+        let missing = base.join("run-x").join("tor-stderr.log");
+        assert_eq!(
+            classify_start_failure_from_log(&missing),
+            ManagedTorStartFailureKind::ReadinessTimeout,
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 }

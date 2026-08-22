@@ -315,6 +315,58 @@ fn draft_revision_is_versioned_and_discoverable_without_internal_path() {
 }
 
 #[test]
+fn allocated_but_unwritten_draft_never_appears_and_cannot_be_resumed() {
+    // Failure 2 invariant: opening Create Election allocates a draft workspace
+    // id but the shell now writes NO durable revision until the first real edit.
+    // A workspace directory with no revisions must therefore be INVISIBLE to
+    // Resume discovery (so no empty `draft-*` ghost row appears) and must not be
+    // resumable, so the ghost/undeletable-active contradiction cannot arise.
+    let dir = TestDir::new("workspace-draft-unwritten");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    // Allocation creates the directory (with empty revisions/commits) but the
+    // caller deliberately writes no revision — the new empty-draft behavior.
+    let workspace_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    assert!(root.join(&workspace_id).is_dir(), "dir is allocated");
+
+    // Not discoverable in Resume.
+    let summaries = ok(list_election_workspaces_v1(&root), "list workspaces");
+    assert!(
+        summaries.iter().all(|s| s.workspace_id != workspace_id),
+        "an unwritten draft must never appear in Resume Election"
+    );
+
+    // Not resumable: it fails closed rather than reviving an empty ghost draft.
+    let error = err(
+        resume_election_workspace_v1(&root, &workspace_id),
+        "unwritten draft must not resume",
+    );
+    assert_eq!(error.code(), "GUI_WORKSPACE_NOT_FOUND");
+
+    // Once a real edit writes a revision, it becomes discoverable as normal.
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "draft-election".to_owned(),
+            "Now it has real content".to_owned(),
+            "draft-revision".to_owned(),
+        ),
+        "draft basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &workspace_id, &draft),
+        "write draft",
+    );
+    let after = ok(list_election_workspaces_v1(&root), "list after first edit");
+    assert!(
+        after.iter().any(|s| s.workspace_id == workspace_id),
+        "a draft with a real edit is discoverable"
+    );
+}
+
+#[test]
 fn draft_created_then_resumed_preserves_public_organizer_fields() {
     let dir = TestDir::new("workspace-draft-resume");
     let root = ok(

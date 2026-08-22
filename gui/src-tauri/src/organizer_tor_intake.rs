@@ -46,10 +46,14 @@ use tari_cc_private_ballot_transport_gateway::{
 };
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
-    SystemManagedTorSpawnerV1, discover_organizer_onion_hostname_v1,
+    discover_organizer_onion_hostname_v1,
 };
 use tauri::{AppHandle, Manager};
 
+use crate::managed_tor_test::{
+    DiagnosticTorSpawnerV1, classify_start_failure_from_log, fresh_run_directory,
+    remove_stale_run_directories,
+};
 use crate::tor_support::{is_windows_reparse_point, resolve_tor_executable, validate_tor_exe};
 use crate::{AppState, CommandError};
 
@@ -79,7 +83,12 @@ pub(crate) struct OrganizerIntakeState {
     manifest_hash_hex: String,
     collector_addr: SocketAddr,
     onion_hostname: String,
+    /// The FRESH per-run Tor DataDirectory this start allocated (never the
+    /// persistent hidden-service directory). Diagnostics only.
     tor_data_dir: PathBuf,
+    /// The per-run captured Tor stderr log, used to classify a later early exit
+    /// into a bounded, path-free failure reason.
+    stderr_log: PathBuf,
     voter_bundle_path: PathBuf,
     durable_inbox_dir: PathBuf,
 }
@@ -100,6 +109,14 @@ pub struct OrganizerIntakeStatusV1 {
     pub election_bound: bool,
     /// The running intake is fully ready (runtime onion verified, worker alive).
     pub ready: bool,
+    /// A start attempt is recorded but a REQUIRED owned component (the Tor child
+    /// or the collector worker) has since died. This is a terminal, recoverable
+    /// failure — never an indefinite "starting" limbo. Restart clears it.
+    pub failed: bool,
+    /// Bounded, path-free, secret-free reason for [`Self::failed`] (e.g.
+    /// `organizer-tor-datadir-lock`, `organizer-tor-exited-early`,
+    /// `organizer-worker-exited`). `None` unless `failed` is true.
+    pub failure_reason: Option<String>,
     /// Ballots this intake run has uniquely accepted (worker-side aggregate).
     pub accepted_ballots: u64,
     // ---- Advanced / diagnostics (never secret) ----
@@ -177,12 +194,22 @@ fn ensure_app_owned_directory(dir: &Path) -> Result<(), CommandError> {
 }
 
 /// The fixed sub-paths inside one election transport root.
+///
+/// Two of these are PERSISTENT and election-scoped — they carry the onion
+/// identity and the organizer-private material and MUST survive every restart so
+/// already-distributed voter bundles stay valid: `hidden_service_dir` and
+/// `organizer_private_dir`. The Tor runtime DataDirectory is deliberately NOT a
+/// fixed persistent path: every start allocates a FRESH run directory under
+/// `tor_runs_base` (see [`start_intake_worker`]). This mirrors the voter-side
+/// hard-kill defence — an orphaned `tor.exe` that survives a Task-Manager kill of
+/// the app keeps the lock of the run directory it was using, so a brand-new run
+/// directory is immune to that stale lock while the SAME `hidden_service_dir`
+/// keeps the onion address and descriptor fingerprint stable across restarts.
 struct TransportPaths {
     organizer_private_dir: PathBuf,
-    tor_data_dir: PathBuf,
     hidden_service_dir: PathBuf,
-    provision_torrc: PathBuf,
-    intake_torrc: PathBuf,
+    /// Parent directory that holds the per-start `run-*` Tor DataDirectories.
+    tor_runs_base: PathBuf,
     voter_bundle_path: PathBuf,
 }
 
@@ -190,10 +217,8 @@ impl TransportPaths {
     fn under(root: &Path) -> Self {
         Self {
             organizer_private_dir: root.join("organizer-private"),
-            tor_data_dir: root.join("organizer-tor-data"),
             hidden_service_dir: root.join("organizer-hidden-service"),
-            provision_torrc: root.join("organizer-provision-torrc"),
-            intake_torrc: root.join("organizer-intake-torrc"),
+            tor_runs_base: root.join("organizer-tor-runs"),
             voter_bundle_path: root.join("voter-public-bundle.cbor"),
         }
     }
@@ -276,42 +301,76 @@ fn organizer_tor_status_blocking(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let running = managed.as_mut();
-    let (intake_running, election_bound, ready, accepted, diag) = match running {
-        Some(m) => {
-            let same_election = bound
-                .as_ref()
-                .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
-            let child_alive = m
-                .tor_child
-                .try_wait()
-                .map(|status| status.is_none())
-                .unwrap_or(false);
-            let ready = same_election && child_alive && m.service_loop.worker_is_alive();
-            let accepted = m.service_loop.accepted_unique_count();
-            let diag = Some((
-                m.onion_hostname.clone(),
-                descriptor_fingerprint_hex(&m.descriptor),
-                m.collector_addr.to_string(),
-                m.tor_data_dir.to_string_lossy().into_owned(),
-                m.voter_bundle_path.to_string_lossy().into_owned(),
-                m.durable_inbox_dir.to_string_lossy().into_owned(),
-            ));
-            (true, same_election, ready, accepted, diag)
-        }
-        None => (false, false, false, 0, None),
-    };
+    let (intake_running, election_bound, ready, failed, failure_reason, accepted, diag) =
+        match running {
+            Some(m) => {
+                let same_election = bound
+                    .as_ref()
+                    .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
+                let child_alive = m
+                    .tor_child
+                    .try_wait()
+                    .map(|status| status.is_none())
+                    .unwrap_or(false);
+                let worker_alive = m.service_loop.worker_is_alive();
+                let ready = same_election && child_alive && worker_alive;
+                // A recorded intake whose owned Tor child or collector worker has
+                // died is a bounded FAILED state — never an indefinite "starting".
+                let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
+                let failed = failure_reason.is_some();
+                let accepted = m.service_loop.accepted_unique_count();
+                let diag = Some((
+                    m.onion_hostname.clone(),
+                    descriptor_fingerprint_hex(&m.descriptor),
+                    m.collector_addr.to_string(),
+                    m.tor_data_dir.to_string_lossy().into_owned(),
+                    m.voter_bundle_path.to_string_lossy().into_owned(),
+                    m.durable_inbox_dir.to_string_lossy().into_owned(),
+                ));
+                (true, same_election, ready, failed, failure_reason, accepted, diag)
+            }
+            None => (false, false, false, false, None, 0, None),
+        };
 
-    let message = status_message(tor_found, transport_provisioned, intake_running, election_bound);
+    let message = status_message(
+        tor_found,
+        transport_provisioned,
+        intake_running,
+        election_bound,
+        failed,
+    );
     Ok(build_status(
         tor_found,
         transport_provisioned,
         intake_running,
         election_bound,
         ready,
+        failed,
+        failure_reason,
         accepted,
         diag,
         message,
     ))
+}
+
+/// Classifies why a recorded intake is unhealthy, or `None` when both the owned
+/// Tor child and the collector worker are alive. A dead Tor child is classified
+/// from its captured per-run stderr log (bounded, path-free); a dead worker with
+/// a live child is reported as `organizer-worker-exited`.
+fn intake_failure_reason(
+    m: &OrganizerIntakeState,
+    child_alive: bool,
+    worker_alive: bool,
+) -> Option<String> {
+    if child_alive && worker_alive {
+        return None;
+    }
+    if !child_alive {
+        let kind = classify_start_failure_from_log(&m.stderr_log);
+        return Some(kind.as_organizer_context_label().to_owned());
+    }
+    // Child alive but the collector worker thread has exited.
+    Some("organizer-worker-exited".to_owned())
 }
 
 /// Starts (or reuses) private ballot intake for the currently loaded election.
@@ -344,23 +403,46 @@ fn start_private_intake_blocking(
 
     let bound = bound_election(state)?;
 
-    // If an intake is already running, either it is for THIS election (return
-    // its status, idempotent) or for a different one (require an explicit stop).
-    {
+    // If an intake is already recorded, resolve it into exactly one of:
+    //   * healthy + THIS election      → return its status (idempotent);
+    //   * healthy + a DIFFERENT election → require an explicit stop;
+    //   * unhealthy (owned Tor child or worker died, e.g. after a hard-kill
+    //     restart) → REAP it and fall through to a single fresh start, so one
+    //     Start click recovers a failed intake without ever stacking a second
+    //     controller/child for the same app+election.
+    let dead_intake = {
         let mut managed = state
             .organizer_intake
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         if let Some(m) = managed.as_mut() {
-            if m.manifest_hash_hex == bound.manifest_hash_hex {
-                return Ok(running_status(m, true));
+            let child_alive = m
+                .tor_child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false);
+            let healthy = child_alive && m.service_loop.worker_is_alive();
+            if healthy {
+                if m.manifest_hash_hex == bound.manifest_hash_hex {
+                    return Ok(running_status(m, true, child_alive));
+                }
+                return Err(CommandError::new(
+                    "GUI_ORGANIZER_INTAKE_OTHER_ELECTION",
+                    "INVALID_LIFECYCLE_TRANSITION",
+                    "stop the running private intake before starting it for a different election",
+                ));
             }
-            return Err(CommandError::new(
-                "GUI_ORGANIZER_INTAKE_OTHER_ELECTION",
-                "INVALID_LIFECYCLE_TRANSITION",
-                "stop the running private intake before starting it for a different election",
-            ));
+            // Unhealthy: take ownership out of the slot so the fresh start below
+            // installs the ONLY current controller. Reap outside the lock.
+            managed.take()
+        } else {
+            None
         }
+    };
+    if let Some(mut dead) = dead_intake {
+        let _ = dead.service_loop.stop(COLLECTOR_STOP_TIMEOUT);
+        let _ = dead.tor_child.kill();
+        let _ = dead.tor_child.wait();
     }
 
     // Build app-owned, election-scoped storage.
@@ -378,7 +460,9 @@ fn start_private_intake_blocking(
     // Run the vetted intake orchestration; on success this returns the running
     // state to store.
     let running = start_intake_worker(app, &tor_executable, &paths, &bound)?;
-    let status = running_status(&running, true);
+    // The worker was just confirmed alive (child liveness re-checked after
+    // discovery, worker liveness checked in step 9), so report it as running.
+    let status = running_status(&running, true, true);
     let mut managed = state
         .organizer_intake
         .lock()
@@ -535,10 +619,19 @@ fn provision_transport(
         election_id: bound.election_id.clone(),
         manifest_hash: bound.manifest_hash,
     };
+    // A FRESH throwaway DataDirectory for the one-shot hostname-discovery run, so
+    // even first-time provisioning can never collide with an orphaned tor.exe
+    // that still holds a prior run directory's lock. The onion identity is
+    // written to the PERSISTENT hidden-service directory, not this run directory.
+    ensure_app_owned_directory(&paths.tor_runs_base)?;
+    let run_dir = fresh_run_directory(&paths.tor_runs_base)?;
+    remove_stale_run_directories(&paths.tor_runs_base, &run_dir);
+    let provision_torrc = run_dir.join("organizer-provision-torrc");
+    let stderr_log = run_dir.join("tor-stderr.log");
     let tor_config = OrganizerHiddenServiceTorConfigV1 {
         executable: tor_executable.to_path_buf(),
-        data_directory: paths.tor_data_dir.clone(),
-        config_file: paths.provision_torrc.clone(),
+        data_directory: run_dir.clone(),
+        config_file: provision_torrc.clone(),
         hidden_service_dir: paths.hidden_service_dir.clone(),
         collector_port: PROVISION_COLLECTOR_PORT,
         startup_timeout: TOR_STARTUP_TIMEOUT,
@@ -551,8 +644,11 @@ fn provision_transport(
         )
     })?;
 
-    let mut child = SystemManagedTorSpawnerV1
-        .spawn(tor_executable, &paths.provision_torrc)
+    let spawner = DiagnosticTorSpawnerV1 {
+        stderr_log: stderr_log.clone(),
+    };
+    let mut child = spawner
+        .spawn(tor_executable, &provision_torrc)
         .map_err(|_| tor_start_failed())?;
     let timeout = DiscoveryTimeoutV1::new(TOR_STARTUP_TIMEOUT);
     let hostname = {
@@ -567,7 +663,9 @@ fn provision_transport(
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(hostname_discovery_failed());
+                let kind = classify_start_failure_from_log(&stderr_log);
+                return Err(hostname_discovery_failed()
+                    .with_context(kind.as_organizer_context_label().to_owned()));
             }
         }
     };
@@ -588,7 +686,9 @@ fn provision_transport(
         &material,
         &binding,
         hostname,
-        &paths.tor_data_dir,
+        // Recorded as inert bundle metadata only (never validated or reused at
+        // runtime); the real DataDirectory is a fresh per-start run directory.
+        &paths.tor_runs_base,
         &paths.hidden_service_dir,
     )
     .map_err(|_| {
@@ -655,11 +755,22 @@ fn start_intake_worker(
         )
     })?;
 
-    // 5. Write the intake torrc with the ACTUAL collector port; launch Tor.
+    // 5. Allocate a FRESH per-start Tor DataDirectory (never the persistent
+    // hidden-service directory), so an orphaned tor.exe surviving a Task-Manager
+    // hard-kill of a prior app instance — which still holds the lock of the run
+    // directory it was using — can never block this start. The SAME persistent
+    // `hidden_service_dir` keeps the onion address/fingerprint stable across
+    // restarts. Then write the intake torrc (inside the run directory) with the
+    // ACTUAL collector port and launch Tor with a per-run captured stderr log.
+    ensure_app_owned_directory(&paths.tor_runs_base)?;
+    let run_dir = fresh_run_directory(&paths.tor_runs_base)?;
+    remove_stale_run_directories(&paths.tor_runs_base, &run_dir);
+    let intake_torrc = run_dir.join("organizer-intake-torrc");
+    let stderr_log = run_dir.join("tor-stderr.log");
     let tor_config = OrganizerHiddenServiceTorConfigV1 {
         executable: tor_executable.to_path_buf(),
-        data_directory: paths.tor_data_dir.clone(),
-        config_file: paths.intake_torrc.clone(),
+        data_directory: run_dir.clone(),
+        config_file: intake_torrc.clone(),
         hidden_service_dir: paths.hidden_service_dir.clone(),
         collector_port: collector_addr.port(),
         startup_timeout: TOR_STARTUP_TIMEOUT,
@@ -671,14 +782,25 @@ fn start_intake_worker(
             "the organizer intake Tor configuration could not be written",
         )
     })?;
-    let mut child = SystemManagedTorSpawnerV1
-        .spawn(tor_executable, &paths.intake_torrc)
+    let spawner = DiagnosticTorSpawnerV1 {
+        stderr_log: stderr_log.clone(),
+    };
+    let mut child = spawner
+        .spawn(tor_executable, &intake_torrc)
         .map_err(|_| tor_start_failed())?;
 
     // 6. Discover the runtime hostname (bounded), watching child liveness. The
     // liveness closure mutably borrows `child`; it is moved into the discovery
     // call, releasing the borrow before any later `child.kill()`/`wait()`. The
     // early-return branch must not touch `child` while the closure holds it.
+    //
+    // NOTE: the hidden-service `hostname` file is PERSISTENT — on a restart it is
+    // already present from the prior run, so discovery can return immediately
+    // while the freshly-spawned child is still bootstrapping. That is only safe
+    // because the child now runs in its OWN fresh DataDirectory and therefore
+    // stays alive; the post-discovery liveness recheck below plus the status
+    // command's continuous child-liveness check catch any early exit and surface
+    // a bounded FAILED state instead of an indefinite "starting".
     let timeout = DiscoveryTimeoutV1::new(TOR_STARTUP_TIMEOUT);
     let mut child_alive = || {
         child
@@ -687,7 +809,8 @@ fn start_intake_worker(
             .unwrap_or(false)
     };
     if !child_alive() {
-        return Err(tor_start_failed());
+        let kind = classify_start_failure_from_log(&stderr_log);
+        return Err(tor_start_failed().with_context(kind.as_organizer_context_label().to_owned()));
     }
     let runtime_hostname =
         match discover_organizer_onion_hostname_v1(&tor_config, &timeout, child_alive) {
@@ -695,9 +818,26 @@ fn start_intake_worker(
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(hostname_discovery_failed());
+                let kind = classify_start_failure_from_log(&stderr_log);
+                return Err(hostname_discovery_failed()
+                    .with_context(kind.as_organizer_context_label().to_owned()));
             }
         };
+
+    // 6b. Post-discovery liveness recheck: discovery can succeed off the
+    // PERSISTENT hostname file before the fresh child has fully settled, so
+    // confirm the owned child did not exit immediately (e.g. a residual lock or
+    // config fault). A dead child here is a bounded, classified start failure —
+    // never a false "running".
+    if child
+        .try_wait()
+        .map(|status| status.is_some())
+        .unwrap_or(true)
+    {
+        let _ = child.wait();
+        let kind = classify_start_failure_from_log(&stderr_log);
+        return Err(tor_start_failed().with_context(kind.as_organizer_context_label().to_owned()));
+    }
 
     // 7. Fail-closed: runtime onion MUST equal the signed descriptor onion
     // BEFORE any request can be serviced.
@@ -768,7 +908,8 @@ fn start_intake_worker(
         manifest_hash_hex: bound.manifest_hash_hex.clone(),
         collector_addr,
         onion_hostname: runtime_hostname,
-        tor_data_dir: paths.tor_data_dir.clone(),
+        tor_data_dir: run_dir,
+        stderr_log,
         voter_bundle_path: paths.voter_bundle_path.clone(),
         durable_inbox_dir,
     })
@@ -813,15 +954,27 @@ fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
 // Status helpers
 // -------------------------------------------------------------------------
 
-fn running_status(m: &OrganizerIntakeState, election_bound: bool) -> OrganizerIntakeStatusV1 {
+/// Builds a status for a recorded running intake. `child_alive` MUST be the
+/// caller's fresh `try_wait` observation of the owned Tor child, so a dead child
+/// is reported as a bounded FAILED state and never a false "running".
+fn running_status(
+    m: &OrganizerIntakeState,
+    election_bound: bool,
+    child_alive: bool,
+) -> OrganizerIntakeStatusV1 {
     let accepted = m.service_loop.accepted_unique_count();
-    let ready = election_bound && m.service_loop.worker_is_alive();
+    let worker_alive = m.service_loop.worker_is_alive();
+    let ready = election_bound && child_alive && worker_alive;
+    let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
+    let failed = failure_reason.is_some();
     OrganizerIntakeStatusV1 {
         tor_found: true,
         transport_provisioned: true,
         intake_running: true,
         election_bound,
         ready,
+        failed,
+        failure_reason,
         accepted_ballots: accepted,
         onion_hostname: Some(m.onion_hostname.clone()),
         descriptor_fingerprint: descriptor_fingerprint_hex(&m.descriptor),
@@ -829,7 +982,9 @@ fn running_status(m: &OrganizerIntakeState, election_bound: bool) -> OrganizerIn
         tor_data_dir: Some(m.tor_data_dir.to_string_lossy().into_owned()),
         voter_bundle_path: Some(m.voter_bundle_path.to_string_lossy().into_owned()),
         durable_inbox_dir: Some(m.durable_inbox_dir.to_string_lossy().into_owned()),
-        message: if ready {
+        message: if failed {
+            "Private intake could not start."
+        } else if ready {
             "Private intake ready."
         } else {
             "Private intake is starting."
@@ -844,6 +999,8 @@ fn build_status(
     intake_running: bool,
     election_bound: bool,
     ready: bool,
+    failed: bool,
+    failure_reason: Option<String>,
     accepted: u64,
     diag: Option<(String, Option<String>, String, String, String, String)>,
     message: &'static str,
@@ -858,6 +1015,8 @@ fn build_status(
         intake_running,
         election_bound,
         ready,
+        failed,
+        failure_reason,
         accepted_ballots: accepted,
         onion_hostname: onion,
         descriptor_fingerprint: fingerprint,
@@ -874,8 +1033,11 @@ fn status_message(
     transport_provisioned: bool,
     intake_running: bool,
     election_bound: bool,
+    failed: bool,
 ) -> &'static str {
-    if intake_running && !election_bound {
+    if failed {
+        "Private intake could not start. Restart it to try again."
+    } else if intake_running && !election_bound {
         "Private intake is running for a different election. Stop it to switch."
     } else if intake_running {
         "Private intake is running."
@@ -918,6 +1080,7 @@ fn hostname_discovery_failed() -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::managed_tor_test::ManagedTorStartFailureKind;
 
     const VALID_HASH: &str =
         "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
@@ -985,21 +1148,67 @@ mod tests {
     }
 
     #[test]
-    fn status_message_guides_the_operator_through_each_state() {
-        assert!(status_message(false, false, false, false).contains("Tor was not found"));
+    fn tor_runtime_datadirectory_is_split_from_the_persistent_identity() {
+        // The onion identity (hidden-service directory) MUST be a fixed,
+        // election-scoped, persistent path so the onion address/fingerprint are
+        // stable across restarts. The Tor runtime DataDirectory MUST NOT be that
+        // same fixed path: it lives under a distinct per-start run base so an
+        // orphaned tor.exe holding a prior run's lock cannot block the next start
+        // (mirrors the voter-side hard-kill defence).
+        let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
+        let paths = TransportPaths::under(&root);
+        assert!(paths.hidden_service_dir.ends_with("organizer-hidden-service"));
+        assert!(paths.tor_runs_base.ends_with("organizer-tor-runs"));
+        assert_ne!(paths.hidden_service_dir, paths.tor_runs_base);
+        assert!(!paths.tor_runs_base.starts_with(&paths.hidden_service_dir));
+        assert!(!paths.hidden_service_dir.starts_with(&paths.tor_runs_base));
+    }
+
+    #[test]
+    fn organizer_failure_labels_are_bounded_prefixed_and_path_free() {
+        use ManagedTorStartFailureKind::*;
+        for kind in [
+            DataDirectoryLock,
+            PortBindFailure,
+            ConfigError,
+            ExitedEarly,
+            ReadinessTimeout,
+        ] {
+            let label = kind.as_organizer_context_label();
+            assert!(label.starts_with("organizer-"), "organizer-prefixed: {label}");
+            assert!(!label.contains('/') && !label.contains('\\'), "path-free: {label}");
+        }
+        // A datadir-lock is the exact orphan-after-hard-kill signature.
         assert_eq!(
-            status_message(true, false, false, false),
+            DataDirectoryLock.as_organizer_context_label(),
+            "organizer-tor-datadir-lock"
+        );
+    }
+
+    #[test]
+    fn status_message_guides_the_operator_through_each_state() {
+        assert!(status_message(false, false, false, false, false).contains("Tor was not found"));
+        assert_eq!(
+            status_message(true, false, false, false, false),
             "Ready to provision and start private intake."
         );
         assert_eq!(
-            status_message(true, true, false, false),
+            status_message(true, true, false, false, false),
             "Ready to start private intake."
         );
-        assert_eq!(status_message(true, true, true, true), "Private intake is running.");
+        assert_eq!(
+            status_message(true, true, true, true, false),
+            "Private intake is running."
+        );
         assert!(
-            status_message(true, true, true, false).contains("different election"),
+            status_message(true, true, true, false, false).contains("different election"),
             "a running intake bound to another election must be called out"
         );
+        // A failed intake must never read as "running" or "starting"; it is an
+        // explicit, recoverable state — even when intake_running is still set.
+        let failed = status_message(true, true, true, true, true);
+        assert!(failed.contains("could not start"), "failed state is explicit: {failed}");
+        assert!(!failed.contains("running"));
     }
 
     #[test]
@@ -1007,5 +1216,95 @@ mod tests {
         // The only dynamic path component is the validated hash; the parent
         // directory name is a fixed backend constant.
         assert_eq!(ORGANIZER_TOR_ROOT_DIRECTORY_NAME, "private-tor");
+    }
+
+    #[test]
+    fn orphan_datadir_lock_signature_maps_to_a_bounded_organizer_reason() {
+        // The exact orphan-after-hard-kill diagnostic path: a fresh child whose
+        // DataDirectory lock is still held by a surviving orphan writes a
+        // "could not lock ... another Tor" stderr; classification must yield the
+        // bounded, path-free organizer datadir-lock reason surfaced as the
+        // FAILED status reason (never an indefinite "starting").
+        let base = std::env::temp_dir().join(format!(
+            "tari-organizer-intake-failreason-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("temp base");
+        let log = base.join("tor-stderr.log");
+        std::fs::write(
+            &log,
+            b"[warn] Could not lock data directory. Is another Tor process running?\n",
+        )
+        .expect("write stderr log");
+        let reason = classify_start_failure_from_log(&log).as_organizer_context_label();
+        assert_eq!(reason, "organizer-tor-datadir-lock");
+
+        // A missing/empty stderr log is a bounded readiness-timeout reason, never
+        // a panic and never an unbounded string.
+        let missing = base.join("no-such-run").join("tor-stderr.log");
+        assert_eq!(
+            classify_start_failure_from_log(&missing).as_organizer_context_label(),
+            "organizer-readiness-timeout"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn organizer_cleanup_is_ownership_scoped_never_a_global_tor_kill() {
+        // Ownership-scope guarantee (defence against a regression that would kill
+        // an unrelated Tor Browser / user Tor / another election): this module
+        // must NEVER terminate Tor by process NAME or via a shell. Cleanup is
+        // limited to the app-owned run directories and the app's OWN Child
+        // handles (kill()/wait()), which target only processes this app spawned.
+        // Scan ONLY the implementation (everything before the test module) so
+        // this test's own list of forbidden literals below cannot match itself.
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        for forbidden in [
+            "taskkill",
+            "Stop-Process",
+            "Get-Process",
+            "/IM ",
+            "/im ",
+            "pkill",
+            "killall",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "organizer Tor lifecycle must never use `{forbidden}` (global/name-based kill)"
+            );
+        }
+        // The only process termination is on an owned std::process::Child handle.
+        assert!(code.contains("tor_child.kill()"));
+    }
+
+    #[test]
+    fn restart_never_rotates_the_onion_identity() {
+        // No-onion-rotation invariant: provisioning (which generates the onion
+        // identity) is gated behind `!is_provisioned()`, so a restart of an
+        // already-provisioned election reuses the persistent hidden-service
+        // directory and NEVER creates a new identity. The hidden-service
+        // directory is also a deterministic function of the election root, so two
+        // "starts" resolve the SAME identity path.
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        assert!(
+            code.contains("if !paths.is_provisioned()"),
+            "the onion identity must be provisioned once, never regenerated on restart"
+        );
+        let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
+        let a = TransportPaths::under(&root).hidden_service_dir;
+        let b = TransportPaths::under(&root).hidden_service_dir;
+        assert_eq!(a, b, "the hidden-service identity path is stable across starts");
     }
 }

@@ -89,6 +89,23 @@ fn exact_retry_is_content_addressed_and_never_double_counts() {
 }
 
 #[test]
+fn existing_digest_file_must_match_before_duplicate_append_succeeds() {
+    let dir = TestDir::new("inbox-existing-mismatch");
+    let inbox = dir.join("inbox");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    let digest_hex = ballot_package_digest_hex_v1(&package);
+    fs::create_dir_all(&inbox).expect("inbox");
+    fs::write(inbox.join(format!("{digest_hex}.package")), b"not-the-package")
+        .expect("write corrupt existing digest file");
+
+    let result = append_accepted_ballot_package_to_inbox_v1(&inbox, &package);
+    assert!(
+        result.is_err(),
+        "a receipt must not rely on an existing package file unless it matches exactly",
+    );
+}
+
+#[test]
 fn different_ballot_same_nullifier_is_rejected() {
     let dir = TestDir::new("inbox-nullifier");
     let inbox = dir.join("inbox");

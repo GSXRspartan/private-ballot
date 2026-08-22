@@ -35,6 +35,7 @@ function readProjectFile(path: string): string {
 
 const vote = readProjectFile("src/screens/Vote.tsx");
 const dialog = readProjectFile("src/api/dialog.ts");
+const managedTor = readProjectFile("src-tauri/src/managed_tor_test.rs");
 
 // -------------------------------------------------------------------------
 // privateSubmissionStatus: derived from DURABLE cast state (Issues 4, 17)
@@ -262,9 +263,11 @@ describe("managed-Tor ready state cannot go stale", () => {
     // without requiring a new ballot/proof/nullifier or re-entering any Tor field.
     assert.match(
       vote,
-      /managedTorStatus\?\.configured && !managedTorStatus\.tor_running && !ballotCast/,
+      /managedTorStatus\?\.configured &&\s*\n?\s*!managedTorStatus\.tor_running &&\s*\n?\s*!ballotCast/,
     );
     assert.match(vote, /Start private connection/);
+    // ...and a way to replace a wrong ballot-office connection before release.
+    assert.match(vote, /Change ballot-office connection/);
   });
 });
 
@@ -512,5 +515,58 @@ describe("offline vs online submission clarity", () => {
     assert.match(vote, /Private online submission · Tor/);
     assert.match(vote, /confirmed only after an authenticated\s+organizer receipt is verified/);
     assert.match(vote, />\s*Submit vote privately\s*</);
+  });
+});
+
+// -------------------------------------------------------------------------
+// Hard-kill Tor recovery (Failure 3): a stale/orphan prior managed process
+// cannot poison the next start, cleanup is ownership-scoped, and the start
+// failure is diagnosable — with no global process kill and no clearnet fallback.
+// -------------------------------------------------------------------------
+
+describe("managed-Tor hard-kill recovery", () => {
+  it("each start uses a FRESH app-owned run directory (immune to a stale data-dir lock)", () => {
+    assert.match(managedTor, /fn fresh_run_directory\(/);
+    assert.match(managedTor, /let run_dir = fresh_run_directory\(&base_dir\)\?;/);
+    // The run directory — not a fixed per-election dir — is what Tor locks.
+    assert.match(managedTor, /data_directory: run_dir\.clone\(\)/);
+    assert.match(managedTor, /config_file: run_dir\.join\("voter-torrc"\)/);
+  });
+
+  it("keeps the dynamic SOCKS port defence as well (defence in depth)", () => {
+    assert.match(managedTor, /let fresh_port = reserve_loopback_socks_port\(\)\?;/);
+  });
+
+  it("cleans up prior run directories ownership-scoped and best-effort", () => {
+    assert.match(managedTor, /fn remove_stale_run_directories\(/);
+    assert.match(managedTor, /remove_stale_run_directories\(&base_dir, &run_dir\);/);
+    // Only app-owned `run-*` directories are considered; failures are ignored.
+    assert.match(managedTor, /name\.starts_with\("run-"\)/);
+    assert.match(managedTor, /let _ = std::fs::remove_dir_all\(&path\);/);
+  });
+
+  it("captures tor stderr and classifies the start-failure mode", () => {
+    assert.match(managedTor, /struct DiagnosticTorSpawnerV1/);
+    assert.match(managedTor, /\.stderr\(Stdio::from\(log\)\)/);
+    assert.match(managedTor, /fn classify_managed_tor_start_failure\(/);
+    for (const label of [
+      "tor-datadir-lock",
+      "tor-port-bind-failure",
+      "tor-config-error",
+      "tor-exited-early",
+      "tor-socks-readiness-timeout",
+    ]) {
+      assert.ok(managedTor.includes(label), `failure label present: ${label}`);
+    }
+    // The friendly user-facing code is unchanged; the kind rides in the context.
+    assert.match(managedTor, /"GUI_TOR_START_FAILED"/);
+    assert.match(managedTor, /\.with_context\(kind\.as_context_label\(\)\.to_owned\(\)\)/);
+  });
+
+  it("never falls back to clearnet and never global-kills tor processes", () => {
+    assert.doesNotMatch(managedTor, /taskkill/i);
+    assert.doesNotMatch(managedTor, /\/IM\s+tor\.exe/i);
+    // No clearnet/plaintext HTTP fallback is introduced by the recovery path.
+    assert.doesNotMatch(managedTor, /http:\/\//i);
   });
 });

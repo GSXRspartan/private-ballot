@@ -267,12 +267,14 @@ impl OpaqueEnvelopeGatewayHandlerV1 for GatewayCollectorHandlerV1<'_> {
         // the existing intake path remains the authoritative one-vote rule, so a
         // genuine duplicate ballot is still rejected by intake.
         let retry_capability = new_retry_capability_v1();
-        let (voter_receipt, package_digest) = match self.gateway.deliver_and_digest(
+        let mut next_gateway = self.gateway.clone();
+        let mut next_session = self.session.transactional_clone();
+        let (voter_receipt, package_digest) = match next_gateway.deliver_and_digest(
             envelope,
             self.descriptor,
             self.receiver_key,
             retry_capability,
-            self.session,
+            &mut next_session,
         ) {
             Ok(result) => result,
             // Admission closed / election not open is the only "unavailable".
@@ -299,13 +301,16 @@ impl OpaqueEnvelopeGatewayHandlerV1 for GatewayCollectorHandlerV1<'_> {
         if let Some(inbox_dir) = self.accepted_package_inbox
             && voter_receipt.state == VoterReceiptStateV1::Accepted
         {
-            let Some(package_bytes) = self.session.packages().last() else {
+            let Some(package_bytes) = next_session.packages().last() else {
                 return Err(CollectorRejectionV1::Internal);
             };
             if append_accepted_ballot_package_to_inbox_v1(inbox_dir, package_bytes).is_err() {
                 return Err(CollectorRejectionV1::Internal);
             }
         }
+
+        *self.gateway = next_gateway;
+        *self.session = next_session;
 
         // Sign the SAME authenticated receipt format the release boundary
         // verifies: bound to THIS descriptor's fingerprint and the exact digest

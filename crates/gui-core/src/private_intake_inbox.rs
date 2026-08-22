@@ -170,6 +170,7 @@ pub fn append_accepted_ballot_package_to_inbox_v1(
             {
                 return Err(unsafe_inbox_path());
             }
+            verify_existing_inbox_package(&final_path, package_bytes)?;
             return Ok(false);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -182,12 +183,14 @@ pub fn append_accepted_ballot_package_to_inbox_v1(
     match fs::rename(&tmp_path, &final_path) {
         Ok(()) => {
             sync_directory_best_effort(inbox_dir);
+            verify_existing_inbox_package(&final_path, package_bytes)?;
             Ok(true)
         }
         // A concurrent writer that won the race already produced the exact file;
         // treat as an idempotent no-op after cleaning up our temp.
         Err(_) if final_path.is_file() => {
             let _ = fs::remove_file(&tmp_path);
+            verify_existing_inbox_package(&final_path, package_bytes)?;
             Ok(false)
         }
         Err(_) => {
@@ -195,6 +198,19 @@ pub fn append_accepted_ballot_package_to_inbox_v1(
             Err(GuiCoreError::io_failure("private-intake-inbox"))
         }
     }
+}
+
+fn verify_existing_inbox_package(path: &Path, expected_bytes: &[u8]) -> Result<(), GuiCoreError> {
+    let existing = read_bounded_package_file(path)?;
+    if existing != expected_bytes {
+        return Err(GuiCoreError::new(
+            "GUI_PRIVATE_INTAKE_INBOX_EXISTING_PACKAGE_MISMATCH",
+            GuiErrorCategory::ArchiveIntegrity,
+            Some("private-intake-inbox"),
+            "an existing private-intake package file does not match the accepted ballot package",
+        ));
+    }
+    Ok(())
 }
 
 /// Ingests every accepted-package file in an election inbox into `session`.

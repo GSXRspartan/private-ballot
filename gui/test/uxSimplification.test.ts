@@ -140,9 +140,11 @@ describe("voter progression derivation", () => {
   it("renders on the Vote screen from the derived stages (no separate state)", () => {
     assert.match(vote, /<ProgressSteps/);
     assert.match(vote, /label="Voting progress"/);
-    assert.match(vote, /steps=\{voterStages\(\{/);
-    // The inputs are the existing screen/workflow state, nothing new fetched.
-    assert.match(vote, /reviewPassed: credentialStage/);
+    // The indicator reuses the SAME reconstructed guidedStages as the workflow
+    // cards (single source of truth), which is derived from the existing
+    // screen/workflow state — nothing new is fetched or persisted.
+    assert.match(vote, /steps=\{guidedStages\}/);
+    assert.match(vote, /const guidedStages = voterStages\(\{/);
     assert.match(vote, /identityReady: canProceedAfterCredential\(credential\)/);
     assert.match(vote, /ballotReady: workflow\?\.prepared_ballot\.state === "Ready"/);
     assert.match(vote, /castState,/);
@@ -244,8 +246,8 @@ describe("private Tor normal UI and progressive disclosure", () => {
 
   it("shows bounded exact-retry progress without implying a new ballot", () => {
     assert.match(vote, /Retry \{autoRetryAttempt\} of/);
-    assert.match(vote, /retrying the same encrypted ballot/i);
-    assert.match(vote, /not creating another vote/i);
+    assert.match(vote, /re-sends the same\s*\n?\s*encrypted ballot/i);
+    assert.match(vote, /never creates\s*\n?\s*another vote/i);
     assert.match(vote, /Your vote is locked\./);
     assert.match(vote, /Stop retrying/);
   });
@@ -282,7 +284,7 @@ describe("CAST_PENDING presentation", () => {
     assert.equal(s.phase, "PENDING");
     assert.match(s.title, /Delivery wasn't confirmed/);
     assert.match(s.detail, /safely locked/);
-    assert.match(s.detail, /exact same encrypted submission/);
+    assert.match(s.detail, /this exact encrypted submission/);
     assert.match(s.detail, /no new ballot will be created/i);
   });
 
@@ -433,7 +435,9 @@ describe("organizer next step derivation", () => {
 
 describe("organizer intake presentation", () => {
   it("shows a plain readiness pill and keeps the two counters distinct", () => {
-    assert.match(manage, /<Pill tone="ok">Ready ✓<\/Pill>/);
+    // The pill says "Running" (local readiness), never "Ready" implying proven
+    // remote onion reachability, which the app cannot know.
+    assert.match(manage, /<Pill tone="ok">Running ✓<\/Pill>/);
     assert.match(manage, /label="Election accepted ballots"/);
     assert.match(manage, /participation\?\.accepted_ballots/);
     assert.match(manage, /label="Received this intake session"/);

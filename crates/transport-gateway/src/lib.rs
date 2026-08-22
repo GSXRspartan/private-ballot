@@ -262,7 +262,7 @@ pub enum TransportAdmissionStateV1 {
 /// Serializes close against expensive authenticated delivery. Callers must
 /// finish every successful `admit` exactly once; close only calls core `close`
 /// after the last admitted request finishes (or the operator aborts its drain).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransportAdmissionGateV1 {
     state: TransportAdmissionStateV1,
     admitted: u32,
@@ -542,7 +542,7 @@ pub fn open_envelope_bytes_v1(
 }
 
 /// In-process collector/gateway simulator. It has no network listener.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct TransportGatewaySimulatorV1 {
     received_count: u64,
     verified_count: u64,

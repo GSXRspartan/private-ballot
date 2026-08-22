@@ -1,4 +1,5 @@
 import type {
+  GuiCommandError,
   GuiPrivateReleaseResultV1,
   GuiPrivateSubmissionResultV1,
   GuiVoterCastLockStateV1,
@@ -8,11 +9,20 @@ import type {
  * Bounded automatic-retry backoff schedule (milliseconds) for a private
  * submission whose ONLY failure so far is transient transport/onion
  * reachability. One entry per automatic retry, so the schedule length is also
- * the maximum number of automatic retries. Kept short and small on purpose: a
- * transient onion route usually becomes reachable within a few seconds, and an
- * ordinary voter must never be forced to hammer Retry by hand. There is no
- * indefinite loop — after these are exhausted the truthful CAST_PENDING UI and
- * the manual Retry button stand.
+ * the maximum number of automatic retries (here: 5 retries after the first
+ * attempt = 6 attempts total). There is no indefinite loop — after these are
+ * exhausted the truthful CAST_PENDING UI and the manual Retry button stand.
+ *
+ * The schedule has two bands, chosen from the real restart evidence:
+ *   - quick (2s, 5s, 8s): a brief transient onion hiccup usually clears here.
+ *   - restart-aware (15s, 30s): after the ballot office RESTARTS its Tor, the
+ *     hidden-service descriptor must be re-published and propagated before an
+ *     independent voter circuit can reach the onion — observed to take up to
+ *     ~1 minute. The two slower attempts cover that window without hammering
+ *     the onion or spinning an unbounded background task. (~60s of delays plus
+ *     bounded per-attempt connection time; the app has no reliable end-to-end
+ *     onion-reachability signal, so it tolerates the latency rather than
+ *     probing for a green light it cannot trust.)
  *
  * Each automatic retry re-sends the EXACT same staged encrypted submission
  * through the existing exact-retry path (same digest, same nullifier, same
@@ -20,7 +30,7 @@ import type {
  * organizer receipt remains mandatory for CAST.
  */
 export const PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS: readonly number[] = [
-  2000, 5000, 8000,
+  2000, 5000, 8000, 15000, 30000,
 ];
 
 /** The bounded, PRIVACY-SAFE diagnostic stage that means the ballot could not be
@@ -51,6 +61,46 @@ export function isTransientPrivateReleaseResult(
     result.cast_lock_state === "CAST_PENDING" &&
     result.diagnostic_stage === TRANSIENT_TRANSPORT_STAGE
   );
+}
+
+/**
+ * Backend error codes that mean the private DELIVERY could not be confirmed
+ * because the ballot office (organizer onion) was temporarily unreachable — a
+ * transient transport failure, NOT a cryptographic/protocol rejection.
+ *
+ * DEFENSE-IN-DEPTH ONLY. The normal post-release remote-unavailable path never
+ * throws: the backend stages the exact envelope and persists CAST_PENDING
+ * BEFORE the network send, so a delivery outage arrives as a RETURNED
+ * CAST_PENDING result (diagnostic PRIVATE_TRANSPORT_UNAVAILABLE), which the
+ * primary classifier {@link isTransientPrivateReleaseResult} handles. This set
+ * only catches a THROWN transport error, and even then the caller acts on it
+ * ONLY when the AUTHORITATIVE durable state is already `CAST_PENDING` — so an
+ * error code alone can never fabricate a locked state, and the exact staged
+ * submission (never a new ballot) is what gets retransmitted.
+ *
+ * PRE-staging failures are deliberately NOT here: a descriptor-authenticity /
+ * election-binding / envelope-seal failure now surfaces with a distinct,
+ * honest, TERMINAL code (`GUI_RELEASE_DESCRIPTOR_*` / `GUI_RELEASE_ENVELOPE_*` /
+ * `GUI_RELEASE_BALLOT_OVERSIZED`) that fails closed as NOT_CAST and must never
+ * be auto-retried. Local-Tor-down (`GUI_TOR_NOT_RUNNING`) is also excluded: it
+ * needs an explicit Reconnect, not a blind retry.
+ */
+export const RECOVERABLE_TRANSPORT_ERROR_CODES: ReadonlySet<string> = new Set([
+  "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
+  "GUI_TOR_CARRIER_UNAVAILABLE",
+]);
+
+/**
+ * Whether a THROWN backend error is a recoverable (transient) transport-delivery
+ * failure. Defense-in-depth: a recoverable transport error is only ever acted on
+ * by the caller when the durable cast state is already `CAST_PENDING`; it must
+ * NOT be presented as a terminal red error there, and it stays in the exact
+ * retry flow. Any other code (pre-staging descriptor/seal terminal codes,
+ * authenticated rejection, invalid receipt, descriptor/package mismatch, or any
+ * non-transport error) is terminal and never retried.
+ */
+export function isRecoverableTransportError(error: GuiCommandError | null): boolean {
+  return error !== null && RECOVERABLE_TRANSPORT_ERROR_CODES.has(error.code);
 }
 
 /**
@@ -199,7 +249,7 @@ export function privateSubmissionStatus(
       tone: "warn",
       title: "Delivery wasn't confirmed",
       detail:
-        "Your anonymous ballot is safely locked. You can retry the exact same encrypted submission — no new ballot will be created.",
+        "Your ballot is safely locked. The ballot office is not reachable yet — this can happen briefly after it restarts its private connection. You can retry this exact encrypted submission; no new ballot will be created.",
     };
   }
 
@@ -231,7 +281,8 @@ export function privateSubmissionStatus(
   return {
     phase: "READY",
     tone: "ok",
-    title: "Private connection ready ✓",
-    detail: "You can submit your ballot privately.",
+    title: "Local private connection ready ✓",
+    detail:
+      "Your local private connection is working. You can submit your ballot privately. If the ballot office recently restarted, its private address may take a short time to become reachable.",
   };
 }

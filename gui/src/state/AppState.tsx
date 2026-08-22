@@ -12,6 +12,7 @@ import type {
 } from "../archive/archiveBinding";
 import { RequestGenerationGate } from "../requestGeneration";
 import type {
+  ActiveWorkspaceIdsV1,
   GuiCommandError,
   GuiElectionSummaryV1,
   GuiElectionWorkspaceResumeResultV1,
@@ -63,6 +64,10 @@ interface AppStateValue {
    *  unload). Numeric fields are null while sealed. */
   participation: GuiParticipationSummaryV1 | null;
   workspaces: GuiElectionWorkspaceSummaryV1[];
+  /** Ids of the workspaces this session has active (loaded session and/or
+   *  in-progress draft). Lets Home avoid offering a Delete the fail-closed
+   *  backend guard would refuse for the active draft. */
+  activeWorkspaceIds: ActiveWorkspaceIdsV1 | null;
   recentActions: RecentAction[];
   settings: AppSettings;
   /** Last structured backend error, or null when none is active. */
@@ -139,6 +144,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [participation, setParticipation] =
     useState<GuiParticipationSummaryV1 | null>(null);
   const [workspaces, setWorkspaces] = useState<GuiElectionWorkspaceSummaryV1[]>([]);
+  const [activeWorkspaceIds, setActiveWorkspaceIds] =
+    useState<ActiveWorkspaceIdsV1 | null>(null);
   const [recentActions, setRecentActions] = useState<RecentAction[]>([]);
   const [settings, setSettings] = useState<AppSettings>(readSettings);
   const [backendError, setBackendError] = useState<GuiCommandError | null>(null);
@@ -205,14 +212,20 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const refreshWorkspaces = useCallback(async () => {
     if (!isDesktopShell()) {
       setWorkspaces([]);
+      setActiveWorkspaceIds(null);
       return;
     }
     try {
-      const summaries = await api.listElectionWorkspaces();
+      const [summaries, activeIds] = await Promise.all([
+        api.listElectionWorkspaces(),
+        api.activeWorkspaceIds(),
+      ]);
       setWorkspaces(summaries);
+      setActiveWorkspaceIds(activeIds);
     } catch (error) {
       captureError(error);
       setWorkspaces([]);
+      setActiveWorkspaceIds(null);
     }
   }, [captureError]);
 
@@ -412,6 +425,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       tally,
       participation,
       workspaces,
+      activeWorkspaceIds,
       recentActions,
       settings,
       backendError,
@@ -440,6 +454,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       tally,
       participation,
       workspaces,
+      activeWorkspaceIds,
       recentActions,
       settings,
       backendError,

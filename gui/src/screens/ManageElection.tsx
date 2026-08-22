@@ -797,8 +797,12 @@ export function ManageElection() {
             <Field label="Status">
               {organizerStatus === null ? (
                 <Pill tone="neutral">Checking…</Pill>
+              ) : organizerStatus.failed ? (
+                <Pill tone="error">Could not start</Pill>
               ) : organizerStatus.intake_running && organizerStatus.ready ? (
-                <Pill tone="ok">Ready ✓</Pill>
+                <Pill tone="ok">Running ✓</Pill>
+              ) : organizerStatus.intake_running ? (
+                <Pill tone="warn">Starting…</Pill>
               ) : (
                 <Pill tone="neutral">Not running</Pill>
               )}
@@ -813,11 +817,13 @@ export function ManageElection() {
             <Field label="Election transport">
               {organizerStatus === null
                 ? "Checking…"
-                : organizerStatus.intake_running && organizerStatus.ready
-                  ? "Private intake ready"
-                  : organizerStatus.transport_provisioned
-                    ? "Ready"
-                    : "Not provisioned"}
+                : organizerStatus.failed
+                  ? "Provisioned (private address kept)"
+                  : organizerStatus.intake_running && organizerStatus.ready
+                    ? "Private receiver running (local)"
+                    : organizerStatus.transport_provisioned
+                      ? "Ready to start"
+                      : "Not provisioned"}
             </Field>
             {/* AUTHORITATIVE election accepted count comes from the durable
                 session/workspace (participation), NOT the Tor worker. A Tor
@@ -836,6 +842,14 @@ export function ManageElection() {
               </Field>
             )}
           </div>
+          {organizerStatus?.intake_running && organizerStatus.ready && (
+            <Notice tone="info">
+              Private intake is running. This confirms the local Tor process and ballot receiver
+              are ready. After starting or restarting Tor, the private address can take a short
+              time (up to about a minute) to become reachable by voters — a voter&rsquo;s ballot
+              stays safely locked and is delivered on a retry once the address is reachable.
+            </Notice>
+          )}
           {organizerStatus?.intake_running && (
             <p className="form-hint">
               “Received this intake session” is the running Tor receiver’s own count and resets
@@ -862,15 +876,51 @@ export function ManageElection() {
             </>
           )}
 
-          {organizerStatus?.intake_running && !organizerStatus.election_bound && (
-            <Notice tone="warn">
-              Private intake is running for a different election. Stop it before starting intake
-              for this election.
+          {organizerStatus?.failed && (
+            <Notice tone="error">
+              Private intake could not start. This election&rsquo;s private address and receiver
+              are safe and unchanged — restart private intake to try again. If it keeps failing
+              right after a restart, a previous run&rsquo;s background Tor may still be exiting;
+              wait a few seconds and restart once more.
+              {organizerStatus.failure_reason && (
+                <>
+                  {" "}
+                  <span className="form-hint">
+                    (diagnostic: {organizerStatus.failure_reason})
+                  </span>
+                </>
+              )}
             </Notice>
           )}
 
+          {organizerStatus?.intake_running &&
+            !organizerStatus.failed &&
+            !organizerStatus.election_bound && (
+              <Notice tone="warn">
+                Private intake is running for a different election. Stop it before starting intake
+                for this election.
+              </Notice>
+            )}
+
           <div className="btn-row">
-            {organizerStatus?.intake_running ? (
+            {organizerStatus?.failed ? (
+              // A failed intake is recoverable with a single click: the backend
+              // reaps the dead controller and starts fresh (a new run directory,
+              // the SAME onion identity). Never leaves the operator with only a
+              // "Stop" against a service that is already down.
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  !canAct ||
+                  organizerBusy ||
+                  (organizerStatus !== null && !organizerStatus.tor_found)
+                }
+                onClick={() => void onStartIntake()}
+              >
+                {organizerBusy ? "Restarting…" : "Restart private intake"}
+              </button>
+            ) : organizerStatus?.intake_running ? (
               <button
                 type="button"
                 className="btn btn-danger"

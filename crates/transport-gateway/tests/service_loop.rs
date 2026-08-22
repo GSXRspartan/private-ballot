@@ -16,6 +16,7 @@ mod common;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -74,6 +75,10 @@ struct LoopFixture {
 }
 
 fn start_loop() -> LoopFixture {
+    start_loop_with_inbox(None)
+}
+
+fn start_loop_with_inbox(inbox: Option<PathBuf>) -> LoopFixture {
     let (receiver_secret, receiver_public) = Kem::gen_keypair();
     let mut gateway_public = [0u8; 32];
     gateway_public.copy_from_slice(receiver_public.to_bytes().as_slice());
@@ -98,6 +103,10 @@ fn start_loop() -> LoopFixture {
         receipt_key_arc,
         "service-loop-receipt".to_owned(),
     );
+    let handler = match inbox.as_ref() {
+        Some(inbox) => handler.with_accepted_package_inbox(inbox.clone()),
+        None => handler,
+    };
     let service_loop =
         OrganizerCollectorServiceLoopV1::start(collector, handler, Duration::from_millis(20))
             .expect("start service loop");
@@ -106,6 +115,18 @@ fn start_loop() -> LoopFixture {
         addr,
         descriptor,
     }
+}
+
+fn temp_path(label: &str) -> PathBuf {
+    let unique = format!(
+        "{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos(),
+    );
+    std::env::temp_dir().join(unique)
 }
 
 /// POSTs one opaque envelope to the loopback collector and returns the HTTP
@@ -230,6 +251,65 @@ fn accepted_count_advances_on_accept_and_is_stable_on_exact_retry() {
         fixture.service_loop.accepted_unique_count(),
         1,
         "an exact retry never inflates the accepted count",
+    );
+
+    fixture
+        .service_loop
+        .stop(Duration::from_secs(2))
+        .expect("bounded clean stop");
+}
+
+#[test]
+fn accepted_receipt_is_returned_only_after_inbox_package_exists() {
+    let inbox = temp_path("service-loop-inbox-success");
+    let fixture = start_loop_with_inbox(Some(inbox.clone()));
+    let addr = fixture.addr;
+
+    let package = common::triptych_package_bytes(0, &[b"candidate-a"]);
+    let envelope = PrivateBallotEnvelopeV1::seal(&fixture.descriptor, &package)
+        .expect("seal")
+        .to_canonical_cbor()
+        .expect("encode");
+
+    let (code, body) = post_envelope(addr, &envelope);
+    assert_eq!(code, 200);
+    assert!(!body.is_empty(), "an authenticated receipt is returned");
+    assert!(
+        inbox
+            .read_dir()
+            .expect("inbox exists before receipt is visible to caller")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".package")),
+        "the durable inbox package must exist before the accepted receipt is made available",
+    );
+    assert_eq!(fixture.service_loop.accepted_unique_count(), 1);
+
+    fixture
+        .service_loop
+        .stop(Duration::from_secs(2))
+        .expect("bounded clean stop");
+}
+
+#[test]
+fn inbox_persistence_failure_emits_no_receipt_and_does_not_report_accepted() {
+    let inbox = temp_path("service-loop-inbox-failure");
+    std::fs::write(&inbox, b"not-a-directory").expect("file blocks inbox directory");
+    let fixture = start_loop_with_inbox(Some(inbox.clone()));
+    let addr = fixture.addr;
+
+    let package = common::triptych_package_bytes(0, &[b"candidate-a"]);
+    let envelope = PrivateBallotEnvelopeV1::seal(&fixture.descriptor, &package)
+        .expect("seal")
+        .to_canonical_cbor()
+        .expect("encode");
+
+    let (code, body) = post_envelope(addr, &envelope);
+    assert_eq!(code, 500, "durable inbox failure must fail closed");
+    assert!(body.is_empty(), "no authenticated receipt bytes are emitted");
+    assert_eq!(
+        fixture.service_loop.accepted_unique_count(),
+        0,
+        "worker accepted count must not advance before the durable inbox commit",
     );
 
     fixture

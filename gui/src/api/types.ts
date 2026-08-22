@@ -50,6 +50,15 @@ export interface GuiElectionWorkspaceResumeResultV1 {
   draft: GuiElectionDraftPreviewV1 | null;
 }
 
+/** Backend-issued ids of the workspaces this session currently has active. Both
+ *  are public opaque ids (the same ids returned by `list_election_workspaces`).
+ *  Used to keep the Home view consistent with the fail-closed delete guard: the
+ *  active draft/session is offered "Resume", never a "Delete" the guard refuses. */
+export interface ActiveWorkspaceIdsV1 {
+  session_workspace_id: string | null;
+  draft_workspace_id: string | null;
+}
+
 export type GuiIntakeCategory =
   | "Accepted"
   | "Duplicate"
@@ -699,6 +708,16 @@ export interface OrganizerIntakeStatusV1 {
   /** The running intake is bound to the CURRENTLY loaded election. */
   election_bound: boolean;
   ready: boolean;
+  /**
+   * A start attempt is recorded but a REQUIRED owned component (the Tor child or
+   * the collector worker) has since died. Terminal but recoverable — a restart
+   * clears it. Distinguishes a genuine start failure from an in-progress start,
+   * so the UI never sits in an indefinite "Starting…".
+   */
+  failed: boolean;
+  /** Bounded, path-free, non-sensitive reason for `failed` (e.g.
+   * `organizer-tor-datadir-lock`); `null` unless `failed` is true. */
+  failure_reason: string | null;
   accepted_ballots: number;
   onion_hostname: string | null;
   descriptor_fingerprint: string | null;

@@ -42,9 +42,10 @@ use tari_cc_private_ballot_gui_core::{
     inspect_anchor_snapshot_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
     mark_draft_workspace_superseded_v1, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
-    resolve_and_recover_cast_lock_state_v1, resume_election_workspace_v1,
-    unlock_saved_voter_credential_v1, validate_workspace_id_v1, verify_archive_directory_v1,
-    verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
+    resolve_and_recover_cast_lock_state_v1,
+    resolve_and_recover_private_transport_cast_lock_state_v1, resume_election_workspace_v1,
+    TransportDescriptorV1, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
+    verify_archive_directory_v1, verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
     voter_credentials_directory_v1, workspace_id_for_session_v1, write_archive_directory_v1,
     write_draft_workspace_revision_v1, write_election_artifacts_v1,
     write_finalized_archive_v1_with_governance_document,
@@ -84,6 +85,15 @@ impl CommandError {
             context: None,
             message: message.to_owned(),
         }
+    }
+
+    /// Attaches a short, bounded diagnostic context label (no path or secret).
+    /// Used so a friendly user-facing error can still carry a machine-readable
+    /// hint that diagnostics and tests can distinguish.
+    #[cfg_attr(not(feature = "managed-tor-test"), allow(dead_code))]
+    fn with_context(mut self, context: String) -> Self {
+        self.context = Some(context);
+        self
     }
 
     fn no_session() -> Self {
@@ -172,12 +182,12 @@ impl From<GuiCoreError> for CommandError {
 }
 
 /// Runs a blocking backend operation on the Tauri blocking thread pool so a
-/// slow, synchronous Tor/process/filesystem call never blocks the main UI
+/// slow, synchronous CPU/process/filesystem call never blocks the main UI
 /// thread (Windows "Not Responding"). The command function stays `async` so
 /// Tauri schedules it off the main thread, and the actual blocking work is moved
-/// onto `spawn_blocking`. A task that fails to run to completion is surfaced as a
-/// bounded error rather than a hang.
-#[cfg(feature = "managed-tor-test")]
+/// onto `spawn_blocking`. Used both for the managed-Tor/onion path and for the
+/// CPU-bound credential Argon2id KDF (unlock/create/import/backup). A task that
+/// fails to run to completion is surfaced as a bounded error rather than a hang.
 pub(crate) async fn run_blocking_command<T, F>(work: F) -> Result<T, CommandError>
 where
     T: Send + 'static,
@@ -188,7 +198,7 @@ where
         Err(_) => Err(CommandError::new(
             "GUI_COMMAND_TASK_FAILED",
             "UNAVAILABLE",
-            "the private-transport background task did not complete",
+            "the background task did not complete",
         )),
     }
 }
@@ -829,6 +839,20 @@ fn cast_locks_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
     Ok(cast_locks_dir)
 }
 
+#[cfg(feature = "managed-tor-test")]
+fn configured_managed_tor_descriptor(
+    state: &AppState,
+) -> Result<Option<TransportDescriptorV1>, CommandError> {
+    managed_tor_test::configured_transport_descriptor(state)
+}
+
+#[cfg(not(feature = "managed-tor-test"))]
+fn configured_managed_tor_descriptor(
+    _state: &AppState,
+) -> Result<Option<TransportDescriptorV1>, CommandError> {
+    Ok(None)
+}
+
 /// Resolves the durable cast-lock state for the loaded election + credential
 /// and applies it to the voter session, so every gated voter command decides
 /// against the authoritative on-disk record (surviving restart, navigation, and
@@ -837,6 +861,7 @@ fn apply_voter_cast_lock(
     app: &AppHandle,
     artifacts: &GuiElectionArtifactsV1,
     voter: &mut GuiVoterSessionV1,
+    transport_descriptor: Option<&TransportDescriptorV1>,
 ) -> Result<GuiVoterCastLockStateV1, CommandError> {
     let Some(public_key_hex) = voter.credential_public_key_hex() else {
         voter.apply_cast_lock_state(GuiVoterCastLockStateV1::NotCast);
@@ -848,12 +873,21 @@ fn apply_voter_cast_lock(
     };
     let cast_locks_dir = cast_locks_directory(app)?;
     let manifest_hash_hex = GuiVoterElectionBindingV1::from_artifacts(artifacts).manifest_hash_hex;
-    let state = resolve_and_recover_cast_lock_state_v1(
-        &cast_locks_dir,
-        &manifest_hash_hex,
-        &fingerprint,
-        artifacts,
-    )?;
+    let state = if let Some(descriptor) = transport_descriptor {
+        resolve_and_recover_private_transport_cast_lock_state_v1(
+            &cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            descriptor,
+        )?
+    } else {
+        resolve_and_recover_cast_lock_state_v1(
+            &cast_locks_dir,
+            &manifest_hash_hex,
+            &fingerprint,
+            artifacts,
+        )?
+    };
     voter.apply_cast_lock_state(state);
     Ok(state)
 }
@@ -1047,6 +1081,40 @@ fn list_election_workspaces(
 ) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, CommandError> {
     let workspaces_dir = workspaces_directory(&app)?;
     Ok(list_election_workspaces_v1(&workspaces_dir)?)
+}
+
+/// The backend-issued ids of the workspaces this session currently has active:
+/// the loaded frozen `session` and the in-progress organizer `draft`. Both are
+/// public opaque ids (the same ids already returned by
+/// [`list_election_workspaces`]); no secret crosses this boundary. The frontend
+/// uses these to keep its view consistent with the fail-closed delete guard —
+/// e.g. offering "Resume" rather than a "Delete" that the guard would refuse
+/// for the currently active draft (Failure 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ActiveWorkspaceIdsV1 {
+    session_workspace_id: Option<String>,
+    draft_workspace_id: Option<String>,
+}
+
+/// Returns the active session/draft workspace ids (read-only, public ids).
+#[tauri::command]
+fn active_workspace_ids(
+    state: tauri::State<'_, AppState>,
+) -> Result<ActiveWorkspaceIdsV1, CommandError> {
+    let session_workspace_id = state
+        .session_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .clone();
+    let draft_workspace_id = state
+        .draft_workspace_id
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?
+        .clone();
+    Ok(ActiveWorkspaceIdsV1 {
+        session_workspace_id,
+        draft_workspace_id,
+    })
 }
 
 /// Resumes one local election workspace by backend-issued id.
@@ -1440,7 +1508,7 @@ fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1
 /// when none exists. This is the non-destructive Create Election entry point.
 #[tauri::command]
 fn get_or_create_election_draft(
-    app: AppHandle,
+    _app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionDraftPreviewV1, CommandError> {
     {
@@ -1452,17 +1520,23 @@ fn get_or_create_election_draft(
             return Ok(draft.preview());
         }
     }
-    let workspaces_dir = workspaces_directory(&app)?;
-    let workspace_id = create_draft_workspace_id_v1(&workspaces_dir)?;
+    // A brand-new draft is held in memory only. Its durable workspace and
+    // backend id are allocated on the FIRST real edit (see
+    // `mutate_draft_transactionally` → `active_or_new_draft_workspace_id`), so
+    // merely opening Create Election never persists an empty `draft-*`
+    // workspace that would surface as a ghost row in Resume Election and then
+    // (being the active draft) refuse deletion (Failure 2). Any stale active
+    // draft id is cleared so the first edit allocates a fresh workspace.
     let draft = GuiElectionDraftV1::new();
-    write_draft_workspace_revision_v1(&workspaces_dir, &workspace_id, &draft)?;
-    state.set_draft_workspace_id(workspace_id)?;
     let preview = draft.preview();
-    let mut guard = state
-        .draft
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *guard = Some(draft);
+    {
+        let mut guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(draft);
+    }
+    state.clear_draft_workspace_id()?;
     Ok(preview)
 }
 
@@ -1471,19 +1545,22 @@ fn get_or_create_election_draft(
 /// it; calling this discards only the in-progress draft.
 #[tauri::command]
 fn start_election_draft(
-    app: AppHandle,
+    _app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let workspaces_dir = workspaces_directory(&app)?;
-    let workspace_id = create_draft_workspace_id_v1(&workspaces_dir)?;
+    // Start a fresh in-memory draft and drop the active draft id so the FIRST
+    // real edit allocates a new durable workspace. An empty fresh draft is not
+    // persisted (Failure 2); any previously committed draft remains on disk as
+    // its own resumable workspace and is not disturbed.
     let draft = GuiElectionDraftV1::new();
-    write_draft_workspace_revision_v1(&workspaces_dir, &workspace_id, &draft)?;
-    let mut guard = state
-        .draft
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *guard = Some(draft);
-    state.set_draft_workspace_id(workspace_id)
+    {
+        let mut guard = state
+            .draft
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *guard = Some(draft);
+    }
+    state.clear_draft_workspace_id()
 }
 
 /// Discards the in-progress draft. Does not unload a frozen session.
@@ -1829,63 +1906,99 @@ fn list_saved_voter_credentials(
 /// container first, then installs the secret into memory. The passphrase is
 /// accepted over IPC for this approved command only and is zeroized on drop.
 #[tauri::command]
-fn create_durable_voter_credential(
+async fn create_durable_voter_credential(
     passphrase: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let passphrase = Zeroizing::new(passphrase);
-    let credentials_dir = credentials_directory(&app)?;
-    state.create_durable_credential_in_dir(&credentials_dir, passphrase.as_str())
+    // The credential Argon2id KDF (64 MiB, t=3, p=4) is CPU-bound and takes
+    // long enough to freeze the desktop window ("Not Responding") if run on the
+    // Tauri command thread. Move only that blocking work to the blocking pool;
+    // the passphrase is zeroized inside the task and never enters JS state.
+    run_blocking_command(move || {
+        let passphrase = Zeroizing::new(passphrase);
+        let credentials_dir = credentials_directory(&app)?;
+        let state = app.state::<AppState>();
+        state
+            .inner()
+            .create_durable_credential_in_dir(&credentials_dir, passphrase.as_str())
+    })
+    .await
 }
 
 /// Unlocks a saved default credential identified by public governance key.
 /// The frontend supplies no path for this operation.
 #[tauri::command]
-fn unlock_saved_voter_credential(
+async fn unlock_saved_voter_credential(
     public_key_hex: String,
     passphrase: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let passphrase = Zeroizing::new(passphrase);
-    let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
-    let credentials_dir = credentials_directory(&app)?;
-    state.unlock_saved_credential_in_dir(&credentials_dir, &public_key, passphrase.as_str())
+    // Argon2id decryption is CPU-bound; run it off the UI thread so the window
+    // stays responsive during unlock. Wrong-password behavior is unchanged: the
+    // AEAD open fails closed inside the same task and no credential is installed.
+    run_blocking_command(move || {
+        let passphrase = Zeroizing::new(passphrase);
+        let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
+        let credentials_dir = credentials_directory(&app)?;
+        let state = app.state::<AppState>();
+        state
+            .inner()
+            .unlock_saved_credential_in_dir(&credentials_dir, &public_key, passphrase.as_str())
+    })
+    .await
 }
 
 /// Imports a user-selected portable encrypted credential file. If
 /// `persist_locally` is true, the validated encrypted bytes are copied into
 /// the backend-derived default path before the credential is installed.
 #[tauri::command]
-fn import_voter_credential(
+async fn import_voter_credential(
     path: String,
     passphrase: String,
     persist_locally: bool,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterCredentialStatusV1, CommandError> {
-    let passphrase = Zeroizing::new(passphrase);
-    let path = external_credential_path(path)?;
-    if persist_locally {
-        let credentials_dir = credentials_directory(&app)?;
-        state.import_credential_from_path(&path, passphrase.as_str(), true, Some(&credentials_dir))
-    } else {
-        state.import_credential_from_path(&path, passphrase.as_str(), false, None)
-    }
+    // Argon2id decryption runs off the UI thread (see unlock).
+    run_blocking_command(move || {
+        let passphrase = Zeroizing::new(passphrase);
+        let path = external_credential_path(path)?;
+        let state = app.state::<AppState>();
+        if persist_locally {
+            let credentials_dir = credentials_directory(&app)?;
+            state.inner().import_credential_from_path(
+                &path,
+                passphrase.as_str(),
+                true,
+                Some(&credentials_dir),
+            )
+        } else {
+            state
+                .inner()
+                .import_credential_from_path(&path, passphrase.as_str(), false, None)
+        }
+    })
+    .await
 }
 
 /// Writes a fresh encrypted portable backup for the currently unlocked
 /// credential. This is copy semantics and does not mutate session state.
 #[tauri::command]
-fn backup_voter_credential(
+async fn backup_voter_credential(
     path: String,
     passphrase: String,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<GuiVoterCredentialBackupResultV1, CommandError> {
-    let passphrase = Zeroizing::new(passphrase);
-    let path = external_credential_path(path)?;
-    state.current_credential_backup(&path, passphrase.as_str())
+    // Argon2id encryption runs off the UI thread so backing up a credential
+    // never freezes the window. Copy semantics only; session state is unchanged.
+    run_blocking_command(move || {
+        let passphrase = Zeroizing::new(passphrase);
+        let path = external_credential_path(path)?;
+        let state = app.state::<AppState>();
+        state
+            .inner()
+            .current_credential_backup(&path, passphrase.as_str())
+    })
+    .await
 }
 
 /// Clears the unlocked credential from Rust memory without deleting any local
@@ -2003,6 +2116,7 @@ fn voter_workflow_status(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let session_guard = state
         .session
         .lock()
@@ -2017,7 +2131,7 @@ fn voter_workflow_status(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.workflow_status(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -2056,6 +2170,7 @@ fn set_voter_ballot_selection(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let session_guard = state
         .session
         .lock()
@@ -2070,7 +2185,7 @@ fn set_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.set_selection(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -2086,6 +2201,7 @@ fn clear_voter_ballot_selection(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let session_guard = state
         .session
         .lock()
@@ -2100,7 +2216,7 @@ fn clear_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.clear_selection(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
@@ -2113,6 +2229,7 @@ fn change_my_ballot_choice(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let session_guard = state
         .session
         .lock()
@@ -2127,7 +2244,7 @@ fn change_my_ballot_choice(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.discard_prepared_ballot(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
@@ -2139,6 +2256,7 @@ fn prepare_voter_ballot(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let (artifacts, lifecycle_state) = {
         let session_guard = state
             .session
@@ -2156,7 +2274,7 @@ fn prepare_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, &artifacts, voter)?;
+    apply_voter_cast_lock(&app, &artifacts, voter, transport_descriptor.as_ref())?;
     Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
 }
 
@@ -2170,6 +2288,7 @@ fn export_prepared_voter_ballot(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotExportV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let cast_locks_dir = cast_locks_directory(&app)?;
     let session_guard = state
         .session
@@ -2185,7 +2304,7 @@ fn export_prepared_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter)?;
+    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.export_and_cast_prepared_ballot(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -2963,6 +3082,7 @@ pub fn run() {
             unload_election,
             election_summary,
             list_election_workspaces,
+            active_workspace_ids,
             resume_election_workspace,
             delete_election_workspace,
             open_voting,

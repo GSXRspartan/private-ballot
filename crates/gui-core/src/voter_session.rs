@@ -1154,7 +1154,7 @@ impl GuiVoterSessionV1 {
         // retransmitted byte-for-byte.
         let envelope = PrivateBallotEnvelopeV1::seal(descriptor, &canonical_bytes)
             .and_then(|sealed| sealed.to_canonical_cbor())
-            .map_err(map_release_transport_error)?;
+            .map_err(map_envelope_seal_error)?;
         // Digest the EXACT bytes that are staged (and later delivered); this is
         // the primary exact-retry integrity invariant recorded in the durable
         // PENDING record.
@@ -1456,7 +1456,7 @@ impl GuiVoterSessionV1 {
     ) -> Result<String, GuiCoreError> {
         roots
             .verify_and_accept_descriptor(descriptor, artifacts.manifest_hash(), consistency)
-            .map_err(map_release_transport_error)?;
+            .map_err(map_descriptor_release_error)?;
         if descriptor.election_id() != artifacts.manifest().election_id().as_bytes() {
             return Err(GuiCoreError::new(
                 "GUI_RELEASE_WRONG_ELECTION",
@@ -1476,7 +1476,7 @@ impl GuiVoterSessionV1 {
         descriptor
             .fingerprint()
             .map(|fingerprint| to_lower_hex(&fingerprint))
-            .map_err(map_release_transport_error)
+            .map_err(map_descriptor_release_error)
     }
 
     /// Discards the prepared ballot so the voter can reconsider ("Change my
@@ -1675,16 +1675,79 @@ impl GuiVoterSessionV1 {
     }
 }
 
-/// Maps a bounded transport error to a bounded, voter-safe gui-core error for
-/// the release path. It intentionally coarsens all transport failures to a
-/// single unavailable-style message so no descriptor/endpoint/crypto detail
-/// leaks; the voter is directed to retry or use offline export.
-fn map_release_transport_error(_error: crate::transport::TransportError) -> GuiCoreError {
+/// Fixed, safe phase labels for private-release diagnostics. They identify WHICH
+/// release phase produced a failure — attached to the error `context` — without
+/// exposing any secret, ballot plaintext, key, or network-identity material:
+/// only the coarse phase and the bounded failure class cross the boundary. This
+/// is the instrumentation that lets a runtime failure be attributed to a phase
+/// instead of being collapsed into one ambiguous "transport unavailable".
+pub const RELEASE_PHASE_DESCRIPTOR_AUTH: &str = "release-descriptor-auth";
+pub const RELEASE_PHASE_ENVELOPE_SEAL: &str = "release-envelope-seal";
+
+/// Maps a descriptor AUTHENTICITY / election-binding / consistency failure
+/// (root trust, signature, wrong election, generation pinning conflict, or a
+/// malformed descriptor) to a bounded, HONEST **terminal** error.
+///
+/// This phase runs BEFORE any staging or transmission and depends ONLY on local
+/// cryptographic/canonical inputs — never on remote reachability. It is
+/// therefore NOT a transient transport-availability failure and MUST NOT be
+/// auto-retried: it fails closed (the voter stays `NotCast`, nothing is staged).
+/// The bounded failure class is preserved in the machine code so a runtime
+/// failure identifies the exact check that rejected the descriptor, rather than
+/// being masked as a "retry later" transport outage.
+fn map_descriptor_release_error(error: crate::transport::TransportError) -> GuiCoreError {
+    use crate::transport::TransportError as E;
+    let (code, message) = match error {
+        E::UntrustedRoot => (
+            "GUI_RELEASE_DESCRIPTOR_UNTRUSTED",
+            "the ballot-office connection is not signed by a trusted authority; re-obtain the connection file",
+        ),
+        E::DescriptorConflict => (
+            "GUI_RELEASE_DESCRIPTOR_CONFLICT",
+            "a different ballot-office connection was already pinned for this election; the connection file is inconsistent",
+        ),
+        E::WrongElection => (
+            "GUI_RELEASE_DESCRIPTOR_WRONG_ELECTION",
+            "the ballot-office connection is bound to a different election",
+        ),
+        E::InvalidDescriptor => (
+            "GUI_RELEASE_DESCRIPTOR_INVALID",
+            "the ballot-office connection file is malformed",
+        ),
+        _ => (
+            "GUI_RELEASE_DESCRIPTOR_UNVERIFIED",
+            "the ballot-office connection could not be verified for this election",
+        ),
+    };
     GuiCoreError::new(
-        "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
-        GuiErrorCategory::Unavailable,
-        Some("private-release"),
-        "private transport is unavailable for this ballot; retry later or use offline export",
+        code,
+        GuiErrorCategory::BindingMismatch,
+        Some(RELEASE_PHASE_DESCRIPTOR_AUTH),
+        message,
+    )
+}
+
+/// Maps an envelope SEAL failure (local HPKE sealing / padding / canonical
+/// encoding of the exact submission) to a bounded, HONEST **terminal** error.
+/// This phase also runs BEFORE staging and is purely local cryptographic work,
+/// never a remote-availability issue, so it fails closed and is not auto-retried.
+fn map_envelope_seal_error(error: crate::transport::TransportError) -> GuiCoreError {
+    use crate::transport::TransportError as E;
+    let (code, message) = match error {
+        E::OversizedPayload => (
+            "GUI_RELEASE_BALLOT_OVERSIZED",
+            "the prepared ballot exceeds the configured transport padding size",
+        ),
+        _ => (
+            "GUI_RELEASE_ENVELOPE_SEAL_FAILED",
+            "the anonymous ballot envelope could not be sealed for private transport",
+        ),
+    };
+    GuiCoreError::new(
+        code,
+        GuiErrorCategory::InvalidInput,
+        Some(RELEASE_PHASE_ENVELOPE_SEAL),
+        message,
     )
 }
 

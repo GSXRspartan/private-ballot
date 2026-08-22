@@ -42,10 +42,19 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     backendError,
     shellAvailable,
     workspaces,
+    activeWorkspaceIds,
     dismissError,
     resumeElectionWorkspace,
     deleteElectionWorkspace,
   } = useAppState();
+  // The workspace this session has active (loaded session and/or in-progress
+  // draft). The backend delete guard is fail-closed and refuses to delete the
+  // active workspace, so Home must not offer a Delete that would fail — it
+  // offers "Resume" instead. This keeps the "No election loaded" empty state
+  // from contradicting an undeletable active draft (Failure 2).
+  const isActiveWorkspace = (workspaceId: string) =>
+    workspaceId === activeWorkspaceIds?.session_workspace_id ||
+    workspaceId === activeWorkspaceIds?.draft_workspace_id;
   // The workspace pending an explicit delete confirmation (null = no dialog).
   const [pendingDelete, setPendingDelete] = useState<{
     workspaceId: string;
@@ -362,21 +371,27 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                           >
                             Resume
                           </button>
-                          <button
-                            type="button"
-                            className="btn btn-secondary"
-                            onClick={() =>
-                              setPendingDelete({
-                                workspaceId: workspace.workspace_id,
-                                label:
-                                  workspace.question_preview ??
-                                  workspace.election_manifest_hash_hex ??
-                                  workspace.workspace_id,
-                              })
-                            }
-                          >
-                            Delete
-                          </button>
+                          {isActiveWorkspace(workspace.workspace_id) ? (
+                            <span className="form-hint">
+                              In progress — your current draft. Resume to continue editing.
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              onClick={() =>
+                                setPendingDelete({
+                                  workspaceId: workspace.workspace_id,
+                                  label:
+                                    workspace.question_preview ??
+                                    workspace.election_manifest_hash_hex ??
+                                    workspace.workspace_id,
+                                })
+                              }
+                            >
+                              Delete
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>

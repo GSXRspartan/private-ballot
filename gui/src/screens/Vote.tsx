@@ -15,6 +15,7 @@ import {
 } from "../api/managedTorConfigMemory";
 import {
   PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS,
+  isRecoverableTransportError,
   isTransientPrivateReleaseResult,
   managedTorTestCardVisible,
   privateSubmissionStageLabel,
@@ -28,6 +29,7 @@ import type {
   GuiPrivateSubmissionResultV1,
   GuiPrivateTransportAvailabilityV1,
   GuiSavedVoterCredentialsV1,
+  GuiVoterCastLockStateV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
@@ -61,7 +63,7 @@ import {
 import { BallotSaveDialogError, requestAndExportPreparedBallot } from "../voterExport";
 import { useAppState } from "../state/AppState";
 import { RequestGenerationGate } from "../requestGeneration";
-import { voterStages } from "../voterProgress";
+import { reviewStageReached, voteStageReached, voterStages } from "../voterProgress";
 import {
   BackendErrorNotice,
   Card,
@@ -215,6 +217,14 @@ export function Vote() {
   const [torExePath, setTorExePath] = useState(() => recallManagedTorConfig().torExePath);
   const [torDataDir, setTorDataDir] = useState("");
   const [voterBundlePath, setVoterBundlePath] = useState("");
+  // Pre-release recovery: when a ballot-office connection is already configured
+  // but the private connection is stopped (e.g. it was configured with a bundle
+  // bound to the WRONG election), the voter can deliberately re-open the
+  // connection-file selector to replace it — without restarting the app,
+  // reloading the election, or touching the prepared ballot. Presentation-only:
+  // it just reveals the existing configure/verify flow, which still fails closed
+  // on an election mismatch. Never offered once the ballot is durably locked.
+  const [reconfiguring, setReconfiguring] = useState(false);
   const selectionDraftIdsRef = useRef<string[]>([]);
   const selectionRequestGenerationRef = useRef(0);
   const confirmationRequestGenerationRef = useRef(new RequestGenerationGate());
@@ -238,6 +248,7 @@ export function Vote() {
     setPrivateRoute("ManagedTor");
     setPrivateResult(null);
     setPrivateError(null);
+    setReconfiguring(false);
     // Leaving/switching elections cancels any in-progress automatic retry so it
     // never continues against a stale election.
     autoRetryCancelRef.current = true;
@@ -336,6 +347,19 @@ export function Vote() {
 
   useEffect(() => {
     if (shellAvailable) void refreshCredentialStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [election, shellAvailable]);
+
+  // On entering the Vote screen (navigation back OR an application restart),
+  // read the AUTHORITATIVE workflow status once so the guided stage can be
+  // RECONSTRUCTED from real backend/durable state (loaded selection, prepared
+  // ballot, durable cast-lock) instead of snapping back to the first stage
+  // because the in-component gate booleans reset on mount. This is read-only:
+  // it never starts Tor, prepares a ballot, releases a submission, or creates
+  // any durable record; `review_confirmed` is passed false so no gate is
+  // asserted the voter has not re-confirmed this session.
+  useEffect(() => {
+    if (election && shellAvailable) void refreshWorkflow(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
 
@@ -636,6 +660,20 @@ export function Vote() {
   // finalization failure, or a thrown error) is surfaced immediately and never
   // retried. The loop is bounded by the backoff schedule and is cancelled the
   // moment the voter stops retrying, stops Tor, or leaves the screen.
+  // Reads the AUTHORITATIVE durable cast-lock state without throwing, so the
+  // retry loop can decide (from real backend state, never a guess) whether a
+  // failed attempt left the ballot durably locked (CAST_PENDING) and therefore
+  // safe to keep exact-retrying.
+  async function durableCastStateOrNull(): Promise<GuiVoterCastLockStateV1 | null> {
+    if (!election || !shellAvailable) return null;
+    try {
+      const status = await api.voterWorkflowStatus(confirmed);
+      return status.cast_lock_state;
+    } catch {
+      return null;
+    }
+  }
+
   async function runBoundedPrivateSubmission(
     initialAttempt: () => Promise<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1>,
   ) {
@@ -647,36 +685,65 @@ export function Vote() {
     setAutoRetryAttempt(0);
     autoRetryCancelRef.current = false;
     try {
-      let result = await initialAttempt();
-      setPrivateResult(result);
       let attempt = 0;
-      while (
-        !autoRetryCancelRef.current &&
-        isTransientPrivateReleaseResult(result) &&
-        attempt < PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length
-      ) {
+      // Each attempt: the first is the fresh submit, subsequent ones re-send the
+      // EXACT same staged encrypted submission (exact-retry). The loop is driven
+      // by whether the outcome is a RECOVERABLE transient transport failure —
+      // whether the backend RETURNED a CAST_PENDING transient result, OR THREW a
+      // transport-unavailable error while the ballot is durably CAST_PENDING. A
+      // thrown transport error no longer breaks the bounded backoff into a
+      // generic terminal error, so a transient ballot-office outage reliably
+      // enters (and stays in) the recoverable retry/backoff state. Terminal
+      // errors (non-transport codes, or a transport error while the ballot is
+      // NOT durably locked) are surfaced immediately and never retried.
+      let nextAttempt = initialAttempt;
+      for (;;) {
+        let recoverableTransient = false;
+        try {
+          const result = await nextAttempt();
+          setPrivateResult(result);
+          recoverableTransient = isTransientPrivateReleaseResult(result);
+        } catch (err) {
+          const commandError = commandErrorFromUnknown(err);
+          const castStateNow = await durableCastStateOrNull();
+          if (castStateNow === "CAST_PENDING" && isRecoverableTransportError(commandError)) {
+            // The ballot is durably locked and the only failure so far is a
+            // transient delivery outage: stay in the recovery flow (no generic
+            // terminal error) and keep retrying the exact staged submission.
+            recoverableTransient = true;
+          } else {
+            // Terminal (or nothing was staged): surface next to the controls;
+            // the durable cast state remains the authority for locked/pending.
+            setPrivateError(commandError);
+            break;
+          }
+        }
+        if (
+          !recoverableTransient ||
+          autoRetryCancelRef.current ||
+          attempt >= PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length
+        ) {
+          break;
+        }
         const delayMs = PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS[attempt];
         attempt += 1;
         setAutoRetryAttempt(attempt);
         const elapsed = await abortableSleep(delayMs, autoRetryCancelRef);
         if (!elapsed || autoRetryCancelRef.current) break;
         // EXACT same staged encrypted submission (exact-retry path).
-        result = await api.retryPrivateSubmission();
-        setPrivateResult(result);
+        nextAttempt = () => api.retryPrivateSubmission();
       }
       setTransport(await api.privateTransportAvailability());
       await refreshWorkflow(true);
-      setManagedTorStatus(await api.managedTorTestStatus());
-    } catch (err) {
-      // Private-submission failures are shown next to the submission controls
-      // (Issue 5), not only at the top of the screen. The durable cast state
-      // (recovered by refreshWorkflow) remains the authority for locked/pending.
-      setPrivateError(commandErrorFromUnknown(err));
-      await refreshWorkflow(true).catch(() => {});
       // Re-read the AUTHORITATIVE managed-Tor status so a failure caused by the
       // Tor child having exited flips the connection banner out of "ready" (and
       // reveals Reconnect) instead of leaving a stale "Private connection ready"
       // contradicting "the managed Tor process has exited".
+      setManagedTorStatus(await api.managedTorTestStatus());
+    } catch (err) {
+      // Reached only if a post-loop refresh throws; keep it next to the controls.
+      setPrivateError(commandErrorFromUnknown(err));
+      await refreshWorkflow(true).catch(() => {});
       await refreshManagedTorStatus().catch(() => {});
     } finally {
       setAutoRetryAttempt(0);
@@ -717,6 +784,7 @@ export function Vote() {
         electionManifestHashHex,
       });
       setManagedTorStatus(status);
+      setReconfiguring(false);
     } catch (err) {
       setPrivateError(commandErrorFromUnknown(err));
     } finally {
@@ -753,6 +821,9 @@ export function Vote() {
       });
       const status = await api.startManagedTor();
       setManagedTorStatus(status);
+      // A successful (re)connect replaces any prior configuration; leave the
+      // reconfigure flow.
+      setReconfiguring(false);
     } catch (err) {
       setPrivateError(commandErrorFromUnknown(err));
     } finally {
@@ -878,11 +949,24 @@ export function Vote() {
   // stage is expanded, completed stages collapse to compact summaries, future
   // stages stay hidden. Show all steps restores the full control surface.
   // ---------------------------------------------------------------------
+  // Reconstruct how far the voter has ACTUALLY progressed from durable/session
+  // backend state, so navigation or a restart never snaps the guided workflow
+  // back to the beginning while real progress exists (the in-component gate
+  // booleans `credentialStage`/`selectionStage` reset to false on every mount).
+  const stageReconstruction = {
+    credentialLoaded: !!credential?.credential_loaded,
+    identityReady: canProceedAfterCredential(credential),
+    selectionLoaded: !!selection?.selection_loaded,
+    ballotReady: workflow?.prepared_ballot.state === "Ready",
+    castLocked,
+  };
+  const reviewReached = reviewStageReached(credentialStage, stageReconstruction);
+  const voteReached = voteStageReached(selectionStage, stageReconstruction);
   const guidedStages = voterStages({
     electionLoaded: election !== null,
-    reviewPassed: credentialStage,
+    reviewPassed: reviewReached,
     identityReady: canProceedAfterCredential(credential),
-    voteEntered: selectionStage,
+    voteEntered: voteReached,
     choiceMade: !!selection?.selection_loaded && selection.valid,
     ballotReady: workflow?.prepared_ballot.state === "Ready",
     castState,
@@ -1026,18 +1110,10 @@ export function Vote() {
           checkmark, the current stage is emphasized, future stages subdued. */}
       {election && (
         <>
-          <ProgressSteps
-            label="Voting progress"
-            steps={voterStages({
-              electionLoaded: election !== null,
-              reviewPassed: credentialStage,
-              identityReady: canProceedAfterCredential(credential),
-              voteEntered: selectionStage,
-              choiceMade: !!selection?.selection_loaded && selection.valid,
-              ballotReady: workflow?.prepared_ballot.state === "Ready",
-              castState,
-            })}
-          />
+          {/* Single source of truth: the progress indicator reuses the SAME
+              reconstructed guided stages as the workflow cards, so navigation
+              or a restart never leaves the bar and the cards disagreeing. */}
+          <ProgressSteps label="Voting progress" steps={guidedStages} />
           {/* Presentation-only escape hatch: reveals every stage (including
               future/technical ones) for review or testing. It never changes
               workflow state, never bypasses a gate, and never enables a
@@ -1682,6 +1758,11 @@ export function Vote() {
                       revealing which eligible voter you are. Your ballot choice is not
                       permanently sealed and may appear in the final verifiable election record.
                     </Notice>
+                    <p className="form-hint">
+                      Your choice and the prepared proof are held only in this session until you
+                      submit or save your ballot. If the app closes first, you will re-select and
+                      re-create the proof — no ballot is cast and nothing is sent until you submit.
+                    </p>
                     <div className="field-list">
                       <Field label="Status">
                         <Pill tone={workflowTone(workflow?.workflow_state)}>
@@ -1933,12 +2014,14 @@ export function Vote() {
                       {autoRetryAttempt > 0 && (
                         <div className="config-stack">
                           <p className="form-hint" role="status" aria-live="polite">
-                            The private route is taking longer than expected. Retrying the same
-                            ballot… (Retry {autoRetryAttempt} of{" "}
+                            The ballot office isn&rsquo;t reachable yet — this can happen briefly
+                            after it restarts its private connection. Retrying the same ballot…
+                            (Retry {autoRetryAttempt} of{" "}
                             {PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS.length})
                             <br />
-                            Your vote is locked. The app is retrying the same encrypted ballot,
-                            not creating another vote.
+                            Your vote is locked. The app waits a little longer between later
+                            retries and re-sends the same encrypted ballot — it never creates
+                            another vote. You can Stop retrying and retry manually anytime.
                           </p>
                           <div className="action-row">
                             <button
@@ -1959,8 +2042,18 @@ export function Vote() {
                         onDismiss={() => setPrivateError(null)}
                       />
 
-                      {!managedTorStatus?.configured && !ballotCast && (
+                      {((!managedTorStatus?.configured && !ballotCast) ||
+                        (reconfiguring && !castLocked)) &&
+                        !managedTorStatus?.tor_running && (
                         <div className="config-stack">
+                          {reconfiguring && managedTorStatus?.configured && (
+                            <Notice tone="warn">
+                              Choose the correct ballot-office connection file for this election.
+                              Replacing it does not change your prepared ballot, your response, or
+                              your anonymous proof — it only updates which ballot office you connect
+                              to. A file from another election is still rejected.
+                            </Notice>
+                          )}
                           <p className="form-hint">
                             Connecting privately runs Tor for you — there is no port, torrc, or
                             Tor data directory to set up. You only need the ballot-office
@@ -1975,9 +2068,11 @@ export function Vote() {
                                   : "Not found"}
                             </Field>
                             <Field label="Ballot office">
-                              {voterBundlePath
-                                ? "Verified for this election ✓"
-                                : "Connection file required"}
+                              {!voterBundlePath
+                                ? "Connection file required"
+                                : reconfiguring
+                                  ? "Selected — will be re-checked on connect"
+                                  : "Verified for this election ✓"}
                             </Field>
                           </div>
 
@@ -2000,12 +2095,14 @@ export function Vote() {
                             </>
                           )}
 
-                          {!voterBundlePath && (
+                          {(!voterBundlePath || reconfiguring) && (
                             <>
-                              <Notice tone="info">
-                                Ballot-office connection file required. Ask the ballot office for
-                                the voter transport bundle file, then select it here.
-                              </Notice>
+                              {!voterBundlePath && (
+                                <Notice tone="info">
+                                  Ballot-office connection file required. Ask the ballot office for
+                                  the voter transport bundle file, then select it here.
+                                </Notice>
+                              )}
                               <div className="action-row">
                                 <button
                                   type="button"
@@ -2013,7 +2110,9 @@ export function Vote() {
                                   disabled={busy || !shellAvailable}
                                   onClick={() => void onBrowseVoterBundle()}
                                 >
-                                  Select ballot-office connection file
+                                  {reconfiguring && voterBundlePath
+                                    ? "Choose a different ballot-office connection file"
+                                    : "Select ballot-office connection file"}
                                 </button>
                               </div>
                             </>
@@ -2032,6 +2131,16 @@ export function Vote() {
                             >
                               Connect privately
                             </button>
+                            {reconfiguring && managedTorStatus?.configured && (
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={busy}
+                                onClick={() => setReconfiguring(false)}
+                              >
+                                Cancel
+                              </button>
+                            )}
                           </div>
 
                           <DetailsSection summary="Advanced">
@@ -2114,7 +2223,10 @@ export function Vote() {
                         </div>
                       )}
 
-                      {managedTorStatus?.configured && !managedTorStatus.tor_running && !ballotCast && (
+                      {managedTorStatus?.configured &&
+                        !managedTorStatus.tor_running &&
+                        !ballotCast &&
+                        !reconfiguring && (
                         <div className="action-row">
                           <button
                             type="button"
@@ -2124,6 +2236,27 @@ export function Vote() {
                           >
                             Start private connection
                           </button>
+                          {/* Pre-release recovery: replace a configured
+                              ballot-office connection (e.g. one bound to the
+                              wrong election) without restarting the app,
+                              reloading the election, or disturbing the prepared
+                              ballot. Only before the ballot is durably locked —
+                              a CAST_PENDING staged envelope is bound to its
+                              original release descriptor and is retried exactly,
+                              never re-pointed. */}
+                          {!castLocked && (
+                            <button
+                              type="button"
+                              className="btn btn-secondary"
+                              disabled={busy}
+                              onClick={() => {
+                                setPrivateError(null);
+                                setReconfiguring(true);
+                              }}
+                            >
+                              Change ballot-office connection
+                            </button>
+                          )}
                         </div>
                       )}
 

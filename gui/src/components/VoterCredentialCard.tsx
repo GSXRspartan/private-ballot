@@ -664,9 +664,21 @@ function PassphraseDialog({
           ? "Import"
           : "Back up";
 
+  // Native form semantics so pressing Enter in the passphrase field submits via
+  // the SAME handler as the button (Failure 6). preventDefault stops the webview
+  // from navigating; the submit is gated by the same disabled condition as the
+  // button (busy or empty passphrase), so a disabled state also blocks Enter and
+  // no duplicate invocation occurs.
+  const canSubmit = !busy && passphrase.length > 0;
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={title}>
-      <div className="modal">
+      <form
+        className="modal"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (canSubmit) onSubmit();
+        }}
+      >
         <h3 className="modal-title">{title}</h3>
         <div className="modal-body">
           {dialog === "backup" && (
@@ -725,15 +737,14 @@ function PassphraseDialog({
             Cancel
           </button>
           <button
-            type="button"
+            type="submit"
             className="btn btn-primary"
-            disabled={busy || passphrase.length === 0}
-            onClick={onSubmit}
+            disabled={!canSubmit}
           >
             {confirmLabel}
           </button>
         </div>
-      </div>
+      </form>
     </div>
   );
 }
