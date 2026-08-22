@@ -49,6 +49,14 @@ export function Guide() {
             been altered.
           </li>
           <li>
+            <strong>Wait for confirmed open.</strong> The frozen election file cannot tell you
+            when voting opens — only the ballot office knows, so the app never guesses. When the
+            office opens voting it publishes a <em>signed status statement</em> for this exact
+            election; import that small file (or check through your private connection) and the
+            app verifies its signature before responses become choosable. While the election is
+            still frozen or closed, the app says exactly that.
+          </li>
+          <li>
             <strong>Review the election.</strong> Confirm the election identity, ballot question,
             response choices, and voting rules before continuing. For newer election files, the
             question and response choices are cryptographically bound to the frozen election
@@ -131,7 +139,16 @@ export function Guide() {
           </li>
           <li>
             <strong>Open voting.</strong> This is a separate, deliberate lifecycle action;
-            starting Tor intake never opens the election on its own.
+            starting Tor intake never opens the election on its own. Opening (and later closing)
+            also fences the running intake immediately: ballots are accepted only while this
+            election is authoritatively open.
+          </li>
+          <li>
+            <strong>Publish signed status after each change.</strong> Export a signed election
+            status statement whenever the lifecycle changes and give voters a copy — it is bound
+            to this exact election and signed by this ballot office, so voters on independent
+            computers learn FROZEN/OPEN/CLOSED without trusting any unsigned claim. While intake
+            is running, connected voters can also fetch the same signed status privately.
           </li>
           <li>
             <strong>Receive ballots.</strong> Private Tor submissions enter a durable
@@ -145,7 +162,8 @@ export function Guide() {
           </li>
           <li>
             <strong>Close voting.</strong> <strong>Closing is irreversible:</strong> no new
-            ballots are accepted afterwards.
+            ballots are accepted afterwards — the running intake is fenced immediately, and any
+            voter still holding stale OPEN evidence cannot have a new ballot accepted.
           </li>
           <li>
             <strong>Tally and verify.</strong> Compute the deterministic tally and mark public

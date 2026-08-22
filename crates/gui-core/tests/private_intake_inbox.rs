@@ -12,7 +12,7 @@ mod common;
 use std::fs;
 
 use tari_cc_private_ballot_gui_core::{
-    LoadedElectionWorkspaceV1, append_accepted_ballot_package_to_inbox_v1,
+    GuiElectionSessionV1, LoadedElectionWorkspaceV1, append_accepted_ballot_package_to_inbox_v1,
     ballot_package_digest_hex_v1, ensure_election_workspaces_directory_v1,
     ensure_private_intake_inbox_directory_v1, ingest_private_intake_inbox_into_session_v1,
     private_intake_inbox_directory_v1, resume_election_workspace_v1,
@@ -226,30 +226,37 @@ fn empty_or_duplicate_only_reconciliation_signals_no_workspace_write() {
 }
 
 #[test]
-fn closed_election_rejects_a_newly_arriving_unsynced_package() {
-    // Once voting is closed the authoritative session must not ingest a package
-    // that arrives (or is reconciled) afterwards. The intake boundary is
-    // fail-closed: a closed session refuses ingest, so a late inbox package can
-    // never become an accepted ballot.
-    let dir = TestDir::new("inbox-closed");
+fn closed_election_drains_admitted_packages_but_the_collector_admits_nothing_new() {
+    // Repaired-architecture contract:
+    //
+    // * The AUTHORITATIVE collector fence refuses every envelope once voting
+    //   closes (proven in transport-gateway `election_status_route` tests), so
+    //   the application can never append a NEW package to the inbox after
+    //   close — there is no post-close acceptance path.
+    // * Packages the collector ALREADY accepted while OPEN (durable hand-off
+    //   completed before any receipt) drain into this workspace during CLOSED,
+    //   so a crash between acceptance and reconciliation can never orphan a
+    //   receipted ballot (TRANSPORT_ADMISSION_AND_CLOSE_V1).
+    let dir = TestDir::new("inbox-closed-drain");
     let inbox = dir.join("inbox");
 
-    // A first ballot is accepted while OPEN.
+    // Ballot A is admitted and handed off while OPEN.
     let ballot_a = triptych_package_bytes(0, &[b"candidate-a"]);
     append_accepted_ballot_package_to_inbox_v1(&inbox, &ballot_a).expect("append a");
     let mut session = open_session();
     ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest a");
     assert_eq!(session.accepted_count(), 1);
 
-    // Voting closes, then a DISTINCT voter's package lands in the inbox.
+    // Voting closes. The fenced collector can no longer admit ballot B — no
+    // application path appends it to the inbox afterwards.
     session.close().expect("close");
-    let ballot_b = triptych_package_bytes(1, &[b"candidate-b"]);
-    append_accepted_ballot_package_to_inbox_v1(&inbox, &ballot_b).expect("append b");
 
-    // Reconciliation after close must fail closed and accept nothing new.
-    let result = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session);
-    assert!(result.is_err(), "a closed election refuses a newly arriving package");
-    assert_eq!(session.accepted_count(), 1, "the closed election gains no new ballot");
+    // Ballot A's durable hand-off record remains: re-draining is idempotent.
+    let summary = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+        .expect("closed sessions still drain admitted work");
+    assert_eq!(summary.newly_accepted, 0);
+    assert_eq!(summary.duplicates, 1);
+    assert_eq!(session.accepted_count(), 1, "no double count during drain");
 }
 
 #[test]
@@ -324,4 +331,146 @@ fn inbox_directory_is_app_owned_and_election_scoped() {
     let ensured = ensure_private_intake_inbox_directory_v1(app_data_root, &manifest_hash_hex)
         .expect("ensure creates the election inbox");
     assert!(ensured.is_dir());
+}
+
+// -------------------------------------------------------------------------
+// Post-close drain: already-accepted work is never orphaned (transport doc
+// TRANSPORT_ADMISSION_AND_CLOSE_V1: closing rejects NEW work, lets admitted
+// work drain; no generic post-close path exists).
+// -------------------------------------------------------------------------
+
+#[test]
+fn accepted_before_close_drains_after_close_and_is_never_lost() {
+    // 1. While OPEN, the collector accepts a ballot and hands it to the
+    //    durable inbox BEFORE any receipt is issued.
+    let dir = TestDir::new("inbox-post-close-drain");
+    let inbox = dir.join("inbox");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    assert!(append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append"));
+
+    let mut session = open_session();
+    // 2. The organizer closes voting before the GUI reconciles the hand-off
+    //    (crash / restart window).
+    session.close().expect("close");
+
+    // 3. Generic post-close intake stays REFUSED — no new-acceptance path.
+    let refused = session.intake_ballot_package_bytes(&package);
+    assert!(refused.is_err(), "closed session refuses generic intake");
+
+    // 4. Reconciliation of the ALREADY-ACCEPTED inbox drains after close:
+    //    the receipted ballot reaches the authoritative workspace and tally.
+    let summary = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+        .expect("post-close drain reconciles");
+    assert_eq!(summary.newly_accepted, 1);
+    assert_eq!(session.accepted_count(), 1);
+    let tally = session.tally().expect("closed election tallies");
+    assert_eq!(
+        tally.accepted_ballots, 1,
+        "a receipted ballot must never be lost to a close"
+    );
+
+    // 5. A second sync is an idempotent duplicate, never a double count.
+    let second = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+        .expect("re-sync after drain");
+    assert_eq!(second.newly_accepted, 0);
+    assert_eq!(second.duplicates, 1);
+    assert_eq!(session.accepted_count(), 1);
+
+    // 6. The durable snapshot replays identically across a restart.
+    let snapshot = session.to_durable_snapshot().expect("snapshot");
+    let resumed = GuiElectionSessionV1::from_durable_snapshot(snapshot).expect("resume");
+    assert_eq!(resumed.accepted_count(), 1);
+}
+
+#[test]
+fn reconciliation_refuses_once_results_are_sealed() {
+    let dir = TestDir::new("inbox-sealed-refusal");
+    let inbox = dir.join("inbox");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    assert!(append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append"));
+
+    let mut session = open_session();
+    session.close().expect("close");
+    // Drain once while CLOSED...
+    let drained =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("drain ok");
+    assert_eq!(drained.newly_accepted, 1);
+
+    // ...then seal the results: further lifecycle progression succeeds, but
+    // reconciliation is refused outright in VERIFIED/FINALIZED.
+    session.mark_verified().expect("verify");
+    let verified_error =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+            .expect_err("sealed results refuse reconciliation");
+    assert_eq!(verified_error.code(), "ELECTION_NOT_OPEN");
+
+    session.finalize().expect("finalize");
+    assert!(
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).is_err(),
+        "FINALIZED refuses reconciliation outright"
+    );
+}
+
+#[test]
+fn frozen_sessions_refuse_reconciliation_like_generic_intake() {
+    let dir = TestDir::new("inbox-frozen-refusal");
+    let inbox = dir.join("inbox");
+    let package = triptych_package_bytes(0, &[b"candidate-a"]);
+    assert!(append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append"));
+
+    // An inbox can never contain pre-acceptance evidence for a FROZEN
+    // election; if one somehow does, the frozen session refuses it.
+    let mut frozen = tari_cc_private_ballot_gui_core::GuiElectionSessionV1::new(common::artifacts())
+        .expect("frozen session");
+    assert!(
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut frozen).is_err(),
+        "frozen sessions refuse inbox reconciliation"
+    );
+}
+
+#[test]
+fn closed_drain_trusts_inbox_presence_and_generic_intake_stays_refused() {
+    // DOCUMENTED TRUST BOUNDARY (TRANSPORT_ADMISSION_AND_CLOSE_V1): during the
+    // CLOSED drain the ONLY provenance for an inbox package is its presence in
+    // this app-owned, content-addressed directory — written exclusively by the
+    // fenced collector while OPEN. There is deliberately no per-file
+    // attestation: every local secret that could sign one lives on the same
+    // machine, so such evidence would add nothing against a local writer who
+    // can already forge it (and tamper with the durable workspace equally).
+    //
+    // This test PINS that boundary exactly, so any widening (e.g. accepting
+    // generic intake again) or accidental narrowing fails loudly here:
+    //
+    // * a package placed by a plain LOCAL writer with no collector involved is
+    //   drained while CLOSED (accepted residual risk against a local
+    //   adversary, traded for never orphaning receipted ballots);
+    // * generic intake of the SAME bytes stays refused at CLOSED.
+    let dir = TestDir::new("inbox-drain-presence-boundary");
+    let inbox = dir.join("inbox");
+
+    let mut session = open_session();
+    session.close().expect("close");
+
+    // A ballot NO collector ever admitted: fresh voter, prepared locally,
+    // dropped straight into the inbox directory.
+    let never_admitted = triptych_package_bytes(2, &[b"candidate-b"]);
+    assert!(
+        append_accepted_ballot_package_to_inbox_v1(&inbox, &never_admitted).expect("local write"),
+        "a local writer can place packages in the app-owned inbox"
+    );
+
+    // The CLOSED drain reconciles by presence (documented residual risk).
+    let summary = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+        .expect("closed drain runs on locally-placed packages");
+    assert_eq!(summary.newly_accepted, 1);
+    assert_eq!(session.accepted_count(), 1);
+
+    // Control: the same bytes through generic intake are refused outright.
+    let mut closed_control = open_session();
+    closed_control.close().expect("close control");
+    assert!(
+        closed_control
+            .intake_ballot_package_bytes(&never_admitted)
+            .is_err()
+    );
 }

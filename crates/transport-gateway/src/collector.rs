@@ -34,8 +34,10 @@ use tari_cc_private_ballot_transport_network::{
 
 use crate::{GatewayReceiverKeyV1, TransportGatewaySimulatorV1, new_retry_capability_v1};
 
-/// The single accepted request path. Anything else is a 404.
+/// The single accepted ballot-delivery request path. Anything else is a 404.
 pub const OPAQUE_ENVELOPE_HTTP_PATH_V1: &str = "/v1/opaque-envelope";
+/// The read-only authenticated election-status path (`GET`, no request body).
+pub const ELECTION_STATUS_HTTP_PATH_V1: &str = "/v1/election-status";
 /// The single accepted request/response content type.
 pub const OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1: &str = "application/octet-stream";
 
@@ -189,6 +191,15 @@ impl RequestDeadlineV1 {
 /// rejection. The collector never opens the envelope itself.
 pub trait OpaqueEnvelopeGatewayHandlerV1 {
     fn handle_opaque_envelope(&mut self, envelope: &[u8]) -> Result<Vec<u8>, CollectorRejectionV1>;
+
+    /// Answers `GET /v1/election-status` with the canonical bytes of one
+    /// authenticated election-status statement reflecting the AUTHORITATIVE
+    /// lifecycle. The default refuses (404) so existing handlers stay valid;
+    /// production intake overrides this to publish signed truth.
+    fn handle_election_status(&mut self) -> Result<Vec<u8>, CollectorRejectionV1> {
+        let _ = self;
+        Err(CollectorRejectionV1::NotFound)
+    }
 }
 
 /// A concrete handler that wires the loopback collector to the existing
@@ -523,6 +534,18 @@ fn read_and_dispatch(
     handler: &mut dyn OpaqueEnvelopeGatewayHandlerV1,
 ) -> Result<Vec<u8>, CollectorRejectionV1> {
     let (request, mut body) = read_request_head(stream, deadline)?;
+
+    // Route dispatch before any body/framing validation.
+    // * GET /v1/election-status — read-only authenticated status route.
+    // * Any other method on a KNOWN path is 405 (handler never invoked).
+    // * Unknown paths are 404.
+    if request.method == "GET" {
+        return match request.path.as_str() {
+            ELECTION_STATUS_HTTP_PATH_V1 => handler.handle_election_status(),
+            OPAQUE_ENVELOPE_HTTP_PATH_V1 => Err(CollectorRejectionV1::MethodNotAllowed),
+            _ => Err(CollectorRejectionV1::NotFound),
+        };
+    }
 
     // Validation order: method, path, framing, content type, length.
     if request.method != "POST" {

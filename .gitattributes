@@ -1,0 +1,32 @@
+# Normalize line endings so a fresh Windows clone with core.autocrlf=true
+# never introduces CRLF into source files that source-inspection tests read.
+# All text files are stored with LF in the repository AND checked out with LF;
+# this keeps `git diff` stable across platforms and keeps semantic
+# source-assertion tests deterministic on every machine.
+
+* text=auto eol=lf
+
+# Canonical protocol artifacts and other binary content must never be
+# line-ending translated in either direction.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.exe binary
+*.dll binary
+*.lib binary
+*.bin binary
+*.cbor binary
+*.hex binary
+
+# Windows scripts legitimately keep CRLF (some tools misparse LF-only batch).
+*.bat text eol=crlf
+*.cmd text eol=crlf
+# PowerShell 5.1 parses either ending; CRLF matches Windows convention.
+*.ps1 text eol=crlf

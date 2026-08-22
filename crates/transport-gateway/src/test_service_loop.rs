@@ -21,7 +21,10 @@ use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
 
-use tari_cc_private_ballot_gui_core::{GuiElectionSessionV1, TransportDescriptorV1};
+use tari_cc_private_ballot_gui_core::{
+    AuthoritativeLifecycleFenceV1, GuiElectionSessionV1, TransportDescriptorV1,
+    AuthenticatedElectionStatusStatementV1,
+};
 
 use crate::TransportGatewaySimulatorV1;
 use crate::collector::{
@@ -61,6 +64,14 @@ pub struct ThreadSafeCollectorHandlerV1 {
     /// every accepted canonical package is appended so the organizer GUI can
     /// ingest it into its authoritative durable workspace.
     accepted_package_inbox: Option<PathBuf>,
+    /// Optional AUTHORITATIVE lifecycle fence. When set, ballot admission is
+    /// refused unless the organizer GUI has published OPEN here — the worker's
+    /// own session never decides admission (fencing for pre-open and close).
+    lifecycle_fence: Option<AuthoritativeLifecycleFenceV1>,
+    /// Optional election-status signing identity: the SAME release-pinned root
+    /// key that signed the descriptor. Required together with the fence to
+    /// answer `GET /v1/election-status`.
+    status_signer: Option<(Arc<SigningKey>, String)>,
 }
 
 impl ThreadSafeCollectorHandlerV1 {
@@ -84,6 +95,8 @@ impl ThreadSafeCollectorHandlerV1 {
             receipt_signing_key,
             receipt_key_id,
             accepted_package_inbox: None,
+            lifecycle_fence: None,
+            status_signer: None,
         }
     }
 
@@ -95,10 +108,44 @@ impl ThreadSafeCollectorHandlerV1 {
         self.accepted_package_inbox = Some(inbox_dir);
         self
     }
+
+    /// Installs the authoritative lifecycle fence. While set, every envelope
+    /// admission requires the fence to be OPEN.
+    #[must_use]
+    pub fn with_lifecycle_fence(mut self, fence: AuthoritativeLifecycleFenceV1) -> Self {
+        self.lifecycle_fence = Some(fence);
+        self
+    }
+
+    /// Installs the root signing identity used to answer
+    /// `GET /v1/election-status` with authenticated truth.
+    #[must_use]
+    pub fn with_election_status_signer(
+        mut self,
+        root_signing_key: Arc<SigningKey>,
+        root_key_id: String,
+    ) -> Self {
+        self.status_signer = Some((root_signing_key, root_key_id));
+        self
+    }
+
+    fn authoritative_lifecycle_open(&self) -> bool {
+        match &self.lifecycle_fence {
+            Some(fence) => fence.is_open(),
+            None => true,
+        }
+    }
 }
 
 impl OpaqueEnvelopeGatewayHandlerV1 for ThreadSafeCollectorHandlerV1 {
     fn handle_opaque_envelope(&mut self, envelope: &[u8]) -> Result<Vec<u8>, CollectorRejectionV1> {
+        // AUTHORITATIVE FENCE: when the GUI lifecycle is not OPEN (pre-open or
+        // closed/verified/finalized), ballots are refused BEFORE any gateway,
+        // decryption, intake, or durable work. A receipt can therefore never
+        // claim acceptance outside the authoritative open state.
+        if !self.authoritative_lifecycle_open() {
+            return Err(CollectorRejectionV1::AdmissionUnavailable);
+        }
         let mut gateway = self
             .gateway
             .lock()
@@ -129,6 +176,38 @@ impl OpaqueEnvelopeGatewayHandlerV1 for ThreadSafeCollectorHandlerV1 {
             None => handler,
         };
         handler.handle_opaque_envelope(envelope)
+    }
+
+    fn handle_election_status(&mut self) -> Result<Vec<u8>, CollectorRejectionV1> {
+        // Status requires BOTH the authoritative fence (the truth source) and
+        // the root signing identity. Without either, refuse rather than guess.
+        let Some(fence) = self.lifecycle_fence.clone() else {
+            return Err(CollectorRejectionV1::NotFound);
+        };
+        let Some((root_signing_key, root_key_id)) = self.status_signer.clone() else {
+            return Err(CollectorRejectionV1::NotFound);
+        };
+        // Election bindings come from the worker's validated artifacts; the
+        // STATE and GENERATION come from the authoritative fence only.
+        let session = self
+            .session
+            .lock()
+            .map_err(|_| CollectorRejectionV1::Internal)?;
+        let artifacts = session.artifacts();
+        let statement = AuthenticatedElectionStatusStatementV1::sign_for_test_or_ceremony(
+            artifacts.manifest().election_id().as_bytes().to_vec(),
+            artifacts.manifest_hash(),
+            artifacts.registry_commitment(),
+            fence.state(),
+            fence.generation(),
+            root_key_id,
+            &root_signing_key,
+        )
+        .map_err(|_| CollectorRejectionV1::Internal)?;
+        drop(session);
+        statement
+            .to_canonical_cbor()
+            .map_err(|_| CollectorRejectionV1::Internal)
     }
 }
 

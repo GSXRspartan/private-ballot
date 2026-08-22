@@ -138,22 +138,42 @@ impl TransportAuthorityRootSetV1 {
         self.current.key_id()
     }
 
+    /// Looks up a non-revoked root by id. Descriptors can never install a new
+    /// root; they only select an already-pinned one.
+    fn lookup_root(&self, root_key_id: &str) -> Result<&TransportAuthorityRootV1, TransportError> {
+        if self.revoked.contains(root_key_id) {
+            return Err(TransportError::UntrustedRoot);
+        }
+        if root_key_id == self.current.key_id() {
+            return Ok(&self.current);
+        }
+        self.historical
+            .get(root_key_id)
+            .ok_or(TransportError::UntrustedRoot)
+    }
+
+    /// Verifies one detached Ed25519 signature under the release-pinned root
+    /// selected by id (revocation-aware). This is the shared verification
+    /// primitive for every artifact signed by the transport authority root —
+    /// descriptors and authenticated election-status statements alike.
+    pub fn verify_by_root_id(
+        &self,
+        root_key_id: &str,
+        message: &[u8],
+        signature_bytes: &[u8; 64],
+    ) -> Result<(), TransportError> {
+        let key = self.lookup_root(root_key_id)?.verifying_key()?;
+        let signature = Signature::from_bytes(signature_bytes);
+        key.verify_strict(message, &signature)
+            .map_err(|_| TransportError::CryptoFailure)
+    }
+
     pub fn verify_descriptor(
         &self,
         descriptor: &TransportDescriptorV1,
         expected_manifest: ManifestHash,
     ) -> Result<(), TransportError> {
-        let root_id = descriptor.root_key_id();
-        if self.revoked.contains(root_id) {
-            return Err(TransportError::UntrustedRoot);
-        }
-        let root = if root_id == self.current.key_id() {
-            &self.current
-        } else {
-            self.historical
-                .get(root_id)
-                .ok_or(TransportError::UntrustedRoot)?
-        };
+        let root = self.lookup_root(descriptor.root_key_id())?;
         descriptor.verify(root, expected_manifest)
     }
 
@@ -168,17 +188,7 @@ impl TransportAuthorityRootSetV1 {
         expected_manifest: ManifestHash,
         consistency: &mut DescriptorConsistencyStoreV1,
     ) -> Result<[u8; 32], TransportError> {
-        let root_id = descriptor.root_key_id();
-        if self.revoked.contains(root_id) {
-            return Err(TransportError::UntrustedRoot);
-        }
-        let root = if root_id == self.current.key_id() {
-            &self.current
-        } else {
-            self.historical
-                .get(root_id)
-                .ok_or(TransportError::UntrustedRoot)?
-        };
+        let root = self.lookup_root(descriptor.root_key_id())?;
         descriptor.verify(root, expected_manifest)?;
         consistency.accept(descriptor, root, expected_manifest)
     }

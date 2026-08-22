@@ -5,6 +5,7 @@ import {
   pickBallotPackagePath,
   pickDirectory,
   pickElectionArtifact,
+  pickElectionStatusFile,
   pickGovernanceDocument,
   pickTorExecutable,
   pickVoterTransportBundle,
@@ -53,6 +54,7 @@ import {
   publicKeyDisplay,
 } from "../voterCredential";
 import {
+  electionNotOpenText,
   receiptStateIsAccepted,
   receiptStateText,
   selectionAtApprovalMax,
@@ -153,7 +155,7 @@ function GuidedStageSummary({
 }
 
 export function Vote() {
-  const { election, shellAvailable, loadElection } = useAppState();
+  const { election, shellAvailable, loadElection, refreshElection } = useAppState();
   const [loadManifestPath, setLoadManifestPath] = useState("");
   const [loadRegistryPath, setLoadRegistryPath] = useState("");
   const [loadOptionSetPath, setLoadOptionSetPath] = useState("");
@@ -225,9 +227,23 @@ export function Vote() {
   // it just reveals the existing configure/verify flow, which still fails closed
   // on an election mismatch. Never offered once the ballot is durably locked.
   const [reconfiguring, setReconfiguring] = useState(false);
+  // Optimistic draft mirror of the checkbox selection. The BACKEND remains
+  // authoritative: every successful or failed set/clear re-syncs this draft
+  // from the authoritative status, so a rejected toggle can never leave a
+  // phantom checked box (the two-computer FROZEN failure).
   const selectionDraftIdsRef = useRef<string[]>([]);
-  const selectionRequestGenerationRef = useRef(0);
+  // Monotonic gate for ALL voter status reads/writes (refreshWorkflow,
+  // refreshSelection, setBackendSelection). A stale async response may never
+  // overwrite newer state; election/credential switches invalidate it.
+  const selectionStatusGateRef = useRef(new RequestGenerationGate());
   const confirmationRequestGenerationRef = useRef(new RequestGenerationGate());
+  // Voter-safe result of importing a signed election-status artifact.
+  const [statusImport, setStatusImport] = useState<{
+    effective_state: string;
+    advanced: boolean;
+    generation: number;
+  } | null>(null);
+  const [statusImportBusy, setStatusImportBusy] = useState(false);
 
   useEffect(() => {
     setConfirmation(null);
@@ -237,7 +253,8 @@ export function Vote() {
     setSelectedOptionIds([]);
     setAbstaining(false);
     selectionDraftIdsRef.current = [];
-    selectionRequestGenerationRef.current += 1;
+    // Election switch invalidates every in-flight selection/status response.
+    selectionStatusGateRef.current.invalidate();
     confirmationRequestGenerationRef.current.invalidate();
     setConfirmed(false);
     setCredentialStage(false);
@@ -501,7 +518,9 @@ export function Vote() {
 
   async function refreshWorkflow(reviewConfirmed = confirmed) {
     if (!election || !shellAvailable) return;
+    const token = selectionStatusGateRef.current.begin();
     const status = await api.voterWorkflowStatus(reviewConfirmed);
+    if (!selectionStatusGateRef.current.isCurrent(token)) return;
     setWorkflow(status);
     setCredential(status.credential);
     setSelection(status.selection);
@@ -512,7 +531,9 @@ export function Vote() {
 
   async function refreshSelection() {
     if (!election || !shellAvailable) return;
+    const token = selectionStatusGateRef.current.begin();
     const status = await api.voterBallotSelectionStatus();
+    if (!selectionStatusGateRef.current.isCurrent(token)) return;
     setSelection(status);
     setSelectedOptionIds(status.selected_option_ids_hex);
     setAbstaining(status.abstaining);
@@ -534,8 +555,7 @@ export function Vote() {
   }
 
   async function setBackendSelection(nextIds: string[], nextAbstaining: boolean) {
-    const requestGeneration = selectionRequestGenerationRef.current + 1;
-    selectionRequestGenerationRef.current = requestGeneration;
+    const requestToken = selectionStatusGateRef.current.begin();
     setBusy(true);
     setError(null);
     try {
@@ -543,16 +563,26 @@ export function Vote() {
         nextIds.length === 0 && !nextAbstaining
           ? await api.clearVoterBallotSelection()
           : await api.setVoterBallotSelection(nextIds, nextAbstaining);
-      if (requestGeneration !== selectionRequestGenerationRef.current) return;
+      if (!selectionStatusGateRef.current.isCurrent(requestToken)) return;
       setSelection(status);
       setSelectedOptionIds(status.selected_option_ids_hex);
       setAbstaining(status.abstaining);
       selectionDraftIdsRef.current = status.selected_option_ids_hex;
       await refreshWorkflow(true);
     } catch (err) {
-      if (requestGeneration === selectionRequestGenerationRef.current) captureError(err);
+      if (selectionStatusGateRef.current.isCurrent(requestToken)) captureError(err);
+      // AUTHORITATIVE ROLLBACK: the backend refused this selection, so re-read
+      // the authoritative state and repaint from it. A rejected toggle can
+      // never leave a phantom checked box or phantom abstention.
+      try {
+        await refreshSelection();
+        await refreshWorkflow(true);
+      } catch {
+        // Surface the original refusal; the rollback refresh is best-effort
+        // and must not mask it.
+      }
     } finally {
-      if (requestGeneration === selectionRequestGenerationRef.current) setBusy(false);
+      if (selectionStatusGateRef.current.isCurrent(requestToken)) setBusy(false);
     }
   }
 
@@ -635,6 +665,50 @@ export function Vote() {
       captureError(err);
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Imports an organizer-signed, election-bound lifecycle statement (offline
+  // file). Rust authenticates it against the ballot-office authority anchor,
+  // applies it monotonically to the loaded election, and persists it; this
+  // screen then re-reads authoritative state. No credential, selection, or
+  // ballot material is involved: asking "is voting open?" reveals nothing.
+  async function onImportElectionStatus() {
+    if (!shellAvailable || !election) return;
+    setError(null);
+    setStatusImportBusy(true);
+    try {
+      const path = await pickElectionStatusFile();
+      if (path === null) return;
+      const result = await api.importElectionStatusArtifact(path);
+      setStatusImport(result.applied);
+      // The backend session is now authoritative at the new lifecycle;
+      // re-read both the shell summary and the voter workflow from it.
+      await refreshElection();
+      await refreshWorkflow(confirmed);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setStatusImportBusy(false);
+    }
+  }
+
+  // Same verification path, but the signed statement is fetched from the
+  // ballot office through the RUNNING managed-Tor connection. The request
+  // carries only public data, so it never links the voter to any ballot.
+  async function onFetchElectionStatusPrivate() {
+    if (!shellAvailable || !election) return;
+    setError(null);
+    setStatusImportBusy(true);
+    try {
+      const result = await api.fetchElectionStatusPrivate();
+      setStatusImport(result.applied);
+      await refreshElection();
+      await refreshWorkflow(confirmed);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setStatusImportBusy(false);
     }
   }
 
@@ -1272,6 +1346,43 @@ export function Vote() {
                   </span>
                 </Field>
               )}
+              {election?.lifecycle_state === "FROZEN" && (
+                <Notice tone="warn">
+                  <strong>Voting has not opened yet.</strong> The frozen election file cannot say
+                  when voting opens — only the ballot office can. When the office opens voting it
+                  publishes a SIGNED status statement; import that file here (or check through the
+                  private connection) to continue.
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={statusImportBusy}
+                      onClick={() => void onImportElectionStatus()}
+                    >
+                      {statusImportBusy ? "Verifying…" : "Import signed election status…"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={statusImportBusy || !managedTorStatus?.configured}
+                      onClick={() => void onFetchElectionStatusPrivate()}
+                    >
+                      Check via private connection
+                    </button>
+                  </div>
+                  {statusImport && (
+                    <p className="form-hint">
+                      Last imported status: {statusImport.effective_state} (generation{" "}
+                      {statusImport.generation}).{statusImport.advanced ? "" : " It matched the current state."}
+                    </p>
+                  )}
+                </Notice>
+              )}
+              {(election?.lifecycle_state === "CLOSED" ||
+                election?.lifecycle_state === "VERIFIED" ||
+                election?.lifecycle_state === "FINALIZED") && (
+                <Notice tone="info">{electionNotOpenText(election.lifecycle_state)}</Notice>
+              )}
               <Field label="How many to choose">
                 <span className="field-value">
                   {selectionInstructionText(confirmation.bound)}
@@ -1588,7 +1699,11 @@ export function Vote() {
                     )}
                     <div className="selection-status" aria-live="polite">
                       <Pill tone={workflowTone(workflow?.workflow_state)}>
-                        {workflowStateText(workflow?.workflow_state)}
+                        {workflow?.workflow_state === "ElectionNotOpen"
+                          ? electionNotOpenText(
+                              selection?.lifecycle_state ?? election?.lifecycle_state,
+                            )
+                          : workflowStateText(workflow?.workflow_state)}
                       </Pill>
                       <span>{selectionLiveText}</span>
                     </div>

@@ -27,9 +27,11 @@ import type {
   GuiElectionSummaryV1,
   GuiElectionWorkspaceResumeResultV1,
   GuiElectionWorkspaceSummaryV1,
-  GuiGovernanceDocumentDigestV1,
-  GuiGovernanceDocumentStatusV1,
-  GuiParticipationSummaryV1,
+   GuiGovernanceDocumentDigestV1,
+   GuiGovernanceDocumentStatusV1,
+   GuiElectionStatusExportResultV1,
+   GuiElectionStatusImportResultV1,
+   GuiParticipationSummaryV1,
   GuiPrivateReleaseResultV1,
   GuiPrivateRouteV1,
   GuiPrivateSubmissionResultV1,
@@ -334,6 +336,16 @@ export const api = {
     call<VoterBundleExportResultV1>("export_voter_transport_bundle", {
       destinationDir,
     }),
+  exportElectionStatusArtifact: (destinationPath: string) =>
+    call<GuiElectionStatusExportResultV1>("export_election_status_artifact", {
+      destinationPath,
+    }),
+  importElectionStatusArtifact: (statusPath: string) =>
+    call<GuiElectionStatusImportResultV1>("import_election_status_artifact", {
+      statusPath,
+    }),
+  fetchElectionStatusPrivate: () =>
+    call<GuiElectionStatusImportResultV1>("fetch_election_status_private"),
   writeArchiveWithGovernanceDocument: (
     targetDir: string,
     governanceDocumentPath: string | null,

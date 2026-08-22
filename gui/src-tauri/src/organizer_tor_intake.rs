@@ -34,8 +34,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
-    GuiElectionArtifactsV1, GuiElectionSessionV1, TransportDescriptorV1,
-    ensure_private_intake_inbox_directory_v1,
+    AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
+    GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
+    ensure_voter_election_status_directory_v1, read_issued_status_generation_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     GatewayReceiverKeyV1, LoadedOrganizerPrivateBundleV1, OpaqueEnvelopeCollectorV1,
@@ -91,6 +92,28 @@ pub(crate) struct OrganizerIntakeState {
     stderr_log: PathBuf,
     voter_bundle_path: PathBuf,
     durable_inbox_dir: PathBuf,
+    /// AUTHORITATIVE lifecycle fence: the GUI publishes every committed
+    /// transition here so admission and status answers reflect organizer truth,
+    /// never the worker session's own substrate state.
+    lifecycle_fence: AuthoritativeLifecycleFenceV1,
+}
+
+impl OrganizerIntakeState {
+    /// True when this running intake belongs to the supplied election.
+    #[must_use]
+    pub(crate) fn is_bound_to_manifest(&self, manifest_hash_hex: &str) -> bool {
+        self.manifest_hash_hex == manifest_hash_hex
+    }
+
+    /// Publishes one committed authoritative lifecycle transition into the
+    /// collector's admission/status path.
+    pub(crate) fn publish_lifecycle_transition(
+        &self,
+        state: ElectionLifecycleStateV1,
+        reserved_generation: Option<u64>,
+    ) {
+        self.lifecycle_fence.observe(state, reserved_generation);
+    }
 }
 
 /// Serializable organizer intake status (organizer-safe aggregates only). No
@@ -167,7 +190,7 @@ fn election_transport_subpath(
 /// Validates a manifest-hash hex and returns the app-owned election transport
 /// root. Resolves the app-data root from the Tauri handle (app-owned, never a
 /// remote value).
-fn election_transport_root(
+pub(crate) fn election_transport_root(
     app: &AppHandle,
     manifest_hash_hex: &str,
 ) -> Result<PathBuf, CommandError> {
@@ -176,6 +199,16 @@ fn election_transport_root(
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())?;
     election_transport_subpath(&app_data_root, manifest_hash_hex)
+}
+
+/// The app-owned organizer-private bundle directory for one election (holds
+/// the root signing secret used to sign descriptors, receipts, and
+/// election-status statements).
+pub(crate) fn organizer_private_bundle_dir(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+) -> Result<PathBuf, CommandError> {
+    Ok(election_transport_root(app, manifest_hash_hex)?.join("organizer-private"))
 }
 
 /// Ensures `dir` is an app-owned real directory (no symlink/reparse redirect).
@@ -233,14 +266,14 @@ impl TransportPaths {
 // Session snapshot (never held across the long Tor bootstrap).
 // -------------------------------------------------------------------------
 
-struct BoundElection {
-    artifacts: GuiElectionArtifactsV1,
-    manifest_hash_hex: String,
-    election_id: Vec<u8>,
-    manifest_hash: [u8; 32],
+pub(crate) struct BoundElection {
+    pub(crate) artifacts: GuiElectionArtifactsV1,
+    pub(crate) manifest_hash_hex: String,
+    pub(crate) election_id: Vec<u8>,
+    pub(crate) manifest_hash: [u8; 32],
 }
 
-fn bound_election(state: &AppState) -> Result<BoundElection, CommandError> {
+pub(crate) fn bound_election(state: &AppState) -> Result<BoundElection, CommandError> {
     let guard = state
         .session
         .lock()
@@ -458,8 +491,20 @@ fn start_private_intake_blocking(
     }
 
     // Run the vetted intake orchestration; on success this returns the running
-    // state to store.
-    let running = start_intake_worker(app, &tor_executable, &paths, &bound)?;
+    // state to store. The AUTHORITATIVE lifecycle at start seeds the admission
+    // fence so a FROZEN election never accepts ballots even if intake starts
+    // before voting opens.
+    let authoritative_lifecycle = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        guard
+            .as_ref()
+            .map(GuiElectionSessionV1::lifecycle_state_v1)
+            .unwrap_or(ElectionLifecycleStateV1::Frozen)
+    };
+    let running = start_intake_worker(app, &tor_executable, &paths, &bound, authoritative_lifecycle)?;
     // The worker was just confirmed alive (child liveness re-checked after
     // discovery, worker liveness checked in step 9), so report it as running.
     let status = running_status(&running, true, true);
@@ -709,6 +754,7 @@ fn start_intake_worker(
     tor_executable: &Path,
     paths: &TransportPaths,
     bound: &BoundElection,
+    authoritative_lifecycle: ElectionLifecycleStateV1,
 ) -> Result<OrganizerIntakeState, CommandError> {
     // 1. Load organizer private bundle and validate ALL bindings before Tor.
     let bundle = load_organizer_private_bundle_v1(&paths.organizer_private_dir).map_err(|_| {
@@ -865,11 +911,24 @@ fn start_intake_worker(
 
     // 8. Only now start the collector service loop (first point a ballot could
     // be accepted). Accepted canonical packages flow to the durable inbox.
+    // The AUTHORITATIVE lifecycle fence is initialized from the organizer
+    // GUI's current state and continues the durable issuance generation, so a
+    // FROZEN election fences ballots immediately and status answers carry
+    // signed truth (never the worker session's own substrate state).
     let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
     let session_arc = Arc::new(Mutex::new(session));
     let descriptor_arc = Arc::new(bundle.descriptor.clone());
     let receiver_key_arc = reconstruct_receiver_key(&bundle)?;
     let receipt_key_arc = Arc::new(bundle.material.receipt_signing_key.clone());
+    let root_signing_key_arc = Arc::new(bundle.material.root_signing_key.clone());
+    let lifecycle_fence = AuthoritativeLifecycleFenceV1::new(
+        authoritative_lifecycle,
+        read_issued_status_generation_v1(
+            &ensure_voter_election_status_directory_v1(&app_data_root(app)?)?,
+            &bound.manifest_hash_hex,
+        )
+        .unwrap_or(0),
+    );
     let handler = ThreadSafeCollectorHandlerV1::new(
         gateway,
         descriptor_arc,
@@ -878,7 +937,9 @@ fn start_intake_worker(
         receipt_key_arc,
         "organizer-receipt-key".to_owned(),
     )
-    .with_accepted_package_inbox(durable_inbox_dir.clone());
+    .with_accepted_package_inbox(durable_inbox_dir.clone())
+    .with_lifecycle_fence(lifecycle_fence.clone())
+    .with_election_status_signer(root_signing_key_arc, bundle.material.root.key_id().to_owned());
     let service_loop =
         OrganizerCollectorServiceLoopV1::start(collector, handler, COLLECTOR_POLL_INTERVAL)
             .map_err(|_| {
@@ -912,6 +973,7 @@ fn start_intake_worker(
         stderr_log,
         voter_bundle_path: paths.voter_bundle_path.clone(),
         durable_inbox_dir,
+        lifecycle_fence,
     })
 }
 

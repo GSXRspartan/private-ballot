@@ -22,9 +22,10 @@ pub use organizer_hidden_service::{
     discover_organizer_onion_hostname_v1,
 };
 pub use tor::{
-    ONION_VIRTUAL_PORT_V1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1, OPAQUE_ENVELOPE_HTTP_PATH_V1,
-    StrictHeaderErrorV1, SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1,
-    TorSocksPrivateReleaseCarrierV1, parse_strict_content_length_v1, parse_strict_header_line_v1,
+    ELECTION_STATUS_HTTP_PATH_V1, ONION_VIRTUAL_PORT_V1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1,
+    OPAQUE_ENVELOPE_HTTP_PATH_V1, StrictHeaderErrorV1, SystemManagedTorReadinessProbeV1,
+    TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1, fetch_election_status_over_tor,
+    parse_strict_content_length_v1, parse_strict_header_line_v1,
     validate_loopback_socket_addr_v1, validate_onion_hostname_v1,
 };
 

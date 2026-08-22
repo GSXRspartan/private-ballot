@@ -37,6 +37,8 @@ use crate::PrivateTransportNetworkErrorV1;
 
 /// The single collector endpoint path. Nothing else is served or requested.
 pub const OPAQUE_ENVELOPE_HTTP_PATH_V1: &str = "/v1/opaque-envelope";
+/// The read-only authenticated election-status endpoint (`GET`, no body).
+pub const ELECTION_STATUS_HTTP_PATH_V1: &str = "/v1/election-status";
 /// The fixed HTTP content type for the opaque envelope body and receipt reply.
 pub const OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1: &str = "application/octet-stream";
 /// The fixed virtual port a Tor v3 hidden service exposes for this protocol. The
@@ -309,6 +311,50 @@ fn deliver_over_tor(
     let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
     let mut stream = socks5_connect_onion(socks_addr, onion_host, onion_port, timeouts)?;
     http_post_opaque_envelope(&mut stream, onion_host, envelope, timeouts)
+}
+
+/// Fetches one authenticated election-status statement from the ballot office
+/// over the managed Tor SOCKS route derived from the verified descriptor.
+///
+/// The request carries ONLY public data (`GET /v1/election-status`): no voter
+/// credential, selection, proof, nullifier, or package — asking "is this
+/// election open?" creates no link between a voter and any ballot. The route
+/// itself is descriptor-bound, so this can never become a clearnet fallback.
+pub fn fetch_election_status_over_tor(
+    socks_addr: SocketAddr,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
+    let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
+    let mut stream = socks5_connect_onion(socks_addr, onion_host, onion_port, timeouts)?;
+    http_get_election_status(&mut stream, onion_host, timeouts)
+}
+
+fn http_get_election_status(
+    stream: &mut TcpStream,
+    onion_host: &str,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
+    stream
+        .set_write_timeout(Some(timeouts.http_write))
+        .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
+    stream
+        .set_read_timeout(Some(timeouts.http_response))
+        .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
+
+    // No body, no Content-Length, strict Connection: close.
+    let header = format!(
+        "GET {ELECTION_STATUS_HTTP_PATH_V1} HTTP/1.1\r\n\
+         Host: {onion_host}\r\n\
+         Accept: {OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1}\r\n\
+         Connection: close\r\n\r\n"
+    );
+    write_all(stream, header.as_bytes())?;
+    stream
+        .flush()
+        .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
+
+    read_http_receipt_response(stream)
 }
 
 /// Opens a TCP connection to the loopback SOCKS proxy and performs a strict

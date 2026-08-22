@@ -5,6 +5,7 @@ import {
   pickBallotPackageFile,
   pickDirectory,
   pickElectionArtifact,
+  pickElectionStatusExportPath,
   pickGovernanceDocument,
   pickTorExecutable,
 } from "../api/dialog";
@@ -485,6 +486,34 @@ export function ManageElection() {
     }
   };
 
+  const [statusExport, setStatusExport] = useState<{
+    written_path: string;
+    lifecycle_state: string;
+    generation: number;
+  } | null>(null);
+
+  // Exports one authenticated election-status statement: a signed statement of
+  // the CURRENT authoritative lifecycle, bound to this exact frozen election,
+  // signed by the same ballot-office root key as the transport descriptor.
+  // Voters import it to learn FROZEN/OPEN/CLOSED/... without trusting any
+  // unsigned claim. The generation is reserved durably before signing, so
+  // restarts never reuse one and stale artifacts can never roll voters back.
+  const onExportElectionStatus = async () => {
+    clearLocalError();
+    setStatusExport(null);
+    const path = await pickElectionStatusExportPath();
+    if (path === null) return;
+    try {
+      const result = await api.exportElectionStatusArtifact(path);
+      setStatusExport(result);
+      recordAction(
+        `Exported signed election status (${result.lifecycle_state}, generation ${result.generation})`,
+      );
+    } catch (error) {
+      showError(error);
+    }
+  };
+
   const onWriteArchive = async () => {
     clearLocalError();
     setArchiveResult(null);
@@ -959,17 +988,26 @@ export function ManageElection() {
           )}
 
           {/* Manual sync stays available but is recovery-oriented: normal
-              operation auto-reconciles, so this is not part of the main flow. */}
+              operation auto-reconciles, so this is not part of the main flow.
+              It also remains available while CLOSED so ballots the collector
+              already accepted (and receipted) before close can finish their
+              durable hand-off into this workspace — never a new-acceptance
+              path. */}
           <h3 className="card-section-heading">Recovery / manual actions</h3>
           <p className="form-hint">
             Accepted ballots reconcile automatically during normal operation. Use this only to
-            reconcile manually after a restart or a problem.
+            reconcile manually after a restart or a problem. After voting closes, sync once more
+            to finish any ballots that were already accepted before the close.
           </p>
           <div className="btn-row">
             <button
               type="button"
               className="btn btn-secondary"
-              disabled={!canAct || lifecycle !== "OPEN" || syncBusy}
+              disabled={
+                !canAct ||
+                syncBusy ||
+                !(lifecycle === "OPEN" || lifecycle === "CLOSED")
+              }
               onClick={() => void onSyncPrivateIntake()}
             >
               {syncBusy ? "Syncing…" : "Sync accepted ballots"}
@@ -1076,6 +1114,33 @@ export function ManageElection() {
               Voter transport bundle exported
               <br />
               <span className="hash">{bundleExportPath}</span>
+            </Notice>
+          )}
+
+          <h3 className="card-section-heading">Signed election status</h3>
+          <p className="card-body">
+            The frozen election package never changes, but voting itself opens and closes. To
+            tell voters the current state truthfully — on another computer, even offline — export
+            a signed status statement after each lifecycle change (open voting, close voting) and
+            give each voter a copy. It is bound to this exact election and signed by this ballot
+            office; voters reject anything else.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || lifecycle === null}
+              onClick={() => void onExportElectionStatus()}
+            >
+              {organizerBusy ? "Working…" : "Export signed election status"}
+            </button>
+          </div>
+          {statusExport && (
+            <Notice tone="ok">
+              Signed election status exported ({statusExport.lifecycle_state}, generation{" "}
+              {statusExport.generation})
+              <br />
+              <span className="hash">{statusExport.written_path}</span>
             </Notice>
           )}
         </Card>

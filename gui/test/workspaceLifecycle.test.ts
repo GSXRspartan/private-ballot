@@ -126,8 +126,12 @@ describe("Home active-workspace consistency", () => {
     assert.match(home, /isActiveWorkspace\(workspace\.workspace_id\) \? \(/);
     assert.match(home, /In progress — your current draft/);
     // The Delete control lives in the else branch (non-active rows only).
-    const deleteIdx = home.indexOf(">\n                              Delete");
+    // Line-ending agnostic: matches LF and CRLF checkouts alike.
+    const deleteMatch = home.match(/>\r?\n\s+Delete\b/);
     const guardIdx = home.indexOf("isActiveWorkspace(workspace.workspace_id) ? (");
-    assert.ok(guardIdx >= 0 && deleteIdx > guardIdx, "Delete is gated behind the active-workspace check");
+    assert.ok(
+      guardIdx >= 0 && deleteMatch !== null && (deleteMatch.index ?? 0) > guardIdx,
+      "Delete is gated behind the active-workspace check",
+    );
   });
 });

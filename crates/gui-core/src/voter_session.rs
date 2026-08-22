@@ -49,6 +49,11 @@ pub enum GuiVoterWorkflowStateV1 {
     CredentialMissing,
     /// The loaded credential is not eligible for this frozen registry.
     CredentialNotEligible,
+    /// The authoritative lifecycle is not OPEN: voting has not opened yet
+    /// (FROZEN) or has closed (CLOSED or later). Nothing else in the voter
+    /// workflow can proceed, so this truth dominates selection/credential
+    /// states. The exact wording comes from `selection.lifecycle_state`.
+    ElectionNotOpen,
     /// No authoritative ballot selection is loaded.
     SelectionIncomplete,
     /// Selection is valid and future proof preparation would be permitted.
@@ -72,6 +77,7 @@ impl GuiVoterWorkflowStateV1 {
             Self::ReviewRequired => "ReviewRequired",
             Self::CredentialMissing => "CredentialMissing",
             Self::CredentialNotEligible => "CredentialNotEligible",
+            Self::ElectionNotOpen => "ElectionNotOpen",
             Self::SelectionIncomplete => "SelectionIncomplete",
             Self::SelectionReady => "SelectionReady",
             Self::PreparingProof => "PreparingProof",
@@ -623,6 +629,12 @@ impl GuiVoterSessionV1 {
     }
 
     /// Validates and stores one authoritative voter selection.
+    ///
+    /// Selection is refused unless the election is OPEN: the backend is
+    /// authoritative, so a checkbox can never become workflow state while
+    /// voting is closed or not yet open (the two-computer phantom-selection
+    /// root cause). Callers surface [`ValidationCode::ElectionNotOpen`] and
+    /// roll their optimistic UI back.
     pub fn set_selection(
         &mut self,
         artifacts: &GuiElectionArtifactsV1,
@@ -632,6 +644,7 @@ impl GuiVoterSessionV1 {
     ) -> Result<GuiVoterSelectionStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
         self.ensure_not_cast_locked()?;
+        ensure_selection_lifecycle_open(lifecycle_state)?;
         if abstain && !selected_option_ids_hex.is_empty() {
             return Err(GuiCoreError::new(
                 "GUI_ABSTENTION_WITH_SELECTIONS",
@@ -665,6 +678,9 @@ impl GuiVoterSessionV1 {
     }
 
     /// Clears the current selection and invalidates prepared state.
+    ///
+    /// Like [`Self::set_selection`], this is refused while the election is not
+    /// OPEN so local selection state can never change outside an open vote.
     pub fn clear_selection(
         &mut self,
         artifacts: &GuiElectionArtifactsV1,
@@ -672,6 +688,7 @@ impl GuiVoterSessionV1 {
     ) -> Result<GuiVoterSelectionStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
         self.ensure_not_cast_locked()?;
+        ensure_selection_lifecycle_open(lifecycle_state)?;
         self.selection = None;
         self.selection_revision = self.selection_revision.saturating_add(1);
         self.invalidate_prepared("Selection cleared; prepared ballot state was cleared.");
@@ -695,7 +712,7 @@ impl GuiVoterSessionV1 {
         lifecycle_state: ElectionLifecycleStateV1,
     ) -> GuiVoterSelectionStatusV1 {
         let can_prepare_ballot = self.can_prepare_ballot(lifecycle_state);
-        match self.selection.as_ref() {
+        let mut status = match self.selection.as_ref() {
             Some(selection) => selection.status(
                 artifacts,
                 lifecycle_state,
@@ -709,7 +726,18 @@ impl GuiVoterSessionV1 {
                 self.selection_revision,
                 "No ballot selection is loaded.",
             ),
+        };
+        // While the election is not OPEN the lifecycle truth dominates the
+        // selection wording so the UI can never claim a usable response state.
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+            status.message = match lifecycle_state {
+                ElectionLifecycleStateV1::Frozen => {
+                    "Voting has not opened yet; responses can be chosen only while voting is open."
+                }
+                _ => "Voting has closed; responses can no longer be chosen or changed.",
+            };
         }
+        status
     }
 
     /// Returns a complete safe public workflow status.
@@ -1625,6 +1653,13 @@ impl GuiVoterSessionV1 {
             GuiVoterCastLockStateV1::CastPending => return GuiVoterWorkflowStateV1::CastPending,
             GuiVoterCastLockStateV1::NotCast => {}
         }
+        // The authoritative lifecycle dominates everything below it: while the
+        // election is not OPEN, no selection or preparation may proceed, so
+        // the workflow must SAY that instead of a misleading
+        // "choose a response" (the two-computer FROZEN failure).
+        if !matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+            return GuiVoterWorkflowStateV1::ElectionNotOpen;
+        }
         match self.credential_status().eligibility {
             GuiVoterEligibilityV1::NotChecked => GuiVoterWorkflowStateV1::CredentialMissing,
             GuiVoterEligibilityV1::NotEligible => GuiVoterWorkflowStateV1::CredentialNotEligible,
@@ -1695,6 +1730,28 @@ pub const RELEASE_PHASE_ENVELOPE_SEAL: &str = "release-envelope-seal";
 /// The bounded failure class is preserved in the machine code so a runtime
 /// failure identifies the exact check that rejected the descriptor, rather than
 /// being masked as a "retry later" transport outage.
+/// Selection changes require an OPEN election. This is the single shared
+/// lifecycle gate for `set_selection`/`clear_selection`, keeping backend
+/// selection state truthful with respect to the authoritative lifecycle.
+fn ensure_selection_lifecycle_open(
+    lifecycle_state: ElectionLifecycleStateV1,
+) -> Result<(), GuiCoreError> {
+    if matches!(lifecycle_state, ElectionLifecycleStateV1::Open) {
+        return Ok(());
+    }
+    Err(GuiCoreError::new(
+        ValidationCode::ElectionNotOpen.as_str(),
+        GuiErrorCategory::InvalidLifecycleTransition,
+        Some("selection"),
+        match lifecycle_state {
+            ElectionLifecycleStateV1::Frozen => {
+                "voting has not opened yet; responses can be chosen only while voting is open"
+            }
+            _ => "voting has closed; responses can no longer be chosen or changed",
+        },
+    ))
+}
+
 fn map_descriptor_release_error(error: crate::transport::TransportError) -> GuiCoreError {
     use crate::transport::TransportError as E;
     let (code, message) = match error {
@@ -2035,22 +2092,35 @@ mod tests {
     }
 
     #[test]
-    fn set_selection_reports_frozen_lifecycle_without_prepare_readiness() {
+    fn set_selection_is_refused_while_frozen_with_truthful_error() {
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         let mut session = eligible_session(&artifacts);
 
-        let status = ok(select_candidate_a(
+        // The two-computer phantom-selection root cause: a FROZEN election
+        // must REFUSE selection outright so no checkbox can become workflow
+        // state while voting has not opened.
+        let error = match select_candidate_a(
             &mut session,
             &artifacts,
             ElectionLifecycleStateV1::Frozen,
-        ));
+        ) {
+            Ok(_) => panic!("frozen election must refuse selection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "ELECTION_NOT_OPEN");
 
-        assert!(status.selection_loaded);
+        let status = session.selection_status(&artifacts, ElectionLifecycleStateV1::Frozen);
+        assert!(!status.selection_loaded);
         assert_eq!(
             status.lifecycle_state,
             ElectionLifecycleStateV1::Frozen.as_str()
         );
         assert!(!status.can_prepare_ballot);
+        assert!(
+            status.message.contains("has not opened"),
+            "selection message must tell the lifecycle truth: {}",
+            status.message
+        );
     }
 
     #[test]
@@ -2072,22 +2142,32 @@ mod tests {
     }
 
     #[test]
-    fn set_selection_reports_closed_lifecycle_without_prepare_readiness() {
+    fn set_selection_is_refused_once_closed() {
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         let mut session = eligible_session(&artifacts);
 
-        let status = ok(select_candidate_a(
+        let error = match select_candidate_a(
             &mut session,
             &artifacts,
             ElectionLifecycleStateV1::Closed,
-        ));
+        ) {
+            Ok(_) => panic!("closed election must refuse selection"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "ELECTION_NOT_OPEN");
 
-        assert!(status.selection_loaded);
+        let status = session.selection_status(&artifacts, ElectionLifecycleStateV1::Closed);
+        assert!(!status.selection_loaded);
         assert_eq!(
             status.lifecycle_state,
             ElectionLifecycleStateV1::Closed.as_str()
         );
         assert!(!status.can_prepare_ballot);
+        assert!(
+            status.message.contains("closed"),
+            "selection message must say voting closed: {}",
+            status.message
+        );
     }
 
     #[test]
@@ -2100,12 +2180,16 @@ mod tests {
             ElectionLifecycleStateV1::Finalized,
         ] {
             let mut session = eligible_session(&artifacts);
-            let status = ok(select_candidate_a(
-                &mut session,
-                &artifacts,
-                lifecycle_state,
-            ));
+            // Every non-open lifecycle refuses selection outright, so stored
+            // selection state can never exist outside an open election.
+            let error = match select_candidate_a(&mut session, &artifacts, lifecycle_state) {
+                Ok(_) => panic!("non-open lifecycle must refuse selection"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), "ELECTION_NOT_OPEN");
 
+            let status = session.selection_status(&artifacts, lifecycle_state);
+            assert!(!status.selection_loaded);
             assert_eq!(status.lifecycle_state, lifecycle_state.as_str());
             assert_ne!(
                 status.lifecycle_state,

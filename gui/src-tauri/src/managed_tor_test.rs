@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
     DescriptorConsistencyStoreV1, GuiPrivateReleaseResultV1, TransportAuthorityRootSetV1,
-    TransportDescriptorV1, ensure_voter_cast_locks_directory_v1,
+    TransportAuthorityRootV1, TransportDescriptorV1, ensure_voter_cast_locks_directory_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, voter_cast_locks_directory_v1,
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
@@ -279,6 +279,10 @@ pub(crate) struct ManagedTorTestState {
     controller: Option<ManagedTorControllerV1<Child>>,
     descriptor: TransportDescriptorV1,
     roots: TransportAuthorityRootSetV1,
+    /// The pinned `(key id, public key)` anchor of the configured bundle's
+    /// current root, captured at configure time for election-status
+    /// authentication.
+    root_anchor: (String, [u8; 32]),
     consistency: DescriptorConsistencyStoreV1,
     socks_addr: SocketAddr,
     tor_exe_path: PathBuf,
@@ -294,6 +298,47 @@ pub(crate) fn configured_transport_descriptor(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     Ok(managed.as_ref().map(|m| m.descriptor.clone()))
+}
+
+/// The pinned transport-authority anchor `(key id, Ed25519 public key)` of the
+/// currently configured voter bundle, if any. Election-status statements are
+/// authenticated against this SAME trust root that authenticated the transport
+/// descriptor.
+pub(crate) fn configured_transport_root_anchor(
+    state: &AppState,
+) -> Result<Option<(String, [u8; 32])>, CommandError> {
+    let managed = state
+        .managed_tor_test
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    Ok(managed.as_ref().map(|m| m.root_anchor.clone()))
+}
+
+/// The currently configured private-transport endpoint for THIS election:
+/// `(loopback SOCKS endpoint, verified descriptor)`. `None` unless a bundle
+/// bound to the ACTIVE election has been configured — a connection configured
+/// for another election can never be reused here.
+pub(crate) fn running_transport_endpoint(
+    state: &AppState,
+) -> Result<Option<(std::net::SocketAddr, TransportDescriptorV1)>, CommandError> {
+    let managed = state
+        .managed_tor_test
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(managed) = managed.as_ref() else {
+        return Ok(None);
+    };
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref() else {
+        return Ok(None);
+    };
+    if managed.descriptor.manifest_hash() != session.artifacts().manifest_hash() {
+        return Ok(None);
+    }
+    Ok(Some((managed.socks_addr, managed.descriptor.clone())))
 }
 
 /// Serializable runtime configuration supplied by the user.
@@ -471,6 +516,22 @@ pub fn configure_managed_tor_test(
         .ok()
         .map(|fp| hex_lower(&fp));
 
+    // Capture the pinned root anchor (key id + public key) for authenticated
+    // election-status verification. The bundle loader guarantees a Pinned root.
+    let root_anchor = match &bundle.root {
+        TransportAuthorityRootV1::Pinned {
+            key_id,
+            public_key,
+        } => (key_id.clone(), *public_key),
+        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
+            return Err(CommandError::new(
+                "GUI_VOTER_BUNDLE_UNTRUSTED",
+                "BINDING_MISMATCH",
+                "the voter-public transport bundle carries no pinned authority root",
+            ));
+        }
+    };
+
     std::fs::create_dir_all(&tor_data_dir).map_err(|_| CommandError::app_data_unavailable())?;
     // Reserve a fresh loopback ephemeral SOCKS port now for a truthful initial
     // endpoint; `start_managed_tor` re-reserves a fresh port on every (re)connect
@@ -482,6 +543,7 @@ pub fn configure_managed_tor_test(
         controller: None,
         descriptor: bundle.descriptor,
         roots,
+        root_anchor,
         consistency,
         socks_addr,
         tor_exe_path: tor_exe,

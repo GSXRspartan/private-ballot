@@ -18,9 +18,10 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
-    ElectionLifecycleStateV1, GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1,
-    GuiAnchorSnapshotInspectionV1, GuiArchiveVerificationV1, GuiArchiveWriteResultV1,
-    GuiBallotIntakeResultV1, GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
+    AppliedElectionStatusV1, ElectionLifecycleStateV1, ElectionStatusKnowledgeV1,
+    GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
+    GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotIntakeResultV1,
+    GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
     GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
     GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
     GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1,
@@ -31,15 +32,17 @@ use tari_cc_private_ballot_gui_core::{
     GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1,
     GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
     GuiVoterSessionV1, GuiVoterWorkflowStatusV1, LoadedElectionWorkspaceV1,
-    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
-    copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
-    delete_election_workspace_v1, delete_saved_voter_credential_v1,
-    ensure_election_workspaces_directory_v1, ensure_voter_cast_locks_directory_v1,
-    ensure_private_intake_inbox_directory_v1, ensure_voter_credentials_directory_v1,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, VoterGovernanceCredentialV1,
+    backup_voter_credential_to_path_v1, copy_validated_voter_credential_to_default_v1,
+    create_draft_workspace_id_v1, delete_election_workspace_v1,
+    delete_saved_voter_credential_v1, ensure_election_workspaces_directory_v1,
+    ensure_voter_cast_locks_directory_v1, ensure_private_intake_inbox_directory_v1,
+    ensure_voter_credentials_directory_v1, ensure_voter_election_status_directory_v1,
     file_summary_for_public_key, ingest_private_intake_inbox_into_session_v1,
-    GuiPrivateIntakeSyncSummaryV1, import_voter_credential_from_path_v1, inspect_anchor_config_v1,
-    inspect_anchor_evidence_v1,
-    inspect_anchor_snapshot_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
+    load_persisted_election_status_v1, verify_and_apply_election_status_statement_v1,
+    GuiPrivateIntakeSyncSummaryV1, import_voter_credential_from_path_v1,
+    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
+    list_election_workspaces_v1, list_saved_voter_credentials_v1,
     mark_draft_workspace_superseded_v1, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
@@ -57,6 +60,8 @@ use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "managed-tor-test")]
+mod election_status_commands;
 #[cfg(feature = "managed-tor-test")]
 mod managed_tor_test;
 #[cfg(feature = "managed-tor-test")]
@@ -178,6 +183,12 @@ impl From<GuiCoreError> for CommandError {
             context: error.context().map(str::to_owned),
             message: error.message().to_owned(),
         }
+    }
+}
+
+impl From<tari_cc_private_ballot_gui_core::ElectionStatusErrorV1> for CommandError {
+    fn from(error: tari_cc_private_ballot_gui_core::ElectionStatusErrorV1) -> Self {
+        GuiCoreError::from(error).into()
     }
 }
 
@@ -978,6 +989,45 @@ fn load_election_folder(
     load_election_from_paths(&manifest, &registry, &option_set, &app, &state)
 }
 
+/// Re-applies a persisted, previously accepted election-status record (if
+/// any) to a freshly installed session so a restart keeps authenticated
+/// lifecycle knowledge offline — no bundle, no network, no Tor. A missing
+/// record is a no-op; a present-but-invalid record fails closed with a
+/// truthful error rather than silently forgetting lifecycle knowledge.
+fn reapply_persisted_election_status(
+    app: &AppHandle,
+    session: &mut GuiElectionSessionV1,
+) -> Result<Option<AppliedElectionStatusV1>, CommandError> {
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root)?;
+    let manifest_hex = session.artifacts().summary().manifest_hash_hex.clone();
+    let Some(record) = load_persisted_election_status_v1(
+        &status_dir,
+        &manifest_hex,
+        session.artifacts().manifest().election_id().as_bytes(),
+        session.artifacts().manifest_hash(),
+        session.artifacts().registry_commitment(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let roots = TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
+        key_id: record.root_key_id.clone(),
+        public_key: record.root_public_key,
+    });
+    let mut knowledge = ElectionStatusKnowledgeV1::from_accepted(
+        record.statement.state(),
+        record.statement.generation(),
+    );
+    let bytes = record.statement.to_canonical_cbor()?;
+    verify_and_apply_election_status_statement_v1(&bytes, &roots, &mut knowledge, session)
+        .map(Some)
+        .map_err(CommandError::from)
+}
+
 /// Shared implementation for the manual three-file and one-folder loaders.
 fn load_election_from_paths(
     manifest_path: &Path,
@@ -988,7 +1038,7 @@ fn load_election_from_paths(
 ) -> Result<GuiElectionSummaryV1, CommandError> {
     let artifacts =
         GuiElectionArtifactsV1::from_paths(manifest_path, registry_path, option_set_path)?;
-    let session = GuiElectionSessionV1::new(artifacts)?;
+    let mut session = GuiElectionSessionV1::new(artifacts)?;
     let workspaces_dir = workspaces_directory(app)?;
     let workspace_id = workspace_id_for_session_v1(&session);
     write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
@@ -1015,6 +1065,11 @@ fn load_election_from_paths(
             session.artifacts(),
         )?;
     }
+    // Restore authenticated lifecycle knowledge for this election (offline,
+    // from the previously accepted status record). Applied AFTER the frozen
+    // workspace write so the workspace keeps the immutable imported identity
+    // and lifecycle evidence always flows through signed statements.
+    reapply_persisted_election_status(app, &mut session)?;
     let summary = session.summary();
     let mut guard = state
         .session
@@ -1144,7 +1199,10 @@ fn resume_election_workspace(
                 draft: Some(preview),
             })
         }
-        LoadedElectionWorkspaceV1::Session { workspace, session } => {
+        LoadedElectionWorkspaceV1::Session { workspace, mut session } => {
+            // Restore authenticated lifecycle knowledge before installing so
+            // the resumed session reflects the last accepted status evidence.
+            reapply_persisted_election_status(&app, &mut session)?;
             let election = session.summary();
             state.install_frozen_session(session)?;
             state.set_session_workspace_id(workspace_id)?;
@@ -1208,15 +1266,29 @@ fn open_voting(
             session.open()?;
             Ok(())
         })?;
+    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Open);
     Ok(summary)
 }
 
 /// Closes ballot acceptance permanently (lifecycle delegation).
+///
+/// FENCE-BEFORE-COMMIT (fail closed): the private-intake admission fence is
+/// published BEFORE the authoritative workspace commit, so a submission whose
+/// admission begins after this command's close can never pass an OPEN fence
+/// and be ACCEPTED after the election was authoritatively closed. Publishing
+/// early can only briefly over-refuse while the commit lands (the next
+/// successful Close/Open click republishes); committing first would let
+/// in-flight ballots be accepted past the cutoff — the unsafe direction.
+/// `open_voting` deliberately keeps the opposite order (publish-after-commit)
+/// because an early OPEN publication would admit ballots before the election
+/// truly opened.
 #[tauri::command]
 fn close_voting(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
+    #[cfg(feature = "managed-tor-test")]
+    fence_close_before_commit(&app, &state)?;
     let (_result, summary, lifecycle_state) =
         mutate_session_transactionally(&app, &state, |session| {
             session.close()?;
@@ -1224,6 +1296,35 @@ fn close_voting(
         })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
     Ok(summary)
+}
+
+/// Publishes CLOSED to the running intake fence before the durable close
+/// commit. Fires only when the active session is currently OPEN (mirroring
+/// what `close()` is about to do), so an illegal click on a FROZEN/CLOSED
+/// session never makes signed status answers lie about authoritative truth.
+#[cfg(feature = "managed-tor-test")]
+fn fence_close_before_commit(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    let manifest_hash_hex = {
+        let guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = guard.as_ref() else {
+            return Err(CommandError::no_session());
+        };
+        if !matches!(
+            session.lifecycle_state_v1(),
+            ElectionLifecycleStateV1::Open
+        ) {
+            return Ok(());
+        }
+        session.summary().manifest_hash_hex.clone()
+    };
+    publish_lifecycle_to_intake(app, state, &manifest_hash_hex, ElectionLifecycleStateV1::Closed);
+    Ok(())
 }
 
 /// Records completion of public verification (lifecycle delegation).
@@ -1238,6 +1339,7 @@ fn mark_verified(
             Ok(())
         })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Verified);
     Ok(summary)
 }
 
@@ -1254,7 +1356,56 @@ fn finalize_election(
             Ok(())
         })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Finalized);
     Ok(summary)
+}
+
+/// Publishes one committed authoritative lifecycle transition to the running
+/// private-intake collector (when one is bound to THIS election). The intake
+/// worker never decides lifecycle truth itself: admission fencing and
+/// authenticated status answers are driven from this cell, so CLOSE fences
+/// ballots immediately and status queries answer from organizer authority —
+/// never from a self-opened worker session. Best-effort by design: without a
+/// running intake there is nothing to fence.
+#[cfg(feature = "managed-tor-test")]
+fn publish_lifecycle_to_intake(
+    app: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+    manifest_hash_hex: &str,
+    new_state: ElectionLifecycleStateV1,
+) {
+    let Ok(intake_guard) = state.organizer_intake.lock() else {
+        return;
+    };
+    let Some(intake) = intake_guard.as_ref() else {
+        return;
+    };
+    if !intake.is_bound_to_manifest(manifest_hash_hex) {
+        return;
+    }
+    // Continue the durable issuance counter when possible so online status
+    // generations never run behind already-exported offline artifacts.
+    let reserved = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .and_then(|root| {
+            use tari_cc_private_ballot_gui_core::reserve_next_status_generation_v1;
+            ensure_voter_election_status_directory_v1(&root)
+                .ok()
+                .and_then(|dir| reserve_next_status_generation_v1(&dir, manifest_hash_hex).ok())
+        });
+    intake.publish_lifecycle_transition(new_state, reserved);
+}
+
+/// Without managed-Tor intake support there is no collector to fence.
+#[cfg(not(feature = "managed-tor-test"))]
+fn publish_lifecycle_to_intake(
+    _app: &AppHandle,
+    _state: &tauri::State<'_, AppState>,
+    _manifest_hash_hex: &str,
+    _new_state: ElectionLifecycleStateV1,
+) {
 }
 
 fn invalidate_voter_for_lifecycle(
@@ -1339,6 +1490,11 @@ fn private_intake_inbox_path(
 /// the accepted count truthful. The accepted Tor ballot thereby becomes part of
 /// the ONE authoritative durable organizer workspace used by participation,
 /// close, tally, verify, and finalize — and survives restart.
+///
+/// Drain window: while OPEN this is live reconciliation; after CLOSE it
+/// completes the documented post-close drain of ballots the collector ALREADY
+/// accepted (and receipted) before the authoritative fence closed — never a
+/// generic post-close acceptance path. VERIFIED/FINALIZED refuse outright.
 #[tauri::command]
 fn sync_private_intake(
     app: AppHandle,
@@ -3164,6 +3320,12 @@ pub fn run() {
             organizer_tor_intake::stop_private_intake,
             #[cfg(feature = "managed-tor-test")]
             organizer_tor_intake::export_voter_transport_bundle,
+            #[cfg(feature = "managed-tor-test")]
+            election_status_commands::export_election_status_artifact,
+            #[cfg(feature = "managed-tor-test")]
+            election_status_commands::import_election_status_artifact,
+            #[cfg(feature = "managed-tor-test")]
+            election_status_commands::fetch_election_status_private,
         ])
         .build(tauri::generate_context!())
         .expect("error while building the Tari Private Ballot shell")

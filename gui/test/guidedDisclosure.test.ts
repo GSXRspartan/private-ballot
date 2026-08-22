@@ -590,6 +590,8 @@ describe("guided disclosure adds no backend surface", () => {
       "api.startManagedTor(",
       "api.stopManagedTor(",
       "api.voterTorStatus(",
+      "api.importElectionStatusArtifact(",
+      "api.fetchElectionStatusPrivate(",
     ]);
     for (const call of new Set(voteApiCalls)) {
       assert.ok(allowedVote.has(call), `unexpected Vote API call: ${call}`);
@@ -603,6 +605,7 @@ describe("guided disclosure adds no backend surface", () => {
       "api.startPrivateIntake(",
       "api.stopPrivateIntake(",
       "api.exportVoterTransportBundle(",
+      "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",
     ]);
     for (const call of new Set(manageApiCalls)) {

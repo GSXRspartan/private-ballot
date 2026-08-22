@@ -552,6 +552,7 @@ export type GuiVoterWorkflowStateV1 =
   | "ReviewRequired"
   | "CredentialMissing"
   | "CredentialNotEligible"
+  | "ElectionNotOpen"
   | "SelectionIncomplete"
   | "SelectionReady"
   | "PreparingProof"
@@ -731,4 +732,27 @@ export interface OrganizerIntakeStatusV1 {
 /** Result of exporting the voter-safe public transport bundle. */
 export interface VoterBundleExportResultV1 {
   written_path: string;
+}
+
+/** Result of exporting one authenticated election-status artifact. */
+export interface GuiElectionStatusExportResultV1 {
+  written_path: string;
+  /** Lifecycle state that was signed (stable machine code). */
+  lifecycle_state: string;
+  /** Monotonic generation reserved for this statement. */
+  generation: number;
+}
+
+/** Voter-safe projection of one applied election-status statement. */
+export interface AppliedElectionStatusResultV1 {
+  effective_state: string;
+  advanced: boolean;
+  generation: number;
+}
+
+/** Result of importing one authenticated election-status artifact. */
+export interface GuiElectionStatusImportResultV1 {
+  applied: AppliedElectionStatusResultV1;
+  /** Refreshed public summary of the active election after application. */
+  election_summary: GuiElectionSummaryV1;
 }

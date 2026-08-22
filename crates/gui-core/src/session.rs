@@ -277,6 +277,9 @@ impl GuiElectionSessionV1 {
     ///
     /// # Errors
     ///
+    /// Ingests one canonical ballot package through the full validation and
+    /// acceptance boundary. Permitted only while the election is OPEN.
+    ///
     /// Returns a bounded [`GuiCoreError`] with code `ELECTION_NOT_OPEN` when
     /// the election is not open (nothing is recorded), or if transcript
     /// recording itself fails.
@@ -284,7 +287,10 @@ impl GuiElectionSessionV1 {
         &mut self,
         package_bytes: &[u8],
     ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
-        if !self.lifecycle.is_open() {
+        if !matches!(
+            self.lifecycle.state(),
+            ElectionLifecycleStateV1::Open
+        ) {
             return Err(GuiCoreError::new(
                 ValidationCode::ElectionNotOpen.as_str(),
                 crate::error::GuiErrorCategory::InvalidLifecycleTransition,
@@ -292,7 +298,52 @@ impl GuiElectionSessionV1 {
                 "ballots are ingested only while the election is open",
             ));
         }
+        self.process_intake_package(package_bytes)
+    }
 
+    /// Reconciles one canonical package from the DURABLE accepted-package
+    /// inbox into this authoritative session.
+    ///
+    /// The inbox is content-addressed and is written ONLY by the collector
+    /// AFTER full validation and acceptance, and ALWAYS before an ACCEPTED
+    /// receipt is issued, so its presence IS durable evidence that this exact
+    /// ballot was admitted while the election was authoritatively OPEN. This
+    /// entry point therefore completes the documented post-close drain of
+    /// already-admitted work: it stays available in `CLOSED` so a crash
+    /// between collector acceptance and GUI reconciliation can never orphan a
+    /// receipted ballot. It is NOT a generic post-close intake path — plain
+    /// file import remains OPEN-gated, and VERIFIED/FINALIZED refuse outright
+    /// because results are sealed at that point.
+    ///
+    /// Validation, nullifier ledger, transcript, and tally semantics are
+    /// byte-for-byte identical to live intake.
+    pub fn reconcile_accepted_package_bytes_from_inbox(
+        &mut self,
+        package_bytes: &[u8],
+    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
+        if matches!(
+            self.lifecycle.state(),
+            ElectionLifecycleStateV1::Draft
+                | ElectionLifecycleStateV1::Frozen
+                | ElectionLifecycleStateV1::Verified
+                | ElectionLifecycleStateV1::Finalized
+        ) {
+            return Err(GuiCoreError::new(
+                ValidationCode::ElectionNotOpen.as_str(),
+                crate::error::GuiErrorCategory::InvalidLifecycleTransition,
+                Some("lifecycle"),
+                "inbox reconciliation is permitted only while voting is open or during the post-close drain",
+            ));
+        }
+        self.process_intake_package(package_bytes)
+    }
+
+    /// Shared intake pipeline: digest → transcript submission → full protocol
+    /// validation → decision recording → canonical storage.
+    fn process_intake_package(
+        &mut self,
+        package_bytes: &[u8],
+    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
         let provider = Blake3HashProviderV1;
         let digest = BallotPackageDigestV1::new(hash_domain_separated(
             &provider,

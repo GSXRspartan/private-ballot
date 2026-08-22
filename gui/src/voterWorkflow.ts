@@ -24,7 +24,12 @@ export function workflowTone(
 ): "ok" | "warn" | "neutral" {
   if (state === "SelectionReady" || state === "PreparedBallotReady" || state === "BallotCast")
     return "ok";
-  if (state === "CredentialNotEligible" || state === "CastPending") return "warn";
+  if (
+    state === "CredentialNotEligible" ||
+    state === "CastPending" ||
+    state === "ElectionNotOpen"
+  )
+    return "warn";
   return "neutral";
 }
 
@@ -34,6 +39,11 @@ export function workflowTone(
  * protocol state and are never shown to ordinary voters; they remain
  * available in the backend DTO for auditors. These sentences describe the
  * voter's next step and never imply that a selection was submitted.
+ *
+ * `ElectionNotOpen` deliberately does NOT say "choose a response": while the
+ * authoritative lifecycle is not OPEN nothing else in the workflow can
+ * proceed. Use {@link electionNotOpenText} so the message states the actual
+ * lifecycle truth (FROZEN = not opened yet, CLOSED+ = closed).
  */
 export function workflowStateText(
   state: GuiVoterWorkflowStateV1 | null | undefined,
@@ -55,11 +65,32 @@ export function workflowStateText(
       return "An eligible voter credential is required to continue.";
     case "CredentialNotEligible":
       return "This credential is not eligible for this election.";
+    case "ElectionNotOpen":
+      return "Voting is not open on this election.";
     case "SelectionIncomplete":
       return "Choose a response to continue.";
     default:
       return "Choose a response to continue.";
   }
+}
+
+/**
+ * The exact lifecycle truth for a non-open election. `lifecycleState` comes
+ * from the authoritative backend selection/workflow DTO (never from frontend
+ * state), so FROZEN and CLOSED are reported distinctly and honestly.
+ */
+export function electionNotOpenText(lifecycleState: string | null | undefined): string {
+  if (lifecycleState === "FROZEN") {
+    return "Voting has not opened yet. This app will show responses as choosable only once the ballot office confirms voting is open.";
+  }
+  if (
+    lifecycleState === "CLOSED" ||
+    lifecycleState === "VERIFIED" ||
+    lifecycleState === "FINALIZED"
+  ) {
+    return "Voting has closed. Responses can no longer be chosen or changed.";
+  }
+  return "Voting is not open on this election.";
 }
 
 export function selectionAtApprovalMax(

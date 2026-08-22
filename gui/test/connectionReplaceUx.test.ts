@@ -92,7 +92,11 @@ describe("replace ballot-office connection (backend invariants)", () => {
   function configureBody(): string {
     const start = managedTor.indexOf("pub fn configure_managed_tor_test");
     assert.ok(start >= 0, "configure command present");
-    const end = managedTor.indexOf("\n}\n", start);
+    // End of the function = the first standalone closing brace at the start
+    // of a line. Line-ending agnostic: matches LF and CRLF checkouts alike.
+    const rest = managedTor.slice(start);
+    const closeMatch = rest.match(/\r?\n\}(?:\r?\n|$)/);
+    const end = closeMatch?.index !== undefined ? start + closeMatch.index : managedTor.length;
     return managedTor.slice(start, end);
   }
 

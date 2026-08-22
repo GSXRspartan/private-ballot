@@ -10,9 +10,9 @@ use std::path::Path;
 mod collector;
 
 pub use collector::{
-    CollectorBindErrorV1, CollectorRejectionV1, CollectorServeOutcomeV1, GatewayCollectorHandlerV1,
-    OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1, OPAQUE_ENVELOPE_HTTP_PATH_V1, OpaqueEnvelopeCollectorV1,
-    OpaqueEnvelopeGatewayHandlerV1,
+    CollectorBindErrorV1, CollectorRejectionV1, CollectorServeOutcomeV1,
+    ELECTION_STATUS_HTTP_PATH_V1, GatewayCollectorHandlerV1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1,
+    OPAQUE_ENVELOPE_HTTP_PATH_V1, OpaqueEnvelopeCollectorV1, OpaqueEnvelopeGatewayHandlerV1,
 };
 
 #[cfg(feature = "managed-tor-test")]

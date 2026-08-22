@@ -21,6 +21,7 @@ pub enum HashDomain {
     TransportBatchLeafV1,
     TransportBatchNodeV1,
     TransportBatchSetV1,
+    ElectionStatusStatementV1,
 }
 
 impl HashDomain {
@@ -45,6 +46,7 @@ impl HashDomain {
             Self::TransportBatchLeafV1 => "tari-cc-private-ballot/transport-batch-leaf/v1",
             Self::TransportBatchNodeV1 => "tari-cc-private-ballot/transport-batch-node/v1",
             Self::TransportBatchSetV1 => "tari-cc-private-ballot/transport-batch-set/v1",
+            Self::ElectionStatusStatementV1 => "tari-cc-private-ballot/election-status/v1",
         }
     }
 }
@@ -195,6 +197,7 @@ mod tests {
             HashDomain::TransportBatchLeafV1,
             HashDomain::TransportBatchNodeV1,
             HashDomain::TransportBatchSetV1,
+            HashDomain::ElectionStatusStatementV1,
         ];
 
         let expected_count = domains.len();

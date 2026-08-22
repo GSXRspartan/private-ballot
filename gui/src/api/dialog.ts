@@ -256,6 +256,42 @@ export async function pickVoterTransportBundle(
 }
 
 /**
+ * Opens a native single-file picker for an authenticated election-status
+ * artifact. Reading, authentication, and monotonic application happen in
+ * Rust; this only returns a path.
+ */
+export async function pickElectionStatusFile(
+  title = "Import signed election status",
+): Promise<string | null> {
+  return openFile(
+    title,
+    [
+      { name: "Signed election status", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "electionArtifact",
+  );
+}
+
+/**
+ * Opens the native save dialog for exporting an authenticated election-status
+ * artifact. Rust, not JavaScript, signs and writes the selected file.
+ */
+export async function pickElectionStatusExportPath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const rememberedDir = recallDirectory("electionArtifact");
+  const picked = await save({
+    title: "Export signed election status",
+    defaultPath: rememberedDir
+      ? joinDefaultPath(rememberedDir, "election-status.cbor")
+      : "election-status.cbor",
+    filters: [{ name: "Signed election status", extensions: ["cbor"] }],
+  });
+  if (picked !== null) rememberDirectoryFromFile("electionArtifact", picked);
+  return picked;
+}
+
+/**
  * Opens a native single-file picker for a plain-text public-key list (the
  * non-canonical organizer convenience import format). Reading and validation
  * happen in the frontend/Rust; this only returns a path.

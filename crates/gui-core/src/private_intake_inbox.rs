@@ -232,7 +232,8 @@ fn verify_existing_inbox_package(path: &Path, expected_bytes: &[u8]) -> Result<(
 ///
 /// Returns a bounded error if the inbox path is unsafe, a file is not a
 /// canonical `<digest>.package`, a file's content does not match its digest
-/// name, or the session is not open for intake.
+/// name, or the session cannot reconcile (only `VERIFIED`/`FINALIZED`, whose
+/// results are sealed, refuse; `CLOSED` still drains already-accepted work).
 pub fn ingest_private_intake_inbox_into_session_v1(
     inbox_dir: &Path,
     session: &mut GuiElectionSessionV1,
@@ -292,7 +293,11 @@ pub fn ingest_private_intake_inbox_into_session_v1(
             ));
         }
         summary.discovered = summary.discovered.saturating_add(1);
-        let result = session.intake_ballot_package_bytes(&package_bytes)?;
+        // Reconciliation entry point: every inbox file was already accepted by
+        // the collector (and receipted) while the election was OPEN, so the
+        // durable hand-off may drain during CLOSED. Identical validation and
+        // ledger semantics; VERIFIED/FINALIZED refuse outright.
+        let result = session.reconcile_accepted_package_bytes_from_inbox(&package_bytes)?;
         if result.accepted {
             summary.newly_accepted = summary.newly_accepted.saturating_add(1);
         } else if matches!(result.category, crate::intake::GuiIntakeCategory::Duplicate) {
@@ -338,7 +343,7 @@ fn read_bounded_package_file(path: &Path) -> Result<Vec<u8>, GuiCoreError> {
     fs::read(path).map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))
 }
 
-fn ensure_direct_directory(path: &Path) -> Result<(), GuiCoreError> {
+pub(crate) fn ensure_direct_directory(path: &Path) -> Result<(), GuiCoreError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
@@ -359,7 +364,7 @@ fn ensure_direct_directory(path: &Path) -> Result<(), GuiCoreError> {
     }
 }
 
-fn write_create_new_sync(path: &Path, bytes: &[u8]) -> Result<(), GuiCoreError> {
+pub(crate) fn write_create_new_sync(path: &Path, bytes: &[u8]) -> Result<(), GuiCoreError> {
     let mut created = false;
     let result = (|| -> Result<(), GuiCoreError> {
         let mut file = OpenOptions::new()
@@ -382,7 +387,7 @@ fn write_create_new_sync(path: &Path, bytes: &[u8]) -> Result<(), GuiCoreError> 
     result
 }
 
-fn sync_directory_best_effort(path: &Path) {
+pub(crate) fn sync_directory_best_effort(path: &Path) {
     if let Ok(file) = File::open(path) {
         let _ = file.sync_all();
     }
@@ -407,7 +412,7 @@ fn too_many_inbox_files() -> GuiCoreError {
 }
 
 #[cfg(windows)]
-fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     // FILE_ATTRIBUTE_REPARSE_POINT (0x400): junctions/mount points that could
     // redirect a read or write outside app-owned storage.

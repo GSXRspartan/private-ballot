@@ -132,15 +132,31 @@ impl ElectionLifecycleV1 {
         )
     }
 
-    /// Checks that one proof statement belongs to the currently open election.
+    /// Checks that one proof statement belongs to the currently admissible
+    /// election window.
+    ///
+    /// Admission semantics (see `docs/transport/TRANSPORT_ADMISSION_AND_CLOSE_V1`):
+    ///
+    /// * `OPEN` — normal live admission.
+    /// * `CLOSED` — the documented post-close DRAIN window: only work that was
+    ///   ALREADY admitted while open may complete its durable hand-off. Network
+    ///   admission is fenced at the collector (authoritative-lifecycle gate), so
+    ///   no NEW ballot can enter through any application path after close; this
+    ///   state exists solely so a crash between collector acceptance and
+    ///   workspace reconciliation can never orphan a receipted ballot.
+    /// * Every other state — refused outright (`DRAFT`, `FROZEN` never
+    ///   admitted anything; `VERIFIED`/`FINALIZED` have sealed results).
     pub fn validate_ballot_statement(
         &self,
         statement: &ProofStatementV1,
     ) -> Result<(), ProtocolError> {
-        if !self.is_open() {
+        if !matches!(
+            self.state,
+            ElectionLifecycleStateV1::Open | ElectionLifecycleStateV1::Closed
+        ) {
             return Err(ProtocolError::new(
                 ValidationCode::ElectionNotOpen,
-                "ballots are accepted only while the election is open",
+                "ballots are accepted only while the election is open (or during the documented post-close drain)",
             ));
         }
 
@@ -329,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn only_open_state_accepts_a_matching_statement() {
+    fn only_open_or_closed_states_accept_a_matching_statement() {
         let matching = statement(1, 3);
         let mut lifecycle = frozen_lifecycle();
 
@@ -342,10 +358,9 @@ mod tests {
         assert!(lifecycle.validate_ballot_statement(&matching).is_ok());
 
         assert!(lifecycle.close().is_ok());
-        assert!(matches!(
-            lifecycle.validate_ballot_statement(&matching),
-            Err(error) if error.code() == ValidationCode::ElectionNotOpen
-        ));
+        // CLOSED is the documented drain window for ALREADY-admitted work;
+        // network admission itself is fenced at the collector.
+        assert!(lifecycle.validate_ballot_statement(&matching).is_ok());
     }
 
     #[test]

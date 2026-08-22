@@ -374,13 +374,19 @@ mod tests {
 
         assert!(lifecycle.close().is_ok());
 
-        assert!(matches!(
-            ledger.accept_verified(
-                &lifecycle,
-                verified_ballot(&manifest, b"closed-nullifier"),
-            ),
-            Err(error) if error.code() == ValidationCode::ElectionNotOpen
-        ));
+        // CLOSED is the documented drain window for ALREADY-admitted work:
+        // the ledger still validates commitments/proofs and enforces the same
+        // nullifier uniqueness. (Network admission itself is fenced at the
+        // collector, so no NEW ballot can reach this state via any application
+        // path after close.)
+        assert!(
+            ledger
+                .accept_verified(
+                    &lifecycle,
+                    verified_ballot(&manifest, b"closed-drain-nullifier"),
+                )
+                .is_ok()
+        );
     }
 
     #[test]
