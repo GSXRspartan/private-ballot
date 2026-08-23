@@ -187,7 +187,8 @@ pub use workspace::{
     MAX_ELECTION_WORKSPACES_V1, MAX_WORKSPACE_PACKAGE_COUNT_V1, MAX_WORKSPACE_REVISION_BYTES_V1,
     create_draft_workspace_id_v1, delete_election_workspace_v1, election_workspaces_directory_v1,
     ensure_election_workspaces_directory_v1, list_election_workspaces_v1,
-    mark_draft_workspace_superseded_v1, read_ballot_package_file_bounded_v1,
-    resume_election_workspace_v1, validate_workspace_id_v1, workspace_id_for_session_v1,
+    mark_draft_workspace_superseded_v1, mark_workspace_organizer_authority_v1,
+    read_ballot_package_file_bounded_v1, resume_election_workspace_v1, validate_workspace_id_v1,
+    workspace_has_organizer_authority_v1, workspace_id_for_session_v1,
     write_draft_workspace_revision_v1, write_session_workspace_revision_v1,
 };

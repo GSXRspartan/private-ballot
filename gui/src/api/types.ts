@@ -42,12 +42,27 @@ export interface GuiElectionWorkspaceSummaryV1 {
   last_revision: number;
   updated_at_unix_secs: number | null;
   finalized: boolean;
+  /** True only when the durable workspace carries valid ORGANIZER-AUTHORITY
+   *  provenance (fail-closed: session workspaces without it are voter-only). */
+  organizer_workspace: boolean;
 }
 
 export interface GuiElectionWorkspaceResumeResultV1 {
   workspace: GuiElectionWorkspaceSummaryV1;
   election: GuiElectionSummaryV1 | null;
   draft: GuiElectionDraftPreviewV1 | null;
+  /** Whether the resumed workspace restores organizer authority. */
+  organizer_workspace: boolean;
+}
+
+/** The ROLE the backend holds for the active election session. `organizer`
+ *  only after freeze or organizer-workspace resume; `imported_voter` for a
+ *  session loaded from public artifacts. Backend-enforced; the UI mirrors it. */
+export type GuiElectionAuthorityV1 = "organizer" | "imported_voter";
+
+/** Public authority projection of the active session (`null` when none). */
+export interface ActiveElectionAuthorityV1 {
+  authority: GuiElectionAuthorityV1;
 }
 
 /** Backend-issued ids of the workspaces this session currently has active. Both

@@ -278,7 +278,7 @@ pub(crate) fn bound_election(state: &AppState) -> Result<BoundElection, CommandE
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = guard.as_ref() else {
+    let Some(session) = guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let artifacts = session.artifacts().clone();
@@ -299,6 +299,10 @@ pub(crate) fn bound_election(state: &AppState) -> Result<BoundElection, CommandE
 
 /// Read-only organizer intake status for the currently loaded election. Never
 /// starts Tor, provisions, or mutates any election/transport state.
+///
+/// ORGANIZER-AUTHORITATIVE: intake status discloses ballot-office transport
+/// internals (onion endpoint, collector, inbox). An imported voter election
+/// must never observe — let alone act on — this surface.
 #[tauri::command]
 pub async fn organizer_tor_status(
     tor_exe_path: Option<String>,
@@ -317,6 +321,9 @@ fn organizer_tor_status_blocking(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<OrganizerIntakeStatusV1, CommandError> {
+    // Role boundary first: no organizer transport introspection for a session
+    // that was merely imported from public artifacts.
+    state.ensure_organizer_authority()?;
     let tor_found = resolve_tor_executable(tor_exe_path.as_deref()).is_ok();
 
     // Current election (if any) drives provisioned/bound reporting.
@@ -411,6 +418,11 @@ fn intake_failure_reason(
 /// Provisions app-owned transport on first use, then runs the exact vetted
 /// intake orchestration in-process. Fail-closed at every step. Does NOT open
 /// voting or mutate the election lifecycle.
+///
+/// ORGANIZER-AUTHORITATIVE — and the gate fires FIRST, before the Tor lookup,
+/// any filesystem write, transport provisioning, hidden-service identity
+/// creation, or worker start. An imported voter election can never provision a
+/// competing organizer transport/signing root for a legitimate frozen election.
 #[tauri::command]
 pub async fn start_private_intake(
     tor_exe_path: Option<String>,
@@ -431,6 +443,9 @@ fn start_private_intake_blocking(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<OrganizerIntakeStatusV1, CommandError> {
+    // ORGANIZER-AUTHORITY GATE — before EVERYTHING (no Tor resolution, no
+    // directory creation, no provisioning, no worker).
+    state.ensure_organizer_authority()?;
     let tor_executable = resolve_tor_executable(tor_exe_path.as_deref())?;
     validate_tor_exe(&tor_executable)?;
 
@@ -501,7 +516,7 @@ fn start_private_intake_blocking(
             .map_err(|_| CommandError::state_poisoned())?;
         guard
             .as_ref()
-            .map(GuiElectionSessionV1::lifecycle_state_v1)
+            .map(|active| active.session.lifecycle_state_v1())
             .unwrap_or(ElectionLifecycleStateV1::Frozen)
     };
     let running = start_intake_worker(app, &tor_executable, &paths, &bound, authoritative_lifecycle)?;
@@ -519,6 +534,8 @@ fn start_private_intake_blocking(
 /// Stops private ballot intake cleanly: bounded service-loop shutdown, reap the
 /// owned Tor child, release the loopback collector. Preserves the hidden-service
 /// identity and every accepted package; never mutates the election lifecycle.
+///
+/// ORGANIZER-AUTHORITATIVE: only the ballot office controls its intake worker.
 #[tauri::command]
 pub async fn stop_private_intake(
     app: AppHandle,
@@ -536,6 +553,9 @@ fn stop_private_intake_blocking(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<OrganizerIntakeStatusV1, CommandError> {
+    // Role boundary first: an imported voter session must never be able to
+    // tear down (or interfere with) a running ballot-office collector.
+    state.ensure_organizer_authority()?;
     let taken = {
         let mut managed = state
             .organizer_intake
@@ -575,12 +595,18 @@ pub(crate) fn shutdown_intake_on_exit(state: &AppState) {
 /// Exports ONLY the voter-safe public transport bundle for the loaded election
 /// to a chosen directory (no-overwrite). Never exports organizer-private key
 /// material.
+///
+/// ORGANIZER-AUTHORITATIVE — and the gate fires before the destination checks:
+/// only the ballot office that provisioned a transport root may distribute its
+/// voter bundle. An imported voter election can never export (and thereby
+/// socially distribute) a bundle for an election it does not organize.
 #[tauri::command]
 pub fn export_voter_transport_bundle(
     destination_dir: String,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<VoterBundleExportResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let destination = PathBuf::from(&destination_dir);
     if !destination.is_absolute() {
         return Err(CommandError::new(

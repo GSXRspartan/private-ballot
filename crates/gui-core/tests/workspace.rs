@@ -1825,3 +1825,178 @@ fn symlink_workspace_entry_is_rejected_where_supported() {
     );
     assert_eq!(error.code(), "GUI_WORKSPACE_UNSAFE_PATH");
 }
+
+// -------------------------------------------------------------------------
+// Durable ORGANIZER-AUTHORITY provenance (role separation regression tests)
+//
+// A workspace body holds only PUBLIC artifacts plus accepted public ballot
+// packages, so content alone can never distinguish a real ballot-office
+// workspace from one synthesized from imported public election artifacts.
+// Authority is therefore a fail-closed durable sidecar marker written by the
+// organizer freeze flow: no marker, no organizer authority on resume.
+// -------------------------------------------------------------------------
+
+use tari_cc_private_ballot_gui_core::{
+    mark_workspace_organizer_authority_v1, workspace_has_organizer_authority_v1,
+};
+
+/// Writes a second, genuinely DIFFERENT election's session workspace (distinct
+/// manifest hash via its own governance revision) into `root`.
+fn other_election_workspace(root: &Path) -> String {
+    let session = common::open_session_with_revision("other-election-workspace");
+    let workspace_id = workspace_id_for_session_v1(&session);
+    assert_ne!(
+        workspace_id,
+        workspace_id_for_session_v1(&common::open_session()),
+        "fixture elections must have distinct manifest hashes"
+    );
+    ok(
+        write_session_workspace_revision_v1(root, &workspace_id, &session),
+        "other workspace revision",
+    );
+    workspace_id
+}
+
+#[test]
+fn organizer_authority_marker_round_trips_and_fails_closed() {
+    let dir = TestDir::new("organizer-marker-roundtrip");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let (workspace_id, _session) = two_revision_workspace(&root);
+
+    // Fail-closed BEFORE any marking: a workspace synthesized from public
+    // artifacts (or any legacy workspace) confers NO organizer authority.
+    assert!(
+        !workspace_has_organizer_authority_v1(&root, &workspace_id),
+        "missing marker must not confer organizer authority"
+    );
+
+    ok(
+        mark_workspace_organizer_authority_v1(&root, &workspace_id),
+        "mark organizer authority",
+    );
+    assert!(workspace_has_organizer_authority_v1(&root, &workspace_id));
+
+    // Idempotent re-marking succeeds and keeps the marker valid.
+    ok(
+        mark_workspace_organizer_authority_v1(&root, &workspace_id),
+        "idempotent remark",
+    );
+    assert!(workspace_has_organizer_authority_v1(&root, &workspace_id));
+
+    // Tampered marker fails closed.
+    let marker_path = root.join(&workspace_id).join("organizer-authority");
+    corrupt_file(&marker_path);
+    assert!(
+        !workspace_has_organizer_authority_v1(&root, &workspace_id),
+        "tampered marker must not confer organizer authority"
+    );
+
+    // Removed marker fails closed again.
+    ok(fs::remove_file(&marker_path), "remove marker");
+    assert!(!workspace_has_organizer_authority_v1(&root, &workspace_id));
+
+    // Marking a missing workspace errors instead of creating stray state.
+    let error = err(
+        mark_workspace_organizer_authority_v1(&root, "election-does-not-exist"),
+        "marker for missing workspace must fail",
+    );
+    assert_eq!(error.code(), "GUI_WORKSPACE_NOT_FOUND");
+}
+
+#[test]
+fn resume_and_list_report_provenance_fail_closed() {
+    let dir = TestDir::new("organizer-marker-resume");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let (workspace_id, _session) = two_revision_workspace(&root);
+
+    let listed = ok(list_election_workspaces_v1(&root), "list before mark");
+    assert_eq!(listed.len(), 1);
+    assert!(
+        !listed[0].organizer_workspace,
+        "unmarked session workspace lists as voter-only"
+    );
+    match ok(resume_election_workspace_v1(&root, &workspace_id), "resume") {
+        LoadedElectionWorkspaceV1::Session { workspace, .. } => assert!(
+            !workspace.organizer_workspace,
+            "resuming an unmarked workspace must NOT restore organizer authority"
+        ),
+        LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected a session workspace"),
+    }
+
+    ok(
+        mark_workspace_organizer_authority_v1(&root, &workspace_id),
+        "mark after commit",
+    );
+
+    let listed = ok(list_election_workspaces_v1(&root), "list after mark");
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].organizer_workspace,
+        "a marked workspace reports genuine organizer provenance"
+    );
+    match ok(resume_election_workspace_v1(&root, &workspace_id), "resume") {
+        LoadedElectionWorkspaceV1::Session { workspace, .. } => {
+            assert!(workspace.organizer_workspace)
+        }
+        LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected a session workspace"),
+    }
+}
+
+#[test]
+fn draft_workspaces_are_always_organizer_context() {
+    let dir = TestDir::new("organizer-marker-draft");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let draft_id = ok(create_draft_workspace_id_v1(&root), "draft id");
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics("d".into(), "Draft question?".into(), "r1".into()),
+        "basics",
+    );
+    ok(
+        write_draft_workspace_revision_v1(&root, &draft_id, &draft),
+        "draft revision",
+    );
+
+    let listed = ok(list_election_workspaces_v1(&root), "list drafts");
+    assert_eq!(listed.len(), 1);
+    assert!(
+        listed[0].organizer_workspace,
+        "drafts are organizer-created objects by construction"
+    );
+    match ok(resume_election_workspace_v1(&root, &draft_id), "resume draft") {
+        LoadedElectionWorkspaceV1::Draft { workspace, .. } => {
+            assert!(workspace.organizer_workspace)
+        }
+        LoadedElectionWorkspaceV1::Session { .. } => panic!("expected a draft workspace"),
+    }
+}
+
+#[test]
+fn organizer_authority_is_scoped_to_one_workspace() {
+    let dir = TestDir::new("organizer-marker-scoped");
+    let root = ok(
+        ensure_election_workspaces_directory_v1(dir.path()),
+        "workspace root",
+    );
+    let (marked_id, _) = two_revision_workspace(&root);
+    let other_id = other_election_workspace(&root);
+
+    ok(
+        mark_workspace_organizer_authority_v1(&root, &marked_id),
+        "mark first workspace",
+    );
+    assert!(workspace_has_organizer_authority_v1(&root, &marked_id));
+    assert!(
+        !workspace_has_organizer_authority_v1(&root, &other_id),
+        "a marker on one election must never confer authority over another"
+    );
+}

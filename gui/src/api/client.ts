@@ -11,6 +11,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActiveElectionAuthorityV1,
   ActiveWorkspaceIdsV1,
   GuiAnchorConfigInspectionV1,
   GuiAnchorEvidenceInspectionV1,
@@ -24,14 +25,14 @@ import type {
   GuiElectionCreationResultV1,
   GuiElectionDraftPreviewV1,
   GuiElectionExportResultV1,
+  GuiElectionStatusExportResultV1,
+  GuiElectionStatusImportResultV1,
   GuiElectionSummaryV1,
   GuiElectionWorkspaceResumeResultV1,
   GuiElectionWorkspaceSummaryV1,
-   GuiGovernanceDocumentDigestV1,
-   GuiGovernanceDocumentStatusV1,
-   GuiElectionStatusExportResultV1,
-   GuiElectionStatusImportResultV1,
-   GuiParticipationSummaryV1,
+  GuiGovernanceDocumentDigestV1,
+  GuiGovernanceDocumentStatusV1,
+  GuiParticipationSummaryV1,
   GuiPrivateReleaseResultV1,
   GuiPrivateRouteV1,
   GuiPrivateSubmissionResultV1,
@@ -122,6 +123,12 @@ export const api = {
   unloadElection: () => call<void>("unload_election"),
 
   electionSummary: () => call<GuiElectionSummaryV1 | null>("election_summary"),
+
+  /** Backend-authoritative role of the active session (`null` when none). The
+   *  UI uses this to hide organizer controls; the backend remains the
+   *  enforcement point for every organizer command. */
+  activeElectionAuthority: () =>
+    call<ActiveElectionAuthorityV1 | null>("active_election_authority"),
 
   listElectionWorkspaces: () =>
     call<GuiElectionWorkspaceSummaryV1[]>("list_election_workspaces"),

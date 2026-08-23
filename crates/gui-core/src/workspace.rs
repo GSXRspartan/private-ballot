@@ -61,6 +61,22 @@ const SUPERSEDED_FILE_NAME: &str = "superseded";
 const SUPERSEDED_TMP_FILE_NAME: &str = "superseded.tmp";
 const MAX_SUPERSEDED_MARKER_BYTES_V1: usize = 1024;
 
+/// Sidecar marker naming the durable ORGANIZER-AUTHORITY provenance of a
+/// session workspace.
+///
+/// A durable workspace body holds ONLY public artifacts plus accepted public
+/// ballot packages, so workspace content alone can never distinguish a real
+/// ballot-office workspace from one synthesized from imported public election
+/// artifacts. Authority provenance is therefore recorded EXPLICITLY, at the
+/// moment an organizer flow first commits the workspace (freeze), in this
+/// app-owned sidecar marker. Resume is fail-closed: a missing, unreadable, or
+/// malformed marker means the workspace confers NO organizer authority.
+const ORGANIZER_AUTHORITY_MARKER_FILE_NAME: &str = "organizer-authority";
+const ORGANIZER_AUTHORITY_TMP_FILE_NAME: &str = "organizer-authority.tmp";
+const ORGANIZER_AUTHORITY_MAGIC_V1: &[u8] =
+    b"TARI_PRIVATE_BALLOT_WORKSPACE_ORGANIZER_AUTHORITY_V1";
+const MAX_ORGANIZER_AUTHORITY_MARKER_BYTES_V1: usize = 256;
+
 /// Public, organizer-safe discovery summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiElectionWorkspaceSummaryV1 {
@@ -72,6 +88,11 @@ pub struct GuiElectionWorkspaceSummaryV1 {
     pub last_revision: u64,
     pub updated_at_unix_secs: Option<u64>,
     pub finalized: bool,
+    /// True only when this workspace carries a valid durable ORGANIZER-AUTHORITY
+    /// provenance marker. Session workspaces without it were created from public
+    /// artifacts (or predate role separation) and confer voter-only authority on
+    /// resume — fail-closed by design.
+    pub organizer_workspace: bool,
 }
 
 /// Public response returned after a resume command installs a workspace.
@@ -80,6 +101,10 @@ pub struct GuiElectionWorkspaceResumeResultV1 {
     pub workspace: GuiElectionWorkspaceSummaryV1,
     pub election: Option<GuiElectionSummaryV1>,
     pub draft: Option<crate::creation::GuiElectionDraftPreviewV1>,
+    /// Whether the resumed workspace carries durable ORGANIZER-AUTHORITY
+    /// provenance. Drafts are always organizer-created; session workspaces are
+    /// organizer-authoritative only with a valid marker (fail-closed).
+    pub organizer_workspace: bool,
 }
 
 /// Loaded workspace with reconstructed Rust state for the Tauri shell.
@@ -275,7 +300,7 @@ pub fn list_election_workspaces_v1(
             // (or a stray marker on a non-draft) never orphans a workspace.
             Ok(Some(record)) => {
                 if draft_superseding_session_v1(workspaces_root, &record).is_none() {
-                    summaries.push(summarize_workspace(&record)?);
+                    summaries.push(summarize_workspace(workspaces_root, &record)?);
                 }
             }
             Ok(None) => {}
@@ -319,7 +344,7 @@ pub fn resume_election_workspace_v1(
             "this draft was superseded by a frozen election workspace; resume the successor election instead",
         ));
     }
-    let workspace = summarize_workspace(&record)?;
+    let workspace = summarize_workspace(workspaces_root, &record)?;
     match record.body {
         DurableElectionWorkspaceBodyV1::Draft(snapshot) => {
             let draft = GuiElectionDraftV1::from_durable_snapshot(snapshot)?;
@@ -497,6 +522,114 @@ fn encode_supersession_marker(superseded_by_workspace_id: &str) -> Result<Vec<u8
     writer.u32(FORMAT_VERSION_V1);
     writer.string(superseded_by_workspace_id, MAX_WORKSPACE_ID_BYTES)?;
     Ok(writer.into_bytes())
+}
+
+// -------------------------------------------------------------------------
+// Durable organizer-authority provenance
+// -------------------------------------------------------------------------
+
+/// Durably records that `workspace_id` is an ORGANIZER-AUTHORITATIVE workspace.
+///
+/// This MUST be called only by organizer flows that themselves establish
+/// authority over the election (today: freezing a newly created election), and
+/// strictly AFTER the workspace revision it vouches for is durably committed.
+/// The marker is idempotent: marking an already-marked workspace succeeds
+/// without rewriting anything.
+///
+/// # Crash safety
+///
+/// A crash before the marker write leaves the workspace resumable WITHOUT
+/// organizer authority (the fail-closed direction): the operator re-runs the
+/// organizer flow rather than silently gaining authority from public data. The
+/// marker itself is written atomically (temp file, then rename) so a partial
+/// write is never observed as a valid marker.
+///
+/// # Errors
+///
+/// Returns a bounded error if the id is not a valid backend-issued identifier,
+/// the workspace path is unsafe, or the marker cannot be written.
+pub fn mark_workspace_organizer_authority_v1(
+    workspaces_root: &Path,
+    workspace_id: &str,
+) -> Result<(), GuiCoreError> {
+    validate_workspace_id_v1(workspace_id)?;
+    let workspace_dir = workspaces_root.join(workspace_id);
+    match fs::symlink_metadata(&workspace_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+                return Err(unsafe_workspace_path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GuiCoreError::new(
+                "GUI_WORKSPACE_NOT_FOUND",
+                GuiErrorCategory::FileIo,
+                Some("election-workspace"),
+                "no election workspace exists to mark as organizer-authoritative",
+            ));
+        }
+        Err(_) => return Err(GuiCoreError::io_failure("election-workspace")),
+    }
+
+    let marker_path = workspace_dir.join(ORGANIZER_AUTHORITY_MARKER_FILE_NAME);
+    // Idempotent: an existing valid marker means nothing changes.
+    if decode_organizer_authority_marker(
+        &read_bounded_file(
+            &marker_path,
+            MAX_ORGANIZER_AUTHORITY_MARKER_BYTES_V1,
+            "election-workspace",
+        )
+        .unwrap_or_default(),
+    ) {
+        return Ok(());
+    }
+
+    let payload = encode_organizer_authority_marker();
+    let tmp_path = workspace_dir.join(ORGANIZER_AUTHORITY_TMP_FILE_NAME);
+    let _ = fs::remove_file(&tmp_path);
+    write_create_new_sync(&tmp_path, &payload, "election-workspace")?;
+    if fs::rename(&tmp_path, &marker_path).is_err() {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(GuiCoreError::io_failure("election-workspace"));
+    }
+    sync_directory_best_effort(&workspace_dir);
+    Ok(())
+}
+
+/// Fail-closed provenance probe: true ONLY when `workspace_id` carries a valid
+/// durable organizer-authority marker. Any missing, unreadable, malformed,
+/// wrong-version, or unsafe marker yields `false`, so public artifacts alone —
+/// or any legacy workspace written before role separation — can never confer
+/// organizer authority on resume.
+#[must_use]
+pub fn workspace_has_organizer_authority_v1(workspaces_root: &Path, workspace_id: &str) -> bool {
+    validate_workspace_id_v1(workspace_id).is_ok()
+        && decode_organizer_authority_marker(
+            &read_bounded_file(
+                &workspaces_root
+                    .join(workspace_id)
+                    .join(ORGANIZER_AUTHORITY_MARKER_FILE_NAME),
+                MAX_ORGANIZER_AUTHORITY_MARKER_BYTES_V1,
+                "election-workspace",
+            )
+            .unwrap_or_default(),
+        )
+}
+
+fn encode_organizer_authority_marker() -> Vec<u8> {
+    let mut writer = BinaryWriter::new();
+    writer.bytes(ORGANIZER_AUTHORITY_MAGIC_V1);
+    writer.u32(FORMAT_VERSION_V1);
+    writer.into_bytes()
+}
+
+/// Strict marker validation: exact magic + current format version + exact
+/// length (nothing may trail).
+fn decode_organizer_authority_marker(bytes: &[u8]) -> bool {
+    let mut reader = BinaryReader::new(bytes);
+    reader.expect_bytes(ORGANIZER_AUTHORITY_MAGIC_V1).is_ok()
+        && reader.u32().ok() == Some(FORMAT_VERSION_V1)
+        && reader.finish().is_ok()
 }
 
 /// Decides whether `record` is a Draft that has been genuinely superseded by a
@@ -921,8 +1054,18 @@ fn lifecycle_rank(state: ElectionLifecycleStateV1) -> Result<u8, GuiCoreError> {
 }
 
 fn summarize_workspace(
+    workspaces_root: &Path,
     record: &DurableElectionWorkspaceV1,
 ) -> Result<GuiElectionWorkspaceSummaryV1, GuiCoreError> {
+    // Provenance is a durable property of the WORKSPACE DIRECTORY: drafts are
+    // organizer-created objects by construction, while session workspaces are
+    // organizer-authoritative only with a valid marker (fail-closed otherwise).
+    let organizer_workspace = match &record.body {
+        DurableElectionWorkspaceBodyV1::Draft(_) => true,
+        DurableElectionWorkspaceBodyV1::Session(_) => {
+            workspace_has_organizer_authority_v1(workspaces_root, &record.workspace_id)
+        }
+    };
     match &record.body {
         DurableElectionWorkspaceBodyV1::Draft(snapshot) => {
             let draft = GuiElectionDraftV1::from_durable_snapshot(snapshot.clone())?;
@@ -936,6 +1079,7 @@ fn summarize_workspace(
                 last_revision: record.revision,
                 updated_at_unix_secs: record.updated_at_unix_secs,
                 finalized: false,
+                organizer_workspace,
             })
         }
         DurableElectionWorkspaceBodyV1::Session(snapshot) => {
@@ -951,6 +1095,7 @@ fn summarize_workspace(
                 last_revision: record.revision,
                 updated_at_unix_secs: record.updated_at_unix_secs,
                 finalized: session.lifecycle_state_v1() == ElectionLifecycleStateV1::Finalized,
+                organizer_workspace,
             })
         }
     }

@@ -21,6 +21,7 @@ import {
   HashValue,
   LifecyclePill,
   Notice,
+  Pill,
 } from "../components/ui";
 import { LockIcon } from "../components/icons";
 import { ParticipationTrack } from "../components/ParticipationTrack";
@@ -37,6 +38,7 @@ import { ParticipationTrack } from "../components/ParticipationTrack";
 export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => void }) {
   const {
     election,
+    electionAuthority,
     participation,
     recentActions,
     backendError,
@@ -130,7 +132,17 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
               <Field label={presentation.optionSetNoun}>
                 {election.candidates.length}
               </Field>
-              <Field label="Recovery">Recovery state saved locally</Field>
+              {/* ROLE TRUTH (mirrors the backend authority model): an
+                  organizer workspace is durable local recovery state; an
+                  imported voter election deliberately has none — its lifecycle
+                  knowledge lives in signed status statements instead. */}
+              {electionAuthority === "imported_voter" ? (
+                <Field label="Role">Voter copy (public artifacts)</Field>
+              ) : electionAuthority === "organizer" ? (
+                <Field label="Role">Ballot office</Field>
+              ) : (
+                <Field label="Recovery">Recovery state saved locally</Field>
+              )}
             </div>
             {onNavigate && (
               <div className="btn-row">
@@ -342,6 +354,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                     <th scope="col">Election</th>
                     <th scope="col">Status</th>
                     <th scope="col">Accepted ballots</th>
+                    <th scope="col">Role</th>
                     <th scope="col">Action</th>
                   </tr>
                 </thead>
@@ -357,6 +370,20 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                         <LifecyclePill state={workspace.lifecycle_state} />
                       </td>
                       <td>{workspace.accepted_ballot_count}</td>
+                      <td>
+                        {/* ROLE TRUTH: only workspaces with durable
+                            organizer-authority provenance restore ballot-office
+                            controls; anything else resumes as a voter view.
+                            Surfaced here so the role is visible BEFORE
+                            resuming. */}
+                        {workspace.lifecycle_state === "DRAFT" ? (
+                          <Pill tone="brand">Draft</Pill>
+                        ) : workspace.organizer_workspace ? (
+                          <Pill tone="ok">Ballot office</Pill>
+                        ) : (
+                          <Pill tone="neutral">Voter copy</Pill>
+                        )}
+                      </td>
                       <td>
                         <div className="action-row">
                           <button

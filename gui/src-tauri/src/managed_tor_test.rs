@@ -332,7 +332,7 @@ pub(crate) fn running_transport_endpoint(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Ok(None);
     };
     if managed.descriptor.manifest_hash() != session.artifacts().manifest_hash() {
@@ -463,7 +463,7 @@ pub fn configure_managed_tor_test(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let manifest_hash = session.artifacts().manifest_hash();
@@ -901,7 +901,7 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = session_guard.as_ref() else {
+        let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         (session.artifacts().clone(), session.lifecycle_state_v1())
@@ -1038,7 +1038,7 @@ pub fn retry_private_submission_via_managed_tor(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = session_guard.as_ref() else {
+        let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         session.artifacts().clone()

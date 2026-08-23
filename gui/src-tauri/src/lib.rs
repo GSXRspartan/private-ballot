@@ -39,7 +39,8 @@ use tari_cc_private_ballot_gui_core::{
     ensure_voter_cast_locks_directory_v1, ensure_private_intake_inbox_directory_v1,
     ensure_voter_credentials_directory_v1, ensure_voter_election_status_directory_v1,
     file_summary_for_public_key, ingest_private_intake_inbox_into_session_v1,
-    load_persisted_election_status_v1, verify_and_apply_election_status_statement_v1,
+    load_persisted_election_status_v1, mark_workspace_organizer_authority_v1,
+    verify_and_apply_election_status_statement_v1,
     GuiPrivateIntakeSyncSummaryV1, import_voter_credential_from_path_v1,
     inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
     list_election_workspaces_v1, list_saved_voter_credentials_v1,
@@ -173,6 +174,20 @@ impl CommandError {
             "portable credential import and backup require an explicit absolute file path",
         )
     }
+
+    /// The single, stable refusal for every organizer-authoritative command
+    /// invoked without an organizer-owned election session. This is a ROLE
+    /// boundary, not a UI gate: it fires in the Rust shell before any
+    /// filesystem mutation, transport provisioning, Tor launch, signing-key
+    /// creation, status-generation reservation, workspace write, or lifecycle
+    /// mutation, and it is returned identically to direct IPC callers.
+    fn organizer_authority_required() -> Self {
+        Self::new(
+            "GUI_ORGANIZER_AUTHORITY_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "this command requires an organizer-owned election; the loaded election was imported from public artifacts, so this computer is a voter for it, not the ballot office",
+        )
+    }
 }
 
 impl From<GuiCoreError> for CommandError {
@@ -211,6 +226,66 @@ where
             "UNAVAILABLE",
             "the background task did not complete",
         )),
+    }
+}
+
+/// The ROLE this shell holds for the active election session.
+///
+/// Authority is established ONLY by explicit organizer or voter flows — never
+/// by the mere presence of a loaded session:
+///
+/// * [`SessionAuthorityV1::Organizer`] — the session came from THIS shell's
+///   organizer flows: freezing a newly created election, or resuming a durable
+///   workspace that carries a valid organizer-authority provenance marker
+///   (written at freeze time). Only this role may run authoritative lifecycle
+///   mutations, private-intake provisioning, voter-bundle export, status
+///   signing, intake reconciliation, tally, and archive writing.
+/// * [`SessionAuthorityV1::ImportedVoter`] — the session was loaded from public
+///   election artifacts (the voter import path). It supports inspection,
+///   credential loading, authenticated status import/fetch, and the full voter
+///   ballot workflow, and can NEVER mutate authoritative organizer state,
+///   provision organizer transport, or synthesize an organizer workspace.
+///
+/// The authority lives OUTSIDE `GuiElectionSessionV1` on purpose: a session is
+/// reconstructible by anyone from public artifacts, so the session object alone
+/// must never imply ballot-office authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SessionAuthorityV1 {
+    Organizer,
+    ImportedVoter,
+}
+
+impl SessionAuthorityV1 {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Organizer => "organizer",
+            Self::ImportedVoter => "imported_voter",
+        }
+    }
+}
+
+/// Serializable view of the active session's authority for the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct ActiveElectionAuthorityV1 {
+    authority: &'static str,
+}
+
+/// The active election session TOGETHER WITH the role this shell holds for it.
+///
+/// Stored under a SINGLE mutex so a session can never be observed without its
+/// matching authority: an election swap (import/resume/unload) is atomic with
+/// respect to every authority check, so no interleaving — including concurrent
+/// direct IPC — can ever evaluate an organizer gate against a newly installed
+/// imported session using a PREVIOUS election's organizer authority.
+struct ActiveElectionSessionV1 {
+    session: GuiElectionSessionV1,
+    authority: SessionAuthorityV1,
+}
+
+impl ActiveElectionSessionV1 {
+    fn new(session: GuiElectionSessionV1, authority: SessionAuthorityV1) -> Self {
+        Self { session, authority }
     }
 }
 
@@ -254,7 +329,10 @@ impl PendingVoterCredentialV1 {
 /// Election replacement clears election workflow state, while the Rust-only
 /// credential survives in pending memory for same-process membership checks.
 struct AppState {
-    session: Mutex<Option<GuiElectionSessionV1>>,
+    /// The active election session WITH its role, under one lock (see
+    /// [`ActiveElectionSessionV1`]): authority checks and session swaps are
+    /// atomic with respect to each other.
+    session: Mutex<Option<ActiveElectionSessionV1>>,
     draft: Mutex<Option<GuiElectionDraftV1>>,
     session_workspace_id: Mutex<Option<String>>,
     draft_workspace_id: Mutex<Option<String>>,
@@ -321,6 +399,31 @@ struct GuiPrivateSubmissionResultV1 {
 }
 
 impl AppState {
+    /// THE organizer-authority gate. Every command that may mutate
+    /// authoritative election state, provision/sign with ballot-office
+    /// material, or disclose organizer transport internals must call this
+    /// FIRST — before any filesystem write, Tor launch, key generation,
+    /// generation reservation, workspace revision, or lifecycle transition.
+    ///
+    /// The role is read under the SAME lock that guards the session, so the
+    /// verdict always describes exactly the session a subsequent read will
+    /// observe — no install/swap interleaving can split them.
+    fn ensure_organizer_authority(&self) -> Result<(), CommandError> {
+        let guard = self.session.lock().map_err(|_| CommandError::state_poisoned())?;
+        match guard.as_ref() {
+            Some(active) if active.authority == SessionAuthorityV1::Organizer => Ok(()),
+            Some(_) => Err(CommandError::organizer_authority_required()),
+            None => Err(CommandError::no_session()),
+        }
+    }
+
+    /// The current session authority (public projection for the frontend).
+    fn active_authority(&self) -> Result<Option<SessionAuthorityV1>, CommandError> {
+        let guard = self.session.lock().map_err(|_| CommandError::state_poisoned())?;
+        Ok(guard.as_ref().map(|active| active.authority))
+    }
+
+    /// Read-only access to the active session.
     fn with_session<T>(
         &self,
         f: impl FnOnce(&GuiElectionSessionV1) -> Result<T, CommandError>,
@@ -330,7 +433,7 @@ impl AppState {
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         match guard.as_ref() {
-            Some(session) => f(session),
+            Some(active) => f(&active.session),
             None => Err(CommandError::no_session()),
         }
     }
@@ -345,7 +448,7 @@ impl AppState {
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         match guard.as_mut() {
-            Some(session) => f(session),
+            Some(active) => f(&mut active.session),
             None => Err(CommandError::no_session()),
         }
     }
@@ -477,7 +580,7 @@ impl AppState {
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        if let Some(session) = session_guard.as_ref() {
+        if let Some(session) = session_guard.as_ref().map(|active| &active.session) {
             let mut voter_guard = self
                 .voter
                 .lock()
@@ -651,10 +754,16 @@ impl AppState {
         self.install_credential(credential, origin)
     }
 
-    /// Moves a Rust-owned pre-freeze credential, if present, into a voter
-    /// session bound to this exact frozen election. gui-core recomputes
-    /// eligibility from the canonical registry during installation.
-    fn install_frozen_session(&self, session: GuiElectionSessionV1) -> Result<(), CommandError> {
+    /// Installs a frozen election session together with the ROLE this shell
+    /// holds for it (`Organizer` from freeze/resume-of-organizer-workspace,
+    /// `ImportedVoter` from public-artifact import). Authority is installed
+    /// atomically with the session so no window exists in which a loaded
+    /// session has an undefined role.
+    fn install_frozen_session(
+        &self,
+        session: GuiElectionSessionV1,
+        authority: SessionAuthorityV1,
+    ) -> Result<(), CommandError> {
         let mut voter = GuiVoterSessionV1::new(session.artifacts());
         let carried_credential = self
             .voter
@@ -680,7 +789,11 @@ impl AppState {
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        *session_guard = Some(session);
+        // Session AND role are replaced under the single session lock, so no
+        // concurrent command can ever observe a new session with the previous
+        // election's authority (or vice versa).
+        *session_guard = Some(ActiveElectionSessionV1::new(session, authority));
+        drop(session_guard);
         let mut voter_guard = self
             .voter
             .lock()
@@ -689,13 +802,22 @@ impl AppState {
         Ok(())
     }
 
+    /// Replaces the active session after a committed organizer mutation. The
+    /// role is preserved BY the snapshot being mutated — an organizer session
+    /// stays an organizer session; an imported one can never reach this path.
     fn replace_active_session(&self, session: GuiElectionSessionV1) -> Result<(), CommandError> {
         let mut session_guard = self
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        *session_guard = Some(session);
-        Ok(())
+        match session_guard.as_ref() {
+            Some(active) => {
+                let authority = active.authority;
+                *session_guard = Some(ActiveElectionSessionV1::new(session, authority));
+                Ok(())
+            }
+            None => Err(CommandError::no_session()),
+        }
     }
 
     fn set_session_workspace_id(&self, workspace_id: String) -> Result<(), CommandError> {
@@ -809,16 +931,28 @@ fn mutate_session_transactionally<T>(
     state: &AppState,
     mutate: impl FnOnce(&mut GuiElectionSessionV1) -> Result<T, CommandError>,
 ) -> Result<(T, GuiElectionSummaryV1, ElectionLifecycleStateV1), CommandError> {
+    // ORGANIZER-AUTHORITY GATE (fail before ANY effect): a durable organizer
+    // workspace revision may only ever be written for an organizer-owned
+    // session. This central gate makes it structurally impossible for any
+    // current or future caller of this helper to mutate an imported voter
+    // session or synthesize an organizer workspace from public artifacts.
+    state.ensure_organizer_authority()?;
     let workspaces_dir = workspaces_directory(app)?;
     let original = {
         let guard = state
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        // Re-check against the SNAPSHOT taken under the lock, so the verdict
+        // and the mutated session are the same unit even under concurrent
+        // election switches (the snapshot carries session + role atomically).
+        let Some(active) = guard.as_ref() else {
             return Err(CommandError::no_session());
         };
-        session.transactional_clone()
+        if active.authority != SessionAuthorityV1::Organizer {
+            return Err(CommandError::organizer_authority_required());
+        }
+        active.session.transactional_clone()
     };
     let mut next = original;
     let result = mutate(&mut next)?;
@@ -1029,6 +1163,14 @@ fn reapply_persisted_election_status(
 }
 
 /// Shared implementation for the manual three-file and one-folder loaders.
+///
+/// ROLE MODEL: loading public election artifacts establishes
+/// [`SessionAuthorityV1::ImportedVoter`] — inspection, credential, signed-status,
+/// and voter-ballot workflow only. It deliberately does NOT create or update any
+/// durable organizer workspace (public artifacts alone must never synthesize
+/// organizer ownership), and it does not claim the session-workspace slot, so
+/// nothing an imported session does can ever write into `election-*` durable
+/// organizer storage.
 fn load_election_from_paths(
     manifest_path: &Path,
     registry_path: &Path,
@@ -1039,9 +1181,6 @@ fn load_election_from_paths(
     let artifacts =
         GuiElectionArtifactsV1::from_paths(manifest_path, registry_path, option_set_path)?;
     let mut session = GuiElectionSessionV1::new(artifacts)?;
-    let workspaces_dir = workspaces_directory(app)?;
-    let workspace_id = workspace_id_for_session_v1(&session);
-    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
     // Preserve a same-process credential across an explicit reload. Its
     // eligibility is recomputed only after the new canonical registry loads.
     let carried_credential = state
@@ -1066,22 +1205,33 @@ fn load_election_from_paths(
         )?;
     }
     // Restore authenticated lifecycle knowledge for this election (offline,
-    // from the previously accepted status record). Applied AFTER the frozen
-    // workspace write so the workspace keeps the immutable imported identity
-    // and lifecycle evidence always flows through signed statements.
+    // from the previously accepted status record). Voter lifecycle evidence
+    // always flows through signed statements verified against the pinned
+    // ballot-office anchor; the local mutable view advances forward only.
     reapply_persisted_election_status(app, &mut session)?;
     let summary = session.summary();
-    let mut guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *guard = Some(session);
-    let mut voter_guard = state
-        .voter
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    *voter_guard = Some(voter);
-    state.set_session_workspace_id(workspace_id)?;
+    {
+        let mut guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        // Session AND voter role are installed atomically: an imported public
+        // election is a VOTER context from the instant it becomes visible.
+        *guard = Some(ActiveElectionSessionV1::new(
+            session,
+            SessionAuthorityV1::ImportedVoter,
+        ));
+    }
+    {
+        let mut voter_guard = state
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        *voter_guard = Some(voter);
+    }
+    // No durable workspace exists for an imported election: the id slot stays
+    // empty so no organizer command can target organizer storage for it.
+    state.clear_session_workspace_id()?;
     Ok(summary)
 }
 
@@ -1111,6 +1261,10 @@ fn unload_election(state: tauri::State<'_, AppState>) -> Result<(), CommandError
             .map_err(|_| CommandError::state_poisoned())?;
         *pending_guard = Some(credential);
     }
+    drop(voter_guard);
+    // Switching away from an election always recomputes authority: the role is
+    // cleared together with the session (they share one lock) so nothing can
+    // leak across a switch.
     state.clear_session_workspace_id()?;
     Ok(())
 }
@@ -1125,7 +1279,26 @@ fn election_summary(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    Ok(guard.as_ref().map(GuiElectionSessionV1::summary))
+    Ok(guard.as_ref().map(|active| active.session.summary()))
+}
+
+/// Public role projection for the ACTIVE session: `"organizer"` only when this
+/// shell established organizer ownership (freeze, or resume of a workspace
+/// carrying durable organizer-authority provenance), `"imported_voter"` when
+/// the session came from public artifacts, and `None` with no active session.
+///
+/// This is a truthful mirror of backend state — the frontend uses it to hide
+/// organizer controls, but the BACKEND gate
+/// ([`AppState::ensure_organizer_authority`]) remains the enforcement point.
+#[tauri::command]
+fn active_election_authority(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<ActiveElectionAuthorityV1>, CommandError> {
+    Ok(state
+        .active_authority()?
+        .map(|authority| ActiveElectionAuthorityV1 {
+            authority: authority.as_str(),
+        }))
 }
 
 /// Lists resumable local election workspaces from the backend-controlled
@@ -1197,6 +1370,7 @@ fn resume_election_workspace(
                 workspace,
                 election: None,
                 draft: Some(preview),
+                organizer_workspace: true,
             })
         }
         LoadedElectionWorkspaceV1::Session { workspace, mut session } => {
@@ -1204,10 +1378,21 @@ fn resume_election_workspace(
             // the resumed session reflects the last accepted status evidence.
             reapply_persisted_election_status(&app, &mut session)?;
             let election = session.summary();
-            state.install_frozen_session(session)?;
+            // ROLE RESTORATION IS FAIL-CLOSED: organizer authority returns only
+            // with a valid durable organizer-authority provenance marker. A
+            // workspace without one (e.g. synthesized from imported public
+            // artifacts, or written before role separation) resumes as a
+            // VOTER-ONLY view of that election.
+            let authority = if workspace.organizer_workspace {
+                SessionAuthorityV1::Organizer
+            } else {
+                SessionAuthorityV1::ImportedVoter
+            };
+            state.install_frozen_session(session, authority)?;
             state.set_session_workspace_id(workspace_id)?;
             state.clear_draft_workspace_id()?;
             Ok(GuiElectionWorkspaceResumeResultV1 {
+                organizer_workspace: workspace.organizer_workspace,
                 workspace,
                 election: Some(election),
                 draft: None,
@@ -1256,11 +1441,15 @@ fn delete_election_workspace(
 }
 
 /// Opens the frozen election for ballot intake (lifecycle delegation).
+///
+/// ORGANIZER-AUTHORITATIVE: rejected up front for any session that was not
+/// established by an organizer flow, before any mutation or workspace write.
 #[tauri::command]
 fn open_voting(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let (_result, summary, _lifecycle_state) =
         mutate_session_transactionally(&app, &state, |session| {
             session.open()?;
@@ -1287,6 +1476,10 @@ fn close_voting(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
+    // Authority is checked BEFORE the intake fence: an unauthorized close must
+    // never publish a signed-truth fence transition for an election this shell
+    // does not organize.
+    state.ensure_organizer_authority()?;
     #[cfg(feature = "managed-tor-test")]
     fence_close_before_commit(&app, &state)?;
     let (_result, summary, lifecycle_state) =
@@ -1312,7 +1505,7 @@ fn fence_close_before_commit(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        let Some(session) = guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         if !matches!(
@@ -1333,6 +1526,7 @@ fn mark_verified(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let (_result, summary, lifecycle_state) =
         mutate_session_transactionally(&app, &state, |session| {
             session.mark_verified()?;
@@ -1350,6 +1544,7 @@ fn finalize_election(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let (_result, summary, lifecycle_state) =
         mutate_session_transactionally(&app, &state, |session| {
             session.finalize()?;
@@ -1424,14 +1619,17 @@ fn invalidate_voter_for_lifecycle(
 
 /// Ingests one canonical ballot package file through the gui-core intake
 /// pipeline (decode, binding, suite policy, proof verification, first-valid
-/// nullifier acceptance). The shell only reads the file bytes; every
-/// validation step is gui-core's.
+/// nullifier acceptance).
+///
+/// ORGANIZER-AUTHORITATIVE: only the ballot office may admit ballots into its
+/// authoritative ledger. Rejected before any file read or session mutation.
 #[tauri::command]
 fn intake_ballot_package(
     package_path: String,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiBallotIntakeResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let package_bytes = read_ballot_package_file_bounded_v1(Path::new(&package_path))?;
     let (result, _summary, _lifecycle_state) =
         mutate_session_transactionally(&app, &state, |session| {
@@ -1463,17 +1661,20 @@ fn private_intake_inbox_dir(
 /// active election. The operator passes their app-data root to the controlled
 /// Tor intake process, which writes accepted ballots into exactly this
 /// election-scoped inbox; this GUI ingests them via `sync_private_intake`.
+///
+/// ORGANIZER-AUTHORITATIVE: the intake inbox is ballot-office infrastructure.
 #[tauri::command]
 fn private_intake_inbox_path(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<String, CommandError> {
+    state.ensure_organizer_authority()?;
     let inbox_dir = {
         let guard = state
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        let Some(session) = guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         private_intake_inbox_dir(&app, session)?
@@ -1495,17 +1696,23 @@ fn private_intake_inbox_path(
 /// completes the documented post-close drain of ballots the collector ALREADY
 /// accepted (and receipted) before the authoritative fence closed — never a
 /// generic post-close acceptance path. VERIFIED/FINALIZED refuse outright.
+///
+/// ORGANIZER-AUTHORITATIVE: reconciliation promotes accepted ballots into the
+/// ONE durable organizer workspace. An imported voter election is rejected
+/// before the inbox directory is even resolved, so an unauthorized call can
+/// never create inbox storage or a workspace revision.
 #[tauri::command]
 fn sync_private_intake(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPrivateIntakeSyncSummaryV1, CommandError> {
+    state.ensure_organizer_authority()?;
     let inbox_dir = {
         let guard = state
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        let Some(session) = guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         private_intake_inbox_dir(&app, session)?
@@ -1532,10 +1739,16 @@ fn sync_private_intake(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        // Snapshot authority recheck (same unit as the cloned session): the
+        // gate verdict and the reconciled session can never diverge under a
+        // concurrent election switch.
+        let Some(active) = guard.as_ref() else {
             return Err(CommandError::no_session());
         };
-        session.transactional_clone()
+        if active.authority != SessionAuthorityV1::Organizer {
+            return Err(CommandError::organizer_authority_required());
+        }
+        active.session.transactional_clone()
     };
     let summary = ingest_private_intake_inbox_into_session_v1(&inbox_dir, &mut next)?;
     if summary.newly_accepted > 0 {
@@ -1547,8 +1760,13 @@ fn sync_private_intake(
 }
 
 /// Computes the deterministic tally over the currently accepted ballots.
+///
+/// ORGANIZER-AUTHORITATIVE: this is the ballot office's authoritative tally
+/// over ITS acceptance ledger. Independent verification of a published result
+/// uses `verify_archive` (ungated, archive-authoritative).
 #[tauri::command]
 fn current_tally(state: tauri::State<'_, AppState>) -> Result<GuiTallySummaryV1, CommandError> {
+    state.ensure_organizer_authority()?;
     state.with_session(|session| Ok(session.tally()?))
 }
 
@@ -1565,11 +1783,16 @@ fn participation_summary(
 }
 
 /// Writes the complete offline archive directory for the active session.
+///
+/// ORGANIZER-AUTHORITATIVE: archives are written from the ballot office's
+/// authoritative session (accepted ballots, transcript). Verifying an existing
+/// archive is `verify_archive` and stays ungated.
 #[tauri::command]
 fn write_archive(
     target_dir: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
     state.with_session(|session| Ok(write_archive_directory_v1(session, Path::new(&target_dir))?))
 }
 
@@ -1577,12 +1800,15 @@ fn write_archive(
 ///
 /// The gui-core finalized writer remains authoritative: it refuses any session
 /// that has not reached FINALIZED and emits the finalized archive manifest.
+/// ORGANIZER-AUTHORITATIVE: the finalized archive is the ballot office's
+/// published record and is written only from its own session.
 #[tauri::command]
 fn write_finalized_archive(
     target_dir: String,
     governance_document_path: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
     state.with_session(|session| {
         let doc_bytes = governance_document_path
             .map(|path| {
@@ -1757,6 +1983,9 @@ fn preserve_credential_and_clear_session(
             .map_err(|_| CommandError::state_poisoned())?;
         *pending_guard = Some(credential);
     }
+    drop(voter_guard);
+    // The role lives with the session under one lock; clearing the session
+    // above removed it atomically.
     state.clear_session_workspace_id()
 }
 
@@ -1891,6 +2120,13 @@ fn freeze_election(
     let (result, session) = draft.freeze()?;
     let workspace_id = workspace_id_for_session_v1(&session);
     write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+    // ORGANIZER-AUTHORITY PROVENANCE: freezing is THE act that establishes
+    // ballot-office ownership of this election in this shell. Record it
+    // durably (strictly after the workspace commit, crash-safe by ordering)
+    // so only THIS workspace ever resumes as an organizer workspace. A failure
+    // here fails the whole freeze rather than silently creating a workspace
+    // that would later resume without authority.
+    mark_workspace_organizer_authority_v1(&workspaces_dir, &workspace_id)?;
     // The authoritative session workspace is now durably committed. Retiring
     // the originating draft from resume discovery is best-effort and MUST NOT
     // fail the freeze: the successor already exists, and a failed marker only
@@ -1908,7 +2144,7 @@ fn freeze_election(
             .map_err(|_| CommandError::state_poisoned())?;
         *guard = Some(draft);
     }
-    state.install_frozen_session(session)?;
+    state.install_frozen_session(session, SessionAuthorityV1::Organizer)?;
     state.set_session_workspace_id(workspace_id)?;
     state.clear_draft_workspace_id()?;
     Ok(result)
@@ -2210,7 +2446,7 @@ fn generate_voter_governance_credential(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    if let Some(session) = session_guard.as_ref() {
+    if let Some(session) = session_guard.as_ref().map(|active| &active.session) {
         let mut voter_guard = state
             .voter
             .lock()
@@ -2277,7 +2513,7 @@ fn voter_workflow_status(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2304,7 +2540,7 @@ fn voter_ballot_selection_status(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let voter_guard = state
@@ -2331,7 +2567,7 @@ fn set_voter_ballot_selection(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2362,7 +2598,7 @@ fn clear_voter_ballot_selection(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2390,7 +2626,7 @@ fn change_my_ballot_choice(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2418,7 +2654,7 @@ fn prepare_voter_ballot(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = session_guard.as_ref() else {
+        let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         (session.artifacts().clone(), session.lifecycle_state_v1())
@@ -2450,7 +2686,7 @@ fn export_prepared_voter_ballot(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2582,7 +2818,7 @@ fn reset_voter_workflow(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref() else {
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
         return Err(CommandError::no_session());
     };
     let mut voter_guard = state
@@ -2600,12 +2836,15 @@ fn reset_voter_workflow(
 /// governance supporting document. When `governance_document_path` is set, the
 /// exact bytes are read in Rust and archived at the project-controlled
 /// `governance/source.bin` path.
+///
+/// ORGANIZER-AUTHORITATIVE (same boundary as `write_archive`).
 #[tauri::command]
 fn write_archive_with_governance_document(
     target_dir: String,
     governance_document_path: Option<String>,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
     state.with_session(|session| {
         let doc_bytes = governance_document_path
             .map(|path| {
@@ -2767,8 +3006,154 @@ mod tests {
             .with_draft_mut(|draft| Ok(draft.freeze()?))
             .expect("freeze draft");
         state
-            .install_frozen_session(session)
+            .install_frozen_session(session, SessionAuthorityV1::Organizer)
             .expect("install frozen voter session");
+    }
+
+    // -------------------------------------------------------------------------
+    // ORGANIZER-AUTHORITY ROLE MODEL regression coverage.
+    //
+    // The two-computer physical failure: Computer B imported ONLY the public
+    // election package yet received full ballot-office controls. These tests
+    // pin the backend rule that role comes from explicit flows — never from
+    // the mere presence of a loaded session.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn organizer_commands_are_refused_without_a_loaded_session() {
+        let state = AppState::default();
+        // No session at all is the truthful no-election refusal.
+        let error = state
+            .ensure_organizer_authority()
+            .expect_err("no session means nothing to organize");
+        assert_eq!(error.code, "GUI_NO_ACTIVE_ELECTION");
+        assert_eq!(state.active_authority().expect("authority read"), None);
+    }
+
+    #[test]
+    fn organizer_freeze_establishes_organizer_authority() {
+        let state = AppState::default();
+        let pending = state.generate_pending_credential().expect("credential");
+        let public_key = pending.public_governance_key_hex.expect("public key");
+        state.get_or_create_draft_preview().expect("create draft");
+        commit_draft(&state, public_key);
+        freeze_draft_into_active_session(&state);
+        assert_eq!(
+            state.active_authority().expect("authority read"),
+            Some(SessionAuthorityV1::Organizer)
+        );
+        // With an organizer-owned session the gate passes.
+        state.ensure_organizer_authority().expect("organizer allowed");
+    }
+
+    #[test]
+    fn imported_public_artifacts_establish_voter_only_authority() {
+        let artifacts = {
+            // A frozen session built exactly as a public-artifact import would
+            // build it (public bytes only; no draft, no organizer flow).
+            let mut draft = GuiElectionDraftV1::new();
+            draft
+                .set_basics(
+                    "imported-election".to_owned(),
+                    "Should the imported election pass?".to_owned(),
+                    "imported-revision".to_owned(),
+                )
+                .expect("basics");
+            draft.set_voters(vec![{
+                let credential =
+                    VoterGovernanceCredentialV1::generate().expect("generated key");
+                credential
+                    .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
+                    .expect("status")
+                    .public_governance_key_hex
+                    .expect("public key")
+            }])
+            .expect("voters");
+            draft.set_options(vec![("yes".to_owned(), "Yes".to_owned())])
+                .expect("options");
+            draft.set_rules(1, 1, false).expect("rules");
+            draft
+                .set_presentation(GuiBallotPresentationType::GovernanceProposal)
+                .expect("presentation");
+            draft.freeze().expect("freeze").1
+        };
+        let state = AppState::default();
+        state
+            .install_frozen_session(artifacts, SessionAuthorityV1::ImportedVoter)
+            .expect("import installs a voter-context session");
+
+        assert_eq!(
+            state.active_authority().expect("authority read"),
+            Some(SessionAuthorityV1::ImportedVoter)
+        );
+        // THE core refusal: every organizer command's gate fails with one
+        // stable code BEFORE any effect.
+        let error = state
+            .ensure_organizer_authority()
+            .expect_err("imported session must never hold organizer authority");
+        assert_eq!(error.code, "GUI_ORGANIZER_AUTHORITY_REQUIRED");
+    }
+
+    #[test]
+    fn switching_elections_recomputes_authority_and_unload_clears_it() {
+        let state = AppState::default();
+        let pending = state.generate_pending_credential().expect("credential");
+        let public_key = pending.public_governance_key_hex.expect("public key");
+        state.get_or_create_draft_preview().expect("create draft");
+        commit_draft(&state, public_key);
+        freeze_draft_into_active_session(&state);
+        assert_eq!(
+            state.active_authority().expect("authority read"),
+            Some(SessionAuthorityV1::Organizer)
+        );
+
+        // Switch to an imported election: the previous organizer role must not
+        // leak across the switch.
+        let other = {
+            let mut draft = GuiElectionDraftV1::new();
+            draft
+                .set_basics(
+                    "switched-election".to_owned(),
+                    "Should the switched election pass?".to_owned(),
+                    "switched-revision".to_owned(),
+                )
+                .expect("basics");
+            draft.set_voters(vec![{
+                let credential =
+                    VoterGovernanceCredentialV1::generate().expect("generated key");
+                credential
+                    .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
+                    .expect("status")
+                    .public_governance_key_hex
+                    .expect("public key")
+            }])
+            .expect("voters");
+            draft.set_options(vec![("yes".to_owned(), "Yes".to_owned())])
+                .expect("options");
+            draft.set_rules(1, 1, false).expect("rules");
+            draft
+                .set_presentation(GuiBallotPresentationType::GovernanceProposal)
+                .expect("presentation");
+            draft.freeze().expect("freeze").1
+        };
+        state
+            .install_frozen_session(other, SessionAuthorityV1::ImportedVoter)
+            .expect("switch to imported election");
+        assert_eq!(
+            state.active_authority().expect("authority read"),
+            Some(SessionAuthorityV1::ImportedVoter),
+            "authority must follow the newly installed session"
+        );
+        assert!(state.ensure_organizer_authority().is_err());
+
+        // Clearing the session (the unload path) always removes the role with
+        // it — they live under the same lock.
+        {
+            let mut session_guard = state.session.lock().expect("session lock");
+            *session_guard = None;
+        }
+        assert_eq!(state.active_authority().expect("authority read"), None);
+        assert!(state.ensure_organizer_authority().is_err());
     }
 
     #[test]
@@ -2834,7 +3219,10 @@ mod tests {
         }
 
         let session_guard = state.session.lock().expect("session lock");
-        let session = session_guard.as_ref().expect("active session");
+        let session = session_guard
+            .as_ref()
+            .map(|active| &active.session)
+            .expect("active session");
         let mut voter_guard = state.voter.lock().expect("voter lock");
         let voter = voter_guard.as_mut().expect("active voter session");
         let selection = voter
@@ -3237,6 +3625,7 @@ pub fn run() {
             load_election_folder,
             unload_election,
             election_summary,
+            active_election_authority,
             list_election_workspaces,
             active_workspace_ids,
             resume_election_workspace,

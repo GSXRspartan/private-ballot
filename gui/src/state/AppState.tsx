@@ -14,6 +14,7 @@ import { RequestGenerationGate } from "../requestGeneration";
 import type {
   ActiveWorkspaceIdsV1,
   GuiCommandError,
+  GuiElectionAuthorityV1,
   GuiElectionSummaryV1,
   GuiElectionWorkspaceResumeResultV1,
   GuiElectionWorkspaceSummaryV1,
@@ -59,6 +60,11 @@ export interface ArchiveViewState {
 interface AppStateValue {
   shellAvailable: boolean;
   election: GuiElectionSummaryV1 | null;
+  /** Backend-authoritative ROLE for the active session (`null` when no
+   *  session): "organizer" only after freeze or organizer-workspace resume;
+   *  "imported_voter" after a public-artifact import. The UI mirrors this to
+   *  hide organizer controls; the Rust gate remains the enforcement point. */
+  electionAuthority: GuiElectionAuthorityV1 | null;
   tally: GuiTallySummaryV1 | null;
   /** Privacy-aware participation summary (backend-authoritative; cleared on
    *  unload). Numeric fields are null while sealed. */
@@ -140,6 +146,8 @@ function readSettings(): AppSettings {
 export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [shellAvailable] = useState(isDesktopShell);
   const [election, setElection] = useState<GuiElectionSummaryV1 | null>(null);
+  const [electionAuthority, setElectionAuthority] =
+    useState<GuiElectionAuthorityV1 | null>(null);
   const [tally, setTally] = useState<GuiTallySummaryV1 | null>(null);
   const [participation, setParticipation] =
     useState<GuiParticipationSummaryV1 | null>(null);
@@ -201,8 +209,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   const refreshElection = useCallback(async () => {
     try {
-      const summary = await api.electionSummary();
+      // Summary and role are fetched together so the UI can never hold an
+      // election without a matching backend authority (or vice versa).
+      const [summary, authority] = await Promise.all([
+        api.electionSummary(),
+        api.activeElectionAuthority(),
+      ]);
       setElection(summary);
+      setElectionAuthority(authority?.authority ?? null);
       setBackendError(null);
     } catch (error) {
       captureError(error);
@@ -269,6 +283,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       try {
         const summary = await api.loadElection(manifestPath, registryPath, optionSetPath);
         setElection(summary);
+        // A public-artifact import is ALWAYS a voter-context session.
+        setElectionAuthority("imported_voter");
         setTally(null);
         setParticipation(null);
         setBackendError(null);
@@ -293,6 +309,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       try {
         const summary = await api.loadElectionFolder(folderPath);
         setElection(summary);
+        // Same backend rule as the three-file loader: imports are voter-only.
+        setElectionAuthority("imported_voter");
         setTally(null);
         setParticipation(null);
         setBackendError(null);
@@ -315,6 +333,15 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       try {
         const result = await api.resumeElectionWorkspace(workspaceId);
         setElection(result.election);
+        // Authority mirrors the durable workspace provenance the backend
+        // restored: organizer only with valid organizer-authority provenance.
+        setElectionAuthority(
+          result.election
+            ? result.organizer_workspace
+              ? "organizer"
+              : "imported_voter"
+            : null,
+        );
         setTally(null);
         setParticipation(null);
         setBackendError(null);
@@ -358,6 +385,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       participationRequestGenerationRef.current.invalidate();
       await api.unloadElection();
       setElection(null);
+      setElectionAuthority(null);
       setTally(null);
       setParticipation(null);
       setBackendError(null);
@@ -422,6 +450,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     () => ({
       shellAvailable,
       election,
+      electionAuthority,
       tally,
       participation,
       workspaces,
@@ -451,6 +480,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     [
       shellAvailable,
       election,
+      electionAuthority,
       tally,
       participation,
       workspaces,

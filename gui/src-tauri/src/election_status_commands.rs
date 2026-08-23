@@ -88,6 +88,11 @@ impl AppliedElectionStatusResultV1 {
 /// Exports one authenticated election-status statement for the active
 /// election to `destination_path` (no-overwrite). Signed with the SAME
 /// release-pinned root key as the transport descriptor.
+///
+/// ORGANIZER-AUTHORITATIVE — the gate fires FIRST: an imported voter election
+/// must never reserve a status generation, load ballot-office signing
+/// material, or produce a signed lifecycle statement. Only the organizer flows
+/// (freeze / organizer-workspace resume) establish that authority.
 #[tauri::command]
 pub async fn export_election_status_artifact(
     destination_path: String,
@@ -105,6 +110,9 @@ fn export_election_status_blocking(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<GuiElectionStatusExportResultV1, CommandError> {
+    // ORGANIZER-AUTHORITY GATE — before binding resolution, before any durable
+    // generation reservation, before any signing material is touched.
+    state.ensure_organizer_authority()?;
     let bound = bound_election(state)?;
 
     let destination = PathBuf::from(&destination_path);
@@ -144,7 +152,7 @@ fn export_election_status_blocking(
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref() else {
+        let Some(session) = guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         session.lifecycle_state_v1()
@@ -268,7 +276,7 @@ fn apply_election_status_bytes_blocking(
         .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_mut() else {
+    let Some(session) = session_guard.as_mut().map(|active| &mut active.session) else {
         return Err(CommandError::no_session());
     };
 

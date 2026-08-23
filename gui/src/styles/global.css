@@ -398,7 +398,12 @@ a {
   padding: 1.25rem 1.5rem 2rem;
 }
 .main-inner {
-  max-width: 62rem;
+  /* Large-desktop density: the previous 62rem cap left a wide dead margin on
+     big monitors. 72rem uses the extra room for content while still keeping a
+     centered reading column (never edge-to-edge on huge displays), and leaves
+     laptop/smaller-window behavior unchanged — below the cap the column is
+     simply the available width, exactly as before. */
+  max-width: 72rem;
   margin: 0 auto;
 }
 
@@ -548,11 +553,32 @@ a {
   color: var(--accent-text);
 }
 
+/* Label/value detail rows.
+ *
+ * Track-sizing root cause (wide-window squeeze): the label track previously
+ * used `minmax(9rem, auto)`. An `auto` MAXIMUM participates in free-space
+ * distribution and stretching, so at wide window sizes the label track could
+ * inflate far beyond its content and starve the value track into a sliver
+ * that wrapped almost character-by-character (the Vote-screen bug). The
+ * repair pins each side to exactly the behavior we want:
+ *
+ * - Label track: `minmax(7.5rem, max-content)` — never smaller than a sane
+ *   reading width, never wider than its longest label (a hard intrinsic cap,
+ *   immune to free-space distribution).
+ * - Value track: `minmax(0, 1fr)` — takes ALL remaining space and can always
+ *   shrink below its content minimum, so long hashes/IDs wrap safely via
+ *   `overflow-wrap: anywhere` instead of forcing either track wide.
+ */
 .field-list {
   display: grid;
-  grid-template-columns: minmax(9rem, auto) 1fr;
+  grid-template-columns: minmax(7.5rem, max-content) minmax(0, 1fr);
   gap: 0.375rem 1rem;
   margin: 0.5rem 0;
+}
+/* No grid item may inflate a track from unbreakable content: values and
+   hashes already wrap with `overflow-wrap: anywhere`; this keeps the floor. */
+.field-list > * {
+  min-width: 0;
 }
 .field-label {
   color: var(--text-secondary);
@@ -845,7 +871,7 @@ table.data th {
    card decoration. */
 /* Dedicated WIDE wrapper for the workflow diagram. The replacement artwork is
    substantially wider and denser than the old asset, so — unlike prose and
-   cards, which keep the comfortable ~62rem reading column of .main-inner — the
+   cards, which keep the comfortable ~72rem reading column of .main-inner — the
    figure deliberately BREAKS OUT to use essentially the full available content
    width, up to a large-desktop cap. The old ~880px cap is intentionally gone: it
    made the new multi-step diagram artificially small.
@@ -1565,7 +1591,7 @@ table.data th {
     grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
   }
   .field-list {
-    grid-template-columns: minmax(7rem, auto) 1fr;
+    grid-template-columns: minmax(6.5rem, max-content) minmax(0, 1fr);
   }
   .toolbar-election {
     max-width: 8rem;

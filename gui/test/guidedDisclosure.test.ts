@@ -433,14 +433,19 @@ describe("organizer guided-mode rendering", () => {
     assert.match(manage, /guidedControls === null \|\| guidedControls\.includes\(control\)/);
   });
 
-  it("shows the phase heading only in guided mode", () => {
+  it("shows the phase heading only in guided mode (organizer context only)", () => {
     assert.match(manage, /const phaseHeading = guidedMode \? organizerPhaseHeading\(lifecycle\) : null/);
-    assert.match(manage, /\{guidedMode && phaseHeading !== null && \(/);
+    // Role-gated: an imported voter election never renders organizer guidance.
+    assert.match(
+      manage,
+      /\{isOrganizer && guidedMode && phaseHeading !== null && \(/,
+    );
   });
 
   it("renders the Results heading only when a results-phase control is relevant", () => {
     assert.match(manage, /const resultsVisible =/);
-    assert.match(manage, /\{resultsVisible && \(/);
+    // Role-gated: an imported voter election never renders organizer guidance.
+    assert.match(manage, /\{isOrganizer && resultsVisible && \(/);
   });
 
   it("lists compact completed-phase summaries derived from existing state", () => {

@@ -72,6 +72,7 @@ function basename(path: string): string {
 export function ManageElection() {
   const {
     election,
+    electionAuthority,
     participation,
     refreshParticipation,
     backendError,
@@ -129,6 +130,15 @@ export function ManageElection() {
 
   const presentation = presentationFor(election);
   const lifecycle = election?.lifecycle_state ?? null;
+  // ROLE GATING (presentation mirror of the Rust authority gate): organizer
+  // controls render ONLY for a session the backend established as
+  // organizer-owned (freeze or organizer-workspace resume). An election
+  // imported from public artifacts is a VOTER context on this screen: it gets
+  // a read-only view and an explicit explanation, never ballot-office controls.
+  // This is defense-in-depth UX only — every organizer command is rejected by
+  // the backend (`GUI_ORGANIZER_AUTHORITY_REQUIRED`) even if invoked directly.
+  const isOrganizer = election !== null && electionAuthority === "organizer";
+  const isImportedVoter = election !== null && electionAuthority === "imported_voter";
   const canAct = shellAvailable && election !== null;
   const canImportBallot = canAct && intakeCanImport(shellAvailable, lifecycle);
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
@@ -333,9 +343,11 @@ export function ManageElection() {
   // reconciliation for the newly loaded/recovered election.
   useEffect(() => {
     prevAcceptedRef.current = null;
-    if (election && shellAvailable) void refreshOrganizerStatus();
+    // Only an organizer context may query ballot-office intake status; the
+    // backend rejects it for imported voter sessions, so we never ask.
+    if (election && shellAvailable && isOrganizer) void refreshOrganizerStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election?.manifest_hash_hex, shellAvailable]);
+  }, [election?.manifest_hash_hex, shellAvailable, isOrganizer]);
 
   // Restart reconciliation: when an OPEN election is loaded/recovered, run ONE
   // authoritative reconciliation so a durable inbox package accepted before an
@@ -345,7 +357,7 @@ export function ManageElection() {
   // an empty/duplicate-only inbox changes nothing; a not-open lifecycle simply
   // has nothing to reconcile and is skipped.
   useEffect(() => {
-    if (!shellAvailable || !election || lifecycle !== "OPEN") return;
+    if (!shellAvailable || !election || lifecycle !== "OPEN" || !isOrganizer) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -687,16 +699,34 @@ export function ManageElection() {
   return (
     <>
       <h1 className="screen-header">Manage Election</h1>
-      <p className="screen-lede">
-        Organizer tools for one election: load the election files, open and close voting,
-        accept submitted ballots, compute the tally, and write the verifiable election record.
-      </p>
+      {isImportedVoter ? (
+        <p className="screen-lede">
+          Voter view of this election: this computer imported its public election
+          package, so it can inspect the election and vote — it is not the ballot office.
+        </p>
+      ) : (
+        <p className="screen-lede">
+          Organizer tools for one election: load the election files, open and close voting,
+          accept submitted ballots, compute the tally, and write the verifiable election record.
+        </p>
+      )}
 
       <BackendErrorNotice error={backendError} onDismiss={dismissError} />
       <BackendErrorNotice error={finalArchiveError ? null : localError} onDismiss={clearLocalError} />
       {!shellAvailable && (
         <Notice tone="info">
           Browser preview: commands are disabled because the desktop shell is not running.
+        </Notice>
+      )}
+
+      {isImportedVoter && (
+        <Notice tone="info">
+          <strong>This election was imported from public election artifacts.</strong> This app
+          instance is a voter for this election, not its ballot office. Organizing actions —
+          opening or closing voting, running private intake, exporting voter materials, signing
+          status statements, tallying, and writing archives — belong to the ballot-office
+          computer and are neither shown here nor accepted by the backend. To vote in this
+          election, use the Vote screen.
         </Notice>
       )}
 
@@ -752,7 +782,7 @@ export function ManageElection() {
         </Card>
       )}
 
-      {election && (
+      {isOrganizer && election && (
         // Plain-language guidance derived from the real lifecycle state; it
         // never fabricates states or implies an irreversible step has happened.
         <Card title="Next step">
@@ -766,8 +796,9 @@ export function ManageElection() {
       {/* Presentation-only escape hatch: reveals the complete control surface
           (including future phases and technical controls) for review or
           debugging. It never changes workflow state, never bypasses a gate,
-          and never enables a disabled control. */}
-      {election && (
+          and never enables a disabled control. Organizer context only: an
+          imported voter election has no organizer controls to reveal. */}
+      {isOrganizer && (
         <div className="action-row">
           <button
             type="button"
@@ -782,7 +813,7 @@ export function ManageElection() {
 
       {/* Completed-phase summaries (guided mode only): compact, derived from
           existing state, each inspectable via Show all election controls. */}
-      {guidedMode && completedSummaries.length > 0 && (
+      {isOrganizer && guidedMode && completedSummaries.length > 0 && (
         <Card title="Progress so far">
           <ul className="guide-facts">
             {completedSummaries.map((summary) => (
@@ -796,7 +827,7 @@ export function ManageElection() {
       )}
 
       {/* The current lifecycle phase leads the workspace. */}
-      {guidedMode && phaseHeading !== null && (
+      {isOrganizer && guidedMode && phaseHeading !== null && (
         <h2 className="screen-section">{phaseHeading}</h2>
       )}
 
@@ -804,6 +835,7 @@ export function ManageElection() {
         <Notice tone="info">Load an election to enable these controls.</Notice>
       )}
 
+      {isOrganizer && (
       <div className="card-grid">
         {/* Guided mode shows only the current phase's cards prominently; the
             rest stay one toggle away under Show all election controls. Card
@@ -1293,12 +1325,13 @@ export function ManageElection() {
         </Card>
         )}
       </div>
+      )}
 
       {/* Results workflow, in order: the gates on each button remain the
           authoritative lifecycle gates; the heading only makes the existing
           progression obvious. In guided mode the whole section appears only
           when a results-phase control is relevant to the current lifecycle. */}
-      {resultsVisible && (
+      {isOrganizer && resultsVisible && (
         <>
           <h2 className="screen-section">Results</h2>
           <p className="form-hint">
@@ -1309,6 +1342,7 @@ export function ManageElection() {
         </>
       )}
 
+      {isOrganizer && (
       <div className="card-grid">
         {showControl("tally") && (
         <Card title="Tally">
@@ -1503,12 +1537,14 @@ export function ManageElection() {
         </Card>
         )}
       </div>
+      )}
 
       {/* Reference details for the loaded election. The entire technical
           section is collapsed by default so normal ballot-office operation
           never requires scrolling through cryptographic internals; nothing is
           removed — every manifest/proof-suite/commitment/identifier field is
-          preserved inside the disclosure. */}
+          preserved inside the disclosure. Read-only public data: it stays
+          available in every role, including imported voter context. */}
       {election && (
         <DetailsSection summary="Election technical details">
           <>
