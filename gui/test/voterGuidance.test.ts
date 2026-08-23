@@ -38,17 +38,19 @@ describe("voter-facing how voting works", () => {
     assert.ok(loadCard > guide, "guide must precede the first action card");
   });
 
-  it("walks the voter through the six journey steps in plain language", () => {
+  it("walks the voter through the journey steps in plain language", () => {
     assert.match(vote, /Load the election\./);
-    assert.match(vote, /files belong together and have not been\s+altered/);
+    assert.match(vote, /belong together and have not\s+been\s+altered/);
     assert.match(vote, /Review the election\./);
     assert.match(vote, /Prove you are eligible privately\./);
+    assert.match(vote, /Configure the ballot-office connection\./);
+    assert.match(vote, /Learn when voting opens\./);
     assert.match(vote, /Choose your vote\./);
     assert.match(vote, /tied to this specific election/);
-    assert.match(vote, /Submit your ballot\./);
+    assert.match(vote, /Create your anonymous proof and submit\./);
     assert.match(vote, /Check its status\./);
-    assert.match(vote, /received,\s+accepted by the organizer, or rejected/);
-    assert.match(vote, /Inclusion and Ootle anchoring are checked\s+later/);
+    assert.match(vote, /authenticated your exact ballot/);
+    assert.match(vote, /not yet final archive inclusion or Ootle\s+anchoring/);
   });
 
   it("keeps protocol vocabulary out of the primary voter explanation", () => {

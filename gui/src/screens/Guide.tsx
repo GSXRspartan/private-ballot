@@ -44,17 +44,36 @@ export function Guide() {
       <Card title="Voter">
         <ol className="guide-steps">
           <li>
-            <strong>Receive the election files.</strong> Load the frozen election package on the
-            Vote screen. The app verifies that its canonical files belong together and have not
-            been altered.
+            <strong>Create or load your private voter credential.</strong> Your voter credential
+            is your private voting identity, not a Tari wallet seed. Keep the encrypted
+            credential file and its passphrase private.
           </li>
           <li>
-            <strong>Wait for confirmed open.</strong> The frozen election file cannot tell you
-            when voting opens — only the ballot office knows, so the app never guesses. When the
-            office opens voting it publishes a <em>signed status statement</em> for this exact
-            election; import that small file (or check through your private connection) and the
-            app verifies its signature before responses become choosable. While the election is
-            still frozen or closed, the app says exactly that.
+            <strong>Give the organizer only your public enrollment key before freeze.</strong>{" "}
+            That public key — never your credential — is what the ballot office enrolls on the
+            eligible voter list.
+          </li>
+          <li>
+            <strong>Receive the frozen election package.</strong> Load it (one folder, or the
+            three files individually) on the Vote screen. The app verifies that its canonical
+            files belong together and have not been altered.
+          </li>
+          <li>
+            <strong>Receive the ballot-office connection file.</strong> The organizer exports a
+            voter transport bundle for this election. Configure it on the Vote screen so the app
+            knows which ballot office is authoritative here: every signed statement from that
+            office is verified against this pinned connection. It contains no ballot-office
+            private keys.
+          </li>
+          <li>
+            <strong>Learn whether voting has opened.</strong> The frozen election package itself
+            cannot tell you when voting opens or closes — only the ballot office can, and there
+            are two equivalent ways to learn it:{" "}
+            <em>check through your private connection</em> once the ballot-office connection is
+            configured, or <em>import a signed election-status file</em> the office gives you.
+            You do not need both. The app verifies either one against the pinned ballot-office
+            authority and applies it only if it is authentic and not older than what you already
+            know.
           </li>
           <li>
             <strong>Review the election.</strong> Confirm the election identity, ballot question,
@@ -63,34 +82,25 @@ export function Guide() {
             definition; legacy files honestly say when no canonical question exists.
           </li>
           <li>
-            <strong>Use your voter credential.</strong> Your voter credential is your private
-            voting identity, not a Tari wallet seed. Keep the encrypted credential file and its
-            passphrase private. Give the organizer only your public enrollment key before the
-            election is frozen.
-          </li>
-          <li>
             <strong>Verify anonymous eligibility.</strong> A Triptych-style linkable ring proof
             establishes that you control one credential in the frozen eligible set, without
             revealing which enrolled public key is yours.
           </li>
           <li>
-            <strong>Choose your response.</strong> Your choice stays local and can be changed any
-            time before the release/export boundary.
+            <strong>Choose your response.</strong> Choices become available only after a
+            verified OPEN. Your choice stays local and can be changed any time before the
+            release/export boundary.
           </li>
           <li>
             <strong>Create the anonymous eligibility proof.</strong> The proof and the ballot are
             bound to this frozen election.
           </li>
           <li>
-            <strong>Connect privately.</strong> Load and verify the organizer's voter-safe
-            transport bundle and let the app manage the local Tor connection for you — no SOCKS
-            port, torrc, onion hostname, or descriptor fingerprint to type.
-          </li>
-          <li>
-            <strong>Submit the encrypted ballot.</strong> Normal private-online submission sends
-            the encrypted ballot package through Tor. A temporary network or onion-reachability
-            failure reuses the <em>exact same</em> staged encrypted submission — it never creates a
-            second ballot, a second proof, or another election nullifier.{" "}
+            <strong>Connect privately and submit the encrypted ballot.</strong> Normal
+            private-online submission sends the encrypted ballot package through Tor, reusing
+            the ballot-office connection you configured earlier. A temporary network or
+            onion-reachability failure reuses the <em>exact same</em> staged encrypted submission
+            — it never creates a second ballot, a second proof, or another election nullifier.{" "}
             <strong>Offline fallback:</strong> save the encrypted ballot package and deliver it
             through the election's approved manual route.
           </li>
@@ -144,11 +154,14 @@ export function Guide() {
             election is authoritatively open.
           </li>
           <li>
-            <strong>Publish signed status after each change.</strong> Export a signed election
-            status statement whenever the lifecycle changes and give voters a copy — it is bound
-            to this exact election and signed by this ballot office, so voters on independent
-            computers learn FROZEN/OPEN/CLOSED without trusting any unsigned claim. While intake
-            is running, connected voters can also fetch the same signed status privately.
+            <strong>Voters learn the new lifecycle state one of two ways.</strong> Voters who
+            configured their ballot-office connection can check the current state privately
+            through your running intake — they need no extra file from you. For voters who
+            cannot check privately, export a <em>signed election status statement</em> after
+            each lifecycle change (open voting, close voting) and give them a copy: it is bound
+            to this exact election and signed by this ballot office, so an independent computer
+            learns FROZEN/OPEN/CLOSED without trusting any unsigned claim. Importing that file
+            is the offline/manual alternative, not a requirement for every voter.
           </li>
           <li>
             <strong>Receive ballots.</strong> Private Tor submissions enter a durable
@@ -188,11 +201,14 @@ export function Guide() {
         </ol>
       </Card>
 
-      <Card title="Voter transport bundle">
+      <Card title="Voter transport bundle (ballot-office connection file)">
         <p className="card-body">
-          The <strong>voter transport bundle</strong> is a public, election-specific file from the
-          ballot office that lets the voter app verify and reach that election's private Tor
-          intake. It contains no ballot-office private keys.
+          The <strong>voter transport bundle</strong> — shown in the voter app as the{" "}
+          <strong>ballot-office connection file</strong> — is a public, election-specific file
+          from the ballot office that lets the voter app verify and reach that election's
+          private Tor intake, and it pins the public key of the office that signs status
+          statements and receipts for this election. It contains no ballot-office private keys,
+          and configuring it never grants the voter any organizer ability.
         </p>
         <p className="card-body">It is different from each of these:</p>
         <ul className="guide-facts">
@@ -242,11 +258,15 @@ export function Guide() {
             protect a machine that is already compromised while the credential is unlocked.
           </li>
           <li>
-            <strong>Anonymous eligibility and network privacy are separate.</strong> The
-            Triptych-style proof hides which eligible registry member proved membership;
-            election-bound linkability (nullifier) semantics prevent a second accepted ballot from
-            the same credential for that election; and Tor mitigates network metadata during
-            private ballot delivery. No single layer provides all of these protections on its own.
+            <strong>Anonymous eligibility, network privacy, and office authentication are
+            three separate protections.</strong> The Triptych-style proof hides which eligible
+            registry member proved membership; election-bound linkability (nullifier) semantics
+            prevent a second accepted ballot from the same credential for that election; Tor
+            mitigates network metadata during private delivery; and the pinned ballot-office
+            authority from the connection file authenticates <em>who is speaking</em> — signed
+            status statements and receipts verify against that office's key. No single layer
+            provides all of these on its own: Tor does not authenticate eligibility or the
+            ballot office, and the eligibility proof does not hide your network connection.
           </li>
           <li>
             <strong>Ballot content is not permanently secret.</strong> Your choice may appear in

@@ -159,6 +159,36 @@ export function managedTorTestCardVisible(input: {
   return input.preparedReady || castLocked;
 }
 
+export interface BallotOfficeConnectionVisibilityInput {
+  /** True when an election is loaded (imported voter session). */
+  electionLoaded: boolean;
+  /** True only when the controlled-test transport feature is compiled in. */
+  featurePresent: boolean;
+}
+
+/**
+ * Whether the "Ballot office connection" card should render on the Vote
+ * screen.
+ *
+ * This is deliberately INDEPENDENT of ballot-submission progress: it depends
+ * only on an election being loaded and the transport feature being present.
+ * The two-computer physical test exposed a circular dead end when this setup
+ * was buried inside the submission card's `preparedReady || castLocked` gate:
+ * a FROZEN voter needed an authenticated OPEN status, which requires the
+ * transport-bundle-pinned authority, which could not be configured until the
+ * ballot was prepared — which itself required OPEN.
+ *
+ * Configuring or connecting here is lifecycle/transport setup only: it never
+ * advances the election lifecycle and never touches selection, proof, ballot,
+ * or cast state (those gates live entirely in the Rust backend). Submission
+ * controls remain separately gated by {@link managedTorTestCardVisible}.
+ */
+export function ballotOfficeConnectionVisible(
+  input: BallotOfficeConnectionVisibilityInput,
+): boolean {
+  return input.electionLoaded && input.featurePresent;
+}
+
 /**
  * Maps a backend controlled-test diagnostic stage code to a short, voter-safe
  * sentence for the Advanced/diagnostics panel. The codes are a bounded,

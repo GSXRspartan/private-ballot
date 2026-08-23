@@ -580,6 +580,17 @@ a {
 .field-list > * {
   min-width: 0;
 }
+/* Second, structural layer of the same repair: only Field pairs belong inside
+   .field-list. The Vote-screen wide-window collapse was caused by wide prose
+   blocks (lifecycle Notices) placed as DIRECT grid children: auto-placement
+   sat them in the label column, and their long unwrapped max-content inflated
+   the max-content label track far beyond any label, starving the value track
+   into a character-per-line sliver. Such stray children must span the full row
+   so they can never sit in — or size — the label column. Screens must still
+   not place wide prose blocks inside .field-list at all. */
+.field-list > :not(.field-label):not(.field-value) {
+  grid-column: 1 / -1;
+}
 .field-label {
   color: var(--text-secondary);
   font-size: 0.875rem;

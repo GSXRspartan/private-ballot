@@ -16,6 +16,7 @@ import {
 } from "../api/managedTorConfigMemory";
 import {
   PRIVATE_SUBMISSION_AUTO_RETRY_BACKOFF_MS,
+  ballotOfficeConnectionVisible,
   isRecoverableTransportError,
   isTransientPrivateReleaseResult,
   managedTorTestCardVisible,
@@ -155,7 +156,8 @@ function GuidedStageSummary({
 }
 
 export function Vote() {
-  const { election, shellAvailable, loadElection, refreshElection } = useAppState();
+  const { election, shellAvailable, loadElection, loadElectionFolder, refreshElection } =
+    useAppState();
   const [loadManifestPath, setLoadManifestPath] = useState("");
   const [loadRegistryPath, setLoadRegistryPath] = useState("");
   const [loadOptionSetPath, setLoadOptionSetPath] = useState("");
@@ -332,6 +334,28 @@ export function Vote() {
     setError(null);
     try {
       await loadElection(loadManifestPath, loadRegistryPath, loadOptionSetPath);
+    } catch (err) {
+      captureError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Primary voter loading action: ONE folder containing the three canonical
+  // exported files. Reuses the exact same backend command and validation as the
+  // organizer/Manage screen one-folder loader (load_election_folder resolves the
+  // three canonical files and goes through the shared load path) — no parallel
+  // validation exists here.
+  async function onVoterLoadElectionFolder() {
+    const folder = await pickDirectory(
+      "Select the election folder itself (do not open it)",
+      "electionExport",
+    );
+    if (!folder) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await loadElectionFolder(folder);
     } catch (err) {
       captureError(err);
     } finally {
@@ -1103,9 +1127,9 @@ export function Vote() {
         <summary className="voter-guide-summary">How voting works</summary>
         <ol className="voter-guide-steps">
           <li>
-            <strong>Load the election.</strong> You receive the election files from the
-            organizer. The app checks that the files belong together and have not been
-            altered.
+            <strong>Load the election.</strong> Select the election package folder you received
+            from the organizer (or the three files individually). The app checks that the files
+            belong together and have not been altered.
           </li>
           <li>
             <strong>Review the election.</strong> Confirm what is being voted on, the
@@ -1114,26 +1138,42 @@ export function Vote() {
           <li>
             <strong>Prove you are eligible privately.</strong> Your voter credential lets the
             app prove that you belong to the approved voter list without revealing which
-            eligible voter you are.
+            eligible voter you are. The organizer only ever received your public enrollment key.
+          </li>
+          <li>
+            <strong>Configure the ballot-office connection.</strong> Select the connection file
+            the organizer gave you (the voter transport bundle). It tells this app which ballot
+            office is authoritative for this election; every signed statement from the office is
+            verified against it. Do this before checking whether voting has opened.
+          </li>
+          <li>
+            <strong>Learn when voting opens.</strong> The frozen election file itself cannot say
+            when voting opens — only the ballot office can, and there are two equivalent ways to
+            learn it: check through your private connection, or import a signed election-status
+            file from the office. Both are verified against the pinned office; responses become
+            choosable only after a verified OPEN.
           </li>
           <li>
             <strong>Choose your vote.</strong> Your ballot is tied to this specific election,
             so it cannot be reused for a different election.
           </li>
           <li>
-            <strong>Submit your ballot.</strong> You can submit through the private online
-            route or save the ballot file and transfer it separately.
+            <strong>Create your anonymous proof and submit.</strong> Create the anonymous
+            eligibility proof, then submit through the private connection (Tor) or save the
+            encrypted ballot file and transfer it separately.
           </li>
           <li>
-            <strong>Check its status.</strong> The app shows whether your ballot was received,
-            accepted by the organizer, or rejected. Inclusion and Ootle anchoring are checked
-            later from the published archive and organizer evidence.
+            <strong>Check its status.</strong> An accepted receipt means the organizer
+            authenticated your exact ballot — it is not yet final archive inclusion or Ootle
+            anchoring. Those are checked later from the published archive and organizer evidence.
           </li>
         </ol>
         <DetailsSection summary="Technical details">
           <p className="card-body">
             Eligibility is proven with the Tari Triptych implementation using an
-            election-bound proof. This voter workflow reports local preparation and transport
+            election-bound proof. Tor protects submission network metadata only; the pinned
+            ballot-office authority (from the connection file) authenticates which office is
+            speaking. This voter workflow reports local preparation and transport
             receipt state only; finalized archive inclusion and aggregate Ootle evidence are
             verified from published organizer records.
           </p>
@@ -1205,101 +1245,421 @@ export function Vote() {
         </>
       )}
 
+      {/* BALLOT OFFICE CONNECTION — lifecycle/transport configuration.
+          Deliberately separate from ballot submission and deliberately NOT
+          gated by guided stage or prepared-ballot state: a FROZEN voter must
+          be able to configure and pin the ballot-office authority BEFORE
+          voting opens, because both lifecycle-update routes (the private
+          status check and signed status import) authenticate against this
+          pinned authority. Configuring or connecting never advances the
+          election lifecycle, never selects a response, never creates a proof,
+          never prepares a ballot, and never stages a submission — those gates
+          live in the Rust backend and still require authenticated OPEN. */}
+      {ballotOfficeConnectionVisible({
+        electionLoaded: !!election,
+        featurePresent: managedTorFeaturePresent,
+      }) && (
+        <Card title="Ballot office connection">
+          <p className="card-body">
+            Your ballot office provides a connection file that identifies the official ballot
+            office for this election. Configure it before checking whether voting has opened:
+            the app verifies every signed status statement against this pinned office, and the
+            private online route reuses this same connection later for submission.
+          </p>
+
+          {/* Private-connection errors are shown HERE too, so they are visible
+              while the submission card is still hidden (e.g. while FROZEN). */}
+          <BackendErrorNotice error={privateError} onDismiss={() => setPrivateError(null)} />
+
+          {((!managedTorStatus?.configured && !ballotCast) ||
+            (reconfiguring && !castLocked)) &&
+            !managedTorStatus?.tor_running && (
+            <div className="config-stack">
+              {reconfiguring && managedTorStatus?.configured && (
+                <Notice tone="warn">
+                  Choose the correct ballot-office connection file for this election.
+                  Replacing it does not change your prepared ballot, your response, or
+                  your anonymous proof — it only updates which ballot office you connect
+                  to. A file from another election is still rejected.
+                </Notice>
+              )}
+              <p className="form-hint">
+                Connecting privately runs Tor for you — there is no port, torrc, or
+                Tor data directory to set up. You only need the ballot-office
+                connection file for this election. Nothing is sent until you submit.
+              </p>
+              <div className="field-list">
+                <Field label="Tor installed">
+                  {voterTorStatus === null
+                    ? "Checking…"
+                    : voterTorStatus.tor_found
+                      ? "Found ✓"
+                      : "Not found"}
+                </Field>
+                <Field label="Ballot office">
+                  {!voterBundlePath
+                    ? "Connection file required"
+                    : reconfiguring
+                      ? "Selected — will be re-checked on connect"
+                      : "Verified for this election ✓"}
+                </Field>
+              </div>
+
+              {voterTorStatus !== null && !voterTorStatus.tor_found && (
+                <>
+                  <Notice tone="info">
+                    Tor was not found automatically. Select a Tor executable once; the
+                    app remembers it and never downloads or installs Tor.
+                  </Notice>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onBrowseTorExe()}
+                    >
+                      Select Tor executable
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {(!voterBundlePath || reconfiguring) && (
+                <>
+                  {!voterBundlePath && (
+                    <Notice tone="info">
+                      Ballot-office connection file required. Ask the ballot office for
+                      the voter transport bundle file, then select it here.
+                    </Notice>
+                  )}
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onBrowseVoterBundle()}
+                    >
+                      {reconfiguring && voterBundlePath
+                        ? "Choose a different ballot-office connection file"
+                        : "Select ballot-office connection file"}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={
+                    busy ||
+                    !voterBundlePath ||
+                    !(voterTorStatus?.tor_found ?? false)
+                  }
+                  onClick={() => void onConnectPrivately()}
+                >
+                  Connect privately
+                </button>
+                {reconfiguring && managedTorStatus?.configured && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={busy}
+                    onClick={() => setReconfiguring(false)}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+
+              <DetailsSection summary="Advanced">
+                <p className="form-hint">
+                  Override the auto-detected Tor executable or supply a manual Tor data
+                  directory. Normal use needs neither — leave them blank for the
+                  app-owned, election-scoped defaults.
+                </p>
+                <div className="form-row form-row--full">
+                  <label htmlFor="tor-exe-path">Tor executable (optional override)</label>
+                  <div className="file-row">
+                    <input
+                      id="tor-exe-path"
+                      type="text"
+                      value={torExePath}
+                      onChange={(e) => setTorExePath(e.target.value)}
+                      placeholder="auto-detected"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onBrowseTorExe()}
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </div>
+                <div className="form-row form-row--full">
+                  <label htmlFor="voter-bundle-path">Voter transport bundle</label>
+                  <div className="file-row">
+                    <input
+                      id="voter-bundle-path"
+                      type="text"
+                      value={voterBundlePath}
+                      onChange={(e) => setVoterBundlePath(e.target.value)}
+                      placeholder="C:\test-root\voter-public-bundle.cbor"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onBrowseVoterBundle()}
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </div>
+                <div className="form-row form-row--full">
+                  <label htmlFor="tor-data-dir">Voter Tor data directory (optional)</label>
+                  <div className="file-row">
+                    <input
+                      id="tor-data-dir"
+                      type="text"
+                      value={torDataDir}
+                      onChange={(e) => setTorDataDir(e.target.value)}
+                      placeholder="auto (app-owned, election-scoped)"
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onBrowseTorDataDir()}
+                    >
+                      Browse
+                    </button>
+                  </div>
+                </div>
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={busy || !voterBundlePath}
+                    onClick={() => void onConfigureManagedTor()}
+                  >
+                    Configure only (do not start)
+                  </button>
+                </div>
+              </DetailsSection>
+            </div>
+          )}
+
+        {managedTorStatus?.configured &&
+          !managedTorStatus.tor_running &&
+          !ballotCast &&
+          !reconfiguring && (
+          <div className="action-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={busy}
+              onClick={() => void onStartManagedTor()}
+            >
+              Start private connection
+            </button>
+            {/* Pre-release recovery: replace a configured ballot-office
+                connection (e.g. one bound to the wrong election) without
+                restarting the app, reloading the election, or disturbing the
+                prepared ballot. Only before the ballot is durably locked — a
+                CAST_PENDING staged envelope is bound to its original release
+                descriptor and is retried exactly, never re-pointed. */}
+            {!castLocked && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={busy}
+                onClick={() => {
+                  setPrivateError(null);
+                  setReconfiguring(true);
+                }}
+              >
+                Change ballot-office connection
+              </button>
+            )}
+          </div>
+        )}
+
+        {managedTorStatus?.configured && managedTorStatus.tor_running && (
+          <>
+            <p className="form-hint">
+              Private connection is running. Checking voting status below uses it; the
+              private submission stage reuses this same connection later.
+            </p>
+            {/* Stop lives here while nothing is durably locked so the voter can
+                always go back (e.g. to replace the connection file). Once
+                CAST_PENDING/CAST the submission/recovery controls own the
+                connection buttons exclusively. */}
+            {!castLocked && (
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={busy}
+                  onClick={() => void onStopManagedTor()}
+                >
+                  Stop private connection
+                </button>
+              </div>
+            )}
+          </>
+        )}
+
+        {election?.lifecycle_state === "FROZEN" && (
+          <>
+            <h3 className="card-section-heading">Check whether voting has opened</h3>
+            <p className="form-hint">
+              The frozen election package cannot say when voting opens — only the ballot
+              office can. Once the connection above is configured, either route works at
+              any time; you do not need both. Check privately through the configured
+              connection, or ask the office for a signed election-status file and import
+              it here. Both are verified against the pinned office before anything changes.
+            </p>
+            <div className="action-row">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={statusImportBusy}
+                onClick={() => void onImportElectionStatus()}
+              >
+                {statusImportBusy ? "Verifying…" : "Import signed election status…"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={statusImportBusy || !managedTorStatus?.configured}
+                onClick={() => void onFetchElectionStatusPrivate()}
+              >
+                Check via private connection
+              </button>
+            </div>
+            {statusImport && (
+              <p className="form-hint">
+                Last imported status: {statusImport.effective_state} (generation{" "}
+                {statusImport.generation}).{statusImport.advanced ? "" : " It matched the current state."}
+              </p>
+            )}
+          </>
+        )}
+        </Card>
+      )}
+
       {!election && (
         <Card title="Load Election">
           <p className="card-body">
-            To vote, load the election files shared by the election organizer: the election
-            definition, the eligible voter list, and the ballot options. The app checks that
-            the files are complete and unaltered before continuing.
+            To vote, select the election package folder you received from the election
+            organizer. The app checks that the files are complete and unaltered before
+            continuing.
           </p>
-          <DetailsSection summary="Technical details">
-            <p className="card-body">
-              The election definition is the manifest file, the eligible voter list is the
-              registry file, and the ballot options are the candidate/option set file.
-            </p>
-          </DetailsSection>
-          <div className="form-row">
-            <label htmlFor="vote-manifest">Election definition</label>
-            <div className="file-row">
-              <input
-                id="vote-manifest"
-                type="text"
-                readOnly
-                value={loadManifestPath ? loadManifestPath.split(/[\\/]/).pop() : ""}
-                placeholder="no file selected"
-              />
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={!shellAvailable || busy}
-                onClick={() => void onPickLoadArtifact("manifest")}
-              >
-                Browse
-              </button>
-            </div>
-          </div>
-          <div className="form-row">
-            <label htmlFor="vote-registry">Eligible voter list</label>
-            <div className="file-row">
-              <input
-                id="vote-registry"
-                type="text"
-                readOnly
-                value={loadRegistryPath ? loadRegistryPath.split(/[\\/]/).pop() : ""}
-                placeholder="no file selected"
-              />
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={!shellAvailable || busy}
-                onClick={() => void onPickLoadArtifact("registry")}
-              >
-                Browse
-              </button>
-            </div>
-          </div>
-          <div className="form-row">
-            <label htmlFor="vote-optionset">Ballot options</label>
-            <div className="file-row">
-              <input
-                id="vote-optionset"
-                type="text"
-                readOnly
-                value={loadOptionSetPath ? loadOptionSetPath.split(/[\\/]/).pop() : ""}
-                placeholder="no file selected"
-              />
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={!shellAvailable || busy}
-                onClick={() => void onPickLoadArtifact("optionSet")}
-              >
-                Browse
-              </button>
-            </div>
-          </div>
           <div className="btn-row">
             <button
               type="button"
               className="btn btn-primary"
-              disabled={
-                !shellAvailable ||
-                busy ||
-                loadManifestPath === "" ||
-                loadRegistryPath === "" ||
-                loadOptionSetPath === ""
-              }
-              onClick={() => void onVoterLoadElection()}
+              disabled={!shellAvailable || busy}
+              onClick={() => void onVoterLoadElectionFolder()}
             >
-              Load Election
+              Select Election Folder
             </button>
           </div>
-          {shellAvailable &&
-            (loadManifestPath === "" ||
-              loadRegistryPath === "" ||
-              loadOptionSetPath === "") && (
-              <p className="form-hint">Choose all required election files to continue.</p>
-            )}
+          <p className="form-hint">
+            Choose the election folder itself — do not open it first. The folder must contain
+            election-manifest.cbor, voter-registry.cbor, and candidate-set.cbor.
+          </p>
+          <DetailsSection summary="Manual file selection (three files)">
+            <p className="card-body">
+              If the organizer shared the files separately instead of as one folder, choose each
+              file here. This uses exactly the same validation as the folder loader.
+            </p>
+            <div className="form-row">
+              <label htmlFor="vote-manifest">Election definition</label>
+              <div className="file-row">
+                <input
+                  id="vote-manifest"
+                  type="text"
+                  readOnly
+                  value={loadManifestPath ? loadManifestPath.split(/[\\/]/).pop() : ""}
+                  placeholder="no file selected"
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!shellAvailable || busy}
+                  onClick={() => void onPickLoadArtifact("manifest")}
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+            <div className="form-row">
+              <label htmlFor="vote-registry">Eligible voter list</label>
+              <div className="file-row">
+                <input
+                  id="vote-registry"
+                  type="text"
+                  readOnly
+                  value={loadRegistryPath ? loadRegistryPath.split(/[\\/]/).pop() : ""}
+                  placeholder="no file selected"
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!shellAvailable || busy}
+                  onClick={() => void onPickLoadArtifact("registry")}
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+            <div className="form-row">
+              <label htmlFor="vote-optionset">Ballot options</label>
+              <div className="file-row">
+                <input
+                  id="vote-optionset"
+                  type="text"
+                  readOnly
+                  value={loadOptionSetPath ? loadOptionSetPath.split(/[\\/]/).pop() : ""}
+                  placeholder="no file selected"
+                />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!shellAvailable || busy}
+                  onClick={() => void onPickLoadArtifact("optionSet")}
+                >
+                  Browse
+                </button>
+              </div>
+            </div>
+            <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={
+                  !shellAvailable ||
+                  busy ||
+                  loadManifestPath === "" ||
+                  loadRegistryPath === "" ||
+                  loadOptionSetPath === ""
+                }
+                onClick={() => void onVoterLoadElection()}
+              >
+                Load Election
+              </button>
+            </div>
+            {shellAvailable &&
+              (loadManifestPath === "" ||
+                loadRegistryPath === "" ||
+                loadOptionSetPath === "") && (
+                <p className="form-hint">Choose all required election files to continue.</p>
+              )}
+          </DetailsSection>
         </Card>
       )}
 
@@ -1326,6 +1686,11 @@ export function Vote() {
               These details come straight from the election definition and cannot be changed by
               anyone, including this app.
             </Notice>
+            {/* Label/value rows ONLY inside .field-list. The lifecycle notices
+                below deliberately live OUTSIDE this grid: a wide prose block
+                placed in the label column inflates its max-content track and
+                collapses the value column to character-per-line at wide window
+                sizes (the Vote-screen wide-window layout bug). */}
             <div className="field-list">
               <Field label="Election">
                 <span className="field-value">
@@ -1346,43 +1711,6 @@ export function Vote() {
                   </span>
                 </Field>
               )}
-              {election?.lifecycle_state === "FROZEN" && (
-                <Notice tone="warn">
-                  <strong>Voting has not opened yet.</strong> The frozen election file cannot say
-                  when voting opens — only the ballot office can. When the office opens voting it
-                  publishes a SIGNED status statement; import that file here (or check through the
-                  private connection) to continue.
-                  <div className="btn-row">
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={statusImportBusy}
-                      onClick={() => void onImportElectionStatus()}
-                    >
-                      {statusImportBusy ? "Verifying…" : "Import signed election status…"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={statusImportBusy || !managedTorStatus?.configured}
-                      onClick={() => void onFetchElectionStatusPrivate()}
-                    >
-                      Check via private connection
-                    </button>
-                  </div>
-                  {statusImport && (
-                    <p className="form-hint">
-                      Last imported status: {statusImport.effective_state} (generation{" "}
-                      {statusImport.generation}).{statusImport.advanced ? "" : " It matched the current state."}
-                    </p>
-                  )}
-                </Notice>
-              )}
-              {(election?.lifecycle_state === "CLOSED" ||
-                election?.lifecycle_state === "VERIFIED" ||
-                election?.lifecycle_state === "FINALIZED") && (
-                <Notice tone="info">{electionNotOpenText(election.lifecycle_state)}</Notice>
-              )}
               <Field label="How many to choose">
                 <span className="field-value">
                   {selectionInstructionText(confirmation.bound)}
@@ -1399,6 +1727,44 @@ export function Vote() {
                 </ul>
               </Field>
             </div>
+            {election?.lifecycle_state === "FROZEN" && (
+              <Notice tone="warn">
+                <strong>Voting has not opened yet.</strong> The frozen election file cannot say
+                when voting opens — only the ballot office can. When the office opens voting it
+                publishes a SIGNED status statement; import that file here (or check through the
+                private connection) to continue. Configure the ballot-office connection below so
+                either route can verify the office&rsquo;s signature.
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={statusImportBusy}
+                    onClick={() => void onImportElectionStatus()}
+                  >
+                    {statusImportBusy ? "Verifying…" : "Import signed election status…"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={statusImportBusy || !managedTorStatus?.configured}
+                    onClick={() => void onFetchElectionStatusPrivate()}
+                  >
+                    Check via private connection
+                  </button>
+                </div>
+                {statusImport && (
+                  <p className="form-hint">
+                    Last imported status: {statusImport.effective_state} (generation{" "}
+                    {statusImport.generation}).{statusImport.advanced ? "" : " It matched the current state."}
+                  </p>
+                )}
+              </Notice>
+            )}
+            {(election?.lifecycle_state === "CLOSED" ||
+              election?.lifecycle_state === "VERIFIED" ||
+              election?.lifecycle_state === "FINALIZED") && (
+              <Notice tone="info">{electionNotOpenText(election.lifecycle_state)}</Notice>
+            )}
             <p className="form-hint">
               This list is read-only. You choose your response after confirming the election.
             </p>
@@ -2157,222 +2523,16 @@ export function Vote() {
                         onDismiss={() => setPrivateError(null)}
                       />
 
-                      {((!managedTorStatus?.configured && !ballotCast) ||
-                        (reconfiguring && !castLocked)) &&
-                        !managedTorStatus?.tor_running && (
-                        <div className="config-stack">
-                          {reconfiguring && managedTorStatus?.configured && (
-                            <Notice tone="warn">
-                              Choose the correct ballot-office connection file for this election.
-                              Replacing it does not change your prepared ballot, your response, or
-                              your anonymous proof — it only updates which ballot office you connect
-                              to. A file from another election is still rejected.
-                            </Notice>
-                          )}
-                          <p className="form-hint">
-                            Connecting privately runs Tor for you — there is no port, torrc, or
-                            Tor data directory to set up. You only need the ballot-office
-                            connection file for this election. Nothing is sent until you submit.
-                          </p>
-                          <div className="field-list">
-                            <Field label="Tor installed">
-                              {voterTorStatus === null
-                                ? "Checking…"
-                                : voterTorStatus.tor_found
-                                  ? "Found ✓"
-                                  : "Not found"}
-                            </Field>
-                            <Field label="Ballot office">
-                              {!voterBundlePath
-                                ? "Connection file required"
-                                : reconfiguring
-                                  ? "Selected — will be re-checked on connect"
-                                  : "Verified for this election ✓"}
-                            </Field>
-                          </div>
-
-                          {voterTorStatus !== null && !voterTorStatus.tor_found && (
-                            <>
-                              <Notice tone="info">
-                                Tor was not found automatically. Select a Tor executable once; the
-                                app remembers it and never downloads or installs Tor.
-                              </Notice>
-                              <div className="action-row">
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  disabled={busy || !shellAvailable}
-                                  onClick={() => void onBrowseTorExe()}
-                                >
-                                  Select Tor executable
-                                </button>
-                              </div>
-                            </>
-                          )}
-
-                          {(!voterBundlePath || reconfiguring) && (
-                            <>
-                              {!voterBundlePath && (
-                                <Notice tone="info">
-                                  Ballot-office connection file required. Ask the ballot office for
-                                  the voter transport bundle file, then select it here.
-                                </Notice>
-                              )}
-                              <div className="action-row">
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  disabled={busy || !shellAvailable}
-                                  onClick={() => void onBrowseVoterBundle()}
-                                >
-                                  {reconfiguring && voterBundlePath
-                                    ? "Choose a different ballot-office connection file"
-                                    : "Select ballot-office connection file"}
-                                </button>
-                              </div>
-                            </>
-                          )}
-
-                          <div className="action-row">
-                            <button
-                              type="button"
-                              className="btn btn-primary"
-                              disabled={
-                                busy ||
-                                !voterBundlePath ||
-                                !(voterTorStatus?.tor_found ?? false)
-                              }
-                              onClick={() => void onConnectPrivately()}
-                            >
-                              Connect privately
-                            </button>
-                            {reconfiguring && managedTorStatus?.configured && (
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={busy}
-                                onClick={() => setReconfiguring(false)}
-                              >
-                                Cancel
-                              </button>
-                            )}
-                          </div>
-
-                          <DetailsSection summary="Advanced">
-                            <p className="form-hint">
-                              Override the auto-detected Tor executable or supply a manual Tor data
-                              directory. Normal use needs neither — leave them blank for the
-                              app-owned, election-scoped defaults.
-                            </p>
-                            <div className="form-row form-row--full">
-                              <label htmlFor="tor-exe-path">Tor executable (optional override)</label>
-                              <div className="file-row">
-                                <input
-                                  id="tor-exe-path"
-                                  type="text"
-                                  value={torExePath}
-                                  onChange={(e) => setTorExePath(e.target.value)}
-                                  placeholder="auto-detected"
-                                />
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  disabled={busy || !shellAvailable}
-                                  onClick={() => void onBrowseTorExe()}
-                                >
-                                  Browse
-                                </button>
-                              </div>
-                            </div>
-                            <div className="form-row form-row--full">
-                              <label htmlFor="voter-bundle-path">Voter transport bundle</label>
-                              <div className="file-row">
-                                <input
-                                  id="voter-bundle-path"
-                                  type="text"
-                                  value={voterBundlePath}
-                                  onChange={(e) => setVoterBundlePath(e.target.value)}
-                                  placeholder="C:\test-root\voter-public-bundle.cbor"
-                                />
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  disabled={busy || !shellAvailable}
-                                  onClick={() => void onBrowseVoterBundle()}
-                                >
-                                  Browse
-                                </button>
-                              </div>
-                            </div>
-                            <div className="form-row form-row--full">
-                              <label htmlFor="tor-data-dir">Voter Tor data directory (optional)</label>
-                              <div className="file-row">
-                                <input
-                                  id="tor-data-dir"
-                                  type="text"
-                                  value={torDataDir}
-                                  onChange={(e) => setTorDataDir(e.target.value)}
-                                  placeholder="auto (app-owned, election-scoped)"
-                                />
-                                <button
-                                  type="button"
-                                  className="btn btn-secondary"
-                                  disabled={busy || !shellAvailable}
-                                  onClick={() => void onBrowseTorDataDir()}
-                                >
-                                  Browse
-                                </button>
-                              </div>
-                            </div>
-                            <div className="action-row">
-                              <button
-                                type="button"
-                                className="btn btn-secondary"
-                                disabled={busy || !voterBundlePath}
-                                onClick={() => void onConfigureManagedTor()}
-                              >
-                                Configure only (do not start)
-                              </button>
-                            </div>
-                          </DetailsSection>
-                        </div>
-                      )}
-
-                      {managedTorStatus?.configured &&
-                        !managedTorStatus.tor_running &&
-                        !ballotCast &&
-                        !reconfiguring && (
-                        <div className="action-row">
-                          <button
-                            type="button"
-                            className="btn btn-secondary"
-                            disabled={busy}
-                            onClick={() => void onStartManagedTor()}
-                          >
-                            Start private connection
-                          </button>
-                          {/* Pre-release recovery: replace a configured
-                              ballot-office connection (e.g. one bound to the
-                              wrong election) without restarting the app,
-                              reloading the election, or disturbing the prepared
-                              ballot. Only before the ballot is durably locked —
-                              a CAST_PENDING staged envelope is bound to its
-                              original release descriptor and is retried exactly,
-                              never re-pointed. */}
-                          {!castLocked && (
-                            <button
-                              type="button"
-                              className="btn btn-secondary"
-                              disabled={busy}
-                              onClick={() => {
-                                setPrivateError(null);
-                                setReconfiguring(true);
-                              }}
-                            >
-                              Change ballot-office connection
-                            </button>
-                          )}
-                        </div>
+                      {/* Connection configuration lives in the dedicated
+                          "Ballot office connection" card near the lifecycle
+                          notice — it is lifecycle/transport setup, not a
+                          submission control, and must be reachable while
+                          FROZEN. Point to it instead of duplicating it. */}
+                      {!managedTorStatus?.configured && !ballotCast && (
+                        <p className="form-hint">
+                          Configure the ballot-office connection above first; then return
+                          here to submit.
+                        </p>
                       )}
 
                       {/* Fresh Submit is offered ONLY when nothing is durably
