@@ -255,11 +255,29 @@ fn import_election_status_blocking(
     state: &AppState,
 ) -> Result<GuiElectionStatusImportResultV1, CommandError> {
     let statement_bytes = read_bounded_status_file(Path::new(&status_path))?;
-    apply_election_status_bytes_blocking(statement_bytes, app, state)
+    let app_data_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root)?;
+    apply_election_status_bytes_in_state(state, &status_dir, statement_bytes)
 }
 
+/// State-level voter-side application core, shared by the Tauri command body
+/// and the shell concurrency regression tests (which supply their own bounded
+/// status directory instead of an AppHandle).
+///
 /// THE single voter-side application path for authenticated status bytes,
 /// shared by the offline file import and the online private-transport fetch.
+///
+/// LOCK-ORDERING INVARIANT (see [`crate::AppState`]): the trust-anchor lookup
+/// (a brief managed-Tor state lock) is resolved BEFORE the session lock is
+/// taken, so this function never holds `session` while acquiring
+/// `managed_tor_test`. Holding both here formed the `session ->
+/// managed_tor_test` half of an ABBA cycle against
+/// `running_transport_endpoint` (`managed_tor_test -> session`) — a stable,
+/// zero-CPU deadlock between two blocking-pool workers that permanently parked
+/// every later voter command (including ballot preparation).
 fn apply_election_status_bytes_blocking(
     statement_bytes: Vec<u8>,
     app: &AppHandle,
@@ -270,6 +288,19 @@ fn apply_election_status_bytes_blocking(
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())?;
     let status_dir = ensure_voter_election_status_directory_v1(&app_data_root)?;
+    apply_election_status_bytes_in_state(state, &status_dir, statement_bytes)
+}
+
+pub(crate) fn apply_election_status_bytes_in_state(
+    state: &AppState,
+    status_dir: &Path,
+    statement_bytes: Vec<u8>,
+) -> Result<GuiElectionStatusImportResultV1, CommandError> {
+    // Trust-root resolution step 1: the configured voter transport bundle's
+    // pinned anchor, read under a BRIEF managed-Tor lock while NO other lock
+    // is held.
+    let configured_anchor: Option<AnchorMaterial> =
+        configured_transport_root_anchor(state)?.map(AnchorMaterial::from);
 
     // Single locked section: resolve bindings, verify, apply, persist.
     let mut session_guard = state
@@ -285,19 +316,18 @@ fn apply_election_status_bytes_blocking(
     // Previously accepted record for THIS election (offline restart path and
     // monotonic knowledge source).
     let persisted = load_persisted_election_status_v1(
-        &status_dir,
+        status_dir,
         &manifest_hex,
         session.artifacts().manifest().election_id().as_bytes(),
         session.artifacts().manifest_hash(),
         session.artifacts().registry_commitment(),
     )?;
 
-    // Trust-root resolution (see command docs for precedence): the configured
-    // voter bundle's pinned anchor first, then the previously persisted
-    // acceptance anchor.
-    let (anchor, roots) = match configured_transport_root_anchor(state)? {
-        Some(anchor_value) => {
-            let material = AnchorMaterial::from(anchor_value);
+    // Trust-root resolution step 2 (precedence unchanged): the configured
+    // anchor first; otherwise the previously persisted acceptance anchor. With
+    // neither, fail closed with the same bounded error as before.
+    let (anchor, roots) = match configured_anchor {
+        Some(material) => {
             let roots = single_root_set(&material);
             (material, roots)
         }
@@ -342,7 +372,7 @@ fn apply_election_status_bytes_blocking(
     let accepted = AuthenticatedElectionStatusStatementV1::from_canonical_cbor(&statement_bytes)
         .map_err(CommandError::from)?;
     persist_election_status_record_v1(
-        &status_dir,
+        status_dir,
         &manifest_hex,
         &PersistedElectionStatusRecordV1 {
             root_key_id: anchor.root_key_id,

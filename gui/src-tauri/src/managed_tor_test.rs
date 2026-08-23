@@ -318,27 +318,52 @@ pub(crate) fn configured_transport_root_anchor(
 /// `(loopback SOCKS endpoint, verified descriptor)`. `None` unless a bundle
 /// bound to the ACTIVE election has been configured — a connection configured
 /// for another election can never be reused here.
+///
+/// LOCK-ORDERING INVARIANT (see [`crate::AppState`]): this function must NEVER
+/// hold the managed-Tor state lock while acquiring the session lock. The
+/// managed-state snapshot is taken and RELEASED first; the session is then
+/// locked separately for the manifest comparison. Holding both at once here
+/// was the live two-computer deadlock: it formed the `managed_tor_test ->
+/// session` half of an ABBA cycle against
+/// `apply_election_status_bytes_blocking` (`session -> managed_tor_test`),
+/// permanently parking every later voter command (including ballot
+/// preparation) at its very first lock acquisition with zero CPU.
 pub(crate) fn running_transport_endpoint(
     state: &AppState,
 ) -> Result<Option<(std::net::SocketAddr, TransportDescriptorV1)>, CommandError> {
-    let managed = state
-        .managed_tor_test
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(managed) = managed.as_ref() else {
+    // 1. Snapshot the managed-Tor side alone, then DROP the guard before any
+    //    other lock is touched.
+    let snapshot = {
+        let managed = state
+            .managed_tor_test
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        managed.as_ref().map(|m| {
+            (
+                m.socks_addr,
+                m.descriptor.clone(),
+                m.descriptor.manifest_hash(),
+            )
+        })
+    };
+    let Some((socks_addr, descriptor, manifest_hash)) = snapshot else {
         return Ok(None);
     };
-    let session_guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
-        return Ok(None);
+    // 2. Separate, non-overlapping session lock for the binding comparison.
+    let descriptor_matches_session = {
+        let session_guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        session_guard
+            .as_ref()
+            .map(|active| active.session.artifacts().manifest_hash())
+            == Some(manifest_hash)
     };
-    if managed.descriptor.manifest_hash() != session.artifacts().manifest_hash() {
+    if !descriptor_matches_session {
         return Ok(None);
     }
-    Ok(Some((managed.socks_addr, managed.descriptor.clone())))
+    Ok(Some((socks_addr, descriptor)))
 }
 
 /// Serializable runtime configuration supplied by the user.
@@ -784,7 +809,7 @@ pub async fn managed_tor_test_status(
 
 /// Blocking body of [`managed_tor_test_status`], run on the blocking thread pool
 /// so the fresh loopback SOCKS probe never stalls the main UI thread.
-fn managed_tor_test_status_blocking(
+pub(crate) fn managed_tor_test_status_blocking(
     state: &AppState,
 ) -> Result<ManagedTorTestStatusV1, CommandError> {
     let (descriptor, socks_addr, controller_present, child_alive) = {
@@ -1186,6 +1211,29 @@ fn hex_lower(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+/// Test-only constructor for a configured (but NOT running) managed-Tor state,
+/// used by shell regression tests to model Computer B's exact physical state:
+/// a verified voter bundle configured for the active election with no child
+/// process. No Tor process is spawned and no network is touched.
+#[cfg(test)]
+pub(crate) fn test_configured_state(
+    descriptor: TransportDescriptorV1,
+    roots: TransportAuthorityRootSetV1,
+    root_anchor: (String, [u8; 32]),
+) -> ManagedTorTestState {
+    ManagedTorTestState {
+        controller: None,
+        descriptor,
+        roots,
+        root_anchor,
+        consistency: DescriptorConsistencyStoreV1::default(),
+        socks_addr: SocketAddr::from(([127, 0, 0, 1], 19051)),
+        tor_exe_path: std::path::PathBuf::from("tor.exe"),
+        tor_data_dir: std::path::PathBuf::from("tor-data"),
+        socks_port: 19051,
+    }
 }
 
 #[cfg(test)]

@@ -328,6 +328,26 @@ impl PendingVoterCredentialV1 {
 /// The election session and voter workflow session are owned by gui-core.
 /// Election replacement clears election workflow state, while the Rust-only
 /// credential survives in pending memory for same-process membership checks.
+///
+/// # GLOBAL LOCK ORDER (deadlock invariant)
+///
+/// Every code path that holds one of these mutexes while acquiring another
+/// MUST follow this single order:
+///
+/// ```text
+/// session -> voter -> pending_voter_credential -> managed_tor_test
+/// ```
+///
+/// with `draft`, `session_workspace_id`, `draft_workspace_id`, `transport`,
+/// and `organizer_intake` used only as single (leaf) locks. Two historical
+/// violations formed a stable ABBA cycle (`managed_tor_test -> session` in
+/// `running_transport_endpoint` versus `session -> managed_tor_test` in
+/// `apply_election_status_bytes_blocking`) that deadlocked two blocking-pool
+/// workers at zero CPU and then parked every later voter command — including
+/// ballot preparation — at its first lock acquisition forever. Both edges are
+/// now non-overlapping, and any future nesting must respect the order above;
+/// prefer the established "snapshot under a short lock, drop, then act"
+/// pattern instead of nesting.
 struct AppState {
     /// The active election session WITH its role, under one lock (see
     /// [`ActiveElectionSessionV1`]): authority checks and session swaps are
@@ -339,6 +359,13 @@ struct AppState {
     voter: Mutex<Option<GuiVoterSessionV1>>,
     pending_voter_credential: Mutex<Option<PendingVoterCredentialV1>>,
     transport: Mutex<PrivateSubmissionCoordinatorV1>,
+    /// Ownership token for the live ballot-preparation worker. The worker
+    /// holds this lock for the whole operation; it is FREE (acquirable) while
+    /// no preparation is running. Any voter-workflow entry point that observes
+    /// the voter stuck in `Preparing` while this slot is free knows the
+    /// previous worker died mid-operation and performs fail-closed recovery —
+    /// backend-authoritative, with no frontend timeout involved.
+    preparation_slot: Mutex<()>,
     #[cfg(feature = "managed-tor-test")]
     managed_tor_test: Mutex<Option<managed_tor_test::ManagedTorTestState>>,
     #[cfg(feature = "managed-tor-test")]
@@ -355,6 +382,7 @@ impl Default for AppState {
             voter: Mutex::new(None),
             pending_voter_credential: Mutex::new(None),
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
+            preparation_slot: Mutex::new(()),
             #[cfg(feature = "managed-tor-test")]
             managed_tor_test: Mutex::new(None),
             #[cfg(feature = "managed-tor-test")]
@@ -1008,6 +1036,17 @@ fn apply_voter_cast_lock(
     voter: &mut GuiVoterSessionV1,
     transport_descriptor: Option<&TransportDescriptorV1>,
 ) -> Result<GuiVoterCastLockStateV1, CommandError> {
+    let cast_locks_dir = cast_locks_directory(app)?;
+    apply_voter_cast_lock_at(&cast_locks_dir, artifacts, voter, transport_descriptor)
+}
+
+/// [`apply_voter_cast_lock`] against an explicit cast-locks directory.
+fn apply_voter_cast_lock_at(
+    cast_locks_dir: &std::path::Path,
+    artifacts: &GuiElectionArtifactsV1,
+    voter: &mut GuiVoterSessionV1,
+    transport_descriptor: Option<&TransportDescriptorV1>,
+) -> Result<GuiVoterCastLockStateV1, CommandError> {
     let Some(public_key_hex) = voter.credential_public_key_hex() else {
         voter.apply_cast_lock_state(GuiVoterCastLockStateV1::NotCast);
         return Ok(GuiVoterCastLockStateV1::NotCast);
@@ -1016,18 +1055,17 @@ fn apply_voter_cast_lock(
         voter.apply_cast_lock_state(GuiVoterCastLockStateV1::NotCast);
         return Ok(GuiVoterCastLockStateV1::NotCast);
     };
-    let cast_locks_dir = cast_locks_directory(app)?;
     let manifest_hash_hex = GuiVoterElectionBindingV1::from_artifacts(artifacts).manifest_hash_hex;
     let state = if let Some(descriptor) = transport_descriptor {
         resolve_and_recover_private_transport_cast_lock_state_v1(
-            &cast_locks_dir,
+            cast_locks_dir,
             &manifest_hash_hex,
             &fingerprint,
             descriptor,
         )?
     } else {
         resolve_and_recover_cast_lock_state_v1(
-            &cast_locks_dir,
+            cast_locks_dir,
             &manifest_hash_hex,
             &fingerprint,
             artifacts,
@@ -2502,6 +2540,12 @@ fn reset_pending_voter_governance_credential(
 /// Returns the complete safe voter workflow status. The frontend supplies
 /// whether the voter has checked the local review box; Rust supplies every
 /// protocol/state gate.
+///
+/// While the voter lock is held, an ABANDONED preparation is recovered
+/// fail-closed: if the prepared state reads `Preparing` while no live
+/// preparation worker owns the preparation slot, the previous worker died
+/// mid-operation, so the state is explicitly invalidated (never left stuck)
+/// and reported truthfully in this status.
 #[tauri::command]
 fn voter_workflow_status(
     review_confirmed: bool,
@@ -2523,12 +2567,30 @@ fn voter_workflow_status(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
+    recover_abandoned_preparation(state.inner(), voter);
     apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
     Ok(voter.workflow_status(
         session.artifacts(),
         session.lifecycle_state_v1(),
         review_confirmed,
     ))
+}
+
+/// Backend-authoritative recovery for a preparation worker that died before it
+/// could complete or recover its own operation. MUST be called only while the
+/// caller holds the `state.voter` lock. Recovery fires only when BOTH hold:
+/// (a) the voter is still `Preparing`, and (b) the preparation slot is FREE —
+/// i.e. no live worker owns the operation. A live worker always holds the slot
+/// for the whole operation, so this can never reset state underneath a
+/// running cryptographic task; there is deliberately NO frontend timeout that
+/// can reach backend state.
+fn recover_abandoned_preparation(state: &AppState, voter: &mut GuiVoterSessionV1) -> bool {
+    let Ok(slot) = state.preparation_slot.try_lock() else {
+        // A live worker owns the preparation; leave its state alone.
+        return false;
+    };
+    drop(slot);
+    voter.fail_abandoned_preparation()
 }
 
 /// Returns the public Rust-authoritative ballot selection status.
@@ -2640,15 +2702,56 @@ fn change_my_ballot_choice(
     Ok(voter.discard_prepared_ballot(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
-/// Generates a real local Triptych proof and canonical ballot package while
-/// holding the Rust voter-session mutex. The result contains safe metadata
-/// only; neither proof bytes nor credential material cross to TypeScript.
+/// Generates a real local Triptych proof and canonical ballot package. The
+/// result contains safe metadata only; neither proof bytes nor credential
+/// material cross to TypeScript.
+///
+/// ARCHITECTURE: proving is CPU-heavy real cryptography (and local package
+/// verification), so this command runs through the reviewed blocking
+/// execution architecture ([`run_blocking_command`] ->
+/// `tauri::async_runtime::spawn_blocking`). It must never again be an
+/// ordinary synchronous command: sync commands execute inline on the main/UI
+/// thread, where a long proof (or a wait on a contended lock) would freeze
+/// message pumping (Windows "Not Responding") for the whole desktop window.
+///
+/// The worker owns the [`AppState::preparation_slot`] for the whole
+/// operation; on every exit path gui-core's fail-closed recovery guarantees
+/// the prepared state is not left `Preparing` (see
+/// [`GuiVoterSessionV1::prepare_ballot`]), and any worker that dies outright
+/// is recovered by the slot-free abandonment sweep in later workflow reads.
 #[tauri::command]
-fn prepare_voter_ballot(
+async fn prepare_voter_ballot(
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
+    _state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
-    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        prepare_voter_ballot_blocking(&app, state.inner())
+    })
+    .await
+}
+
+/// Blocking body of [`prepare_voter_ballot`], run on the blocking thread pool.
+fn prepare_voter_ballot_blocking(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    let cast_locks_dir = cast_locks_directory(app)?;
+    prepare_voter_ballot_in_state(state, Some(&cast_locks_dir))
+}
+
+/// State-level ballot preparation core, shared by the Tauri command body and
+/// the shell regression tests. `cast_locks_dir == None` skips only the
+/// durable cast-record recovery read (no durable record can exist in those
+/// in-memory test states); all gating semantics are identical either way.
+fn prepare_voter_ballot_in_state(
+    state: &AppState,
+    cast_locks_dir: Option<&std::path::Path>,
+) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    // Own the preparation slot FIRST so a concurrent abandonment sweep (or a
+    // second direct IPC caller) can never observe this operation as abandoned.
+    let _preparation_slot = state.preparation_slot.lock().map_err(|_| CommandError::state_poisoned())?;
+    let transport_descriptor = configured_managed_tor_descriptor(state)?;
     let (artifacts, lifecycle_state) = {
         let session_guard = state
             .session
@@ -2666,7 +2769,14 @@ fn prepare_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, &artifacts, voter, transport_descriptor.as_ref())?;
+    if let Some(cast_locks_dir) = cast_locks_dir {
+        apply_voter_cast_lock_at(
+            cast_locks_dir,
+            &artifacts,
+            voter,
+            transport_descriptor.as_ref(),
+        )?;
+    }
     Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
 }
 
@@ -3611,6 +3721,489 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.path);
         }
+    }
+
+    // =========================================================================
+    // TWO-COMPUTER PREPARATION SHELL BOUNDARY + LOCK-ORDER REGRESSIONS.
+    //
+    // The physical two-computer failure: on Computer B (imported voter,
+    // configured managed-Tor connection, authenticated OPEN, selection made)
+    // clicking "Create anonymous eligibility proof" parked the invocation
+    // forever with ZERO CPU while the window stayed responsive. Root cause:
+    // an ABBA lock cycle between two blocking-pool workers —
+    //   apply_election_status_bytes_blocking:  session -> managed_tor_test
+    //   running_transport_endpoint:            managed_tor_test -> session
+    // — after which state.session and state.managed_tor_test were locked
+    // forever and every later voter command parked at its first acquisition.
+    //
+    // These tests pin the repaired shell contract: preparation runs through
+    // the reviewed blocking architecture, the two inverted lock edges no
+    // longer overlap, concurrent status/transport activity cannot deadlock
+    // preparation, and a failed/abandoned preparation can never strand
+    // Preparing. They reach the SHELL boundary (AppState + command bodies),
+    // not merely GuiVoterSessionV1.
+    // =========================================================================
+
+    use tari_cc_private_ballot_gui_core::{
+        AuthenticatedElectionStatusStatementV1, BatchPolicyV1, PaddingPolicyV1,
+        TransportRoutePolicyV1,
+    };
+
+    const OFFICE_ROOT_KEY_ID: &str = "ballot-office-root-1";
+    const TEST_ONION_ENDPOINT: &str =
+        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
+
+    /// Installs exactly Computer B's physical state: an IMPORTED public
+    /// election (ImportedVoter authority), an eligible carried credential, and
+    /// an authenticated OPEN lifecycle. Returns the state and the enrolled
+    /// public key hex.
+    fn imported_voter_open_state() -> (AppState, String) {
+        let state = AppState::default();
+        let pending = state.generate_pending_credential().expect("credential");
+        let public_key = pending.public_governance_key_hex.expect("public key");
+        state.get_or_create_draft_preview().expect("draft");
+        commit_draft(&state, public_key.clone());
+        // Imported public artifacts install as a VOTER context only.
+        let (_, session) = state
+            .with_draft_mut(|draft| Ok(draft.freeze()?))
+            .expect("freeze");
+        state
+            .install_frozen_session(session, SessionAuthorityV1::ImportedVoter)
+            .expect("install imported session");
+        assert_eq!(
+            state.active_authority().expect("authority"),
+            Some(SessionAuthorityV1::ImportedVoter)
+        );
+        state
+            .with_session_mut(|session| {
+                session.open()?;
+                Ok(())
+            })
+            .expect("open");
+        (state, public_key)
+    }
+
+    /// Selects one option through the shell's Rust-authoritative path.
+    fn select_substitute_option(state: &AppState) {
+        let session_guard = state.session.lock().expect("session lock");
+        let session = session_guard.as_ref().map(|a| &a.session).expect("session");
+        let mut voter_guard = state.voter.lock().expect("voter lock");
+        let voter = voter_guard.as_mut().expect("voter session");
+        voter
+            .set_selection(
+                session.artifacts(),
+                session.lifecycle_state_v1(),
+                vec!["796573".to_owned()],
+                false,
+            )
+            .expect("select");
+    }
+
+    #[cfg(feature = "managed-tor-test")]
+    /// Configures a verified voter transport bundle for the ACTIVE election,
+    /// as Computer B had done before OPEN. Signs a descriptor with a test
+    /// office root; no Tor process and no network is touched.
+    fn configure_managed_transport_for_active_election(state: &AppState) {
+        use ed25519_dalek::SigningKey;
+        use tari_cc_private_ballot_gui_core::TransportDescriptorV1;
+
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let roots = TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
+            key_id: OFFICE_ROOT_KEY_ID.to_owned(),
+            public_key: signing_key.verifying_key().to_bytes(),
+        });
+        let (election_id, manifest_hash) = {
+            let guard = state.session.lock().expect("session lock");
+            let session = guard.as_ref().map(|a| &a.session).expect("session");
+            (
+                session
+                    .artifacts()
+                    .manifest()
+                    .election_id()
+                    .as_bytes()
+                    .to_vec(),
+                session.artifacts().manifest_hash(),
+            )
+        };
+        let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
+            election_id,
+            manifest_hash,
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec![TEST_ONION_ENDPOINT.to_owned()],
+            Vec::new(),
+            [0x11; 32],
+            "intake-gateway-2026".to_owned(),
+            vec![[0x88; 32]],
+            PaddingPolicyV1 {
+                id: "fixed-connection".to_owned(),
+                padded_bytes: 64 * 1024,
+            },
+            BatchPolicyV1 {
+                id: "accepted-1".to_owned(),
+                accepted_unique_floor: 1,
+            },
+            None,
+            OFFICE_ROOT_KEY_ID.to_owned(),
+            &signing_key,
+        )
+        .expect("fixture descriptor signs");
+        let root_anchor = (OFFICE_ROOT_KEY_ID.to_owned(), *signing_key.verifying_key().as_bytes());
+        let managed =
+            managed_tor_test::test_configured_state(descriptor, roots, root_anchor);
+        *state
+            .managed_tor_test
+            .lock()
+            .expect("managed lock") = Some(managed);
+    }
+
+    #[cfg(feature = "managed-tor-test")]
+    /// Signs an authenticated OPEN status statement as the organizer office
+    /// would, bound to the active election, at the given generation.
+    fn signed_open_status(state: &AppState, generation: u64) -> Vec<u8> {
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[0x42; 32]);
+        let guard = state.session.lock().expect("session lock");
+        let session = guard.as_ref().map(|a| &a.session).expect("session");
+        AuthenticatedElectionStatusStatementV1::sign_for_test_or_ceremony(
+            session
+                .artifacts()
+                .manifest()
+                .election_id()
+                .as_bytes()
+                .to_vec(),
+            session.artifacts().manifest_hash(),
+            session.artifacts().registry_commitment(),
+            ElectionLifecycleStateV1::Open,
+            generation,
+            OFFICE_ROOT_KEY_ID.to_owned(),
+            &signing_key,
+        )
+        .expect("fixture statement signs")
+        .to_canonical_cbor()
+        .expect("fixture statement encodes")
+    }
+
+    /// A. Imported voter + eligible credential + OPEN + valid selection:
+    /// the SHELL prepare core returns Ready, voter stays NOT_CAST, and no
+    /// secret-bearing field crosses the boundary.
+    #[test]
+    fn shell_prepare_returns_ready_for_imported_open_voter() {
+        let (state, _public_key) = imported_voter_open_state();
+        select_substitute_option(&state);
+
+        let prepared =
+            prepare_voter_ballot_in_state(&state, None).expect("shell preparation succeeds");
+        assert_eq!(prepared.state, "Ready");
+        assert!(prepared.ready_to_export);
+        assert!(prepared.summary.as_ref().expect("summary").locally_verified);
+
+        // Cast boundary untouched before export; safe to retry or reconsider.
+        let session_guard = state.session.lock().expect("session lock");
+        let session = session_guard.as_ref().map(|a| &a.session).expect("session");
+        let voter_guard = state.voter.lock().expect("voter lock");
+        let voter = voter_guard.as_ref().expect("voter session");
+        let workflow = voter.workflow_status(
+            session.artifacts(),
+            session.lifecycle_state_v1(),
+            true,
+        );
+        drop(session_guard);
+        drop(voter_guard);
+        assert_eq!(workflow.cast_lock_state, "NOT_CAST");
+
+        let serialized = serde_json::to_value(&prepared).expect("safe JSON");
+        let mut all_keys = Vec::new();
+        fn collect_keys(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (k, v) in map {
+                        out.push(k.to_lowercase());
+                        collect_keys(v, out);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        collect_keys(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        collect_keys(&serialized, &mut all_keys);
+        for key in &all_keys {
+            for marker in ["secret", "witness", "private", "nullifier"] {
+                assert!(!key.contains(marker), "field {key} must not leak {marker}");
+            }
+        }
+        // The only proof-related field name is the PUBLIC suite identifier.
+        assert!(all_keys.iter().any(|k| k == "proof_suite_id"));
+    }
+
+    /// B. Same state WITH a configured managed-Tor descriptor: preparation
+    /// still returns Ready, and the endpoint resolver binds it to THIS
+    /// election without holding both locks.
+    #[cfg(feature = "managed-tor-test")]
+    #[test]
+    fn shell_prepare_returns_ready_with_configured_managed_tor() {
+        let (state, _public_key) = imported_voter_open_state();
+        configure_managed_transport_for_active_election(&state);
+        select_substitute_option(&state);
+
+        // Repaired resolver: completes against this state and binds correctly.
+        let endpoint =
+            managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
+        assert!(endpoint.is_some(), "descriptor must bind to active election");
+
+        let prepared =
+            prepare_voter_ballot_in_state(&state, None).expect("shell preparation succeeds");
+        assert_eq!(prepared.state, "Ready");
+    }
+
+    /// C. Realistic concurrent managed-Tor STATUS polling while preparation
+    /// runs must never deadlock: the poller takes only short managed-state
+    /// locks and every round of both sides completes well inside the budget.
+    #[cfg(feature = "managed-tor-test")]
+    #[test]
+    fn concurrent_status_polling_and_preparation_never_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let state = std::sync::Arc::new({
+            let (state, _) = imported_voter_open_state();
+            configure_managed_transport_for_active_election(&state);
+            select_substitute_option(&state);
+            state
+        });
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let poller = {
+            let state = std::sync::Arc::clone(&state);
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut rounds = 0_u32;
+                while !stop.load(Ordering::SeqCst) && rounds < 200 {
+                    managed_tor_test::managed_tor_test_status_blocking(&state)
+                        .expect("status read");
+                    rounds += 1;
+                }
+                rounds
+            })
+        };
+        for _ in 0..8 {
+            let prepared = prepare_voter_ballot_in_state(&state, None)
+                .expect("preparation under polling");
+            assert_eq!(prepared.state, "Ready");
+        }
+        stop.store(true, Ordering::SeqCst);
+        // Generous ceiling: a deadlock never finishes, while ordinary suite
+        // contention (sibling tests run real Triptych proofs) merely delays.
+        let deadline = Duration::from_secs(120);
+        let started = std::time::Instant::now();
+        loop {
+            match poller.is_finished() {
+                true => break,
+                false if started.elapsed() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                false => panic!("status poller deadlocked against preparation"),
+            }
+        }
+        poller.join().expect("poller thread");
+    }
+
+    /// D. Deterministic-shape lock-order stress: the two formerly inverted
+    /// edges run concurrently with preparation — real signed-status imports
+    /// (session-held section), real endpoint resolution (managed-state
+    /// snapshot), and real preparations — under a completion budget. Against
+    /// e851308 this schedule could form the ABBA cycle and hang; after the
+    /// repair neither edge nests, so all workers always finish.
+    #[cfg(feature = "managed-tor-test")]
+    #[test]
+    fn concurrent_status_import_fetch_and_preparation_never_deadlock() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let dir = TestDir::new("lock-order-stress");
+        let status_dir = dir.join("election-status");
+        std::fs::create_dir_all(&status_dir).expect("status dir");
+
+        let state = Arc::new({
+            let (state, _) = imported_voter_open_state();
+            configure_managed_transport_for_active_election(&state);
+            select_substitute_option(&state);
+            state
+        });
+
+        let importer = {
+            let state = Arc::clone(&state);
+            let status_dir = status_dir.clone();
+            std::thread::spawn(move || {
+                for generation in 1_u64..=25 {
+                    let bytes = signed_open_status(&state, generation);
+                    crate::election_status_commands::apply_election_status_bytes_in_state(
+                        &state,
+                        &status_dir,
+                        bytes,
+                    )
+                    .expect("authenticated import applies monotonically");
+                }
+            })
+        };
+        let fetcher = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                for _ in 0..250 {
+                    managed_tor_test::running_transport_endpoint(&state)
+                        .expect("endpoint read");
+                    std::thread::yield_now();
+                }
+            })
+        };
+        let preparer = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                for _ in 0..4 {
+                    let prepared = prepare_voter_ballot_in_state(&state, None)
+                        .expect("preparation under contention");
+                    assert_eq!(prepared.state, "Ready");
+                }
+            })
+        };
+
+        // A genuine lock-order deadlock never finishes; ordinary scheduling
+        // contention (this suite runs real Triptych proofs in sibling tests)
+        // merely delays. The ceiling therefore only exists to convert an
+        // infinite hang into a loud failure.
+        let handles = [importer, fetcher, preparer];
+        let deadline = Instant::now() + Duration::from_secs(300);
+        for handle in handles {
+            while !handle.is_finished() {
+                if Instant::now() >= deadline {
+                    panic!("lock-order deadlock suspected: worker exceeded budget");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            handle.join().expect("worker thread");
+        }
+    }
+
+    /// E. A preparation worker that dies mid-operation can never leave the
+    /// voter stuck in Preparing: the backend-owned abandonment sweep recovers
+    /// fail-closed (NOT_CAST preserved, retry allowed) with NO frontend
+    /// timeout involved.
+    #[test]
+    fn abandoned_preparation_is_recovered_fail_closed_by_backend_sweep() {
+        let (state, _public_key) = imported_voter_open_state();
+        select_substitute_option(&state);
+
+        // Simulate a worker that installed Preparing and then died before its
+        // recovery could run: begin the operation directly, then release the
+        // locks WITHOUT completing. The preparation slot stays free.
+        {
+            let mut voter_guard = state.voter.lock().expect("voter lock");
+            let voter = voter_guard.as_mut().expect("voter session");
+            let token = voter
+                .begin_preparation_operation(ElectionLifecycleStateV1::Open)
+                .expect("operation begins");
+            assert_eq!(voter.preparing_operation_id(), Some(token.operation_id()));
+        }
+
+        // Backend-authoritative sweep (same call the workflow status makes).
+        {
+            let mut voter_guard = state.voter.lock().expect("voter lock");
+            let voter = voter_guard.as_mut().expect("voter session");
+            assert!(recover_abandoned_preparation(&state, voter));
+        }
+
+        // State is truthfully Invalidated (never Preparing), still NOT_CAST,
+        // and the voter may safely retry proof generation.
+        {
+            let session_guard = state.session.lock().expect("session lock");
+            let session = session_guard.as_ref().map(|a| &a.session).expect("session");
+            let mut voter_guard = state.voter.lock().expect("voter lock");
+            let voter = voter_guard.as_mut().expect("voter session");
+            let workflow =
+                voter.workflow_status(session.artifacts(), session.lifecycle_state_v1(), true);
+            assert_eq!(workflow.prepared_ballot.state, "Invalidated");
+            assert_eq!(workflow.cast_lock_state, "NOT_CAST");
+
+            let retry =
+                voter.prepare_ballot(session.artifacts(), session.lifecycle_state_v1());
+            drop(session_guard);
+            drop(voter_guard);
+            let retry = retry.expect("retry after abandonment succeeds");
+            assert_eq!(retry.state, "Ready");
+        }
+    }
+
+    /// F. A live worker OWNS the slot: the sweep must refuse to touch its
+    /// Preparing state (no frontend timeout can reset a running cryptographic
+    /// task through the backend).
+    #[test]
+    fn live_preparation_slot_protects_worker_from_sweep() {
+        let (state, _public_key) = imported_voter_open_state();
+        select_substitute_option(&state);
+
+        // A live worker holds the slot for its whole operation.
+        let _slot_guard = state.preparation_slot.lock().expect("slot lock");
+        {
+            let mut voter_guard = state.voter.lock().expect("voter lock");
+            let voter = voter_guard.as_mut().expect("voter session");
+            voter
+                .begin_preparation_operation(ElectionLifecycleStateV1::Open)
+                .expect("operation begins");
+            // While the slot is owned, the sweep is a no-op.
+            assert!(!recover_abandoned_preparation(&state, voter));
+            assert!(
+                voter.preparing_operation_id().is_some(),
+                "live worker's Preparing state must be untouched"
+            );
+        }
+    }
+
+    /// G. Existing cast-lock semantics remain intact at the shell boundary:
+    /// preparation resolves the durable record from disk and a CAST record
+    /// refuses new preparation outright.
+    #[test]
+    fn cast_lock_from_disk_refuses_new_shell_preparation() {
+        let (state, public_key) = imported_voter_open_state();
+        select_substitute_option(&state);
+
+        let dir = TestDir::new("cast-lock-shell-prepare");
+        let cast_locks_dir = dir.join("cast-locks");
+        ensure_voter_cast_locks_directory_v1(&cast_locks_dir).expect("cast locks dir");
+        let fingerprint =
+            public_credential_fingerprint_hex_v1(&public_key).expect("fingerprint");
+        let manifest_hash_hex = {
+            let guard = state.session.lock().expect("session lock");
+            GuiVoterElectionBindingV1::from_artifacts(
+                guard.as_ref().map(|a| &a.session).expect("session").artifacts(),
+            )
+            .manifest_hash_hex
+        };
+        // Forge the DURABLE local cast the way export/cast would record it.
+        write_cast_record_cast_for_test(
+            &cast_locks_dir,
+            &fingerprint,
+            &manifest_hash_hex,
+        );
+
+        let prepared = prepare_voter_ballot_in_state(&state, Some(cast_locks_dir.as_path()))
+            .expect_err("a durably locked voter cannot prepare again");
+        assert_eq!(prepared.code, "GUI_BALLOT_ALREADY_CAST");
+    }
+
+    /// Writes a present-but-malformed durable record at the canonical cast
+    /// path. Recovery is fail-closed: an unreadable record resolves to
+    /// `CAST_PENDING` (locked), never `NOT_CAST`, so preparation refuses.
+    fn write_cast_record_cast_for_test(
+        dir: &Path,
+        fingerprint_hex: &str,
+        manifest_hash_hex: &str,
+    ) {
+        use std::fs;
+        let path =
+            dir.join(format!("{fingerprint_hex}-{manifest_hash_hex}.castlock"));
+        fs::write(&path, b"not-a-canonical-record").expect("write malformed record");
     }
 }
 

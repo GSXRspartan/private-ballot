@@ -40,6 +40,13 @@ use crate::voter_credential::{
 pub const PROOF_GENERATION_DEFERRED_NOTICE: &str =
     "Proof construction is local; no ballot is submitted by this application.";
 
+/// Test-only panic injection point for proving the fail-closed preparation
+/// recovery: when set, [`GuiVoterSessionV1::prepare_ballot`]'s proof work
+/// panics after `Preparing` has been installed, exactly like a worker crash.
+#[cfg(test)]
+pub(crate) static TEST_PANIC_DURING_PROOF_WORK: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Stable public workflow-state code derived from Rust-owned voter state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum GuiVoterWorkflowStateV1 {
@@ -806,6 +813,14 @@ impl GuiVoterSessionV1 {
     /// Constructs, encodes, decodes, and independently verifies one real
     /// Triptych ballot package. The caller holds the voter-session mutex for
     /// this whole method, so the credential is borrowed without cloning.
+    ///
+    /// FAIL-CLOSED PREPARATION RECOVERY: every exit path — success, stale
+    /// token, verification failure, AND an unexpected panic inside the proof
+    /// work — leaves the prepared state explicitly NOT `Preparing`. A runtime
+    /// failure can therefore never wedge the workflow: the voter stays
+    /// `NotCast` with no staged submission and may safely retry proof
+    /// generation. (The panic path matters because this runs on a blocking
+    /// worker; without recovery a panicking worker would strand `Preparing`.)
     pub fn prepare_ballot(
         &mut self,
         artifacts: &GuiElectionArtifactsV1,
@@ -813,7 +828,11 @@ impl GuiVoterSessionV1 {
     ) -> Result<GuiPreparedBallotStatusV1, GuiCoreError> {
         self.ensure_bound(artifacts)?;
         let token = self.begin_preparation_operation(lifecycle_state)?;
-        let result = (|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if TEST_PANIC_DURING_PROOF_WORK.load(std::sync::atomic::Ordering::SeqCst) {
+                panic!("injected proof-worker crash");
+            }
             let credential = self.credential.as_ref().ok_or_else(|| {
                 GuiCoreError::new(
                     "GUI_NO_VOTER_CREDENTIAL",
@@ -897,7 +916,23 @@ impl GuiVoterSessionV1 {
                     ready_to_export: true,
                 },
             ))
-        })();
+        }));
+        let result = match result {
+            Ok(inner) => inner,
+            Err(_) => {
+                // The proof worker panicked. Recover here — while this method
+                // still owns `&mut self` and no mutex guard can be poisoned by
+                // the unwind (the caller's guard is outside this frame, and
+                // catch_unwind stopped it before it escaped) — so the prepared
+                // state can never remain stuck in `Preparing`.
+                Err(GuiCoreError::new(
+                    "GUI_PREPARATION_TASK_FAILED",
+                    GuiErrorCategory::ProofFailure,
+                    Some("prepare-ballot"),
+                    "the proof generation task failed unexpectedly; no ballot was prepared and you may try again",
+                ))
+            }
+        };
         match result {
             Ok((canonical_bytes, summary)) if self.matches_token(lifecycle_state, &token) => {
                 self.prepared_ballot = PreparedBallotStateV1::Ready {
@@ -923,6 +958,53 @@ impl GuiVoterSessionV1 {
                 );
                 Err(error)
             }
+        }
+    }
+
+    /// Fail-closed recovery for an ABANDONED preparation operation: flips a
+    /// stuck `Preparing` state back to `Invalidated` so the voter can retry.
+    ///
+    /// This is the backend-authoritative counterpart to
+    /// [`Self::prepare_ballot`]'s internal recovery. The SHELL calls it when it
+    /// can prove no live worker owns the operation (its preparation slot is
+    /// free) while the state still reads `Preparing` — i.e. the worker died
+    /// before `prepare_ballot` could recover on its own. It never touches
+    /// `Ready`, `Cast`, or cast-lock state, and it bumps the preparation
+    /// generation so any older in-flight result becomes stale and can never
+    /// install over newer election/credential/selection state.
+    pub fn fail_abandoned_preparation(&mut self) -> bool {
+        if self.prepared_ballot.is_preparing() {
+            self.invalidate_prepared(
+                "A previous proof attempt was interrupted before it finished; you may safely try again.",
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Token-guarded recovery: invalidates the prepared state ONLY if it is
+    /// still exactly the `Preparing` operation identified by `token` AND every
+    /// generation the token captured is still current. A stale token (older
+    /// operation id, changed credential, changed selection, or different
+    /// binding) can never clear a NEWER preparation. Returns whether recovery
+    /// fired.
+    pub fn fail_preparation_operation(&mut self, token: &GuiVoterPreparationTokenV1) -> bool {
+        if self.matches_token(ElectionLifecycleStateV1::Open, token) {
+            self.invalidate_prepared(
+                "The proof attempt did not complete; no prepared ballot is available.",
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The non-secret operation id currently `Preparing`, if any.
+    #[must_use]
+    pub fn preparing_operation_id(&self) -> Option<u64> {
+        match &self.prepared_ballot {
+            PreparedBallotStateV1::Preparing { operation_id } => Some(*operation_id),
+            _ => None,
         }
     }
 
@@ -2721,5 +2803,89 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("unexpected json error: {error:?}"),
         }
+    }
+
+    fn open_preparable_session() -> (GuiElectionArtifactsV1, GuiVoterSessionV1) {
+        let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
+        let mut session = eligible_session(&artifacts);
+        ok(select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Open));
+        (artifacts, session)
+    }
+
+    // -------------------------------------------------------------------------
+    // FAIL-CLOSED PREPARATION RECOVERY: no runtime failure may leave the voter
+    // permanently `Preparing`; the voter stays NOT_CAST and may safely retry.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn panicking_proof_work_leaves_no_preparing_state_and_allows_retry() {
+        let (artifacts, mut session) = open_preparable_session();
+
+        TEST_PANIC_DURING_PROOF_WORK.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = session.prepare_ballot(&artifacts, ElectionLifecycleStateV1::Open);
+        TEST_PANIC_DURING_PROOF_WORK.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        assert_code(result, "GUI_PREPARATION_TASK_FAILED");
+        assert_eq!(session.preparing_operation_id(), None);
+        let status = session.prepared_ballot.status(ElectionLifecycleStateV1::Open);
+        assert_eq!(status.state, "Invalidated");
+        assert!(!status.ready_to_export);
+        // Cast boundary untouched and a retry succeeds for real.
+        assert_eq!(session.cast_lock, GuiVoterCastLockStateV1::NotCast);
+        let retry = ok(session.prepare_ballot(&artifacts, ElectionLifecycleStateV1::Open));
+        assert_eq!(retry.state, "Ready");
+    }
+
+    #[test]
+    fn abandoned_preparing_operation_is_recoverable_fail_closed() {
+        let (_artifacts, mut session) = open_preparable_session();
+        let token = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
+        assert_eq!(
+            session.preparing_operation_id(),
+            Some(token.operation_id())
+        );
+
+        assert!(session.fail_abandoned_preparation());
+        assert_eq!(session.preparing_operation_id(), None);
+        let status = session.prepared_ballot.status(ElectionLifecycleStateV1::Open);
+        assert_eq!(status.state, "Invalidated");
+
+        // Recovery is idempotent outside Preparing and never touches cast state.
+        assert!(!session.fail_abandoned_preparation());
+        assert_eq!(session.cast_lock, GuiVoterCastLockStateV1::NotCast);
+    }
+
+    #[test]
+    fn stale_recovery_token_cannot_clear_a_newer_preparation() {
+        let (_artifacts, mut session) = open_preparable_session();
+        let stale = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
+        // A newer operation supersedes the stale one.
+        let fresh = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
+        assert_ne!(stale.operation_id(), fresh.operation_id());
+
+        assert!(!session.fail_preparation_operation(&stale));
+        assert_eq!(
+            session.preparing_operation_id(),
+            Some(fresh.operation_id()),
+            "a stale token must never clear a newer preparation"
+        );
+        assert!(session.fail_preparation_operation(&fresh));
+        assert_eq!(session.preparing_operation_id(), None);
+    }
+
+    #[test]
+    fn preparation_refused_for_foreign_election_leaves_no_preparing_state() {
+        // A session bound to another election must refuse before any
+        // `Preparing` state exists, and must leave cast state untouched.
+        let other_election_artifacts =
+            artifacts(false, limits(1, 2, false), b"other-election");
+        let mut session = eligible_session(&other_election_artifacts);
+        let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
+        assert_code(
+            session.prepare_ballot(&artifacts, ElectionLifecycleStateV1::Open),
+            "GUI_VOTER_SESSION_ELECTION_MISMATCH",
+        );
+        assert_eq!(session.preparing_operation_id(), None);
+        assert_eq!(session.cast_lock, GuiVoterCastLockStateV1::NotCast);
     }
 }

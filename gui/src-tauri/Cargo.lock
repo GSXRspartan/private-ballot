@@ -5149,6 +5149,7 @@ dependencies = [
 name = "tari-cc-private-ballot-gui"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "tari-cc-private-ballot-gui-core",

@@ -39,3 +39,6 @@ default = []
 managed-tor-test = [
     "tari-cc-private-ballot-transport-gateway/managed-tor-test",
 ]
+
+[dev-dependencies]
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["rand_core"] }
