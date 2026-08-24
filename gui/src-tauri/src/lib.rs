@@ -2794,19 +2794,84 @@ async fn prepare_voter_ballot(
     .await
 }
 
-/// Dev-only lock-acquisition trace for `prepare_voter_ballot`. Logs the
-/// thread id and step name to stderr (visible in the cargo/Tauri dev console)
-/// so a physical zero-CPU park can be attributed to the exact acquisition
-/// site on the next run. Prints NO secrets, NO proof bytes, NO credential
-/// material — only the step name and the thread id. A no-op in release
-/// builds (`#[cfg(not(debug_assertions))]`).
+/// Dev-only liveness trace for `prepare_voter_ballot`. Records the thread id,
+/// a millisecond wall-clock timestamp, and the step name so a physical
+/// zero-CPU park can be attributed to the exact site on the next run.
+///
+/// Writes to TWO sinks from a dedicated diagnostic writer thread:
+///   1. stderr — visible when a console/dev server is attached (e.g.
+///      the feature-enabled Cargo launch used by the physical test).
+///   2. a durable append-only file `%TEMP%/tari-ballot-prepare-trace.log`
+///      (`std::env::temp_dir()`), which survives a launch with NO attached or
+///      observed console (a directly-run GUI shell). This removes the earlier
+///      ambiguity where "no trace lines in the console" could not distinguish
+///      "command body never entered" from "trace simply not observable".
+///
+/// Command and blocking-worker threads only perform a bounded `try_send`; they
+/// never open, append, flush, or wait for the trace sink. A full/disconnected
+/// channel drops the diagnostic line instead of perturbing voting control flow.
+/// A startup sentinel proves the sink was operational before a physical click.
+///
+/// Records ONLY the step name, process/thread ids, and timestamp — NO secrets,
+/// NO proof bytes, NO credential/nullifier/ballot material. The file sink is
+/// best-effort and never affects control flow. A no-op in release builds
+/// (`#[cfg(not(debug_assertions))]`). This is diagnostic instrumentation for
+/// the physical voter-proof liveness investigation and carries no protocol
+/// behavior; it is safe to remove once the boundary is confirmed.
 #[cfg(debug_assertions)]
 fn prepare_lock_trace(step: &str) {
-    eprintln!(
-        "[prepare_voter_ballot] tid={:?} step={}",
+    let t_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    let line = format!(
+        "[prepare_voter_ballot] t_ms={} pid={} tid={:?} step={}",
+        t_ms,
+        std::process::id(),
         std::thread::current().id(),
         step
     );
+    let _ = prepare_trace_sender().try_send(line);
+}
+
+#[cfg(debug_assertions)]
+fn prepare_trace_sender() -> &'static std::sync::mpsc::SyncSender<String> {
+    static SENDER: std::sync::OnceLock<std::sync::mpsc::SyncSender<String>> =
+        std::sync::OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(256);
+        let _ = std::thread::Builder::new()
+            .name("prepare-trace-writer".to_owned())
+            .spawn(move || {
+                use std::io::Write as _;
+
+                let mut path = std::env::temp_dir();
+                path.push("tari-ballot-prepare-trace.log");
+                let mut file = None;
+                while let Ok(line) = receiver.recv() {
+                    {
+                        let stderr = std::io::stderr();
+                        let mut stderr = stderr.lock();
+                        let _ = writeln!(stderr, "{line}");
+                    }
+                    if file.is_none() {
+                        file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .ok();
+                    }
+                    if let Some(sink) = file.as_mut() {
+                        if writeln!(sink, "{line}").is_err() {
+                            file = None;
+                        } else {
+                            let _ = sink.flush();
+                        }
+                    }
+                }
+            });
+        sender
+    })
 }
 
 #[cfg(not(debug_assertions))]
@@ -4418,6 +4483,9 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    prepare_lock_trace("trace sink initialized");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())

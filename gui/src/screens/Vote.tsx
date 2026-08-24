@@ -168,6 +168,35 @@ function GuidedStageSummary({
  */
 let prepareVoterBallotInFlight = false;
 
+// TEMPORARY DIAGNOSTIC (physical voter-proof liveness investigation).
+// Separate identities for the current WebView page realm and THIS Vote module
+// evaluation. Normal Vote -> Settings -> Vote keeps both. Vite HMR keeps the
+// page identity/time origin but changes the module identity. A whole WebView
+// reload changes the page identity/time origin as well. This also makes a
+// module re-evaluation that resets `prepareVoterBallotInFlight` attributable
+// instead of conflating HMR with a reload. Dev-only; carries NO secrets.
+const prepareDiagnosticGlobal = globalThis as typeof globalThis & {
+  __TARI_PREPARE_PAGE_GENERATION__?: string;
+};
+const PREPARE_PAGE_GENERATION =
+  prepareDiagnosticGlobal.__TARI_PREPARE_PAGE_GENERATION__ ??
+  Math.random().toString(36).slice(2, 10);
+prepareDiagnosticGlobal.__TARI_PREPARE_PAGE_GENERATION__ = PREPARE_PAGE_GENERATION;
+const PREPARE_PAGE_TIME_ORIGIN = Math.round(performance.timeOrigin);
+const VOTE_MODULE_GENERATION = Math.random().toString(36).slice(2, 8);
+let prepareOpCounter = 0;
+function prepareTrace(step: string, opId?: number): void {
+  const env = (import.meta as unknown as { env?: { DEV?: boolean } }).env;
+  if (!env?.DEV) return;
+  // eslint-disable-next-line no-console
+  console.info(
+    `[prepare-trace] page=${PREPARE_PAGE_GENERATION} module=${VOTE_MODULE_GENERATION} origin=${PREPARE_PAGE_TIME_ORIGIN} op=${opId ?? "-"} step="${step}" t=${Math.round(
+      performance.now(),
+    )}`,
+  );
+}
+prepareTrace("Vote module evaluated");
+
 export function Vote() {
   const { election, shellAvailable, loadElection, loadElectionFolder, refreshElection } =
     useAppState();
@@ -294,6 +323,29 @@ export function Vote() {
       autoRetryCancelRef.current = true;
     };
   }, []);
+
+  // TEMPORARY DIAGNOSTIC (physical voter-proof liveness investigation).
+  // Breadcrumb the Vote mount/unmount lifecycle together with the module
+  // generation and the CURRENT in-flight tracker value. Across a
+  // Vote -> Settings -> Vote navigation this proves whether the module was
+  // re-evaluated (generation changes) and whether an unresolved prepare
+  // operation's tracker survived the remount. Dev-only; no secrets.
+  useEffect(() => {
+    prepareTrace(`Vote mounted (inFlight=${prepareVoterBallotInFlight})`);
+    return () => {
+      prepareTrace(`Vote unmounted (inFlight=${prepareVoterBallotInFlight})`);
+    };
+  }, []);
+
+  // The proof button is driven by shared component-level `busy`, while the
+  // duplicate-operation guard is module-level. Other mount-time operations
+  // can clear `busy` independently, so explicitly record any state in which
+  // the UI looks enabled while the original prepare operation is still live.
+  useEffect(() => {
+    prepareTrace(
+      `prepare UI state (busy=${busy} inFlight=${prepareVoterBallotInFlight} canPrepare=${workflow?.can_prepare_ballot ?? "unknown"} prepared=${workflow?.prepared_ballot.state ?? "unknown"})`,
+    );
+  }, [busy, workflow?.can_prepare_ballot, workflow?.prepared_ballot.state]);
 
   // Re-hydrate the remembered controlled-test paths whenever the election
   // identity changes. The GLOBAL tor.exe is restored; the ELECTION-SPECIFIC
@@ -651,15 +703,28 @@ export function Vote() {
 
   async function onGenerateProof() {
     if (!shellAvailable) return;
-    if (prepareVoterBallotInFlight) return;
+    if (prepareVoterBallotInFlight) {
+      prepareTrace("onGenerateProof: blocked (already in-flight)");
+      return;
+    }
+    const opId = ++prepareOpCounter;
+    prepareTrace("onGenerateProof: entered", opId);
     prepareVoterBallotInFlight = true;
     setBusy(true);
     setError(null);
     try {
+      prepareTrace("before api.prepareVoterBallot (invoke)", opId);
       const prepared = await api.prepareVoterBallot();
+      prepareTrace("invoke resolved", opId);
+      prepareTrace("before refreshWorkflow", opId);
       await refreshWorkflow(true);
+      prepareTrace("after refreshWorkflow", opId);
+      prepareTrace("before privateTransportAvailability", opId);
       setTransport(await api.privateTransportAvailability());
+      prepareTrace("after privateTransportAvailability", opId);
+      prepareTrace("before refreshManagedTorStatus", opId);
       await refreshManagedTorStatus();
+      prepareTrace("after refreshManagedTorStatus", opId);
       if (prepared.state !== "Ready") {
         setError({
           code: "GUI_PROOF_VERIFICATION_FAILED",
@@ -669,8 +734,10 @@ export function Vote() {
         });
       }
     } catch (err) {
+      prepareTrace("invoke rejected (catch)", opId);
       captureError(err);
     } finally {
+      prepareTrace("finally (clearing in-flight tracker)", opId);
       prepareVoterBallotInFlight = false;
       setBusy(false);
     }
