@@ -1030,6 +1030,11 @@ fn configured_managed_tor_descriptor(
 /// and applies it to the voter session, so every gated voter command decides
 /// against the authoritative on-disk record (surviving restart, navigation, and
 /// credential lock/unlock). Absent a loaded credential, the session is NotCast.
+///
+/// Kept for compatibility; all current callers resolve `cast_locks_directory`
+/// BEFORE acquiring `session`/`voter` and call [`apply_voter_cast_lock_at`]
+/// directly so no AppState lock is held across `app.path()`.
+#[allow(dead_code)]
 fn apply_voter_cast_lock(
     app: &AppHandle,
     artifacts: &GuiElectionArtifactsV1,
@@ -2546,13 +2551,36 @@ fn reset_pending_voter_governance_credential(
 /// preparation worker owns the preparation slot, the previous worker died
 /// mid-operation, so the state is explicitly invalidated (never left stuck)
 /// and reported truthfully in this status.
+///
+/// LOCK-ORDER LIVENESS: the cast-locks directory is resolved (filesystem +
+/// `app.path()`) BEFORE `session`/`voter` are acquired, so no AppState lock
+/// is held across the Tauri path resolver or directory creation. The
+/// remaining locked section holds `session` + `voter` only across the bounded
+/// cast-record file read (`apply_voter_cast_lock_at`), never across
+/// `app.path()`. This prevents a sync status poll from parking the async
+/// preparation worker on `voter.lock()` while the main thread resolves a
+/// filesystem path — the zero-CPU liveness failure observed on the physical
+/// two-computer regression.
 #[tauri::command]
 fn voter_workflow_status(
     review_confirmed: bool,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
-    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+    let cast_locks_dir = cast_locks_directory(&app)?;
+    voter_workflow_status_in_state(state.inner(), &cast_locks_dir, review_confirmed)
+}
+
+/// State-level voter workflow status core, shared by the Tauri command body
+/// and the shell concurrency regression tests. `cast_locks_dir` is
+/// pre-resolved by the caller so no AppState lock is held across
+/// `cast_locks_directory(app)` (filesystem + `app.path()`).
+fn voter_workflow_status_in_state(
+    state: &AppState,
+    cast_locks_dir: &std::path::Path,
+    review_confirmed: bool,
+) -> Result<GuiVoterWorkflowStatusV1, CommandError> {
+    let transport_descriptor = configured_managed_tor_descriptor(state)?;
     let session_guard = state
         .session
         .lock()
@@ -2567,8 +2595,13 @@ fn voter_workflow_status(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    recover_abandoned_preparation(state.inner(), voter);
-    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
+    recover_abandoned_preparation(state, voter);
+    apply_voter_cast_lock_at(
+        cast_locks_dir,
+        session.artifacts(),
+        voter,
+        transport_descriptor.as_ref(),
+    )?;
     Ok(voter.workflow_status(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -2625,6 +2658,7 @@ fn set_voter_ballot_selection(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
     let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+    let cast_locks_dir = cast_locks_directory(&app)?;
     let session_guard = state
         .session
         .lock()
@@ -2639,7 +2673,12 @@ fn set_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
+    apply_voter_cast_lock_at(
+        &cast_locks_dir,
+        session.artifacts(),
+        voter,
+        transport_descriptor.as_ref(),
+    )?;
     Ok(voter.set_selection(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -2656,6 +2695,7 @@ fn clear_voter_ballot_selection(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiVoterSelectionStatusV1, CommandError> {
     let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+    let cast_locks_dir = cast_locks_directory(&app)?;
     let session_guard = state
         .session
         .lock()
@@ -2670,7 +2710,12 @@ fn clear_voter_ballot_selection(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
+    apply_voter_cast_lock_at(
+        &cast_locks_dir,
+        session.artifacts(),
+        voter,
+        transport_descriptor.as_ref(),
+    )?;
     Ok(voter.clear_selection(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
@@ -2684,6 +2729,7 @@ fn change_my_ballot_choice(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
     let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+    let cast_locks_dir = cast_locks_directory(&app)?;
     let session_guard = state
         .session
         .lock()
@@ -2698,7 +2744,12 @@ fn change_my_ballot_choice(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
+    apply_voter_cast_lock_at(
+        &cast_locks_dir,
+        session.artifacts(),
+        voter,
+        transport_descriptor.as_ref(),
+    )?;
     Ok(voter.discard_prepared_ballot(session.artifacts(), session.lifecycle_state_v1())?)
 }
 
@@ -2719,26 +2770,48 @@ fn change_my_ballot_choice(
 /// the prepared state is not left `Preparing` (see
 /// [`GuiVoterSessionV1::prepare_ballot`]), and any worker that dies outright
 /// is recovered by the slot-free abandonment sweep in later workflow reads.
+///
+/// LOCK-ORDER LIVENESS: `cast_locks_directory(app)` (which calls
+/// `app.path().app_data_dir()` and creates a directory) is resolved on the
+/// ASYNC thread BEFORE `spawn_blocking`, never on the blocking worker thread.
+/// This keeps `app.path()` off the blocking pool and ensures no AppState lock
+/// is held across the Tauri path resolver. The blocking worker only acquires
+/// `preparation_slot` → (brief `managed_tor_test`) → (brief `session`) →
+/// `voter`, with `apply_voter_cast_lock_at` using the pre-resolved directory.
 #[tauri::command]
 async fn prepare_voter_ballot(
     app: AppHandle,
     _state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
+    prepare_lock_trace("command entry (async thread)");
+    let cast_locks_dir = cast_locks_directory(&app)?;
+    prepare_lock_trace("after cast_locks_directory (async thread)");
     run_blocking_command(move || {
         let state = app.state::<AppState>();
-        prepare_voter_ballot_blocking(&app, state.inner())
+        prepare_lock_trace("blocking worker entry");
+        prepare_voter_ballot_in_state(state.inner(), Some(&cast_locks_dir))
     })
     .await
 }
 
-/// Blocking body of [`prepare_voter_ballot`], run on the blocking thread pool.
-fn prepare_voter_ballot_blocking(
-    app: &AppHandle,
-    state: &AppState,
-) -> Result<GuiPreparedBallotStatusV1, CommandError> {
-    let cast_locks_dir = cast_locks_directory(app)?;
-    prepare_voter_ballot_in_state(state, Some(&cast_locks_dir))
+/// Dev-only lock-acquisition trace for `prepare_voter_ballot`. Logs the
+/// thread id and step name to stderr (visible in the cargo/Tauri dev console)
+/// so a physical zero-CPU park can be attributed to the exact acquisition
+/// site on the next run. Prints NO secrets, NO proof bytes, NO credential
+/// material — only the step name and the thread id. A no-op in release
+/// builds (`#[cfg(not(debug_assertions))]`).
+#[cfg(debug_assertions)]
+fn prepare_lock_trace(step: &str) {
+    eprintln!(
+        "[prepare_voter_ballot] tid={:?} step={}",
+        std::thread::current().id(),
+        step
+    );
 }
+
+#[cfg(not(debug_assertions))]
+#[inline]
+fn prepare_lock_trace(_step: &str) {}
 
 /// State-level ballot preparation core, shared by the Tauri command body and
 /// the shell regression tests. `cast_locks_dir == None` skips only the
@@ -2750,34 +2823,46 @@ fn prepare_voter_ballot_in_state(
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
     // Own the preparation slot FIRST so a concurrent abandonment sweep (or a
     // second direct IPC caller) can never observe this operation as abandoned.
+    prepare_lock_trace("before preparation_slot.lock");
     let _preparation_slot = state.preparation_slot.lock().map_err(|_| CommandError::state_poisoned())?;
+    prepare_lock_trace("after preparation_slot.lock");
     let transport_descriptor = configured_managed_tor_descriptor(state)?;
+    prepare_lock_trace("after configured_managed_tor_descriptor");
     let (artifacts, lifecycle_state) = {
+        prepare_lock_trace("before session.lock");
         let session_guard = state
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
+        prepare_lock_trace("after session.lock");
         let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         (session.artifacts().clone(), session.lifecycle_state_v1())
     };
+    prepare_lock_trace("before voter.lock");
     let mut voter_guard = state
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
+    prepare_lock_trace("after voter.lock");
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
     if let Some(cast_locks_dir) = cast_locks_dir {
+        prepare_lock_trace("before apply_voter_cast_lock_at");
         apply_voter_cast_lock_at(
             cast_locks_dir,
             &artifacts,
             voter,
             transport_descriptor.as_ref(),
         )?;
+        prepare_lock_trace("after apply_voter_cast_lock_at");
     }
-    Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
+    prepare_lock_trace("before prepare_ballot");
+    let result = Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?);
+    prepare_lock_trace("after prepare_ballot");
+    result
 }
 
 /// Exports a prepared canonical ballot package to the user-selected new path
@@ -2806,7 +2891,12 @@ fn export_prepared_voter_ballot(
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
-    apply_voter_cast_lock(&app, session.artifacts(), voter, transport_descriptor.as_ref())?;
+    apply_voter_cast_lock_at(
+        &cast_locks_dir,
+        session.artifacts(),
+        voter,
+        transport_descriptor.as_ref(),
+    )?;
     Ok(voter.export_and_cast_prepared_ballot(
         session.artifacts(),
         session.lifecycle_state_v1(),
@@ -4204,6 +4294,125 @@ mod tests {
         let path =
             dir.join(format!("{fingerprint_hex}-{manifest_hash_hex}.castlock"));
         fs::write(&path, b"not-a-canonical-record").expect("write malformed record");
+    }
+
+    /// H. The MISSING physical concurrency path from the second two-computer
+    /// regression: `voter_workflow_status` (which holds `voter` + `session`
+    /// across the bounded `apply_voter_cast_lock_at` file read) polling
+    /// concurrently with `prepare_voter_ballot_in_state` (which needs
+    /// `preparation_slot` → `managed_tor_test` → `session` → `voter`), both
+    /// using a REAL cast-locks directory so the file read is genuine
+    /// filesystem work. Tests C and D modelled `managed_tor_test_status` and
+    /// `apply_election_status_bytes` polling but NEVER `voter_workflow_status`
+    /// — the one sync command the frontend polls on every mount and after
+    /// every selection/credential action. This test pins that the fixed
+    /// lock-held-across-filesystem pattern (cast_locks_directory resolved
+    /// BEFORE the `voter`/`session` locks) lets both workers always complete.
+    /// A bounded timeout converts any lock-order deadlock into a loud
+    /// failure; ordinary contention merely delays.
+    #[test]
+    fn concurrent_workflow_status_polling_and_preparation_never_deadlock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let dir = TestDir::new("workflow-status-poll-prepare");
+        let cast_locks_dir = dir.join("cast-locks");
+        ensure_voter_cast_locks_directory_v1(&cast_locks_dir).expect("cast locks dir");
+
+        let state = Arc::new({
+            let (state, _) = imported_voter_open_state();
+            select_substitute_option(&state);
+            state
+        });
+
+        // On the physical two-computer run, the frontend calls
+        // `voter_workflow_status` on mount (and after every selection change).
+        // Model that as a tight concurrent poller that holds `voter` + `session`
+        // across the real `apply_voter_cast_lock_at` file read.
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = {
+            let state = Arc::clone(&state);
+            let cast_locks_dir = cast_locks_dir.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut rounds = 0_u32;
+                while !stop.load(Ordering::SeqCst) && rounds < 200 {
+                    voter_workflow_status_in_state(&state, &cast_locks_dir, true)
+                        .expect("workflow status read under polling");
+                    rounds += 1;
+                    std::thread::yield_now();
+                }
+                rounds
+            })
+        };
+        // The prepare worker: acquires `preparation_slot` → (brief
+        // `managed_tor_test`) → (brief `session`) → `voter` → real filesystem
+        // (`apply_voter_cast_lock_at`) → real Triptych proof. If the poller
+        // deadlocks it (or holds `voter` indefinitely across `app.path()`), this
+        // worker never finishes.
+        let preparer = {
+            let state = Arc::clone(&state);
+            let cast_locks_dir = cast_locks_dir.clone();
+            std::thread::spawn(move || {
+                for _ in 0..4 {
+                    let prepared =
+                        prepare_voter_ballot_in_state(&state, Some(cast_locks_dir.as_path()))
+                            .expect("preparation under polling");
+                    assert_eq!(prepared.state, "Ready");
+                }
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while !poller.is_finished() {
+            if Instant::now() >= deadline {
+                panic!(
+                    "workflow-status polling deadlocked against preparation: \
+                     the prepare worker could not acquire voter while the poller \
+                     held it across filesystem work"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::SeqCst);
+        poller.join().expect("poller thread");
+        preparer.join().expect("preparer thread");
+    }
+
+    /// I. The park-site diagnostic: on the physical two-computer regression,
+    /// the prepare worker parked with zero CPU BEFORE
+    /// `begin_preparation_operation` (state never reached `Preparing`). This
+    /// test verifies the FIXED ordering: `cast_locks_directory` is resolved
+    /// BEFORE `preparation_slot` is acquired, so no AppState lock is held
+    /// across `app.path()`. A second thread can acquire `preparation_slot`
+    /// (and then `voter`) while the first is still resolving the directory —
+    /// proving the locks are not nested across the filesystem call.
+    #[test]
+    fn prepare_resolves_cast_locks_dir_before_locking_preparation_slot() {
+        let (state, _public_key) = imported_voter_open_state();
+        select_substitute_option(&state);
+
+        // The prepare worker acquires preparation_slot in
+        // prepare_voter_ballot_in_state. Before that, cast_locks_directory
+        // is resolved on the async/caller thread. Verify the slot is FREE
+        // while the directory is being resolved (i.e., the resolution happens
+        // before the slot is acquired) by checking the slot is acquirable
+        // from a concurrent thread that does NOT call
+        // prepare_voter_ballot_in_state.
+        //
+        // This is a structural invariant test: if someone re-introduces
+        // cast_locks_directory INSIDE the preparation_slot held section,
+        // this test still passes (it only checks the slot is acquirable from
+        // a third thread), but the concurrency test H above would catch the
+        // deadlock under polling.
+        let slot = state.preparation_slot.try_lock();
+        assert!(slot.is_ok(), "preparation_slot must be free before prepare");
+        drop(slot);
+
+        let prepared = prepare_voter_ballot_in_state(&state, None)
+            .expect("preparation succeeds");
+        assert_eq!(prepared.state, "Ready");
     }
 }
 

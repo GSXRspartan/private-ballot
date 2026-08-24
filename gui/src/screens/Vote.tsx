@@ -155,6 +155,19 @@ function GuidedStageSummary({
   );
 }
 
+/**
+ * Module-level in-flight prepare tracker. Survives Vote component
+ * unmount/remount so a route navigation (Vote -> Settings -> Vote) never
+ * silently resets `busy` while the backend `prepare_voter_ballot` operation is
+ * still unresolved. Without this, the local `busy` state resets to `false` on
+ * remount, the proof-creation button becomes clickable again, and a second
+ * click could spawn a second blocking worker — overlapping with the first
+ * (which is still parked or running). The tracker is set synchronously in
+ * `onGenerateProof` before the await and cleared in the `finally` block, so
+ * the remounted component can restore `busy` truthfully.
+ */
+let prepareVoterBallotInFlight = false;
+
 export function Vote() {
   const { election, shellAvailable, loadElection, loadElectionFolder, refreshElection } =
     useAppState();
@@ -399,8 +412,16 @@ export function Vote() {
   // it never starts Tor, prepares a ballot, releases a submission, or creates
   // any durable record; `review_confirmed` is passed false so no gate is
   // asserted the voter has not re-confirmed this session.
+  //
+  // BACKEND PARK HARDENING: if a `prepare_voter_ballot` invocation is still
+  // in-flight from a PREVIOUS mount (route navigation abandoned the unresolved
+  // Tauri invoke), restore `busy` so the proof-creation button stays disabled
+  // and a second click cannot spawn a second blocking worker overlapping the
+  // first. The module-level tracker survives unmount/remount; the backend
+  // operation is NOT cancelled by unmount.
   useEffect(() => {
     if (election && shellAvailable) void refreshWorkflow(false);
+    if (prepareVoterBallotInFlight) setBusy(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
 
@@ -630,6 +651,8 @@ export function Vote() {
 
   async function onGenerateProof() {
     if (!shellAvailable) return;
+    if (prepareVoterBallotInFlight) return;
+    prepareVoterBallotInFlight = true;
     setBusy(true);
     setError(null);
     try {
@@ -648,6 +671,7 @@ export function Vote() {
     } catch (err) {
       captureError(err);
     } finally {
+      prepareVoterBallotInFlight = false;
       setBusy(false);
     }
   }
