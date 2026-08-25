@@ -157,3 +157,76 @@ describe("cast recovery state", () => {
     assert.doesNotMatch(pendingSlice, /Change my choice|Save encrypted ballot file|onGenerateProof/);
   });
 });
+
+// -------------------------------------------------------------------------
+// Post-CAST read-only authenticated lifecycle refresh
+// -------------------------------------------------------------------------
+
+describe("post-cast lifecycle refresh", () => {
+  // Isolate the refresh affordance surfaced inside the cast card.
+  const summary = 'summary="Check the current election status"';
+  function refreshSlice(): string {
+    const start = vote.indexOf(summary);
+    assert.ok(start >= 0, "post-cast status refresh section must exist");
+    const end = vote.indexOf("</DetailsSection>", start);
+    assert.ok(end > start, "the refresh section must be a closed DetailsSection");
+    return vote.slice(start, end);
+  }
+
+  it("lives in the CAST (ballotCast) branch, after the terminal explanation", () => {
+    const castTernary = vote.indexOf("ballotCast ? (");
+    const whyLocked = vote.indexOf("Why can't I change it?");
+    const refresh = vote.indexOf(summary);
+    const pending = vote.indexOf("Your ballot for this election is being finalized");
+    assert.ok(castTernary >= 0 && whyLocked >= 0 && refresh >= 0 && pending >= 0);
+    // After the "why can't I change it" terminal explanation, and before the
+    // CAST_PENDING branch — i.e. inside the accepted-cast fragment.
+    assert.ok(refresh > whyLocked, "refresh comes after the terminal explanation");
+    assert.ok(refresh < pending, "refresh stays inside the cast (not pending) branch");
+  });
+
+  it("reuses the existing authenticated status paths — no parallel protocol", () => {
+    const slice = refreshSlice();
+    assert.match(slice, /onImportElectionStatus\(\)/);
+    assert.match(slice, /onFetchElectionStatusPrivate\(\)/);
+    // No new fetch/import command is introduced for the post-cast path.
+    assert.match(client, /fetchElectionStatusPrivate/);
+    assert.match(client, /importElectionStatusArtifact/);
+  });
+
+  it("offers the private check only when Tor is ALREADY running (never starts Tor)", () => {
+    const slice = refreshSlice();
+    assert.match(slice, /managedTorStatus\?\.tor_running && \(/);
+    // The refresh must not contain any control that would start a connection or
+    // re-open the ballot workflow.
+    assert.doesNotMatch(slice, /startManagedTor|onConnect|onStartManagedTor/);
+  });
+
+  it("is read-only: it re-opens no selection/proof/submission/credential control", () => {
+    const slice = refreshSlice();
+    assert.doesNotMatch(
+      slice,
+      /onGenerateProof|Change my choice|Save encrypted ballot file|onSubmitPrivately|prepareVoterBallot|setVoterBallotSelection|onExportBallot/,
+    );
+    // The copy states plainly that it never changes/resubmits/re-opens the vote.
+    assert.match(slice, /never changes, resubmits, or\s+re-opens your vote/);
+  });
+
+  it("describes ELECTION status, never claiming the ballot itself advanced", () => {
+    const slice = refreshSlice();
+    assert.doesNotMatch(slice, /your ballot (is|was|has been) (accepted|counted|included|finalized|anchored)/i);
+  });
+
+  it("both status handlers remain read-only re-reads (import + private fetch)", () => {
+    for (const name of ["onImportElectionStatus", "onFetchElectionStatusPrivate"]) {
+      const start = vote.indexOf(`async function ${name}`);
+      assert.ok(start >= 0, `${name} must exist`);
+      const body = vote.slice(start, start + 900);
+      // They apply an authenticated statement and re-read authoritative state;
+      // they never mutate selection/credential/ballot.
+      assert.match(body, /await refreshElection\(\)/, name);
+      assert.match(body, /await refreshWorkflow\(/, name);
+      assert.doesNotMatch(body, /prepareVoterBallot|setVoterBallotSelection|changeMyBallotChoice/, name);
+    }
+  });
+});

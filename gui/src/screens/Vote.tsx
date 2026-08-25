@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { api, BackendError } from "../api/client";
 import {
@@ -156,46 +156,41 @@ function GuidedStageSummary({
 }
 
 /**
- * Module-level in-flight prepare tracker. Survives Vote component
- * unmount/remount so a route navigation (Vote -> Settings -> Vote) never
- * silently resets `busy` while the backend `prepare_voter_ballot` operation is
- * still unresolved. Without this, the local `busy` state resets to `false` on
- * remount, the proof-creation button becomes clickable again, and a second
- * click could spawn a second blocking worker — overlapping with the first
- * (which is still parked or running). The tracker is set synchronously in
- * `onGenerateProof` before the await and cleared in the `finally` block, so
- * the remounted component can restore `busy` truthfully.
+ * Module-level "a `prepare_voter_ballot` invocation is in flight" store. It is
+ * the SINGLE source of truth for two things that must never disagree:
+ *   1. the duplicate-prepare guard — a second `onGenerateProof` is refused
+ *      while an invocation is still unresolved; and
+ *   2. the Create-proof button's disabled state, read into React through
+ *      `useSyncExternalStore`.
+ *
+ * Living at module scope, it survives a Vote unmount/remount (route navigation
+ * Vote -> Settings -> Vote never re-evaluates the module), so an invocation
+ * abandoned by a previous mount still blocks a duplicate AND still shows the
+ * button disabled; when that invocation finally settles from the previous
+ * mount's `finally`, the store notifies every subscriber, so the remounted
+ * component re-enables the button truthfully. Because the button derives from
+ * THIS store — not the shared `busy` flag — an UNRELATED async operation
+ * toggling `busy` can never enable or disable the proof action incorrectly
+ * (the physical two-computer defect).
  */
-let prepareVoterBallotInFlight = false;
-
-// TEMPORARY DIAGNOSTIC (physical voter-proof liveness investigation).
-// Separate identities for the current WebView page realm and THIS Vote module
-// evaluation. Normal Vote -> Settings -> Vote keeps both. Vite HMR keeps the
-// page identity/time origin but changes the module identity. A whole WebView
-// reload changes the page identity/time origin as well. This also makes a
-// module re-evaluation that resets `prepareVoterBallotInFlight` attributable
-// instead of conflating HMR with a reload. Dev-only; carries NO secrets.
-const prepareDiagnosticGlobal = globalThis as typeof globalThis & {
-  __TARI_PREPARE_PAGE_GENERATION__?: string;
-};
-const PREPARE_PAGE_GENERATION =
-  prepareDiagnosticGlobal.__TARI_PREPARE_PAGE_GENERATION__ ??
-  Math.random().toString(36).slice(2, 10);
-prepareDiagnosticGlobal.__TARI_PREPARE_PAGE_GENERATION__ = PREPARE_PAGE_GENERATION;
-const PREPARE_PAGE_TIME_ORIGIN = Math.round(performance.timeOrigin);
-const VOTE_MODULE_GENERATION = Math.random().toString(36).slice(2, 8);
-let prepareOpCounter = 0;
-function prepareTrace(step: string, opId?: number): void {
-  const env = (import.meta as unknown as { env?: { DEV?: boolean } }).env;
-  if (!env?.DEV) return;
-  // eslint-disable-next-line no-console
-  console.info(
-    `[prepare-trace] page=${PREPARE_PAGE_GENERATION} module=${VOTE_MODULE_GENERATION} origin=${PREPARE_PAGE_TIME_ORIGIN} op=${opId ?? "-"} step="${step}" t=${Math.round(
-      performance.now(),
-    )}`,
-  );
-}
-prepareTrace("Vote module evaluated");
+const prepareInFlightStore = (() => {
+  let inFlight = false;
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: (): boolean => inFlight,
+    subscribe(listener: () => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    set(next: boolean): void {
+      if (inFlight === next) return;
+      inFlight = next;
+      for (const listener of listeners) listener();
+    },
+  };
+})();
 
 export function Vote() {
   const { election, shellAvailable, loadElection, loadElectionFolder, refreshElection } =
@@ -218,6 +213,14 @@ export function Vote() {
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [credentialError, setCredentialError] = useState<GuiCommandError | null>(null);
   const [busy, setBusy] = useState(false);
+  // Dedicated "a proof preparation is actually in flight" indicator, mirrored
+  // from the module-level store so it survives unmount/remount and can never be
+  // clobbered by an unrelated operation's shared `busy` toggling. This — not
+  // `busy` — drives the Create-proof button and its "Creating…" notice.
+  const preparingProof = useSyncExternalStore(
+    prepareInFlightStore.subscribe,
+    prepareInFlightStore.getSnapshot,
+  );
   const [confirmCast, setConfirmCast] = useState(false);
   // Guided progressive disclosure (presentation only). Default = guided mode:
   // the current stage is expanded, completed stages collapse to compact
@@ -323,29 +326,6 @@ export function Vote() {
       autoRetryCancelRef.current = true;
     };
   }, []);
-
-  // TEMPORARY DIAGNOSTIC (physical voter-proof liveness investigation).
-  // Breadcrumb the Vote mount/unmount lifecycle together with the module
-  // generation and the CURRENT in-flight tracker value. Across a
-  // Vote -> Settings -> Vote navigation this proves whether the module was
-  // re-evaluated (generation changes) and whether an unresolved prepare
-  // operation's tracker survived the remount. Dev-only; no secrets.
-  useEffect(() => {
-    prepareTrace(`Vote mounted (inFlight=${prepareVoterBallotInFlight})`);
-    return () => {
-      prepareTrace(`Vote unmounted (inFlight=${prepareVoterBallotInFlight})`);
-    };
-  }, []);
-
-  // The proof button is driven by shared component-level `busy`, while the
-  // duplicate-operation guard is module-level. Other mount-time operations
-  // can clear `busy` independently, so explicitly record any state in which
-  // the UI looks enabled while the original prepare operation is still live.
-  useEffect(() => {
-    prepareTrace(
-      `prepare UI state (busy=${busy} inFlight=${prepareVoterBallotInFlight} canPrepare=${workflow?.can_prepare_ballot ?? "unknown"} prepared=${workflow?.prepared_ballot.state ?? "unknown"})`,
-    );
-  }, [busy, workflow?.can_prepare_ballot, workflow?.prepared_ballot.state]);
 
   // Re-hydrate the remembered controlled-test paths whenever the election
   // identity changes. The GLOBAL tor.exe is restored; the ELECTION-SPECIFIC
@@ -465,15 +445,16 @@ export function Vote() {
   // any durable record; `review_confirmed` is passed false so no gate is
   // asserted the voter has not re-confirmed this session.
   //
-  // BACKEND PARK HARDENING: if a `prepare_voter_ballot` invocation is still
-  // in-flight from a PREVIOUS mount (route navigation abandoned the unresolved
-  // Tauri invoke), restore `busy` so the proof-creation button stays disabled
-  // and a second click cannot spawn a second blocking worker overlapping the
-  // first. The module-level tracker survives unmount/remount; the backend
-  // operation is NOT cancelled by unmount.
+  // A `prepare_voter_ballot` invocation abandoned by a PREVIOUS mount (route
+  // navigation left the Tauri invoke unresolved) keeps the Create-proof button
+  // disabled and refuses a duplicate WITHOUT any manual `busy` restore here:
+  // the button derives from `prepareInFlightStore` (via `useSyncExternalStore`),
+  // which is module-level and already reflects the in-flight invocation on this
+  // fresh mount, then re-enables the button when it settles. Restoring `busy`
+  // manually would leak `busy = true` (the previous mount's `finally` clears
+  // only its own instance's state), so it is deliberately NOT done.
   useEffect(() => {
     if (election && shellAvailable) void refreshWorkflow(false);
-    if (prepareVoterBallotInFlight) setBusy(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election, shellAvailable]);
 
@@ -679,7 +660,15 @@ export function Vote() {
         // and must not mask it.
       }
     } finally {
-      if (selectionStatusGateRef.current.isCurrent(requestToken)) setBusy(false);
+      // The gate token guards STALE STATE writes (setSelection/setWorkflow),
+      // NOT this flag. `refreshSelection`/`refreshWorkflow` called above advance
+      // the SAME gate, so `isCurrent(requestToken)` is already false here — a
+      // guarded reset would leave `busy = true` forever after every selection
+      // change, disabling the whole selection/proof surface until a route
+      // remount reset it (the physical two-computer defect). This user action is
+      // the terminal owner (the checkboxes are disabled while it runs, so no
+      // overlapping selection write can start), so it always releases `busy`.
+      setBusy(false);
     }
   }
 
@@ -703,28 +692,19 @@ export function Vote() {
 
   async function onGenerateProof() {
     if (!shellAvailable) return;
-    if (prepareVoterBallotInFlight) {
-      prepareTrace("onGenerateProof: blocked (already in-flight)");
-      return;
-    }
-    const opId = ++prepareOpCounter;
-    prepareTrace("onGenerateProof: entered", opId);
-    prepareVoterBallotInFlight = true;
+    // Refuse a duplicate while an invocation from THIS or a previous mount is
+    // still unresolved. The store is module-level, so a remount cannot reset it
+    // and a second click can never spawn a second blocking worker overlapping
+    // the first. Set BEFORE the awaited invoke; cleared ONLY in `finally`.
+    if (prepareInFlightStore.getSnapshot()) return;
+    prepareInFlightStore.set(true);
     setBusy(true);
     setError(null);
     try {
-      prepareTrace("before api.prepareVoterBallot (invoke)", opId);
       const prepared = await api.prepareVoterBallot();
-      prepareTrace("invoke resolved", opId);
-      prepareTrace("before refreshWorkflow", opId);
       await refreshWorkflow(true);
-      prepareTrace("after refreshWorkflow", opId);
-      prepareTrace("before privateTransportAvailability", opId);
       setTransport(await api.privateTransportAvailability());
-      prepareTrace("after privateTransportAvailability", opId);
-      prepareTrace("before refreshManagedTorStatus", opId);
       await refreshManagedTorStatus();
-      prepareTrace("after refreshManagedTorStatus", opId);
       if (prepared.state !== "Ready") {
         setError({
           code: "GUI_PROOF_VERIFICATION_FAILED",
@@ -734,11 +714,9 @@ export function Vote() {
         });
       }
     } catch (err) {
-      prepareTrace("invoke rejected (catch)", opId);
       captureError(err);
     } finally {
-      prepareTrace("finally (clearing in-flight tracker)", opId);
-      prepareVoterBallotInFlight = false;
+      prepareInFlightStore.set(false);
       setBusy(false);
     }
   }
@@ -2281,6 +2259,70 @@ export function Vote() {
                               this local lock, is what guarantees one vote.
                             </p>
                           </DetailsSection>
+                          {/* Read-only authenticated lifecycle refresh. A cast
+                              voter cannot change their vote, but MAY ask the
+                              pinned ballot office for a newer SIGNED election-
+                              status statement so this screen can reflect voting
+                              closing or the election being finalized. It reuses
+                              the SAME authenticated, monotonic status paths as
+                              before the cast (import a signed file, or fetch it
+                              over an ALREADY-running private connection): it
+                              never reopens selection, proof, submission, or
+                              credential controls, never starts Tor, cannot roll
+                              the lifecycle backward, and never infers a newer
+                              state from a result or archive. `castLocked` keeps
+                              every voting control hidden regardless of the state
+                              it reveals. */}
+                          <DetailsSection summary="Check the current election status">
+                            <p className="card-body">
+                              Your vote is locked and cannot change. You can still check
+                              whether the election has since moved on — for example, voting
+                              closing or the final record being published — by verifying a
+                              signed status statement from the ballot office. This only
+                              updates what this screen shows; it never changes, resubmits, or
+                              re-opens your vote.
+                            </p>
+                            {election && (
+                              <div className="field-list">
+                                <Field label="Election status">
+                                  <span className="field-value">
+                                    {lifecyclePlainText(election.lifecycle_state)}
+                                  </span>
+                                </Field>
+                              </div>
+                            )}
+                            <div className="action-row">
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={statusImportBusy}
+                                onClick={() => void onImportElectionStatus()}
+                              >
+                                {statusImportBusy ? "Verifying…" : "Import signed election status…"}
+                              </button>
+                              {/* Offered only when the private connection is
+                                  ALREADY running — this reuses it and never
+                                  starts Tor. The offline import above always
+                                  works from the pinned election package. */}
+                              {managedTorStatus?.tor_running && (
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary"
+                                  disabled={statusImportBusy}
+                                  onClick={() => void onFetchElectionStatusPrivate()}
+                                >
+                                  Check via private connection
+                                </button>
+                              )}
+                            </div>
+                            {statusImport && (
+                              <p className="form-hint">
+                                Last checked status: {statusImport.effective_state} (generation{" "}
+                                {statusImport.generation}).
+                                {statusImport.advanced ? "" : " It matched the current state."}
+                              </p>
+                            )}
+                          </DetailsSection>
                         </>
                       ) : (
                         <>
@@ -2347,7 +2389,7 @@ export function Vote() {
                         </span>
                       </Field>
                     </div>
-                    {busy && workflow?.prepared_ballot.state !== "Ready" && (
+                    {preparingProof && workflow?.prepared_ballot.state !== "Ready" && (
                       <Notice tone="info">
                         Creating your anonymous eligibility proof… This can take a moment.
                       </Notice>
@@ -2356,8 +2398,13 @@ export function Vote() {
                       <button
                         type="button"
                         className="btn btn-primary"
+                        // Enablement derives from the ACTUAL prepare-in-flight
+                        // store (never the shared `busy`) plus backend authority,
+                        // so an unrelated async operation can neither disable this
+                        // action while nothing is preparing nor enable it while a
+                        // preparation is genuinely in flight.
                         disabled={
-                          busy ||
+                          preparingProof ||
                           !workflow?.can_prepare_ballot ||
                           workflow?.prepared_ballot.state === "Ready"
                         }

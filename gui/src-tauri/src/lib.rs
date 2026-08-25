@@ -2783,100 +2783,13 @@ async fn prepare_voter_ballot(
     app: AppHandle,
     _state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
-    prepare_lock_trace("command entry (async thread)");
     let cast_locks_dir = cast_locks_directory(&app)?;
-    prepare_lock_trace("after cast_locks_directory (async thread)");
     run_blocking_command(move || {
         let state = app.state::<AppState>();
-        prepare_lock_trace("blocking worker entry");
         prepare_voter_ballot_in_state(state.inner(), Some(&cast_locks_dir))
     })
     .await
 }
-
-/// Dev-only liveness trace for `prepare_voter_ballot`. Records the thread id,
-/// a millisecond wall-clock timestamp, and the step name so a physical
-/// zero-CPU park can be attributed to the exact site on the next run.
-///
-/// Writes to TWO sinks from a dedicated diagnostic writer thread:
-///   1. stderr — visible when a console/dev server is attached (e.g.
-///      the feature-enabled Cargo launch used by the physical test).
-///   2. a durable append-only file `%TEMP%/tari-ballot-prepare-trace.log`
-///      (`std::env::temp_dir()`), which survives a launch with NO attached or
-///      observed console (a directly-run GUI shell). This removes the earlier
-///      ambiguity where "no trace lines in the console" could not distinguish
-///      "command body never entered" from "trace simply not observable".
-///
-/// Command and blocking-worker threads only perform a bounded `try_send`; they
-/// never open, append, flush, or wait for the trace sink. A full/disconnected
-/// channel drops the diagnostic line instead of perturbing voting control flow.
-/// A startup sentinel proves the sink was operational before a physical click.
-///
-/// Records ONLY the step name, process/thread ids, and timestamp — NO secrets,
-/// NO proof bytes, NO credential/nullifier/ballot material. The file sink is
-/// best-effort and never affects control flow. A no-op in release builds
-/// (`#[cfg(not(debug_assertions))]`). This is diagnostic instrumentation for
-/// the physical voter-proof liveness investigation and carries no protocol
-/// behavior; it is safe to remove once the boundary is confirmed.
-#[cfg(debug_assertions)]
-fn prepare_lock_trace(step: &str) {
-    let t_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    let line = format!(
-        "[prepare_voter_ballot] t_ms={} pid={} tid={:?} step={}",
-        t_ms,
-        std::process::id(),
-        std::thread::current().id(),
-        step
-    );
-    let _ = prepare_trace_sender().try_send(line);
-}
-
-#[cfg(debug_assertions)]
-fn prepare_trace_sender() -> &'static std::sync::mpsc::SyncSender<String> {
-    static SENDER: std::sync::OnceLock<std::sync::mpsc::SyncSender<String>> =
-        std::sync::OnceLock::new();
-    SENDER.get_or_init(|| {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(256);
-        let _ = std::thread::Builder::new()
-            .name("prepare-trace-writer".to_owned())
-            .spawn(move || {
-                use std::io::Write as _;
-
-                let mut path = std::env::temp_dir();
-                path.push("tari-ballot-prepare-trace.log");
-                let mut file = None;
-                while let Ok(line) = receiver.recv() {
-                    {
-                        let stderr = std::io::stderr();
-                        let mut stderr = stderr.lock();
-                        let _ = writeln!(stderr, "{line}");
-                    }
-                    if file.is_none() {
-                        file = std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)
-                            .ok();
-                    }
-                    if let Some(sink) = file.as_mut() {
-                        if writeln!(sink, "{line}").is_err() {
-                            file = None;
-                        } else {
-                            let _ = sink.flush();
-                        }
-                    }
-                }
-            });
-        sender
-    })
-}
-
-#[cfg(not(debug_assertions))]
-#[inline]
-fn prepare_lock_trace(_step: &str) {}
 
 /// State-level ballot preparation core, shared by the Tauri command body and
 /// the shell regression tests. `cast_locks_dir == None` skips only the
@@ -2888,46 +2801,34 @@ fn prepare_voter_ballot_in_state(
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
     // Own the preparation slot FIRST so a concurrent abandonment sweep (or a
     // second direct IPC caller) can never observe this operation as abandoned.
-    prepare_lock_trace("before preparation_slot.lock");
     let _preparation_slot = state.preparation_slot.lock().map_err(|_| CommandError::state_poisoned())?;
-    prepare_lock_trace("after preparation_slot.lock");
     let transport_descriptor = configured_managed_tor_descriptor(state)?;
-    prepare_lock_trace("after configured_managed_tor_descriptor");
     let (artifacts, lifecycle_state) = {
-        prepare_lock_trace("before session.lock");
         let session_guard = state
             .session
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
-        prepare_lock_trace("after session.lock");
         let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
         (session.artifacts().clone(), session.lifecycle_state_v1())
     };
-    prepare_lock_trace("before voter.lock");
     let mut voter_guard = state
         .voter
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    prepare_lock_trace("after voter.lock");
     let Some(voter) = voter_guard.as_mut() else {
         return Err(CommandError::no_voter_session());
     };
     if let Some(cast_locks_dir) = cast_locks_dir {
-        prepare_lock_trace("before apply_voter_cast_lock_at");
         apply_voter_cast_lock_at(
             cast_locks_dir,
             &artifacts,
             voter,
             transport_descriptor.as_ref(),
         )?;
-        prepare_lock_trace("after apply_voter_cast_lock_at");
     }
-    prepare_lock_trace("before prepare_ballot");
-    let result = Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?);
-    prepare_lock_trace("after prepare_ballot");
-    result
+    Ok(voter.prepare_ballot(&artifacts, lifecycle_state)?)
 }
 
 /// Exports a prepared canonical ballot package to the user-selected new path
@@ -4483,9 +4384,6 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    #[cfg(debug_assertions)]
-    prepare_lock_trace("trace sink initialized");
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
