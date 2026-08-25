@@ -42,6 +42,10 @@ import type {
 import { selectionInstructionText } from "../ballot/ballotTypes";
 import { lifecyclePlainText } from "../lifecycle";
 import {
+  LifecycleAutoRefreshController,
+  isTerminalLifecycleState,
+} from "../lifecycleAutoRefresh";
+import {
   BOUND_SECTION_LABEL,
   confirmationContinueAvailable,
   documentMatchShortLabel,
@@ -284,6 +288,23 @@ export function Vote() {
   // overwrite newer state; election/credential switches invalidate it.
   const selectionStatusGateRef = useRef(new RequestGenerationGate());
   const confirmationRequestGenerationRef = useRef(new RequestGenerationGate());
+  // Monotonic gate for AUTOMATIC lifecycle status responses. An election
+  // switch invalidates it, so a slow response for election X can never paint
+  // its result (status line, summary, workflow) onto the newly loaded
+  // election Y. The backend additionally refuses to apply X's statement to
+  // Y's session (statements are bound to the exact election identity), so
+  // this gate is presentation-level defense in depth on top of the
+  // cryptographic binding.
+  const lifecycleRefreshGateRef = useRef(new RequestGenerationGate());
+  // Single-flight guard shared by the MANUAL and AUTOMATIC lifecycle status
+  // checks: at most ONE authenticated private-status request is ever in
+  // flight for this election/connection, whichever way it was triggered.
+  const lifecycleStatusInFlightRef = useRef(false);
+  // Automatic-refresh engine instance + indirection so the controller (built
+  // once per mount) always calls the LATEST tick closure without being
+  // recreated (and never double-scheduled) by re-renders.
+  const lifecycleControllerRef = useRef<LifecycleAutoRefreshController | null>(null);
+  const lifecyclePollTickRef = useRef<() => Promise<void>>(async () => {});
   // Voter-safe result of importing a signed election-status artifact.
   const [statusImport, setStatusImport] = useState<{
     effective_state: string;
@@ -303,6 +324,9 @@ export function Vote() {
     // Election switch invalidates every in-flight selection/status response.
     selectionStatusGateRef.current.invalidate();
     confirmationRequestGenerationRef.current.invalidate();
+    // ...and every in-flight AUTOMATIC lifecycle status response: election X's
+    // pending private status check must never paint onto election Y.
+    lifecycleRefreshGateRef.current.invalidate();
     setConfirmed(false);
     setCredentialStage(false);
     setSelectionStage(false);
@@ -492,6 +516,77 @@ export function Vote() {
     return () => clearInterval(intervalId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shellAvailable, managedTorStatus?.configured, workflow?.cast_lock_state]);
+
+  // ---------------------------------------------------------------------
+  // AUTOMATIC authenticated lifecycle refresh.
+  //
+  // While the voter's managed private connection is ALREADY running, the
+  // screen periodically fetches the ballot office's current SIGNED
+  // election-status statement through that same private route so an
+  // organizer-side lifecycle change (FROZEN -> OPEN -> CLOSED -> VERIFIED)
+  // reaches the voter without any manual "Check via private connection"
+  // press. The automatic tick reuses EXACTLY the manual authenticated path
+  // (`onFetchElectionStatusPrivate(false)`): same backend command
+  // (`fetch_election_status_private`), same Rust verification against the
+  // pinned office anchor, same monotonic fail-closed application, same
+  // authoritative re-reads. It differs only in presentation: no error popup,
+  // no button-busy flag; a transient transport failure silently preserves the
+  // last authenticated state and the loop simply tries again later.
+  //
+  // Polling conditions (ALL required): shell present, an election loaded,
+  // the ballot-office connection configured AND already running, and the
+  // lifecycle not yet terminal (FINALIZED). There is deliberately NO path
+  // from polling to Tor startup/reconnect and NO clearnet fallback: when the
+  // conditions stop holding (voter stops the connection, unloads the
+  // election, navigates away), the loop is stopped instead.
+  // ---------------------------------------------------------------------
+  useEffect(() => {
+    const configured = managedTorStatus?.configured ?? false;
+    const torRunning = managedTorStatus?.tor_running ?? false;
+    const ready =
+      shellAvailable &&
+      !!election &&
+      configured &&
+      torRunning &&
+      !isTerminalLifecycleState(election.lifecycle_state);
+    // Recreate only after a real unmount (dispose) so StrictMode's dev
+    // double-mount can never accumulate duplicate pollers; within one mount
+    // the SAME controller is reused and start/stop are idempotent.
+    let controller = lifecycleControllerRef.current;
+    if (controller === null || controller.isDisposed()) {
+      controller = new LifecycleAutoRefreshController({
+        tick: () => lifecyclePollTickRef.current(),
+      });
+      lifecycleControllerRef.current = controller;
+    }
+    if (ready) {
+      // Immediate first check on becoming ready (connect, remount while
+      // connected, election switch), then the conservative periodic cadence.
+      controller.start(true);
+    } else {
+      controller.stop();
+    }
+    return () => {
+      lifecycleControllerRef.current?.stop();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    shellAvailable,
+    electionManifestHashHex,
+    managedTorStatus?.configured,
+    managedTorStatus?.tor_running,
+    election?.lifecycle_state,
+  ]);
+
+  // Final teardown on real unmount / app shutdown: no timer survives the
+  // screen, so route changes cannot leave a background poller behind.
+  useEffect(() => {
+    return () => {
+      lifecycleControllerRef.current?.dispose();
+      lifecycleControllerRef.current = null;
+      lifecycleStatusInFlightRef.current = false;
+    };
+  }, []);
 
   async function onSelectGovernanceDocument() {
     const path = await pickGovernanceDocument("Select local governance document to inspect");
@@ -786,24 +881,62 @@ export function Vote() {
     }
   }
 
-  // Same verification path, but the signed statement is fetched from the
-  // ballot office through the RUNNING managed-Tor connection. The request
-  // carries only public data, so it never links the voter to any ballot.
-  async function onFetchElectionStatusPrivate() {
+  // The ONE authenticated private-status path for this screen, shared by the
+  // manual button (`manual = true`, the default) and the automatic lifecycle
+  // refresh tick (`manual = false`). Both run the SAME backend command
+  // (`fetch_election_status_private`): Rust fetches over the RUNNING managed
+  // Tor connection, verifies the signed statement against the pinned
+  // ballot-office anchor and THIS election's identity, applies it
+  // monotonically (fail-closed against rollback/stale/conflicting
+  // generations), persists it, and returns the applied result; the screen then
+  // re-reads authoritative state. The request carries only public data, so it
+  // never links the voter to any ballot.
+  //
+  // `manual = false` (automatic polling) differs ONLY in presentation: no
+  // error popup and no button-busy flag — a transient transport failure must
+  // not erase the last authenticated state nor flash UI churn every interval.
+  // A shared single-flight guard keeps at most ONE such request in flight no
+  // matter which entry point triggered it.
+  async function onFetchElectionStatusPrivate(manual = true) {
     if (!shellAvailable || !election) return;
-    setError(null);
-    setStatusImportBusy(true);
+    if (lifecycleStatusInFlightRef.current) return;
+    lifecycleStatusInFlightRef.current = true;
+    const requestToken = lifecycleRefreshGateRef.current.begin();
+    if (manual) {
+      setError(null);
+      setStatusImportBusy(true);
+    }
     try {
       const result = await api.fetchElectionStatusPrivate();
+      // Stale-response guard: an election switch between request and response
+      // invalidates the token, so election X's result can never mutate the
+      // newly loaded election Y's presentation. (The backend independently
+      // refuses to apply X's statement to Y's session.)
+      if (!lifecycleRefreshGateRef.current.isCurrent(requestToken)) return;
       setStatusImport(result.applied);
       await refreshElection();
       await refreshWorkflow(confirmed);
     } catch (err) {
-      captureError(err);
+      if (manual) captureError(err);
+      // Automatic failures are deliberately silent: keep polling, keep the
+      // last authenticated state.
     } finally {
-      setStatusImportBusy(false);
+      lifecycleStatusInFlightRef.current = false;
+      if (manual) setStatusImportBusy(false);
     }
   }
+
+  // The automatic tick is exactly the manual private check in read-only,
+  // silent mode — never a second protocol implementation.
+  async function automaticLifecycleStatusTick(): Promise<void> {
+    await onFetchElectionStatusPrivate(false);
+  }
+
+  // Keep the controller's tick pointed at the latest closure each render so
+  // the long-lived engine always sees current state without rescheduling.
+  useEffect(() => {
+    lifecyclePollTickRef.current = automaticLifecycleStatusTick;
+  });
 
   async function onSubmitPrivately() {
     if (privateRoute === "OfflineExport") {
@@ -1590,6 +1723,8 @@ export function Vote() {
               any time; you do not need both. Check privately through the configured
               connection, or ask the office for a signed election-status file and import
               it here. Both are verified against the pinned office before anything changes.
+              While your private connection is running, this app also checks quietly on
+              its own and applies a newer signed status automatically.
             </p>
             <div className="action-row">
               <button
@@ -2280,7 +2415,9 @@ export function Vote() {
                               closing or the final record being published — by verifying a
                               signed status statement from the ballot office. This only
                               updates what this screen shows; it never changes, resubmits, or
-                              re-opens your vote.
+                              re-opens your vote. While your private connection is running,
+                              this app also checks quietly on its own and applies a newer
+                              signed status automatically.
                             </p>
                             {election && (
                               <div className="field-list">
