@@ -19,8 +19,11 @@
 //
 // These tests pin the fix and the invariants that keep minimize == minimize:
 // the shell must never hide/minimize/skip-taskbar/tray/destroy the window, and
-// the frontend must never touch the Tauri window API (its capability grants no
-// window permissions anyway).
+// the frontend's window-API use is confined to ONE narrow operation —
+// ThemeProvider syncing the NATIVE window theme (title bar) with the app's
+// light/dark preference via `Window::set_theme`, backed by exactly the
+// `core:window:allow-set-theme` permission (which cannot move, resize, close,
+// or hide the window).
 //
 // A real Windows minimize→restore regression is still REQUIRED after this
 // change; the behavior cannot be exercised headlessly.
@@ -127,19 +130,24 @@ describe("shell window-lifecycle policy", () => {
 // The frontend cannot manipulate the native window at all.
 // -------------------------------------------------------------------------
 
-describe("frontend never touches the Tauri window API", () => {
-  function walk(dir: URL): string[] {
-    const out: string[] = [];
+describe("frontend window-API use stays confined to native theme sync", () => {
+  function walk(dir: URL): { path: string; content: string }[] {
+    const out: { path: string; content: string }[] = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const child = new URL(`${entry.name}${entry.isDirectory() ? "/" : ""}`, dir);
       if (entry.isDirectory()) out.push(...walk(child));
-      else if (/\.(ts|tsx)$/.test(entry.name)) out.push(readFileSync(child, "utf8"));
+      else if (/\.(ts|tsx)$/.test(entry.name)) {
+        out.push({ path: child.pathname, content: readFileSync(child, "utf8") });
+      }
     }
     return out;
   }
 
-  it("imports no window/webviewWindow module and calls no window ops", () => {
-    const sources = walk(new URL("../src/", import.meta.url)).join("\n");
+  it("imports no window/webviewWindow module and calls no window ops outside ThemeProvider", () => {
+    const sources = walk(new URL("../src/", import.meta.url))
+      .filter((file) => !file.path.endsWith("ThemeProvider.tsx"))
+      .map((file) => file.content)
+      .join("\n");
     for (const forbidden of [
       "@tauri-apps/api/window",
       "@tauri-apps/api/webviewWindow",
@@ -151,12 +159,38 @@ describe("frontend never touches the Tauri window API", () => {
     }
   });
 
-  it("the capability grants only dialog permissions (no window control)", () => {
+  it("the ONLY window-API use is ThemeProvider's setTheme sync — nothing else", () => {
+    const theme = readProjectFile("src/theme/ThemeProvider.tsx");
+    assert.match(theme, /getCurrentWindow\(\)\.setTheme\(/);
+    // The granted surface is the theme ONLY: no geometry, visibility, or
+    // lifecycle operation may appear next to it.
+    for (const forbidden of [
+      ".close(", ".destroy(", ".hide(", ".show(", ".minimize(", ".unminimize(",
+      ".maximize(", ".unmaximize(", ".startDragging(", ".startResizeDragging(",
+      ".setPosition(", ".setSize(", ".setFullscreen(", ".setAlwaysOnTop(",
+      ".center(", ".focus(", ".setResizable(", ".setMaximizable(",
+      ".setSkipTaskbar(", "innerSize", "outerPosition", "onCloseRequested",
+    ]) {
+      assert.ok(!theme.includes(forbidden), `theme provider must not call ${forbidden}`);
+    }
+  });
+
+  it("the capability grants dialogs plus exactly one narrow theme permission", () => {
     const cap = JSON.parse(readProjectFile("src-tauri/capabilities/default.json"));
-    assert.deepEqual(cap.permissions, ["dialog:allow-open", "dialog:allow-save"]);
+    assert.deepEqual(cap.permissions, [
+      "dialog:allow-open",
+      "dialog:allow-save",
+      "core:window:allow-set-theme",
+    ]);
+    // No window permission beyond set-theme (which cannot move, resize,
+    // close, or hide the window) may ever be granted to the webview.
     assert.ok(
-      !cap.permissions.some((p: string) => p.startsWith("core:window")),
-      "no core:window permission is granted to the webview",
+      cap.permissions.every(
+        (p: string) =>
+          p.startsWith("dialog:") ||
+          p === "core:window:allow-set-theme",
+      ),
+      "no core:window permission other than allow-set-theme",
     );
   });
 });

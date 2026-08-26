@@ -46,6 +46,10 @@ import {
   isTerminalLifecycleState,
 } from "../lifecycleAutoRefresh";
 import {
+  appliedStatusDiffersFromPainted,
+  authenticatedLifecycleAdvanced,
+} from "../lifecyclePollApply";
+import {
   BOUND_SECTION_LABEL,
   confirmationContinueAvailable,
   documentMatchShortLabel,
@@ -312,6 +316,13 @@ export function Vote() {
     generation: number;
   } | null>(null);
   const [statusImportBusy, setStatusImportBusy] = useState(false);
+  // STABLE election identity (the frozen manifest hash). Election-scoped
+  // effects key on THIS, never on the `election` object itself: background
+  // refreshes legitimately install a fresh summary object for the SAME
+  // election, and an object-identity dependency made every such refresh look
+  // like an election switch (the periodic Vote-page reset). A real switch —
+  // different manifest hash, or unloaded -> loaded — still trips every effect.
+  const electionManifestHashHex = election?.manifest_hash_hex ?? "";
 
   useEffect(() => {
     setConfirmation(null);
@@ -341,7 +352,7 @@ export function Vote() {
     // never continues against a stale election.
     autoRetryCancelRef.current = true;
     setAutoRetryAttempt(0);
-  }, [election]);
+  }, [electionManifestHashHex]);
 
   // On unmount (voter leaves the screen), cancel any in-progress automatic retry
   // so no submission continues in the background.
@@ -357,7 +368,6 @@ export function Vote() {
   // THIS election (manifest hash), and are otherwise cleared so a prior
   // election's transport bundle is never silently reused (F2). Runs on mount and
   // on every election switch, not on same-election field edits.
-  const electionManifestHashHex = election?.manifest_hash_hex ?? "";
   useEffect(() => {
     const remembered = recallManagedTorConfig(electionManifestHashHex);
     setTorExePath(remembered.torExePath);
@@ -453,12 +463,12 @@ export function Vote() {
   useEffect(() => {
     if (election && shellAvailable) void loadConfirmation(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election, shellAvailable]);
+  }, [electionManifestHashHex, shellAvailable]);
 
   useEffect(() => {
     if (shellAvailable) void refreshCredentialStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election, shellAvailable]);
+  }, [electionManifestHashHex, shellAvailable]);
 
   // On entering the Vote screen (navigation back OR an application restart),
   // read the AUTHORITATIVE workflow status once so the guided stage can be
@@ -480,7 +490,7 @@ export function Vote() {
   useEffect(() => {
     if (election && shellAvailable) void refreshWorkflow(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election, shellAvailable]);
+  }, [electionManifestHashHex, shellAvailable]);
 
   // Populate the controlled managed-Tor status on load so the recovery/status
   // card reflects reality after a restart (feature presence + durable state),
@@ -489,7 +499,7 @@ export function Vote() {
   useEffect(() => {
     if (election && shellAvailable) void refreshManagedTorStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election, shellAvailable]);
+  }, [electionManifestHashHex, shellAvailable]);
 
   // Probe voter Tor availability (read-only) so the one-click Connect flow can
   // show "Tor installed: Found" without the voter typing a path. Re-runs when
@@ -497,7 +507,7 @@ export function Vote() {
   useEffect(() => {
     if (election && shellAvailable) void refreshVoterTorStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [election, shellAvailable, torExePath]);
+  }, [electionManifestHashHex, shellAvailable, torExePath]);
 
   // Truthful ready-state: while the managed-Tor connection is configured and the
   // ballot is not yet durably CAST, re-read the AUTHORITATIVE status on a bounded
@@ -895,6 +905,15 @@ export function Vote() {
   // `manual = false` (automatic polling) differs ONLY in presentation: no
   // error popup and no button-busy flag — a transient transport failure must
   // not erase the last authenticated state nor flash UI churn every interval.
+  // The same is true for SUCCESS: the backend reports whether its monotonic
+  // application actually advanced (`applied.advanced`, false for an
+  // idempotent re-application). An automatic poll that did NOT advance
+  // authenticated knowledge paints nothing and re-reads nothing — no election
+  // summary refresh, no workflow reconstruction, no state churn at all — so a
+  // voter sitting on this screen cannot see polling happen. Only a genuine
+  // forward application (or a manual check, which deliberately heals any
+  // drift) triggers the authoritative re-reads. The backend remains the sole
+  // lifecycle authority; no frontend-trusted state is introduced.
   // A shared single-flight guard keeps at most ONE such request in flight no
   // matter which entry point triggered it.
   async function onFetchElectionStatusPrivate(manual = true) {
@@ -913,9 +932,16 @@ export function Vote() {
       // newly loaded election Y's presentation. (The backend independently
       // refuses to apply X's statement to Y's session.)
       if (!lifecycleRefreshGateRef.current.isCurrent(requestToken)) return;
-      setStatusImport(result.applied);
-      await refreshElection();
-      await refreshWorkflow(confirmed);
+      const applied = result.applied;
+      if (appliedStatusDiffersFromPainted(statusImport, applied)) {
+        setStatusImport({ ...applied });
+      }
+      // A no-op poll must be INVISIBLE; only real progress (or an explicit
+      // manual check) pays for the broad authoritative re-reads.
+      if (manual || authenticatedLifecycleAdvanced(applied, election.lifecycle_state ?? "")) {
+        await refreshElection();
+        await refreshWorkflow(confirmed);
+      }
     } catch (err) {
       if (manual) captureError(err);
       // Automatic failures are deliberately silent: keep polling, keep the

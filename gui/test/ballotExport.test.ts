@@ -11,13 +11,20 @@ function readProjectFile(path: string): string {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 }
 
-test("desktop capability permits only the native open and save dialogs", () => {
+test("desktop capability permits only the native open and save dialogs (plus theme sync)", () => {
   const capability = JSON.parse(readProjectFile("src-tauri/capabilities/default.json"));
-  assert.deepEqual(capability.permissions, ["dialog:allow-open", "dialog:allow-save"]);
+  assert.deepEqual(capability.permissions, [
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "core:window:allow-set-theme",
+  ]);
   assert.ok(capability.permissions.includes("dialog:allow-open"));
   assert.ok(capability.permissions.includes("dialog:allow-save"));
   assert.ok(
-    capability.permissions.every((permission: string) => permission.startsWith("dialog:")),
+    capability.permissions.every(
+      (permission: string) =>
+        permission.startsWith("dialog:") || permission === "core:window:allow-set-theme",
+    ),
     "the ballot save repair must not add filesystem, shell, or network permissions",
   );
 });

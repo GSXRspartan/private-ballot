@@ -221,7 +221,9 @@ describe("post-cast lifecycle refresh", () => {
     for (const name of ["onImportElectionStatus", "onFetchElectionStatusPrivate"]) {
       const start = vote.indexOf(`async function ${name}`);
       assert.ok(start >= 0, `${name} must exist`);
-      const body = vote.slice(start, start + 900);
+      // Wide enough to cover the no-op gating before the re-reads; the
+      // assertions still require BOTH authoritative re-reads to be present.
+      const body = vote.slice(start, start + 1800);
       // They apply an authenticated statement and re-read authoritative state;
       // they never mutate selection/credential/ballot.
       assert.match(body, /await refreshElection\(\)/, name);

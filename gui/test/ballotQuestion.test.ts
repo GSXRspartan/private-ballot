@@ -48,7 +48,13 @@ describe("canonical ballot question beside responses", () => {
     // every election change (and absent when no election is loaded), so a stale
     // question can never persist.
     assert.match(vote, /confirmation\.bound\.proposal_question &&/);
-    assert.match(vote, /setConfirmation\(null\);[\s\S]*\}, \[election\]\);/);
+    // The reset effect keys on STABLE election identity (manifest hash): the
+    // question is cleared on a real election switch, never on same-election
+    // background refreshes that install a fresh summary object.
+    assert.match(
+      vote,
+      /setConfirmation\(null\);[\s\S]*\}, \[electionManifestHashHex\]\);/,
+    );
   });
 
   it("wraps long questions and stays inside its card", () => {

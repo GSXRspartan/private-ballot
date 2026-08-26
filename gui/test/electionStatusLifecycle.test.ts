@@ -266,7 +266,10 @@ describe("phantom-selection reconciliation", () => {
   it("election switch invalidates pending selection operations", () => {
     const effectStart = vote.search(/useEffect\(\(\) => \{\r?\n    setConfirmation\(null\);/);
     assert.ok(effectStart >= 0, "election-switch reset effect present");
-    const effect = vote.slice(effectStart, vote.indexOf("}, [election]);", effectStart));
+    const effect = vote.slice(
+      effectStart,
+      vote.indexOf("}, [electionManifestHashHex]);", effectStart),
+    );
     assert.match(effect, /selectionStatusGateRef\.current\.invalidate\(\)/);
   });
 

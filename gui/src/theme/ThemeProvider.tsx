@@ -37,6 +37,14 @@ function readStoredMode(): ThemeMode {
  * manual override persisted in localStorage. The resolved theme is applied
  * as `data-theme` on the document root; all colors come from the token
  * scales in global.css.
+ *
+ * The NATIVE window chrome (Windows title bar, macOS window appearance) is
+ * kept in the SAME theme through Tauri's supported `Window::set_theme` API:
+ * dark app theme -> dark title bar, light app theme -> light title bar. In
+ * `system` mode the override is cleared (`setTheme(null)`) so the OS decides,
+ * exactly like the web content does via `prefers-color-scheme`. This uses a
+ * public cross-platform Tauri API — no frameless title bar and no Windows-only
+ * hacks — and silently no-ops outside the desktop shell (plain browser dev).
  */
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [mode, setModeState] = useState<ThemeMode>(readStoredMode);
@@ -59,6 +67,19 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     document.documentElement.dataset.theme = resolved;
   }, [resolved]);
+
+  // Native window theme follows the RESOLVED theme; `system` clears the
+  // override so the native chrome tracks the OS like the content does.
+  useEffect(() => {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().setTheme(mode === "system" ? null : resolved),
+      )
+      .catch(() => {
+        /* older shells or denied permission: web theme still applies */
+      });
+  }, [mode, resolved]);
 
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next);

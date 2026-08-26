@@ -605,7 +605,10 @@ describe("automatic lifecycle refresh wiring (Vote screen)", () => {
 
   it("election-switch race: stale responses cannot mutate the newly loaded election", () => {
     // The switch invalidates the dedicated lifecycle gate...
-    const resetEffect = voteEffectSlice("setConfirmation(null);", "}, [election]);");
+    const resetEffect = voteEffectSlice(
+      "setConfirmation(null);",
+      "}, [electionManifestHashHex]);",
+    );
     assert.match(resetEffect, /lifecycleRefreshGateRef\.current\.invalidate\(\)/);
     // ...and the shared path drops any response whose token is no longer
     // current BEFORE writing presentation state.
