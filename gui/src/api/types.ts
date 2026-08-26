@@ -735,6 +735,15 @@ export interface OrganizerIntakeStatusV1 {
    * `organizer-tor-datadir-lock`); `null` unless `failed` is true. */
   failure_reason: string | null;
   accepted_ballots: number;
+  /** Lifecycle the running collector would currently sign into status answers
+   * (backend-authoritative fence). `null` while no intake is running. */
+  published_lifecycle: string | null;
+  /** Monotonic generation the running collector would currently sign. */
+  status_generation: number | null;
+  /** Authoritative session lifecycle observed during the same status call.
+   * A disagreement with `published_lifecycle` is healed automatically within
+   * one heartbeat and surfaces here for troubleshooting. */
+  authoritative_lifecycle: string | null;
   onion_hostname: string | null;
   descriptor_fingerprint: string | null;
   collector_addr: string | null;

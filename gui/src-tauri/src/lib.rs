@@ -1621,19 +1621,25 @@ fn publish_lifecycle_to_intake(
     if !intake.is_bound_to_manifest(manifest_hash_hex) {
         return;
     }
-    // Continue the durable issuance counter when possible so online status
-    // generations never run behind already-exported offline artifacts.
-    let reserved = app
+    // ONE publication primitive shared with the read-only status heartbeat's
+    // reconciliation (`reconcile_intake_lifecycle`): an unchanged state is an
+    // in-memory no-op; a real change continues the durable issuance counter so
+    // online status generations never run behind already-exported offline
+    // artifacts. The heartbeat independently re-converges the fence to the
+    // authoritative session lifecycle every few seconds, so a silently lost
+    // push (startup race, skipped guard) can never leave the ballot office
+    // serving stale signed lifecycle truth.
+    let status_dir = app
         .path()
         .app_data_dir()
         .ok()
-        .and_then(|root| {
-            use tari_cc_private_ballot_gui_core::reserve_next_status_generation_v1;
-            ensure_voter_election_status_directory_v1(&root)
-                .ok()
-                .and_then(|dir| reserve_next_status_generation_v1(&dir, manifest_hash_hex).ok())
-        });
-    intake.publish_lifecycle_transition(new_state, reserved);
+        .and_then(|root| ensure_voter_election_status_directory_v1(&root).ok());
+    organizer_tor_intake::reconcile_intake_lifecycle(
+        manifest_hash_hex,
+        &intake.lifecycle_fence,
+        new_state,
+        status_dir.as_deref(),
+    );
 }
 
 /// Without managed-Tor intake support there is no collector to fence.

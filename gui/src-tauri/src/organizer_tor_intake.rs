@@ -37,6 +37,7 @@ use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
     GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
     ensure_voter_election_status_directory_v1, read_issued_status_generation_v1,
+    reserve_next_status_generation_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     GatewayReceiverKeyV1, LoadedOrganizerPrivateBundleV1, OpaqueEnvelopeCollectorV1,
@@ -94,8 +95,10 @@ pub(crate) struct OrganizerIntakeState {
     durable_inbox_dir: PathBuf,
     /// AUTHORITATIVE lifecycle fence: the GUI publishes every committed
     /// transition here so admission and status answers reflect organizer truth,
-    /// never the worker session's own substrate state.
-    lifecycle_fence: AuthoritativeLifecycleFenceV1,
+    /// never the worker session's own substrate state. Crate-visible so the
+    /// shell's shared publication primitive
+    /// ([`reconcile_intake_lifecycle`]) can drive it directly.
+    pub(crate) lifecycle_fence: AuthoritativeLifecycleFenceV1,
 }
 
 impl OrganizerIntakeState {
@@ -104,16 +107,45 @@ impl OrganizerIntakeState {
     pub(crate) fn is_bound_to_manifest(&self, manifest_hash_hex: &str) -> bool {
         self.manifest_hash_hex == manifest_hash_hex
     }
+}
 
-    /// Publishes one committed authoritative lifecycle transition into the
-    /// collector's admission/status path.
-    pub(crate) fn publish_lifecycle_transition(
-        &self,
-        state: ElectionLifecycleStateV1,
-        reserved_generation: Option<u64>,
-    ) {
-        self.lifecycle_fence.observe(state, reserved_generation);
+/// Reconciles one running intake's authoritative lifecycle fence with the
+/// organizer GUI's AUTHORITATIVE session state.
+///
+/// WHY THIS EXISTS (two-computer physical failure,
+/// `lifecycle-auto-refresh-01`): publications into the running collector's
+/// fence are best-effort push, and a silently lost push left the ballot office
+/// serving validly-signed but STALE lifecycle statements indefinitely — voters
+/// never learned FROZEN -> OPEN through automatic polls, manual polls, or
+/// restarts of either side's private connection, while offline export of the
+/// same truth worked. This healer converges served truth to authoritative
+/// truth using the SAME reviewed [`AuthoritativeLifecycleFenceV1::observe`]
+/// primitive as every other publication — no second protocol, no new trust
+/// root:
+///
+/// * unchanged state → pure in-memory compare, idempotent, NO ledger write;
+/// * changed state → continues the durable issuance ledger when available
+///   ([`reserve_next_status_generation_v1`]), so healed statements carry a
+///   fresh generation strictly beyond everything already served or exported
+///   (the fence seed is reserved too — see the step-8 note in
+///   [`start_intake_worker`]); without a usable status directory it falls back
+///   to the fence's internal monotonic bump.
+///
+/// Called from the read-only organizer status heartbeat while intake runs
+/// (healing any lost push within one heartbeat), and shared by every lifecycle
+/// publisher so there is exactly ONE publication path.
+pub(crate) fn reconcile_intake_lifecycle(
+    manifest_hash_hex: &str,
+    fence: &AuthoritativeLifecycleFenceV1,
+    authoritative: ElectionLifecycleStateV1,
+    status_dir: Option<&Path>,
+) {
+    if fence.state() == authoritative {
+        return;
     }
+    let reserved = status_dir
+        .and_then(|dir| reserve_next_status_generation_v1(dir, manifest_hash_hex).ok());
+    fence.observe(authoritative, reserved);
 }
 
 /// Serializable organizer intake status (organizer-safe aggregates only). No
@@ -142,6 +174,18 @@ pub struct OrganizerIntakeStatusV1 {
     pub failure_reason: Option<String>,
     /// Ballots this intake run has uniquely accepted (worker-side aggregate).
     pub accepted_ballots: u64,
+    // ---- Served-vs-authoritative diagnostics (never secret) ----
+    /// The lifecycle the RUNNING collector would sign into
+    /// `GET /v1/election-status` answers right now (fence state). `None`
+    /// while no intake is running. A value that disagrees with
+    /// [`Self::authoritative_lifecycle`] means a publication was missed and
+    /// is healed by the status heartbeat within seconds.
+    pub published_lifecycle: Option<String>,
+    /// The monotonic generation the running collector would currently sign.
+    pub status_generation: Option<u64>,
+    /// The authoritative GUI session lifecycle observed during this same
+    /// status call (the truth every publication must converge to).
+    pub authoritative_lifecycle: Option<String>,
     // ---- Advanced / diagnostics (never secret) ----
     pub onion_hostname: Option<String>,
     pub descriptor_fingerprint: Option<String>,
@@ -271,6 +315,8 @@ pub(crate) struct BoundElection {
     pub(crate) manifest_hash_hex: String,
     pub(crate) election_id: Vec<u8>,
     pub(crate) manifest_hash: [u8; 32],
+    /// The authoritative lifecycle at snapshot time.
+    pub(crate) lifecycle: ElectionLifecycleStateV1,
 }
 
 pub(crate) fn bound_election(state: &AppState) -> Result<BoundElection, CommandError> {
@@ -285,11 +331,13 @@ pub(crate) fn bound_election(state: &AppState) -> Result<BoundElection, CommandE
     let manifest_hash_hex = artifacts.summary().manifest_hash_hex.clone();
     let election_id = artifacts.manifest().election_id().as_bytes().to_vec();
     let manifest_hash = *artifacts.manifest_hash().as_bytes();
+    let lifecycle = session.lifecycle_state_v1();
     Ok(BoundElection {
         artifacts,
         manifest_hash_hex,
         election_id,
         manifest_hash,
+        lifecycle,
     })
 }
 
@@ -335,42 +383,85 @@ fn organizer_tor_status_blocking(
         },
         None => false,
     };
+    // Durable issuance ledger used ONLY when a reconciliation actually changes
+    // the fence state (see `reconcile_intake_lifecycle`); resolved best-effort.
+    let status_dir = app_data_root(app)
+        .ok()
+        .and_then(|root| ensure_voter_election_status_directory_v1(&root).ok());
 
     let mut managed = state
         .organizer_intake
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let running = managed.as_mut();
-    let (intake_running, election_bound, ready, failed, failure_reason, accepted, diag) =
-        match running {
-            Some(m) => {
-                let same_election = bound
-                    .as_ref()
-                    .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
-                let child_alive = m
-                    .tor_child
-                    .try_wait()
-                    .map(|status| status.is_none())
-                    .unwrap_or(false);
-                let worker_alive = m.service_loop.worker_is_alive();
-                let ready = same_election && child_alive && worker_alive;
-                // A recorded intake whose owned Tor child or collector worker has
-                // died is a bounded FAILED state — never an indefinite "starting".
-                let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
-                let failed = failure_reason.is_some();
-                let accepted = m.service_loop.accepted_unique_count();
-                let diag = Some((
-                    m.onion_hostname.clone(),
-                    descriptor_fingerprint_hex(&m.descriptor),
-                    m.collector_addr.to_string(),
-                    m.tor_data_dir.to_string_lossy().into_owned(),
-                    m.voter_bundle_path.to_string_lossy().into_owned(),
-                    m.durable_inbox_dir.to_string_lossy().into_owned(),
-                ));
-                (true, same_election, ready, failed, failure_reason, accepted, diag)
+    let (
+        intake_running,
+        election_bound,
+        ready,
+        failed,
+        failure_reason,
+        accepted,
+        diag,
+        published,
+    ) = match running {
+        Some(m) => {
+            let same_election = bound
+                .as_ref()
+                .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
+            // AUTHORITATIVE RECONCILIATION HEARTBEAT: this read-only status
+            // command runs every few seconds while the ballot-office screen is
+            // open. Before reporting anything, converge the running collector's
+            // fence to the authoritative session lifecycle so a silently lost
+            // transition publication can never persist beyond one heartbeat.
+            // Same state is a lock-free no-op; only a real change touches the
+            // issuance ledger. No network, no Tor action, no clearnet.
+            if same_election
+                && let Some(b) = bound.as_ref()
+            {
+                reconcile_intake_lifecycle(
+                    &m.manifest_hash_hex,
+                    &m.lifecycle_fence,
+                    b.lifecycle,
+                    status_dir.as_deref(),
+                );
             }
-            None => (false, false, false, false, None, 0, None),
-        };
+            let child_alive = m
+                .tor_child
+                .try_wait()
+                .map(|status| status.is_none())
+                .unwrap_or(false);
+            let worker_alive = m.service_loop.worker_is_alive();
+            let ready = same_election && child_alive && worker_alive;
+            // A recorded intake whose owned Tor child or collector worker has
+            // died is a bounded FAILED state — never an indefinite "starting".
+            let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
+            let failed = failure_reason.is_some();
+            let accepted = m.service_loop.accepted_unique_count();
+            let published = Some((
+                m.lifecycle_fence.state(),
+                m.lifecycle_fence.generation(),
+            ));
+            let diag = Some((
+                m.onion_hostname.clone(),
+                descriptor_fingerprint_hex(&m.descriptor),
+                m.collector_addr.to_string(),
+                m.tor_data_dir.to_string_lossy().into_owned(),
+                m.voter_bundle_path.to_string_lossy().into_owned(),
+                m.durable_inbox_dir.to_string_lossy().into_owned(),
+            ));
+            (
+                true,
+                same_election,
+                ready,
+                failed,
+                failure_reason,
+                accepted,
+                diag,
+                published,
+            )
+        }
+        None => (false, false, false, false, None, 0, None, None),
+    };
 
     let message = status_message(
         tor_found,
@@ -389,6 +480,8 @@ fn organizer_tor_status_blocking(
         failure_reason,
         accepted,
         diag,
+        published,
+        bound.as_ref().map(|b| b.lifecycle),
         message,
     ))
 }
@@ -472,7 +565,7 @@ fn start_private_intake_blocking(
             let healthy = child_alive && m.service_loop.worker_is_alive();
             if healthy {
                 if m.manifest_hash_hex == bound.manifest_hash_hex {
-                    return Ok(running_status(m, true, child_alive));
+                    return Ok(running_status(m, true, child_alive, bound.lifecycle));
                 }
                 return Err(CommandError::new(
                     "GUI_ORGANIZER_INTAKE_OTHER_ELECTION",
@@ -522,7 +615,7 @@ fn start_private_intake_blocking(
     let running = start_intake_worker(app, &tor_executable, &paths, &bound, authoritative_lifecycle)?;
     // The worker was just confirmed alive (child liveness re-checked after
     // discovery, worker liveness checked in step 9), so report it as running.
-    let status = running_status(&running, true, true);
+    let status = running_status(&running, true, true, authoritative_lifecycle);
     let mut managed = state
         .organizer_intake
         .lock()
@@ -938,23 +1031,41 @@ fn start_intake_worker(
     // 8. Only now start the collector service loop (first point a ballot could
     // be accepted). Accepted canonical packages flow to the durable inbox.
     // The AUTHORITATIVE lifecycle fence is initialized from the organizer
-    // GUI's current state and continues the durable issuance generation, so a
-    // FROZEN election fences ballots immediately and status answers carry
-    // signed truth (never the worker session's own substrate state).
+    // GUI's current state, so a FROZEN election fences ballots immediately
+    // and status answers carry signed truth (never the worker session's own
+    // substrate state).
+    //
+    // ROOT-CAUSE FIX (two-computer physical failure,
+    // `lifecycle-auto-refresh-01`): the seed generation MUST be freshly
+    // RESERVED into the durable issuance ledger, never merely re-read from it.
+    // Seeding at the raw ledger value N made the served startup FROZEN
+    // statement share generation N with the very next reserved transition
+    // (read+1 == N when nothing was exported between start and transition).
+    // Any voter that had already applied the signed FROZEN@N statement then
+    // rejected every signed OPEN@N statement as ConflictingGeneration —
+    // surviving organizer-intake restarts (the fence re-derived the same
+    // collision) and voter-connection restarts — while an OFFLINE export
+    // (which reserves strictly beyond the collision) still worked. Reserving
+    // the seed writes it into the SAME ledger every publication and export
+    // continues, so every served statement carries a unique, strictly
+    // monotonic generation across restarts. A failed reservation degrades to
+    // the legacy read-only seed instead of blocking ballot-office startup
+    // (still monotonic within one run; the heartbeat reconciliation keeps
+    // healing state truth).
     let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
     let session_arc = Arc::new(Mutex::new(session));
     let descriptor_arc = Arc::new(bundle.descriptor.clone());
     let receiver_key_arc = reconstruct_receiver_key(&bundle)?;
     let receipt_key_arc = Arc::new(bundle.material.receipt_signing_key.clone());
     let root_signing_key_arc = Arc::new(bundle.material.root_signing_key.clone());
-    let lifecycle_fence = AuthoritativeLifecycleFenceV1::new(
-        authoritative_lifecycle,
-        read_issued_status_generation_v1(
-            &ensure_voter_election_status_directory_v1(&app_data_root(app)?)?,
-            &bound.manifest_hash_hex,
-        )
-        .unwrap_or(0),
-    );
+    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root(app)?)?;
+    let seed_generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
+        .unwrap_or_else(|_| {
+            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
+                .unwrap_or(0)
+        });
+    let lifecycle_fence =
+        AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, seed_generation);
     let handler = ThreadSafeCollectorHandlerV1::new(
         gateway,
         descriptor_arc,
@@ -1045,10 +1156,13 @@ fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
 /// Builds a status for a recorded running intake. `child_alive` MUST be the
 /// caller's fresh `try_wait` observation of the owned Tor child, so a dead child
 /// is reported as a bounded FAILED state and never a false "running".
+/// `authoritative` is the caller's fresh authoritative session lifecycle so the
+/// served-vs-authoritative diagnostics are truthful at build time.
 fn running_status(
     m: &OrganizerIntakeState,
     election_bound: bool,
     child_alive: bool,
+    authoritative: ElectionLifecycleStateV1,
 ) -> OrganizerIntakeStatusV1 {
     let accepted = m.service_loop.accepted_unique_count();
     let worker_alive = m.service_loop.worker_is_alive();
@@ -1064,6 +1178,9 @@ fn running_status(
         failed,
         failure_reason,
         accepted_ballots: accepted,
+        published_lifecycle: Some(m.lifecycle_fence.state().as_str().to_owned()),
+        status_generation: Some(m.lifecycle_fence.generation()),
+        authoritative_lifecycle: Some(authoritative.as_str().to_owned()),
         onion_hostname: Some(m.onion_hostname.clone()),
         descriptor_fingerprint: descriptor_fingerprint_hex(&m.descriptor),
         collector_addr: Some(m.collector_addr.to_string()),
@@ -1091,11 +1208,17 @@ fn build_status(
     failure_reason: Option<String>,
     accepted: u64,
     diag: Option<(String, Option<String>, String, String, String, String)>,
+    published: Option<(ElectionLifecycleStateV1, u64)>,
+    authoritative: Option<ElectionLifecycleStateV1>,
     message: &'static str,
 ) -> OrganizerIntakeStatusV1 {
     let (onion, fingerprint, collector, data_dir, bundle, inbox) = match diag {
         Some((o, f, c, d, b, i)) => (Some(o), f, Some(c), Some(d), Some(b), Some(i)),
         None => (None, None, None, None, None, None),
+    };
+    let (published_lifecycle, status_generation) = match published {
+        Some((state, generation)) => (Some(state.as_str().to_owned()), Some(generation)),
+        None => (None, None),
     };
     OrganizerIntakeStatusV1 {
         tor_found,
@@ -1106,6 +1229,9 @@ fn build_status(
         failed,
         failure_reason,
         accepted_ballots: accepted,
+        published_lifecycle,
+        status_generation,
+        authoritative_lifecycle: authoritative.map(|state| state.as_str().to_owned()),
         onion_hostname: onion,
         descriptor_fingerprint: fingerprint,
         collector_addr: collector,
@@ -1394,5 +1520,189 @@ mod tests {
         let a = TransportPaths::under(&root).hidden_service_dir;
         let b = TransportPaths::under(&root).hidden_service_dir;
         assert_eq!(a, b, "the hidden-service identity path is stable across starts");
+    }
+
+    /// Creates a unique bounded temporary status directory for issuance-ledger
+    /// assertions.
+    fn temp_status_dir(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "tari-organizer-intake-reconcile-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("temp status dir");
+        base
+    }
+
+    fn issued_generation(dir: &Path, hash: &str) -> u64 {
+        read_issued_status_generation_v1(dir, hash).expect("issued generation readable")
+    }
+
+    fn seed_ledger(dir: &Path, hash: &str, through_generation: u64) {
+        for expected in 1..=through_generation {
+            let reserved =
+                reserve_next_status_generation_v1(dir, hash).expect("seed reservation");
+            assert_eq!(reserved, expected);
+        }
+    }
+
+    #[test]
+    fn reconcile_unchanged_state_is_a_no_op_without_ledger_growth() {
+        // Heartbeat cost contract: the every-few-seconds reconciliation MUST be
+        // a pure in-memory compare when authority already agrees with the fence
+        // — no reservation write, no generation movement.
+        let dir = temp_status_dir("noop");
+        let hash = VALID_HASH;
+        seed_ledger(&dir, hash, 3);
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, 3);
+        reconcile_intake_lifecycle(hash, &fence, ElectionLifecycleStateV1::Frozen, Some(&dir));
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Frozen);
+        assert_eq!(fence.generation(), 3);
+        assert_eq!(
+            issued_generation(&dir, hash),
+            3,
+            "an unchanged reconcile must never touch the durable issuance ledger"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_heals_a_lost_open_publication_without_restart() {
+        // Physical regression shape (`lifecycle-auto-refresh-01`): intake is
+        // running FROZEN (seed generation durably reserved per the root-cause
+        // fix), the organizer commits OPEN but the push publication is lost,
+        // and the ballot office keeps serving signed FROZEN. The heartbeat
+        // reconciliation must converge served truth to authoritative truth on
+        // the SAME running collector, continuing the durable ledger.
+        let dir = temp_status_dir("heal");
+        let hash = VALID_HASH;
+        seed_ledger(&dir, hash, 1);
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, 1);
+
+        // Lost publish: the organizer is OPEN but nothing observed it.
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Frozen);
+
+        // Heartbeat heals: strictly past the served FROZEN generation.
+        reconcile_intake_lifecycle(hash, &fence, ElectionLifecycleStateV1::Open, Some(&dir));
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Open);
+        assert_eq!(fence.generation(), 2);
+        assert_eq!(issued_generation(&dir, hash), 2);
+
+        // Idempotent repeats stay stable (no churn while OPEN persists).
+        reconcile_intake_lifecycle(hash, &fence, ElectionLifecycleStateV1::Open, Some(&dir));
+        assert_eq!(fence.generation(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn startup_frozen_statement_generation_never_collides_with_the_first_transition() {
+        // THE ROOT-CAUSE REGRESSION of the two-computer physical failure.
+        // Before the fix, the intake fence was seeded from the RAW ledger value
+        // N, so the first reserved transition minted read+1 == N and the served
+        // OPEN statement repeated the FROZEN statement's generation. A voter
+        // that had applied FROZEN@N then rejected every OPEN@N forever
+        // (ConflictingGeneration), surviving all restarts. With the seed
+        // reserved like any other issuance, the walk below must hold: the same
+        // voter knowledge that consumed FROZEN@1 accepts the reconciled OPEN
+        // statement, and the offline export that follows never repeats a
+        // generation either.
+        let dir = temp_status_dir("collision");
+        let hash = VALID_HASH;
+        // Intake start reserves its seed generation (the fix).
+        let seed = reserve_next_status_generation_v1(&dir, hash).expect("seed reservation");
+        assert_eq!(seed, 1);
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, seed);
+        assert_eq!(fence.generation(), 1);
+
+        // A voter consumed the served signed FROZEN@1 statement.
+        let mut knowledge =
+            tari_cc_private_ballot_gui_core::ElectionStatusKnowledgeV1::from_accepted(
+                ElectionLifecycleStateV1::Frozen,
+                fence.generation(),
+            );
+
+        // The organizer commits OPEN; the heartbeat/publisher continues the
+        // ledger instead of repeating generation 1.
+        reconcile_intake_lifecycle(hash, &fence, ElectionLifecycleStateV1::Open, Some(&dir));
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Open);
+        let open_generation = fence.generation();
+        assert!(
+            open_generation > 1,
+            "OPEN must carry a STRICTLY greater generation than the served FROZEN statement"
+        );
+
+        // That same voter must accept the newer statement (this exact plan()
+        // call failed with ConflictingGeneration before the fix).
+        let target = knowledge
+            .plan(
+                ElectionLifecycleStateV1::Open,
+                open_generation,
+                ElectionLifecycleStateV1::Frozen,
+            )
+            .expect("voter that applied FROZEN must accept the newer OPEN statement");
+        assert_eq!(target, ElectionLifecycleStateV1::Open);
+
+        // And a later offline export still continues the same ledger space.
+        let export = reserve_next_status_generation_v1(&dir, hash).expect("export reservation");
+        assert!(export > open_generation);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_sequence_frozen_open_closed_is_strictly_monotonic() {
+        // Required lifecycle walk on ONE running intake: FROZEN -> OPEN ->
+        // CLOSED without a restart; every newer state must carry a strictly
+        // increasing generation so voter-side monotonic application accepts it.
+        let dir = temp_status_dir("walk");
+        let hash = VALID_HASH;
+        seed_ledger(&dir, hash, 1);
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, 1);
+        let mut previous = fence.generation();
+        for authoritative in [
+            ElectionLifecycleStateV1::Open,
+            ElectionLifecycleStateV1::Closed,
+        ] {
+            reconcile_intake_lifecycle(hash, &fence, authoritative, Some(&dir));
+            assert_eq!(fence.state(), authoritative);
+            assert!(
+                fence.generation() > previous,
+                "generations must strictly advance across reconciled transitions"
+            );
+            previous = fence.generation();
+        }
+        assert_eq!(previous, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reconcile_without_a_status_directory_still_advances_monotonically() {
+        // Fail-safe fallback: an unusable issuance ledger must not block the
+        // heal — the fence's internal monotonic bump keeps statements signable
+        // and forward-only.
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, 5);
+        reconcile_intake_lifecycle(VALID_HASH, &fence, ElectionLifecycleStateV1::Open, None);
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Open);
+        assert_eq!(fence.generation(), 6);
+    }
+
+    #[test]
+    fn reconcile_authority_wins_after_a_failed_close_commit() {
+        // Inverse direction (safe-direction over-refusal): if CLOSE was fenced
+        // before a commit that then failed, authority remains OPEN. A later
+        // heartbeat must restore the served truth to OPEN so signed answers
+        // never keep lying about a transition that never committed.
+        let dir = temp_status_dir("authority");
+        let hash = VALID_HASH;
+        seed_ledger(&dir, hash, 5);
+        let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Open, 4);
+        fence.observe(ElectionLifecycleStateV1::Closed, Some(5));
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Closed);
+        reconcile_intake_lifecycle(hash, &fence, ElectionLifecycleStateV1::Open, Some(&dir));
+        assert_eq!(fence.state(), ElectionLifecycleStateV1::Open);
+        assert_eq!(fence.generation(), 6);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

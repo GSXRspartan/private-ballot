@@ -31,8 +31,9 @@ use hpke::{Kem as KemTrait, Serializable, kem::X25519HkdfSha256};
 use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 use tari_cc_private_ballot_gui_core::{
     AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1,
-    BatchPolicyV1, PaddingPolicyV1, PrivateBallotEnvelopeV1, TransportAuthorityRootSetV1,
-    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
+    ElectionStatusKnowledgeV1, GuiElectionSessionV1, BatchPolicyV1, PaddingPolicyV1,
+    PrivateBallotEnvelopeV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
+    TransportDescriptorV1, TransportRoutePolicyV1, verify_and_apply_election_status_statement_v1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1};
 use tari_cc_private_ballot_transport_gateway::{
@@ -355,4 +356,87 @@ fn status_route_requires_signer_and_exact_path() {
         octet_post("/v1/election-status", b"junk"),
     );
     assert_ne!(post_status_code, 200);
+}
+
+#[test]
+fn physical_regression_frozen_then_open_on_one_running_collector_with_voter_apply() {
+    // Reproduces the two-computer physical failure (`lifecycle-auto-refresh-01`)
+    // end to end at the wire level, under the ROOT-CAUSE fix's generation
+    // semantics: the intake fence seed is durably RESERVED like any other
+    // issuance, so a served statement's generation is never re-minted by a
+    // later transition.
+    //
+    // 1. The ballot-office status source starts FROZEN at its reserved seed.
+    // 2. A voter fetches and APPLIES that FROZEN statement (monotonic knowledge).
+    // 3. The organizer authoritative lifecycle advances to OPEN (generation 2).
+    // 4. The SAME already-running collector is queried and MUST return a newly
+    //    valid signed OPEN statement — never a snapshot frozen at start time.
+    // 5. The voter private-fetch apply path accepts it and advances FROZEN ->
+    //    OPEN (this exact apply failed with ConflictingGeneration before the
+    //    fix, because the served OPEN repeated generation 1).
+    // 6. OPEN -> CLOSED while the service keeps running stays monotonic.
+    let fixture = handler_fixture();
+    let fence = AuthoritativeLifecycleFenceV1::new(ElectionLifecycleStateV1::Frozen, 1);
+    let (_gateway, _session, mut handler) = fenced_handler(&fixture, fence.clone());
+    let collector = OpaqueEnvelopeCollectorV1::bind_loopback_port(0).expect("bind");
+
+    // Steps 1+2: startup truth — signed FROZEN@1, consumed by the voter.
+    let (frozen_code, frozen_body) =
+        drive_once(&collector, &mut handler, http_get("/v1/election-status"));
+    assert_eq!(frozen_code, 200);
+    let frozen = verify_statement(&fixture, &frozen_body);
+    assert_eq!(frozen.state(), ElectionLifecycleStateV1::Frozen);
+    assert_eq!(frozen.generation(), 1);
+    let mut knowledge =
+        ElectionStatusKnowledgeV1::from_accepted(frozen.state(), frozen.generation());
+    let mut voter = GuiElectionSessionV1::new(common::artifacts()).expect("frozen voter session");
+    verify_and_apply_election_status_statement_v1(
+        &frozen_body,
+        &fixture.roots,
+        &mut knowledge,
+        &mut voter,
+    )
+    .expect("startup FROZEN statement applies");
+
+    // Step 3: the organizer commits OPEN; publication continues the ledger.
+    fence.observe(ElectionLifecycleStateV1::Open, Some(2));
+
+    // Step 4: the SAME already-running collector answers with NEW signed truth
+    // (no restart of the collector, handler, or worker).
+    let (open_code, open_body) =
+        drive_once(&collector, &mut handler, http_get("/v1/election-status"));
+    assert_eq!(open_code, 200);
+    let open = verify_statement(&fixture, &open_body);
+    assert_eq!(open.state(), ElectionLifecycleStateV1::Open);
+    assert_eq!(open.generation(), 2);
+
+    // Step 5: the previously-FROZEN voter applies the OPEN answer.
+    let applied = verify_and_apply_election_status_statement_v1(
+        &open_body,
+        &fixture.roots,
+        &mut knowledge,
+        &mut voter,
+    )
+    .expect("voter that consumed FROZEN must accept the newer OPEN statement");
+    assert_eq!(applied.effective_state, ElectionLifecycleStateV1::Open);
+    assert!(applied.advanced, "the voter must actually advance to OPEN");
+    assert_eq!(voter.lifecycle_state_v1(), ElectionLifecycleStateV1::Open);
+
+    // Step 6: OPEN -> CLOSED on the still-running service stays monotonic and
+    // remains applicable by the same voter knowledge.
+    fence.observe(ElectionLifecycleStateV1::Closed, Some(3));
+    let (closed_code, closed_body) =
+        drive_once(&collector, &mut handler, http_get("/v1/election-status"));
+    assert_eq!(closed_code, 200);
+    let closed = verify_statement(&fixture, &closed_body);
+    assert_eq!(closed.state(), ElectionLifecycleStateV1::Closed);
+    assert_eq!(closed.generation(), 3);
+    let applied_closed = verify_and_apply_election_status_statement_v1(
+        &closed_body,
+        &fixture.roots,
+        &mut knowledge,
+        &mut voter,
+    )
+    .expect("voter must learn the close through the same live endpoint");
+    assert_eq!(applied_closed.effective_state, ElectionLifecycleStateV1::Closed);
 }

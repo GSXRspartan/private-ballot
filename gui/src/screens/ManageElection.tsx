@@ -1062,6 +1062,20 @@ export function ManageElection() {
 
           <DetailsSection summary="Advanced Tor diagnostics">
             <div className="field-list">
+              {organizerStatus?.published_lifecycle && (
+                <Field label="Served election status">
+                  {organizerStatus.published_lifecycle}
+                  {organizerStatus.status_generation !== null &&
+                    ` (generation ${organizerStatus.status_generation})`}
+                </Field>
+              )}
+              {organizerStatus?.authoritative_lifecycle &&
+                organizerStatus.authoritative_lifecycle !==
+                  organizerStatus.published_lifecycle && (
+                  <Field label="Authoritative lifecycle (reconciling)">
+                    {organizerStatus.authoritative_lifecycle}
+                  </Field>
+                )}
               {organizerStatus?.onion_hostname && (
                 <Field label="Verified onion">
                   <span className="hash">{organizerStatus.onion_hostname}</span>
