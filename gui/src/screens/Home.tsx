@@ -375,11 +375,14 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                             organizer-authority provenance restore ballot-office
                             controls; anything else resumes as a voter view.
                             Surfaced here so the role is visible BEFORE
-                            resuming. */}
+                            resuming. The "Ballot office" role pill uses the
+                            brand/selection tone (Tari Purple), NOT the
+                            success-green tone, because this describes a ROLE
+                            rather than a positive lifecycle state. */}
                         {workspace.lifecycle_state === "DRAFT" ? (
                           <Pill tone="brand">Draft</Pill>
                         ) : workspace.organizer_workspace ? (
-                          <Pill tone="ok">Ballot office</Pill>
+                          <Pill tone="brand">Ballot office</Pill>
                         ) : (
                           <Pill tone="neutral">Voter copy</Pill>
                         )}

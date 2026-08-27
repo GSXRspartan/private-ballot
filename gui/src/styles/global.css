@@ -22,6 +22,17 @@
  */
 
 :root {
+  /* Canonical Tari brand tokens. Composed/aliased over the official Tari
+     scales below rather than redeclared, so there is a single source of
+     truth for each brand color. --tari-purple aliases the exact official
+     Tari Purple already carried as --tari-purple-500 (#813bf5); --tari-ink
+     and --on-tari-green are the same canonical dark structural color. */
+  --tari-ink: #040723;
+  --tari-purple: var(--tari-purple-500);
+  --tari-cloud: #ECEEFF;
+  --tari-green: #C9EB00;
+  --on-tari-green: var(--tari-ink);
+
   /* Official Tari scales (verbatim from the official theming package). */
   --tari-purple-50: #f6f0fe;
   --tari-purple-100: #decbfc;
@@ -61,9 +72,11 @@
   --tari-blue-500: #318efa;
   --tari-blue-800: #1b4bb2;
 
-  /* Typography: the official Tari interfaces use Poppins; referenced via
-     local() only (no bundled font binaries in this slice), with a system
-     fallback stack. rem-based sizes respect user font scaling. */
+  /* Typography: the official Tari interfaces use Poppins. Poppins is bundled
+     locally (latin subset, weights 400/500/600/700) via @fontsource/poppins,
+     so the desktop app ships its own font assets and makes no runtime web/font
+     request. The system fallback stack is preserved for environments without
+     the bundled assets. rem-based sizes respect user font scaling. */
   --font-family: "Poppins", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace;
 
@@ -78,11 +91,12 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
-  /* Surfaces: a slightly cooler, darker lavender-gray page background with
-     near-white cards, so cards, header, and sidebar read as distinct
-     surfaces instead of one washed-out field. The sidebar gets its own
-     subtly recessed surface between the page and the cards. */
-  --bg: #e7e9f2;
+  /* Surfaces: Tari Cloud (#ECEEFF) is the canonical light brand page
+     background. Near-white cards keep a distinct hierarchy above it, and the
+     sidebar gets its own subtly recessed surface between the page and the
+     cards. Not every light surface is identical — only the page reads as
+     Tari Cloud. */
+  --bg: var(--tari-cloud);
   --surface: #fcfcfe;
   --surface-sunken: #eef0f6;
   --nav-surface: #f0f1f8;
@@ -107,11 +121,13 @@
   --link: var(--tari-purple-700);
   --focus-ring: var(--tari-purple-500);
 
-  /* Status (text-safe contrast on light surfaces). */
+  /* Status (text-safe contrast on light surfaces). --ok is a readable dark
+     green for plain text and notice borders on light surfaces; prominent
+     FILLED positive components (pill-ok) use --tari-green / --on-tari-green
+     directly so the same Tari Green is shown in both themes. */
   --ok: var(--tari-green-700);
-  --ok-bg: #d6f5e1;
   --warn: var(--tari-orange-700);
-  --warn-bg: #fbebD9;
+  --warn-bg: #fbebd9;
   --error: var(--tari-red-700);
   --error-bg: #fee4e2;
   --info: var(--tari-blue-800);
@@ -124,32 +140,46 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: var(--tari-bg-950);
-  --surface: var(--tari-bg-900);
-  --surface-sunken: var(--tari-bg-950);
+  /* Tari Ink (#040723) is the canonical dark structural base background.
+     Secondary surfaces are deliberately derived from Ink with a subtle
+     Purple influence (not generic charcoal): the card/nav/header surface
+     lifts Ink by a small purple-tinted step, and the sunken surface sits
+     between the page and the cards. Depth is preserved (cards read above
+     the page; sunken areas read below cards) without flattening to one
+     color or washing the whole UI in purple. */
+  --bg: var(--tari-ink);
+  --surface: #0d0c24;
+  --surface-sunken: #090820;
   /* Dark theme keeps the sidebar on the same surface as the cards. */
   --nav-surface: var(--surface);
   --text: #ffffff;
   --text-secondary: var(--tari-grey-100);
   --text-disabled: rgba(255, 255, 255, 0.5);
   --placeholder: rgba(255, 255, 255, 0.45);
-  --border: rgba(255, 255, 255, 0.16);
-  --border-strong: rgba(255, 255, 255, 0.34);
+  /* Borders derive from Tari Cloud (#ECEEFF) at low alpha so the structural
+     lines read as part of the same brand family rather than neutral gray. */
+  --border: rgba(236, 238, 255, 0.16);
+  --border-strong: rgba(236, 238, 255, 0.34);
 
   /* Brand accents: official dark-theme primary step (tariPurple 400/500). */
   --primary: var(--tari-purple-500);
   --primary-hover: var(--tari-purple-400);
   --primary-active: var(--tari-purple-300);
   --on-primary: #ffffff;
-  --accent-bg: var(--tari-purple-900);
-  --accent-bg-hover: var(--tari-bg-800);
+  /* Selection / brand surface treatments are translucent Tari Purple over
+     the dark surface (not a dense opaque purple block), so official Tari
+     Purple stays recognizable while the surface tone shows through. */
+  --accent-bg: rgba(129, 59, 245, 0.24);
+  --accent-bg-hover: rgba(129, 59, 245, 0.14);
   --accent-text: var(--tari-purple-200);
   --link: var(--tari-purple-300);
   --focus-ring: var(--tari-purple-300);
 
-  /* Status (text-safe contrast on dark surfaces). */
+  /* Status (text-safe contrast on dark surfaces). --ok is a readable light
+     green for plain text and notice borders on dark surfaces; prominent
+     FILLED positive components (pill-ok) use --tari-green / --on-tari-green
+     directly so the same Tari Green is shown in both themes. */
   --ok: var(--tari-green-300);
-  --ok-bg: #0f452f;
   --warn: var(--tari-orange-200);
   --warn-bg: #71391d;
   --error: var(--tari-red-300);
@@ -371,13 +401,15 @@ a {
 .nav-item:hover {
   background: var(--accent-bg-hover);
 }
-/* Selected state: background + weight + left accent bar, so the active
-   item never relies on color alone. */
+/* Selected state: translucent Tari Purple background + readable light purple
+   text + a clear exact-Tari-Purple (#813BF5) inset accent bar, so the active
+   item never relies on color alone and official Tari Purple is recognizable
+   without becoming a dense opaque block. */
 .nav-item[aria-current="page"] {
   background: var(--accent-bg);
   color: var(--accent-text);
   font-weight: 600;
-  box-shadow: inset 3px 0 0 0 var(--accent-text);
+  box-shadow: inset 3px 0 0 0 var(--primary);
 }
 /* Section headings: small, muted, letter-spaced labels that are clearly
    not clickable navigation items. */
@@ -502,7 +534,7 @@ a {
    a confirmation dialog; the backend lifecycle remains authoritative. */
 .btn-danger {
   background: var(--error);
-  color: #ffffff;
+  color: var(--on-primary);
 }
 .btn-danger:hover:not(:disabled) {
   background: var(--tari-red-500);
@@ -532,9 +564,14 @@ a {
   color: var(--text-secondary);
   border: 1px solid var(--border);
 }
+/* Prominent FILLED positive-state pill (OPEN, VERIFIED, successfully
+   anchored, completed/ready, etc.): the same canonical Tari Green fill with
+   Tari Ink text in BOTH themes, so the visible green UI language is
+   consistent. This is a filled component, not plain body text, so the lime
+   fill is paired with Ink text for readable contrast. */
 .pill-ok {
-  background: var(--ok-bg);
-  color: var(--ok);
+  background: var(--tari-green);
+  color: var(--on-tari-green);
 }
 .pill-warn {
   background: var(--warn-bg);
@@ -1279,7 +1316,7 @@ table.data th {
   width: 6rem;
 }
 .voter-textarea {
-  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 0.8125rem;
   resize: vertical;
 }
@@ -1338,7 +1375,7 @@ table.data th {
 }
 .selection-option-id {
   color: var(--text-secondary);
-  font-family: ui-monospace, "Cascadia Mono", "Consolas", monospace;
+  font-family: var(--font-mono);
   font-size: 0.75rem;
 }
 .selection-option-desc {
