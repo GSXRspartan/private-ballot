@@ -295,6 +295,174 @@ impl GuiCoreError {
         )
     }
 
+    /// A mutable anchor output/state path is inside the finalized archive
+    /// directory (HIGH-2). Writing there would mutate the finalized archive.
+    #[must_use]
+    pub const fn live_anchor_output_within_archive() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_OUTPUT_WITHIN_ARCHIVE",
+            GuiErrorCategory::InvalidInput,
+            Some("live-anchor-config"),
+            "anchor config, snapshot, and evidence paths must be outside the finalized archive directory",
+        )
+    }
+
+    /// A walletd/indexer endpoint is not a loopback host (HIGH-3).
+    #[must_use]
+    pub const fn live_anchor_endpoint_not_loopback() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_ENDPOINT_NOT_LOOPBACK",
+            GuiErrorCategory::InvalidInput,
+            Some("live-anchor-config"),
+            "the walletd and indexer endpoints must be organizer-local loopback addresses",
+        )
+    }
+
+    /// The maximum fee is zero or exceeds the project policy ceiling (MEDIUM-3).
+    #[must_use]
+    pub const fn live_anchor_max_fee_out_of_policy() -> Self {
+        Self::new(
+            "GUI_LIVE_ANCHOR_MAX_FEE_OUT_OF_POLICY",
+            GuiErrorCategory::InvalidInput,
+            Some("live-anchor-config"),
+            "the maximum fee must be greater than zero and within the anchor fee policy ceiling",
+        )
+    }
+
+    /// GUI-driven publish was requested without the minimum privacy floor.
+    #[must_use]
+    pub const fn anchor_publish_privacy_floor() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_PRIVACY_FLOOR",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "publishing requires an explicit accepted-ballot floor of at least two",
+        )
+    }
+
+    /// The verified cohort is smaller than the configured floor.
+    #[must_use]
+    pub const fn anchor_publish_accepted_below_floor() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_COHORT_BELOW_FLOOR",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "the verified archive has fewer accepted ballots than the required floor",
+        )
+    }
+
+    /// The config lacks immutable live approval facts.
+    #[must_use]
+    pub const fn anchor_publish_live_facts_missing() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_LIVE_FACTS_MISSING",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "the anchor config lacks live approval facts required for publishing",
+        )
+    }
+
+    /// The decision string was not one of approve, reject, or none.
+    #[must_use]
+    pub const fn anchor_publish_decision_invalid() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_DECISION_INVALID",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "the publish decision must be approve, reject, or none",
+        )
+    }
+
+    /// The auth environment variable name is malformed or unreadable.
+    #[must_use]
+    pub const fn anchor_publish_auth_env_name_invalid() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_AUTH_ENV_NAME_INVALID",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "the walletd auth environment variable name is invalid or unreadable",
+        )
+    }
+
+    /// The auth token failed validation (empty, whitespace, or too long).
+    #[must_use]
+    pub const fn anchor_publish_auth_token_invalid() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_AUTH_TOKEN_INVALID",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "the walletd bearer token failed validation",
+        )
+    }
+
+    /// The bounded async executor could not be constructed.
+    #[must_use]
+    pub const fn anchor_publish_executor_failed() -> Self {
+        Self::new(
+            "GUI_ANCHOR_PUBLISH_EXECUTOR_FAILED",
+            GuiErrorCategory::Unavailable,
+            Some("anchor-publish"),
+            "the bounded network executor could not be constructed",
+        )
+    }
+
+    /// A real transport could not be constructed from the endpoints.
+    #[must_use]
+    pub const fn anchor_publish_transport_unavailable() -> Self {
+        Self::new(
+            "ANCHOR_PUBLISH_TRANSPORT_UNAVAILABLE",
+            GuiErrorCategory::Unavailable,
+            Some("anchor-publish"),
+            "a network transport could not be constructed from the configured endpoints",
+        )
+    }
+
+    /// A mutable anchor output/state path would write inside the finalized
+    /// archive directory (HIGH-2), rejected before any network action.
+    #[must_use]
+    pub const fn anchor_publish_output_within_archive() -> Self {
+        Self::new(
+            "ANCHOR_PUBLISH_OUTPUT_WITHIN_ARCHIVE",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "an anchor output path is inside the finalized archive; nothing was published",
+        )
+    }
+
+    /// A walletd/indexer endpoint is not loopback (HIGH-3), rejected before any
+    /// network action or secret transmission.
+    #[must_use]
+    pub const fn anchor_publish_endpoint_not_loopback() -> Self {
+        Self::new(
+            "ANCHOR_PUBLISH_ENDPOINT_NOT_LOOPBACK",
+            GuiErrorCategory::InvalidInput,
+            Some("anchor-publish"),
+            "publishing requires organizer-local loopback walletd and indexer endpoints",
+        )
+    }
+
+    /// Another live publish step already holds the per-anchor lock (HIGH-1).
+    #[must_use]
+    pub const fn anchor_publish_lock_busy() -> Self {
+        Self::new(
+            "ANCHOR_PUBLISH_LOCK_BUSY",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("anchor-publish"),
+            "another publish step for this election is already in progress",
+        )
+    }
+
+    /// The durable per-anchor publish lock could not be acquired (HIGH-1).
+    #[must_use]
+    pub const fn anchor_publish_lock_unavailable() -> Self {
+        Self::new(
+            "ANCHOR_PUBLISH_LOCK_UNAVAILABLE",
+            GuiErrorCategory::FileIo,
+            Some("anchor-publish"),
+            "the publish lock could not be acquired; nothing was published",
+        )
+    }
+
     /// An archive content file listed in the catalog is missing on disk.
     #[must_use]
     pub const fn archive_missing_file() -> Self {

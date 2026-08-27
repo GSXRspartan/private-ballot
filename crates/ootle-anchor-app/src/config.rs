@@ -94,8 +94,12 @@ pub enum ConfigFileError {
     UnsupportedNetwork,
     /// The maximum fee was zero.
     InvalidMaxFee,
+    /// The maximum fee exceeded the project policy ceiling.
+    MaxFeeAboveCeiling,
     /// The receipt-query attempt count was zero.
     InvalidReceiptQueryAttempts,
+    /// The optional request timeout was outside the sane bounds.
+    InvalidRequestTimeout,
     /// The backoff base was zero or the cap was below the base.
     InvalidBackoff,
     /// A path was not absolute or exceeded the bounded length.
@@ -123,7 +127,9 @@ impl ConfigFileError {
             Self::InvalidData => "CONFIG_INVALID_DATA",
             Self::UnsupportedNetwork => "CONFIG_UNSUPPORTED_NETWORK",
             Self::InvalidMaxFee => "CONFIG_INVALID_MAX_FEE",
+            Self::MaxFeeAboveCeiling => "CONFIG_MAX_FEE_ABOVE_CEILING",
             Self::InvalidReceiptQueryAttempts => "CONFIG_INVALID_RECEIPT_QUERY_ATTEMPTS",
+            Self::InvalidRequestTimeout => "CONFIG_INVALID_REQUEST_TIMEOUT",
             Self::InvalidBackoff => "CONFIG_INVALID_BACKOFF",
             Self::InvalidPath => "CONFIG_INVALID_PATH",
             Self::NetworkMismatch => "CONFIG_NETWORK_MISMATCH",
@@ -156,9 +162,11 @@ fn from_adapter(error: NetworkAdapterConfigError) -> ConfigFileError {
     match error {
         NetworkAdapterConfigError::UnsupportedNetwork => ConfigFileError::UnsupportedNetwork,
         NetworkAdapterConfigError::InvalidMaxFee => ConfigFileError::InvalidMaxFee,
+        NetworkAdapterConfigError::MaxFeeAboveCeiling => ConfigFileError::MaxFeeAboveCeiling,
         NetworkAdapterConfigError::InvalidReceiptQueryAttempts => {
             ConfigFileError::InvalidReceiptQueryAttempts
         }
+        NetworkAdapterConfigError::InvalidRequestTimeout => ConfigFileError::InvalidRequestTimeout,
     }
 }
 

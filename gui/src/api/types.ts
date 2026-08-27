@@ -310,6 +310,80 @@ export interface GuiAnchorEvidenceInspectionV1 {
   human_review_summary: string;
 }
 
+/** Request for one bounded live anchor lifecycle step (organizer-only).
+ *
+ * The frontend cannot choose which environment variable holds the walletd
+ * bearer secret; it only signals whether to attach the token. The backend
+ * reads exactly one fixed variable (WALLETD_AUTH_TOKEN) and nothing else. */
+export interface GuiLiveAnchorStepRequestV1 {
+  config_path: string;
+  archive_directory: string;
+  use_walletd_auth: boolean;
+  decision: "approve" | "reject" | "none";
+}
+
+/** Result of one bounded live anchor lifecycle step. */
+export interface GuiLiveAnchorStepResultV1 {
+  machine_code: string;
+  phase: string;
+  phase_is_terminal: boolean;
+  phase_is_terminal_success: boolean;
+  transaction_id: string | null;
+  next_backoff_secs: number | null;
+  diagnostic: string | null;
+  evidence_path: string;
+  evidence_written: boolean;
+  snapshot_path: string;
+  network: string;
+  manifest_hash_hex: string;
+  archive_hash_hex: string;
+  anchor_digest_hex: string;
+}
+
+/** Request to generate a live anchor config from a verified finalized archive. */
+export interface GuiLiveAnchorConfigRequestV1 {
+  archive_directory: string;
+  output_config_path: string;
+  network: string;
+  walletd_endpoint: string;
+  indexer_endpoint: string;
+  account_reference: string;
+  fee_component: string;
+  seal_signer_kind: string;
+  seal_signer_id: string;
+  declared_seal_public_key: string;
+  dedicated_organizer_wallet_attested: boolean;
+  max_fee: number;
+  required_accepted_ballot_floor: number;
+  reduced_anonymity_acknowledged: boolean;
+  snapshot_path: string;
+  evidence_path: string;
+  backoff_base_secs: number;
+  backoff_cap_secs: number;
+  receipt_query_attempts: number;
+  request_timeout_secs: number | null;
+  ttl_secs: number | null;
+}
+
+/** Result of generating a live anchor config. */
+export interface GuiLiveAnchorConfigResultV1 {
+  config_path: string;
+  input_provenance: string;
+  manifest_hash_hex: string;
+  archive_hash_hex: string;
+  anchor_digest_hex: string;
+  accepted_ballot_count: number;
+  required_accepted_ballot_floor: number;
+  reduced_anonymity: boolean;
+  reduced_anonymity_acknowledged: boolean;
+  fee_component: string;
+  declared_seal_public_key: string;
+  seal_assurance: string;
+  dedicated_organizer_wallet_attested: boolean;
+  config_file_blake3_256: string;
+  config_file_bytes: number;
+}
+
 /** Bounded command error payload (mirror of the shell's CommandError). */
 export interface GuiCommandError {
   code: string;

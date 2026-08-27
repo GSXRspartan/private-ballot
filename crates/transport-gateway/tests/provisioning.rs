@@ -45,10 +45,7 @@ fn provision_valid_bundle(
     let dir = unique_dir(label);
     let artifacts = common::artifacts();
     let election_id = artifacts.manifest().election_id().as_bytes().to_vec();
-    let manifest_hash = artifacts
-        .manifest_hash()
-        .as_bytes()
-        .to_owned();
+    let manifest_hash = artifacts.manifest_hash().as_bytes().to_owned();
     let binding = TestElectionBindingV1 {
         election_id,
         manifest_hash,
@@ -86,7 +83,9 @@ fn valid_bundle_loads_and_validates_intake_startup() {
 #[test]
 fn mutated_gateway_secret_fails_closed_at_load_before_network() {
     let (dir, _artifacts, _binding) = provision_valid_bundle("mutated-secret");
-    let secret_path = dir.join("organizer-private").join("gateway-receiver-secret.bin");
+    let secret_path = dir
+        .join("organizer-private")
+        .join("gateway-receiver-secret.bin");
     let mut secret = std::fs::read(&secret_path).expect("read secret");
     assert_eq!(secret.len(), 32, "gateway receiver secret is 32 bytes");
     // Flip a bit that survives X25519 scalar clamping (clamping clears the low
@@ -118,10 +117,10 @@ fn validate_intake_startup_catches_descriptor_gateway_key_mismatch() {
     // Replace the descriptor with one carrying a different gateway public key
     // but otherwise valid for the same election. This simulates a descriptor
     // whose gateway key disagrees with the actual secret.
+    use hpke::{Kem as KemTrait, Serializable, kem::X25519HkdfSha256};
     use tari_cc_private_ballot_gui_core::{
         BatchPolicyV1, PaddingPolicyV1, TransportDescriptorV1, TransportRoutePolicyV1,
     };
-    use hpke::{Kem as KemTrait, Serializable, kem::X25519HkdfSha256};
     type Kem = X25519HkdfSha256;
     let (_other_secret, other_public) = Kem::gen_keypair();
     let mut other_gateway = [0u8; 32];

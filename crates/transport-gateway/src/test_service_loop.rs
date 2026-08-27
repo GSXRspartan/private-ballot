@@ -22,8 +22,8 @@ use std::time::Duration;
 use ed25519_dalek::SigningKey;
 
 use tari_cc_private_ballot_gui_core::{
-    AuthoritativeLifecycleFenceV1, GuiElectionSessionV1, TransportDescriptorV1,
-    AuthenticatedElectionStatusStatementV1,
+    AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1, GuiElectionSessionV1,
+    TransportDescriptorV1,
 };
 
 use crate::TransportGatewaySimulatorV1;

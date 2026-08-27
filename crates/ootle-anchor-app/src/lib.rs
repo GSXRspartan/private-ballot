@@ -29,10 +29,15 @@
 pub mod backoff;
 pub mod cli;
 pub mod config;
+pub mod create_intent;
 pub mod driver;
 pub mod evidence;
 pub mod executor;
 pub mod inspect_snapshot;
+pub mod path_guard;
+pub mod policy;
+pub mod poll_gate;
+pub mod publish_lock;
 pub mod report;
 pub mod snapshot_store;
 pub mod terminal_index;
@@ -46,7 +51,8 @@ pub use config::{
     SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
 };
 pub use driver::{
-    AnchorAppDriver, DriverError, DriverRunOutcome, OperatorDecision, VerifiedRuntimeArchiveFactsV1,
+    AnchorAppDriver, DriverError, DriverRunOutcome, DriverSingleStepOutcomeV1, OperatorDecision,
+    VerifiedRuntimeArchiveFactsV1,
 };
 pub use evidence::{
     AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError, EvidenceFileError,
@@ -54,6 +60,9 @@ pub use evidence::{
     write_evidence_atomic,
 };
 pub use executor::{TokioBlockingExecutor, TokioRuntimeBuildError};
+pub use policy::{
+    OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1, WALLETD_AUTH_TOKEN_ENV_VAR_V1,
+};
 pub use report::MachineReportCode;
 pub use snapshot_store::{
     MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1,

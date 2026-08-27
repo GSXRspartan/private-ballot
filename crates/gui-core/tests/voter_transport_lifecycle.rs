@@ -28,16 +28,16 @@
 mod common;
 
 use ed25519_dalek::SigningKey;
+use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
+use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
     AppliedElectionStatusV1, AuthenticatedElectionStatusStatementV1, BatchPolicyV1,
     DescriptorConsistencyStoreV1, ElectionStatusErrorV1, ElectionStatusKnowledgeV1,
     GuiElectionArtifactsV1, GuiElectionSessionV1, GuiVoterSessionV1, PaddingPolicyV1,
-    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
-    TransportError, TransportRoutePolicyV1, verify_and_apply_election_status_statement_v1,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1, TransportError,
+    TransportRoutePolicyV1, verify_and_apply_election_status_statement_v1,
     voter_selectable_options,
 };
-use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
-use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_protocol::ManifestHash;
 
 use common::{approval_limits, artifacts, candidate_bytes, manifest_with, registry_bytes};
@@ -297,8 +297,13 @@ fn open_status_requires_the_pinned_office_then_applies_monotonically() {
     // never authenticate this office's statements.
     let open_bytes = office.signed_status(&identity, ElectionLifecycleStateV1::Open, 2);
     let unrelated_roots = OfficeFixture::new(0x7B).roots();
-    let error = apply(&mut voter_session, &mut knowledge, &unrelated_roots, &open_bytes)
-        .expect_err("status without the pinned office authority must be refused");
+    let error = apply(
+        &mut voter_session,
+        &mut knowledge,
+        &unrelated_roots,
+        &open_bytes,
+    )
+    .expect_err("status without the pinned office authority must be refused");
     assert!(matches!(
         error,
         ElectionStatusErrorV1::InvalidSignature | ElectionStatusErrorV1::UntrustedRoot

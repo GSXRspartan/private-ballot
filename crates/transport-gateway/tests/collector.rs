@@ -686,7 +686,11 @@ fn accepted_delivery_is_handed_off_to_inbox_and_retry_is_deduped() {
         );
         assert_eq!(code, 200);
     }
-    assert_eq!(count_packages(), 1, "an accepted delivery is handed off once");
+    assert_eq!(
+        count_packages(),
+        1,
+        "an accepted delivery is handed off once"
+    );
 
     // An EXACT retry recovers the acceptance (still 200) but is content-addressed:
     // it never writes a second file and never inflates the accepted count.
@@ -708,7 +712,11 @@ fn accepted_delivery_is_handed_off_to_inbox_and_retry_is_deduped() {
         );
         assert_eq!(code, 200);
     }
-    assert_eq!(count_packages(), 1, "an exact retry never writes a second file");
+    assert_eq!(
+        count_packages(),
+        1,
+        "an exact retry never writes a second file"
+    );
     assert_eq!(gateway.accepted_unique_count(), 1);
 }
 

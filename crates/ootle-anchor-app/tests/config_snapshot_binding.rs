@@ -6,6 +6,8 @@
 //! behavior. A mismatch never contacts a scripted transport and never mutates
 //! the snapshot, evidence, transaction ID, or fingerprint.
 
+#![cfg(feature = "test-support")]
+
 mod common;
 
 use common::*;

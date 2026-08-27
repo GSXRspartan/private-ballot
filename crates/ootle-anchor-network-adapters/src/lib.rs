@@ -51,7 +51,10 @@ mod indexer;
 mod walletd;
 
 pub use auth::{WalletdAuthSecret, WalletdAuthSecretError};
-pub use config::{NetworkAdapterConfig, NetworkAdapterConfigError};
+pub use config::{
+    NetworkAdapterConfig, NetworkAdapterConfigError, OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1,
+    OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1, OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1,
+};
 pub use endpoint::{
     IndexerEndpoint, IndexerEndpointError, MAX_ENDPOINT_BASE_PATH_BYTES, WalletdEndpoint,
     WalletdEndpointError,

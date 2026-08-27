@@ -44,16 +44,22 @@ use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptCoordinator, AnchorReceiptQueryV1, VerifiedIndexerAnchorV1,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
-    WalletdAnchorSnapshotV1, WalletdSubmissionStateV1,
+    WalletdAnchorAdapterError, WalletdAnchorCoordinator, WalletdAnchorSnapshotV1,
+    WalletdSubmissionStateV1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, ManifestHash};
 
 use crate::backoff::WallClockBackoff;
 use crate::config::{AnchorAppConfig, AnchorConfigInputProvenanceV1};
+use crate::create_intent::{self, CreateIntentFileError};
 use crate::evidence::{
     AnchorEvidenceRecordV1, ArchiveProofInputs, EvidenceError, EvidenceFileError,
     LiveEvidenceApprovalFactsV1, TerminalEvidenceInputs, write_evidence_atomic,
 };
+use crate::path_guard::path_is_within_archive;
+use crate::policy::OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1;
+use crate::poll_gate;
+use crate::publish_lock::{self, PublishLockError};
 use crate::report::MachineReportCode;
 use crate::snapshot_store::{self, SnapshotFileError};
 use crate::terminal_index::{
@@ -103,6 +109,30 @@ pub enum DriverError {
     RuntimeArchiveVerificationFailed,
     /// Runtime archive facts did not exactly match the canonical config.
     RuntimeArchiveBindingMismatch,
+    /// Live publication was attempted below the shared minimum accepted-ballot
+    /// privacy floor (HIGH-4). Enforced in this shared layer before any network
+    /// action so GUI, CLI, and direct driver invocations are identically bound.
+    PrivacyFloorNotMet,
+    /// A mutable anchor output/state path (snapshot, evidence, or poll gate)
+    /// equals or is nested inside the finalized archive directory (HIGH-2).
+    /// Writing there would mutate the supposedly finalized archive.
+    OutputPathWithinArchive,
+    /// A walletd or indexer endpoint is not a loopback host (HIGH-3). Live
+    /// publication requires organizer-local endpoints so the walletd bearer
+    /// token and every anchor request can only ever reach the operator's own
+    /// machine.
+    NonLoopbackEndpoint,
+    /// Another live publish step already holds the per-anchor lock (HIGH-1).
+    PublishLockBusy,
+    /// The durable per-anchor publish lock could not be acquired (I/O failure).
+    PublishLockUnavailable,
+    /// The durable pre-create intent could not be written, cleared, or checked.
+    CreateIntent(CreateIntentFileError),
+    /// A prior walletd create may have succeeded but its opaque response was
+    /// lost. Walletd exposes no supported lookup by the project's deterministic
+    /// request id/fingerprint, so the caller must reconcile it manually rather
+    /// than issuing a blind second create.
+    CreateRecoveryRequired,
 }
 
 impl DriverError {
@@ -129,6 +159,13 @@ impl DriverError {
             Self::RuntimeArchiveRequired => "DRIVER_RUNTIME_ARCHIVE_REQUIRED",
             Self::RuntimeArchiveVerificationFailed => "DRIVER_RUNTIME_ARCHIVE_VERIFICATION_FAILED",
             Self::RuntimeArchiveBindingMismatch => "DRIVER_RUNTIME_ARCHIVE_BINDING_MISMATCH",
+            Self::PrivacyFloorNotMet => "DRIVER_PRIVACY_FLOOR_NOT_MET",
+            Self::OutputPathWithinArchive => "DRIVER_OUTPUT_PATH_WITHIN_ARCHIVE",
+            Self::NonLoopbackEndpoint => "DRIVER_NON_LOOPBACK_ENDPOINT",
+            Self::PublishLockBusy => "DRIVER_PUBLISH_LOCK_BUSY",
+            Self::PublishLockUnavailable => "DRIVER_PUBLISH_LOCK_UNAVAILABLE",
+            Self::CreateIntent(error) => error.as_str(),
+            Self::CreateRecoveryRequired => "DRIVER_CREATE_RECOVERY_REQUIRED",
         }
     }
 }
@@ -162,6 +199,12 @@ impl From<LifecycleError> for DriverError {
 impl From<TerminalIndexError> for DriverError {
     fn from(error: TerminalIndexError) -> Self {
         Self::TerminalIndex(error)
+    }
+}
+
+impl From<CreateIntentFileError> for DriverError {
+    fn from(error: CreateIntentFileError) -> Self {
+        Self::CreateIntent(error)
     }
 }
 
@@ -221,7 +264,6 @@ impl DriverRunOutcome {
             Self::NotYetFinalized => MachineReportCode::NotYetFinalized,
         }
     }
-
     /// Returns the evidence record, if this is a terminal outcome.
     #[must_use]
     pub fn evidence(&self) -> Option<&AnchorEvidenceRecordV1> {
@@ -247,6 +289,30 @@ pub enum OperatorDecision {
     Reject,
     /// Make no decision; the run stops at `Prepared`.
     NoDecision,
+}
+
+/// The result of one bounded [`AnchorAppDriver::run_single_step`] call.
+///
+/// `outcome` is `Some` exactly when the lifecycle reached a terminal (or
+/// explicitly stopped) state this step; otherwise the phase is resumable and
+/// `next_backoff_secs` reports the suggested wait before the next poll.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverSingleStepOutcomeV1 {
+    /// The terminal outcome, when this step reached one.
+    pub outcome: Option<DriverRunOutcome>,
+    /// The phase after this step.
+    pub phase: UnifiedAnchorLifecyclePhase,
+    /// The bound transaction id, when one exists.
+    pub transaction_id: Option<tari_cc_private_ballot_anchor_transport::AnchorTransactionId>,
+    /// Suggested backoff before the next poll attempt, if any.
+    pub next_backoff_secs: Option<u64>,
+}
+
+/// One iteration result of the shared run-loop body.
+enum DriverAdvanceOnceV1 {
+    Terminal(DriverRunOutcome),
+    Continue,
+    ContinueAfter(core::time::Duration),
 }
 
 /// In-memory proof that one runtime archive verification pass matched the
@@ -340,7 +406,11 @@ impl VerifiedRuntimeArchiveFactsV1 {
 
     /// Test-only constructor for scripted driver tests that do not create a
     /// real finalized archive on disk.
-    #[doc(hidden)]
+    ///
+    /// This is deliberately absent from normal production builds. Live
+    /// publication can obtain runtime facts only through
+    /// [`Self::from_archive_and_config`].
+    #[cfg(feature = "test-support")]
     pub fn matching_config_for_test(config: &AnchorAppConfig) -> Result<Self, DriverError> {
         let facts = config
             .live_approval_facts()
@@ -392,6 +462,11 @@ where
     terminal_index_root: Option<PathBuf>,
     terminal_index_phase_override: Option<UnifiedAnchorLifecyclePhase>,
     runtime_archive: Option<VerifiedRuntimeArchiveFactsV1>,
+    /// The finalized archive directory this live driver was bound to, retained
+    /// so the shared containment guard (HIGH-2) can reject any output/state path
+    /// that would mutate it. `None` for offline scripted drivers with no archive
+    /// directory on disk.
+    archive_dir: Option<PathBuf>,
 }
 
 impl<W, I> AnchorAppDriver<W, I>
@@ -427,6 +502,7 @@ where
             terminal_index_root: None,
             terminal_index_phase_override: None,
             runtime_archive: None,
+            archive_dir: None,
         })
     }
 
@@ -448,6 +524,7 @@ where
         let mut driver = Self::new(config, walletd_adapter, indexer_adapter)?;
         driver.terminal_index_root = Some(default_terminal_index_root()?);
         driver.runtime_archive = Some(runtime_archive);
+        driver.archive_dir = Some(archive_dir.to_path_buf());
         Ok(driver)
     }
 
@@ -469,27 +546,11 @@ where
             std::time::Duration::from_secs(config.backoff_cap_secs()),
         )
         .map_err(|_| DriverError::InvalidBackoff)?;
-        let snapshot = match snapshot_store::read_snapshot(config.snapshot_path()) {
-            Ok(snapshot) => Some(snapshot),
-            Err(SnapshotFileError::FileNotFound) => None,
-            Err(error) => return Err(DriverError::Snapshot(error)),
-        };
-
-        // Restore-time binding validation: the current configuration must not
-        // reinterpret a lifecycle created for another archive, election,
-        // network, account, fee, payload, or transaction. If a snapshot
-        // exists, its immutable anchor binding is compared with the
-        // config-derived binding before any transport construction or receipt
-        // lookup.
-        if let Some(ref snapshot) = snapshot {
-            Self::validate_snapshot_binding(&config, snapshot)?;
-        }
-
-        let max_attempts = config.network_adapter().receipt_query_max_attempts();
-        let orchestrator = match snapshot {
-            Some(snapshot) => AnchorLifecycleOrchestrator::from_snapshot(snapshot)?,
-            None => AnchorLifecycleOrchestrator::new(PollingPolicy::new(max_attempts)),
-        };
+        // Restore-time binding validation happens inside `load_orchestrator`:
+        // the current configuration must not reinterpret a lifecycle created
+        // for another archive, election, network, account, fee, payload, or
+        // transaction.
+        let orchestrator = Self::load_orchestrator(&config)?;
         Ok(Self {
             orchestrator,
             walletd_adapter,
@@ -499,7 +560,45 @@ where
             terminal_index_root: None,
             terminal_index_phase_override: None,
             runtime_archive: None,
+            archive_dir: None,
         })
+    }
+
+    /// Reads the persisted snapshot (if any), validates its immutable binding
+    /// against the current config, and builds the orchestrator. Shared by
+    /// [`Self::restore`] and the under-lock reload so the concurrency-safe
+    /// read-modify-write cycle always starts from the freshest on-disk state.
+    fn load_orchestrator(
+        config: &AnchorAppConfig,
+    ) -> Result<AnchorLifecycleOrchestrator, DriverError> {
+        let snapshot = match snapshot_store::read_snapshot(config.snapshot_path()) {
+            Ok(snapshot) => Some(snapshot),
+            Err(SnapshotFileError::FileNotFound) => None,
+            Err(error) => return Err(DriverError::Snapshot(error)),
+        };
+        if let Some(ref snapshot) = snapshot {
+            Self::validate_snapshot_binding(config, snapshot)?;
+        }
+        let max_attempts = config.network_adapter().receipt_query_max_attempts();
+        Ok(match snapshot {
+            Some(snapshot) => AnchorLifecycleOrchestrator::from_snapshot(snapshot)?,
+            None => AnchorLifecycleOrchestrator::new(PollingPolicy::new(max_attempts)),
+        })
+    }
+
+    /// Re-reads the on-disk snapshot into the orchestrator while the per-anchor
+    /// publish lock is held (HIGH-1). Because each Tauri invocation restores its
+    /// own driver from disk BEFORE acquiring the lock, a concurrent step may
+    /// have persisted a newer snapshot in the meantime; reloading here ensures
+    /// the locked step observes that newer state and never re-drives a
+    /// transition (e.g. re-submits) another step already performed. No-op for
+    /// offline scripted drivers (no terminal-index root).
+    fn reload_orchestrator_if_live(&mut self) -> Result<(), DriverError> {
+        if self.terminal_index_root.is_none() {
+            return Ok(());
+        }
+        self.orchestrator = Self::load_orchestrator(&self.config)?;
+        Ok(())
     }
 
     /// Restores a live driver with the production terminal index enabled.
@@ -519,6 +618,7 @@ where
         let mut driver = Self::restore(config, walletd_adapter, indexer_adapter)?;
         driver.terminal_index_root = Some(default_terminal_index_root()?);
         driver.runtime_archive = Some(runtime_archive);
+        driver.archive_dir = Some(archive_dir.to_path_buf());
         Ok(driver)
     }
 
@@ -527,7 +627,7 @@ where
     /// This is used by focused offline tests to avoid shared machine state. The
     /// standalone CLI uses [`Self::restore_live`] and the production default
     /// root.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_terminal_index_root_for_test(mut self, root: PathBuf) -> Self {
         self.terminal_index_root = Some(root);
@@ -536,10 +636,19 @@ where
 
     /// Supplies test-only runtime archive facts for scripted tests that do not
     /// materialize a finalized archive directory.
-    #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_runtime_archive_for_test(mut self, facts: VerifiedRuntimeArchiveFactsV1) -> Self {
         self.runtime_archive = Some(facts);
+        self
+    }
+
+    /// Supplies the bound archive directory for focused containment tests that
+    /// do not construct via [`Self::restore_live`]/[`Self::new_live`].
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_archive_dir_for_test(mut self, archive_dir: PathBuf) -> Self {
+        self.archive_dir = Some(archive_dir);
         self
     }
 
@@ -601,121 +710,384 @@ where
     ///
     /// Returns [`DriverError`] on any step failure.
     pub fn run(&mut self, decision: OperatorDecision) -> Result<DriverRunOutcome, DriverError> {
-        if self.config.input_provenance() != AnchorConfigInputProvenanceV1::ArchiveVerified {
-            return Err(DriverError::OfflineTestRawHashesNotLiveApproved);
-        }
-        self.require_runtime_archive_for_live_config()?;
-        if self.terminal_index_root.is_some() && self.config.live_approval_facts().is_none() {
-            return Err(DriverError::LiveApprovalFactsRequired);
-        }
+        self.require_live_preconditions()?;
+        self.with_publish_lock_if_live(|driver| driver.run_locked(decision))
+    }
+
+    /// The looped run body, executed while holding the per-anchor publish lock.
+    fn run_locked(&mut self, decision: OperatorDecision) -> Result<DriverRunOutcome, DriverError> {
+        self.reload_orchestrator_if_live()?;
         if let Some(evidence) = self.terminal_index_preflight()? {
             self.terminal_index_phase_override = Some(UnifiedAnchorLifecyclePhase::FinalizedAccept);
             return Ok(DriverRunOutcome::FinalizedAccept(evidence));
         }
 
+        self.require_no_uncertain_create()?;
+
         loop {
-            match self.orchestrator.phase() {
-                UnifiedAnchorLifecyclePhase::NotPrepared => {
-                    self.step_prepare()?;
-                    self.persist_snapshot()?;
+            // A stepped caller may have persisted a poll gate before restart.
+            // The looped path sleeps through that same durable deadline before
+            // its first (or a subsequently reloaded) eligible poll.
+            if self.is_polling_phase() {
+                if let Some(remaining) = self.poll_gate_remaining_if_live() {
+                    std::thread::sleep(core::time::Duration::from_secs(remaining));
                     continue;
                 }
-                UnifiedAnchorLifecyclePhase::Prepared => match decision {
-                    OperatorDecision::Reject => {
-                        self.step_reject()?;
-                        self.persist_snapshot()?;
-                        let evidence =
-                            self.terminal_evidence(TerminalEvidenceInputs::RejectedByApprover)?;
-                        self.write_terminal_evidence(&evidence)?;
-                        return Ok(DriverRunOutcome::RejectedByApprover(evidence));
-                    }
-                    OperatorDecision::Approve => {
-                        self.step_approve()?;
-                        self.persist_snapshot()?;
-                        continue;
-                    }
-                    OperatorDecision::NoDecision => {
-                        self.persist_snapshot()?;
-                        return Ok(DriverRunOutcome::NotYetFinalized);
-                    }
-                },
-                UnifiedAnchorLifecyclePhase::Approved => {
-                    self.persist_submit_write_ahead_snapshot()?;
-                    self.step_submit()?;
+            }
+            match self.advance_once(decision)? {
+                DriverAdvanceOnceV1::Terminal(outcome) => {
+                    self.clear_poll_gate_if_live();
+                    return Ok(outcome);
+                }
+                DriverAdvanceOnceV1::Continue => {}
+                DriverAdvanceOnceV1::ContinueAfter(delay) => {
+                    // Persist the not-before deadline before sleeping so a
+                    // restart (or a stepped takeover) honors the same backoff.
+                    self.write_poll_gate_if_live(delay);
+                    std::thread::sleep(delay);
+                }
+            }
+        }
+    }
+
+    /// Performs at most one bounded lifecycle transition and never sleeps.
+    ///
+    /// This is the interactive (GUI) counterpart of [`Self::run`]: it executes
+    /// exactly one iteration of the same run-loop body with identical
+    /// preconditions, terminal-index preflight, snapshot persistence,
+    /// write-ahead submit intent, evidence construction, and binding checks —
+    /// but returns before any backoff delay would elapse. The suggested
+    /// backoff is reported as `next_backoff_secs`; the caller may wait or call
+    /// again immediately. Polling attempts are tracked by the orchestrator
+    /// either way, so immediate re-invocation can never skip policy bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] on any step failure.
+    pub fn run_single_step(
+        &mut self,
+        decision: OperatorDecision,
+    ) -> Result<DriverSingleStepOutcomeV1, DriverError> {
+        self.require_live_preconditions()?;
+        self.with_publish_lock_if_live(|driver| driver.run_single_step_locked(decision))
+    }
+
+    /// The single-step body, executed while holding the per-anchor publish lock.
+    fn run_single_step_locked(
+        &mut self,
+        decision: OperatorDecision,
+    ) -> Result<DriverSingleStepOutcomeV1, DriverError> {
+        self.reload_orchestrator_if_live()?;
+        if let Some(evidence) = self.terminal_index_preflight()? {
+            self.terminal_index_phase_override = Some(UnifiedAnchorLifecyclePhase::FinalizedAccept);
+            self.clear_poll_gate_if_live();
+            return Ok(DriverSingleStepOutcomeV1 {
+                outcome: Some(DriverRunOutcome::FinalizedAccept(evidence)),
+                phase: self.phase(),
+                transaction_id: self.transaction_id().cloned(),
+                next_backoff_secs: None,
+            });
+        }
+        self.require_no_uncertain_create()?;
+        // MEDIUM-1: before a receipt poll, honor the persisted backoff deadline.
+        // A premature step returns a bounded "retry after" WITHOUT polling and
+        // WITHOUT consuming a receipt attempt; the deadline survives restart.
+        if self.is_polling_phase() {
+            if let Some(remaining) = self.poll_gate_remaining_if_live() {
+                return Ok(DriverSingleStepOutcomeV1 {
+                    outcome: None,
+                    phase: self.phase(),
+                    transaction_id: self.transaction_id().cloned(),
+                    next_backoff_secs: Some(remaining),
+                });
+            }
+        }
+        match self.advance_once(decision)? {
+            DriverAdvanceOnceV1::Terminal(outcome) => {
+                self.clear_poll_gate_if_live();
+                Ok(DriverSingleStepOutcomeV1 {
+                    outcome: Some(outcome),
+                    phase: self.phase(),
+                    transaction_id: self.transaction_id().cloned(),
+                    next_backoff_secs: None,
+                })
+            }
+            DriverAdvanceOnceV1::Continue => Ok(DriverSingleStepOutcomeV1 {
+                outcome: None,
+                phase: self.phase(),
+                transaction_id: self.transaction_id().cloned(),
+                next_backoff_secs: None,
+            }),
+            DriverAdvanceOnceV1::ContinueAfter(delay) => {
+                self.write_poll_gate_if_live(delay);
+                Ok(DriverSingleStepOutcomeV1 {
+                    outcome: None,
+                    phase: self.phase(),
+                    transaction_id: self.transaction_id().cloned(),
+                    next_backoff_secs: Some(u64::try_from(delay.as_secs()).unwrap_or(u64::MAX)),
+                })
+            }
+        }
+    }
+
+    /// Runs `body` while holding the per-anchor publish lock (HIGH-1) when this
+    /// is a live driver; offline scripted drivers (no terminal-index root) run
+    /// `body` directly.
+    fn with_publish_lock_if_live<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, DriverError>,
+    ) -> Result<T, DriverError> {
+        match self.terminal_index_root.clone() {
+            Some(root) => {
+                let key = self.anchor_lock_key();
+                publish_lock::with_publish_lock(&root, &key, map_publish_lock_error, || body(self))
+            }
+            None => body(self),
+        }
+    }
+
+    fn is_polling_phase(&self) -> bool {
+        matches!(
+            self.orchestrator.phase(),
+            UnifiedAnchorLifecyclePhase::Submitted | UnifiedAnchorLifecyclePhase::PollingInProgress
+        )
+    }
+
+    fn poll_gate_remaining_if_live(&self) -> Option<u64> {
+        if self.terminal_index_root.is_none() {
+            return None;
+        }
+        poll_gate::poll_gate_remaining_secs(self.config.snapshot_path())
+    }
+
+    fn write_poll_gate_if_live(&self, delay: core::time::Duration) {
+        if self.terminal_index_root.is_some() {
+            poll_gate::write_poll_gate(
+                self.config.snapshot_path(),
+                delay.as_secs(),
+                self.config.backoff_cap_secs(),
+            );
+        }
+    }
+
+    fn clear_poll_gate_if_live(&self) {
+        if self.terminal_index_root.is_some() {
+            poll_gate::clear_poll_gate(self.config.snapshot_path());
+        }
+    }
+
+    fn require_live_preconditions(&self) -> Result<(), DriverError> {
+        if self.config.input_provenance() != AnchorConfigInputProvenanceV1::ArchiveVerified {
+            return Err(DriverError::OfflineTestRawHashesNotLiveApproved);
+        }
+        // Verify the runtime archive against the config first: this refuses a
+        // missing runtime archive AND (via `ensure_matches_config`) any config
+        // lacking immutable live approval facts, so a live driver reaching the
+        // floor check below always has facts.
+        self.require_runtime_archive_for_live_config()?;
+        // Bind the facts explicitly and enforce the floor unconditionally —
+        // never gated on an optional terminal-index root — so no live entry
+        // point can slip a below-floor cohort through.
+        let Some(facts) = self.config.live_approval_facts() else {
+            return Err(DriverError::LiveApprovalFactsRequired);
+        };
+        // HIGH-4: shared privacy floor. Enforced here so every live entry point
+        // (GUI, CLI, direct driver) is bound identically, before any transport.
+        if facts.required_accepted_ballot_floor()
+            < OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1
+            || facts.accepted_ballot_count() < OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1
+        {
+            return Err(DriverError::PrivacyFloorNotMet);
+        }
+        // HIGH-2: no mutable output/state path may write into the finalized
+        // archive directory.
+        self.require_output_paths_outside_archive()?;
+        // HIGH-3: the walletd/indexer endpoints must be organizer-local so the
+        // bearer token and every anchor request can only reach this machine.
+        self.require_loopback_endpoints()?;
+        Ok(())
+    }
+
+    /// Refuses a second create while the durable record of a prior create is
+    /// unresolved. A prepared snapshot proves the create response was durably
+    /// recorded; only a `NotPrepared` lifecycle remains ambiguous.
+    fn require_no_uncertain_create(&self) -> Result<(), DriverError> {
+        if self.orchestrator.phase() != UnifiedAnchorLifecyclePhase::NotPrepared {
+            return Ok(());
+        }
+        if create_intent::exists(self.config.snapshot_path())? {
+            return Err(DriverError::CreateRecoveryRequired);
+        }
+        Ok(())
+    }
+
+    /// HIGH-2 containment guard: rejects when any mutable anchor state would
+    /// be written inside the bound finalized archive directory.
+    fn require_output_paths_outside_archive(&self) -> Result<(), DriverError> {
+        let Some(archive_dir) = self.archive_dir.as_deref() else {
+            return Ok(());
+        };
+        let snapshot_path = self.config.snapshot_path();
+        let poll_gate_path = poll_gate::poll_gate_path(snapshot_path);
+        let create_intent_path = create_intent::create_intent_path(snapshot_path);
+        let candidates = [
+            snapshot_path,
+            self.config.evidence_path(),
+            poll_gate_path.as_path(),
+            create_intent_path.as_path(),
+        ];
+        for candidate in candidates {
+            if path_is_within_archive(candidate, archive_dir) {
+                return Err(DriverError::OutputPathWithinArchive);
+            }
+        }
+        Ok(())
+    }
+
+    /// HIGH-3 endpoint policy: both endpoints must be loopback for live
+    /// publication (the walletd endpoint carries the optional bearer token).
+    fn require_loopback_endpoints(&self) -> Result<(), DriverError> {
+        let adapter = self.config.network_adapter();
+        if !adapter.walletd_endpoint().is_loopback() || !adapter.indexer_endpoint().is_loopback() {
+            return Err(DriverError::NonLoopbackEndpoint);
+        }
+        Ok(())
+    }
+
+    /// Deterministic per-anchor lock key: the election manifest hash. Unrelated
+    /// elections never contend; the terminal index is manifest-scoped too.
+    fn anchor_lock_key(&self) -> [u8; 32] {
+        *self.config.archive_manifest_hash().as_bytes()
+    }
+
+    /// One iteration of the run-loop body shared verbatim by [`Self::run`]
+    /// and [`Self::run_single_step`].
+    fn advance_once(
+        &mut self,
+        decision: OperatorDecision,
+    ) -> Result<DriverAdvanceOnceV1, DriverError> {
+        match self.orchestrator.phase() {
+            UnifiedAnchorLifecyclePhase::NotPrepared => {
+                self.step_prepare()?;
+                self.persist_snapshot()?;
+                create_intent::clear(self.config.snapshot_path())?;
+                Ok(DriverAdvanceOnceV1::Continue)
+            }
+            UnifiedAnchorLifecyclePhase::Prepared => match decision {
+                OperatorDecision::Reject => {
+                    self.step_reject()?;
                     self.persist_snapshot()?;
-                    continue;
-                }
-                UnifiedAnchorLifecyclePhase::Unknown => {
-                    self.step_recover()?;
-                    self.persist_snapshot()?;
-                    continue;
-                }
-                UnifiedAnchorLifecyclePhase::Submitted
-                | UnifiedAnchorLifecyclePhase::PollingInProgress => {
-                    let outcome = self.step_poll_once_and_maybe_sleep()?;
-                    self.persist_snapshot()?;
-                    if let Some(outcome) = outcome {
-                        if let Some(evidence) = outcome.evidence() {
-                            self.write_terminal_evidence(evidence)?;
-                        }
-                        return Ok(outcome);
-                    }
-                    continue;
-                }
-                UnifiedAnchorLifecyclePhase::FinalizedAccept => {
-                    let evidence = self.accept_evidence()?;
-                    self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::FinalizedAccept(evidence));
-                }
-                UnifiedAnchorLifecyclePhase::FinalizedFeeOnly => {
-                    let evidence = self.terminal_evidence(TerminalEvidenceInputs::FeeOnly {
-                        transaction_id: self
-                            .transaction_id()
-                            .cloned()
-                            .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
-                        ledger_position: None,
-                    })?;
-                    self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::FinalizedFeeOnly(evidence));
-                }
-                UnifiedAnchorLifecyclePhase::FinalizedReject => {
-                    let evidence = self.terminal_evidence(TerminalEvidenceInputs::Reject {
-                        transaction_id: self
-                            .transaction_id()
-                            .cloned()
-                            .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
-                        ledger_position: None,
-                    })?;
-                    self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::FinalizedReject(evidence));
-                }
-                UnifiedAnchorLifecyclePhase::FinalizedVerificationFailed => {
-                    let evidence =
-                        self.terminal_evidence(TerminalEvidenceInputs::VerificationFailed {
-                            transaction_id: self.transaction_id().cloned(),
-                            ledger_position: None,
-                        })?;
-                    self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::VerificationFailed(evidence));
-                }
-                UnifiedAnchorLifecyclePhase::FinalizedDisagreement => {
-                    let evidence =
-                        self.terminal_evidence(TerminalEvidenceInputs::Disagreement {
-                            transaction_id: self
-                                .transaction_id()
-                                .cloned()
-                                .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
-                            ledger_position: None,
-                        })?;
-                    self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::Disagreement(evidence));
-                }
-                UnifiedAnchorLifecyclePhase::RejectedByApprover => {
                     let evidence =
                         self.terminal_evidence(TerminalEvidenceInputs::RejectedByApprover)?;
                     self.write_terminal_evidence(&evidence)?;
-                    return Ok(DriverRunOutcome::RejectedByApprover(evidence));
+                    Ok(DriverAdvanceOnceV1::Terminal(
+                        DriverRunOutcome::RejectedByApprover(evidence),
+                    ))
                 }
+                OperatorDecision::Approve => {
+                    self.step_approve()?;
+                    self.persist_snapshot()?;
+                    Ok(DriverAdvanceOnceV1::Continue)
+                }
+                OperatorDecision::NoDecision => {
+                    self.persist_snapshot()?;
+                    Ok(DriverAdvanceOnceV1::Terminal(
+                        DriverRunOutcome::NotYetFinalized,
+                    ))
+                }
+            },
+            UnifiedAnchorLifecyclePhase::Approved => {
+                self.persist_submit_write_ahead_snapshot()?;
+                self.step_submit()?;
+                self.persist_snapshot()?;
+                Ok(DriverAdvanceOnceV1::Continue)
+            }
+            UnifiedAnchorLifecyclePhase::Unknown => {
+                self.step_recover()?;
+                self.persist_snapshot()?;
+                Ok(DriverAdvanceOnceV1::Continue)
+            }
+            UnifiedAnchorLifecyclePhase::Submitted
+            | UnifiedAnchorLifecyclePhase::PollingInProgress => {
+                let outcome = self.step_poll_once()?;
+                self.persist_snapshot()?;
+                match outcome {
+                    (Some(outcome), _) => {
+                        if let Some(evidence) = outcome.evidence() {
+                            self.write_terminal_evidence(evidence)?;
+                        }
+                        Ok(DriverAdvanceOnceV1::Terminal(outcome))
+                    }
+                    (None, Some(delay)) if !delay.is_zero() => {
+                        Ok(DriverAdvanceOnceV1::ContinueAfter(delay))
+                    }
+                    (None, _) => Ok(DriverAdvanceOnceV1::Continue),
+                }
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedAccept => {
+                let evidence = self.accept_evidence()?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::FinalizedAccept(evidence),
+                ))
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedFeeOnly => {
+                let evidence = self.terminal_evidence(TerminalEvidenceInputs::FeeOnly {
+                    transaction_id: self
+                        .transaction_id()
+                        .cloned()
+                        .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
+                    ledger_position: None,
+                })?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::FinalizedFeeOnly(evidence),
+                ))
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedReject => {
+                let evidence = self.terminal_evidence(TerminalEvidenceInputs::Reject {
+                    transaction_id: self
+                        .transaction_id()
+                        .cloned()
+                        .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
+                    ledger_position: None,
+                })?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::FinalizedReject(evidence),
+                ))
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedVerificationFailed => {
+                let evidence =
+                    self.terminal_evidence(TerminalEvidenceInputs::VerificationFailed {
+                        transaction_id: self.transaction_id().cloned(),
+                        ledger_position: None,
+                    })?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::VerificationFailed(evidence),
+                ))
+            }
+            UnifiedAnchorLifecyclePhase::FinalizedDisagreement => {
+                let evidence = self.terminal_evidence(TerminalEvidenceInputs::Disagreement {
+                    transaction_id: self
+                        .transaction_id()
+                        .cloned()
+                        .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
+                    ledger_position: None,
+                })?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::Disagreement(evidence),
+                ))
+            }
+            UnifiedAnchorLifecyclePhase::RejectedByApprover => {
+                let evidence =
+                    self.terminal_evidence(TerminalEvidenceInputs::RejectedByApprover)?;
+                self.write_terminal_evidence(&evidence)?;
+                Ok(DriverAdvanceOnceV1::Terminal(
+                    DriverRunOutcome::RejectedByApprover(evidence),
+                ))
             }
         }
     }
@@ -825,14 +1197,32 @@ where
         let max_fee = self.config.network_adapter().max_fee();
         let preparation = AnchorPreparationRequest::new(binding, max_fee, None);
         let build_request = tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation);
-        self.orchestrator.prepare_fee_bearing(
-            &mut self.walletd_adapter,
+        let (build_result, create) = WalletdAnchorCoordinator::build_fee_bearing_create_request(
             &build_request,
             self.config.network_adapter().fee_component(),
             self.config.network_adapter().seal_signer(),
             self.config.ttl_secs(),
-        )?;
-        Ok(())
+        )
+        .map_err(|error| DriverError::Lifecycle(LifecycleError::Walletd(error)))?;
+
+        // The intent must reach stable storage before the create RPC. Walletd
+        // returns its opaque request id only in the response and cannot yet
+        // reconcile by project id/fingerprint, so an uncertain result is
+        // intentionally fail-closed on restart.
+        create_intent::write_atomic(self.config.snapshot_path(), &self.config, &create)?;
+        match self.orchestrator.prepare_fee_bearing_prebuilt(
+            &mut self.walletd_adapter,
+            &build_result,
+            &create,
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if create_error_proves_no_side_effect(&error) {
+                    create_intent::clear(self.config.snapshot_path())?;
+                }
+                Err(DriverError::Lifecycle(error))
+            }
+        }
     }
 
     fn step_approve(&mut self) -> Result<(), DriverError> {
@@ -854,14 +1244,15 @@ where
         self.orchestrator.recover(&mut self.walletd_adapter)?;
         Ok(())
     }
-
-    /// Performs exactly one poll. If the phase becomes terminal, builds and
-    /// returns the corresponding evidence outcome. If polling exhausts the
-    /// policy, builds and returns `PollExhaustedUnknown`. Otherwise computes
-    /// the next delay and sleeps.
+    /// Performs exactly one poll without sleeping. Returns the terminal
+    /// outcome when the phase becomes terminal, otherwise the computed next
+    /// backoff delay (which may be zero).
     ///
-    /// Never sleeps after a terminal or exhaustion.
-    fn step_poll_once_and_maybe_sleep(&mut self) -> Result<Option<DriverRunOutcome>, DriverError> {
+    /// Never computes a delay after a terminal state or after policy
+    /// exhaustion.
+    fn step_poll_once(
+        &mut self,
+    ) -> Result<(Option<DriverRunOutcome>, Option<core::time::Duration>), DriverError> {
         let report = self
             .orchestrator
             .advance_one_poll(&mut self.indexer_adapter)?;
@@ -869,7 +1260,7 @@ where
 
         if phase == UnifiedAnchorLifecyclePhase::FinalizedAccept {
             let evidence = self.accept_evidence()?;
-            return Ok(Some(DriverRunOutcome::FinalizedAccept(evidence)));
+            return Ok((Some(DriverRunOutcome::FinalizedAccept(evidence)), None));
         }
         if phase == UnifiedAnchorLifecyclePhase::FinalizedFeeOnly {
             let evidence = self.terminal_evidence(TerminalEvidenceInputs::FeeOnly {
@@ -879,7 +1270,7 @@ where
                     .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
                 ledger_position: None,
             })?;
-            return Ok(Some(DriverRunOutcome::FinalizedFeeOnly(evidence)));
+            return Ok((Some(DriverRunOutcome::FinalizedFeeOnly(evidence)), None));
         }
         if phase == UnifiedAnchorLifecyclePhase::FinalizedReject {
             let evidence = self.terminal_evidence(TerminalEvidenceInputs::Reject {
@@ -889,14 +1280,14 @@ where
                     .ok_or(DriverError::Lifecycle(LifecycleError::NotSubmitted))?,
                 ledger_position: None,
             })?;
-            return Ok(Some(DriverRunOutcome::FinalizedReject(evidence)));
+            return Ok((Some(DriverRunOutcome::FinalizedReject(evidence)), None));
         }
         if phase == UnifiedAnchorLifecyclePhase::FinalizedVerificationFailed {
             let evidence = self.terminal_evidence(TerminalEvidenceInputs::VerificationFailed {
                 transaction_id: self.transaction_id().cloned(),
                 ledger_position: None,
             })?;
-            return Ok(Some(DriverRunOutcome::VerificationFailed(evidence)));
+            return Ok((Some(DriverRunOutcome::VerificationFailed(evidence)), None));
         }
 
         // Poll exhaustion surfaces as a resumable `Unknown` with the
@@ -909,20 +1300,18 @@ where
                 self.terminal_evidence(TerminalEvidenceInputs::PollExhaustedUnknown {
                     transaction_id: self.transaction_id().cloned(),
                 })?;
-            return Ok(Some(DriverRunOutcome::PollExhaustedUnknown(evidence)));
+            return Ok((Some(DriverRunOutcome::PollExhaustedUnknown(evidence)), None));
         }
 
-        // Non-terminal: sleep before the next attempt, but never sleep before
-        // the first attempt, after a terminal state, or after policy
-        // exhaustion. The next attempt index is 1-based.
+        // Non-terminal: compute the delay before the next attempt, but never
+        // before the first attempt. The next attempt index is 1-based.
         let next_attempt = report.attempts_consumed();
-        if next_attempt > 0 {
-            let delay = self.backoff.delay_for(next_attempt);
-            if !delay.is_zero() {
-                std::thread::sleep(delay);
-            }
-        }
-        Ok(None)
+        let delay = if next_attempt > 0 {
+            self.backoff.delay_for(next_attempt)
+        } else {
+            core::time::Duration::ZERO
+        };
+        Ok((None, Some(delay)))
     }
 
     // -----------------------------------------------------------------------
@@ -1117,6 +1506,27 @@ where
         snapshot_store::write_snapshot_atomic(self.config.snapshot_path(), &intent)?;
         Ok(())
     }
+}
+
+fn map_publish_lock_error(error: PublishLockError) -> DriverError {
+    match error {
+        PublishLockError::Busy => DriverError::PublishLockBusy,
+        PublishLockError::Unavailable => DriverError::PublishLockUnavailable,
+    }
+}
+
+/// Only an explicit walletd refusal/not-found response proves that no request
+/// was created.
+/// Transport, timeout, malformed-response, and availability errors all leave
+/// the pre-create intent in place because walletd may have observed the call.
+fn create_error_proves_no_side_effect(error: &LifecycleError) -> bool {
+    matches!(
+        error,
+        LifecycleError::Walletd(
+            WalletdAnchorAdapterError::RequestCreationRejected
+                | WalletdAnchorAdapterError::RequestNotFound
+        )
+    )
 }
 
 fn parse_hash(hex: &str) -> Result<[u8; 32], DriverError> {

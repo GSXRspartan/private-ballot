@@ -5153,6 +5153,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tari-cc-private-ballot-gui-core",
+ "tari-cc-private-ballot-ootle-anchor-app",
+ "tari-cc-private-ballot-ootle-anchor-network-adapters",
  "tari-cc-private-ballot-transport-gateway",
  "tari-cc-private-ballot-transport-network",
  "tauri",

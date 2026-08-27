@@ -143,8 +143,8 @@ pub(crate) fn reconcile_intake_lifecycle(
     if fence.state() == authoritative {
         return;
     }
-    let reserved = status_dir
-        .and_then(|dir| reserve_next_status_generation_v1(dir, manifest_hash_hex).ok());
+    let reserved =
+        status_dir.and_then(|dir| reserve_next_status_generation_v1(dir, manifest_hash_hex).ok());
     fence.observe(authoritative, reserved);
 }
 
@@ -394,74 +394,61 @@ fn organizer_tor_status_blocking(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let running = managed.as_mut();
-    let (
-        intake_running,
-        election_bound,
-        ready,
-        failed,
-        failure_reason,
-        accepted,
-        diag,
-        published,
-    ) = match running {
-        Some(m) => {
-            let same_election = bound
-                .as_ref()
-                .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
-            // AUTHORITATIVE RECONCILIATION HEARTBEAT: this read-only status
-            // command runs every few seconds while the ballot-office screen is
-            // open. Before reporting anything, converge the running collector's
-            // fence to the authoritative session lifecycle so a silently lost
-            // transition publication can never persist beyond one heartbeat.
-            // Same state is a lock-free no-op; only a real change touches the
-            // issuance ledger. No network, no Tor action, no clearnet.
-            if same_election
-                && let Some(b) = bound.as_ref()
-            {
-                reconcile_intake_lifecycle(
-                    &m.manifest_hash_hex,
-                    &m.lifecycle_fence,
-                    b.lifecycle,
-                    status_dir.as_deref(),
-                );
+    let (intake_running, election_bound, ready, failed, failure_reason, accepted, diag, published) =
+        match running {
+            Some(m) => {
+                let same_election = bound
+                    .as_ref()
+                    .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
+                // AUTHORITATIVE RECONCILIATION HEARTBEAT: this read-only status
+                // command runs every few seconds while the ballot-office screen is
+                // open. Before reporting anything, converge the running collector's
+                // fence to the authoritative session lifecycle so a silently lost
+                // transition publication can never persist beyond one heartbeat.
+                // Same state is a lock-free no-op; only a real change touches the
+                // issuance ledger. No network, no Tor action, no clearnet.
+                if same_election && let Some(b) = bound.as_ref() {
+                    reconcile_intake_lifecycle(
+                        &m.manifest_hash_hex,
+                        &m.lifecycle_fence,
+                        b.lifecycle,
+                        status_dir.as_deref(),
+                    );
+                }
+                let child_alive = m
+                    .tor_child
+                    .try_wait()
+                    .map(|status| status.is_none())
+                    .unwrap_or(false);
+                let worker_alive = m.service_loop.worker_is_alive();
+                let ready = same_election && child_alive && worker_alive;
+                // A recorded intake whose owned Tor child or collector worker has
+                // died is a bounded FAILED state — never an indefinite "starting".
+                let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
+                let failed = failure_reason.is_some();
+                let accepted = m.service_loop.accepted_unique_count();
+                let published = Some((m.lifecycle_fence.state(), m.lifecycle_fence.generation()));
+                let diag = Some((
+                    m.onion_hostname.clone(),
+                    descriptor_fingerprint_hex(&m.descriptor),
+                    m.collector_addr.to_string(),
+                    m.tor_data_dir.to_string_lossy().into_owned(),
+                    m.voter_bundle_path.to_string_lossy().into_owned(),
+                    m.durable_inbox_dir.to_string_lossy().into_owned(),
+                ));
+                (
+                    true,
+                    same_election,
+                    ready,
+                    failed,
+                    failure_reason,
+                    accepted,
+                    diag,
+                    published,
+                )
             }
-            let child_alive = m
-                .tor_child
-                .try_wait()
-                .map(|status| status.is_none())
-                .unwrap_or(false);
-            let worker_alive = m.service_loop.worker_is_alive();
-            let ready = same_election && child_alive && worker_alive;
-            // A recorded intake whose owned Tor child or collector worker has
-            // died is a bounded FAILED state — never an indefinite "starting".
-            let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
-            let failed = failure_reason.is_some();
-            let accepted = m.service_loop.accepted_unique_count();
-            let published = Some((
-                m.lifecycle_fence.state(),
-                m.lifecycle_fence.generation(),
-            ));
-            let diag = Some((
-                m.onion_hostname.clone(),
-                descriptor_fingerprint_hex(&m.descriptor),
-                m.collector_addr.to_string(),
-                m.tor_data_dir.to_string_lossy().into_owned(),
-                m.voter_bundle_path.to_string_lossy().into_owned(),
-                m.durable_inbox_dir.to_string_lossy().into_owned(),
-            ));
-            (
-                true,
-                same_election,
-                ready,
-                failed,
-                failure_reason,
-                accepted,
-                diag,
-                published,
-            )
-        }
-        None => (false, false, false, false, None, 0, None, None),
-    };
+            None => (false, false, false, false, None, 0, None, None),
+        };
 
     let message = status_message(
         tor_found,
@@ -612,7 +599,13 @@ fn start_private_intake_blocking(
             .map(|active| active.session.lifecycle_state_v1())
             .unwrap_or(ElectionLifecycleStateV1::Frozen)
     };
-    let running = start_intake_worker(app, &tor_executable, &paths, &bound, authoritative_lifecycle)?;
+    let running = start_intake_worker(
+        app,
+        &tor_executable,
+        &paths,
+        &bound,
+        authoritative_lifecycle,
+    )?;
     // The worker was just confirmed alive (child liveness re-checked after
     // discovery, worker liveness checked in step 9), so report it as running.
     let status = running_status(&running, true, true, authoritative_lifecycle);
@@ -630,9 +623,7 @@ fn start_private_intake_blocking(
 ///
 /// ORGANIZER-AUTHORITATIVE: only the ballot office controls its intake worker.
 #[tauri::command]
-pub async fn stop_private_intake(
-    app: AppHandle,
-) -> Result<OrganizerIntakeStatusV1, CommandError> {
+pub async fn stop_private_intake(app: AppHandle) -> Result<OrganizerIntakeStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
         stop_private_intake_blocking(&app, state.inner())
@@ -900,8 +891,8 @@ fn start_intake_worker(
             .map_err(CommandError::from)?;
 
     // 3. Fresh intake worker session (NOT the authoritative GUI session).
-    let mut session = GuiElectionSessionV1::new(bound.artifacts.clone())
-        .map_err(CommandError::from)?;
+    let mut session =
+        GuiElectionSessionV1::new(bound.artifacts.clone()).map_err(CommandError::from)?;
     session.open().map_err(CommandError::from)?;
 
     // 4. Bind the loopback collector (bound but not yet serviced).
@@ -1061,8 +1052,7 @@ fn start_intake_worker(
     let status_dir = ensure_voter_election_status_directory_v1(&app_data_root(app)?)?;
     let seed_generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
         .unwrap_or_else(|_| {
-            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
-                .unwrap_or(0)
+            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex).unwrap_or(0)
         });
     let lifecycle_fence =
         AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, seed_generation);
@@ -1076,7 +1066,10 @@ fn start_intake_worker(
     )
     .with_accepted_package_inbox(durable_inbox_dir.clone())
     .with_lifecycle_fence(lifecycle_fence.clone())
-    .with_election_status_signer(root_signing_key_arc, bundle.material.root.key_id().to_owned());
+    .with_election_status_signer(
+        root_signing_key_arc,
+        bundle.material.root.key_id().to_owned(),
+    );
     let service_loop =
         OrganizerCollectorServiceLoopV1::start(collector, handler, COLLECTOR_POLL_INTERVAL)
             .map_err(|_| {
@@ -1296,8 +1289,7 @@ mod tests {
     use super::*;
     use crate::managed_tor_test::ManagedTorStartFailureKind;
 
-    const VALID_HASH: &str =
-        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
 
     fn app_root() -> PathBuf {
         PathBuf::from(if cfg!(windows) {
@@ -1317,7 +1309,8 @@ mod tests {
             root.display()
         );
         assert!(
-            root.to_string_lossy().contains(ORGANIZER_TOR_ROOT_DIRECTORY_NAME),
+            root.to_string_lossy()
+                .contains(ORGANIZER_TOR_ROOT_DIRECTORY_NAME),
             "root must live under the app-owned private-tor directory"
         );
     }
@@ -1355,10 +1348,18 @@ mod tests {
         let paths = TransportPaths::under(&root);
         // The exported artifact is exactly the voter PUBLIC bundle; the private
         // material lives in a separate organizer-private directory.
-        assert!(paths.voter_bundle_path.ends_with("voter-public-bundle.cbor"));
+        assert!(
+            paths
+                .voter_bundle_path
+                .ends_with("voter-public-bundle.cbor")
+        );
         assert!(paths.organizer_private_dir.ends_with("organizer-private"));
         assert_ne!(paths.voter_bundle_path, paths.organizer_private_dir);
-        assert!(!paths.voter_bundle_path.starts_with(&paths.organizer_private_dir));
+        assert!(
+            !paths
+                .voter_bundle_path
+                .starts_with(&paths.organizer_private_dir)
+        );
     }
 
     #[test]
@@ -1371,7 +1372,11 @@ mod tests {
         // (mirrors the voter-side hard-kill defence).
         let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
         let paths = TransportPaths::under(&root);
-        assert!(paths.hidden_service_dir.ends_with("organizer-hidden-service"));
+        assert!(
+            paths
+                .hidden_service_dir
+                .ends_with("organizer-hidden-service")
+        );
         assert!(paths.tor_runs_base.ends_with("organizer-tor-runs"));
         assert_ne!(paths.hidden_service_dir, paths.tor_runs_base);
         assert!(!paths.tor_runs_base.starts_with(&paths.hidden_service_dir));
@@ -1389,8 +1394,14 @@ mod tests {
             ReadinessTimeout,
         ] {
             let label = kind.as_organizer_context_label();
-            assert!(label.starts_with("organizer-"), "organizer-prefixed: {label}");
-            assert!(!label.contains('/') && !label.contains('\\'), "path-free: {label}");
+            assert!(
+                label.starts_with("organizer-"),
+                "organizer-prefixed: {label}"
+            );
+            assert!(
+                !label.contains('/') && !label.contains('\\'),
+                "path-free: {label}"
+            );
         }
         // A datadir-lock is the exact orphan-after-hard-kill signature.
         assert_eq!(
@@ -1421,7 +1432,10 @@ mod tests {
         // A failed intake must never read as "running" or "starting"; it is an
         // explicit, recoverable state — even when intake_running is still set.
         let failed = status_message(true, true, true, true, true);
-        assert!(failed.contains("could not start"), "failed state is explicit: {failed}");
+        assert!(
+            failed.contains("could not start"),
+            "failed state is explicit: {failed}"
+        );
         assert!(!failed.contains("running"));
     }
 
@@ -1519,7 +1533,10 @@ mod tests {
         let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
         let a = TransportPaths::under(&root).hidden_service_dir;
         let b = TransportPaths::under(&root).hidden_service_dir;
-        assert_eq!(a, b, "the hidden-service identity path is stable across starts");
+        assert_eq!(
+            a, b,
+            "the hidden-service identity path is stable across starts"
+        );
     }
 
     /// Creates a unique bounded temporary status directory for issuance-ledger
@@ -1543,8 +1560,7 @@ mod tests {
 
     fn seed_ledger(dir: &Path, hash: &str, through_generation: u64) {
         for expected in 1..=through_generation {
-            let reserved =
-                reserve_next_status_generation_v1(dir, hash).expect("seed reservation");
+            let reserved = reserve_next_status_generation_v1(dir, hash).expect("seed reservation");
             assert_eq!(reserved, expected);
         }
     }

@@ -21,40 +21,46 @@ use tari_cc_private_ballot_gui_core::{
     AppliedElectionStatusV1, ElectionLifecycleStateV1, ElectionStatusKnowledgeV1,
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
     GuiArchiveVerificationV1, GuiArchiveWriteResultV1, GuiBallotIntakeResultV1,
-    GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1,
-    GuiElectionCreationResultV1, GuiElectionDraftPreviewV1, GuiElectionDraftV1,
-    GuiElectionExportResultV1, GuiElectionSessionV1, GuiElectionSummaryV1,
-    GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1,
+    GuiBallotPresentationType, GuiCoreError, GuiElectionArtifactsV1, GuiElectionCreationResultV1,
+    GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportResultV1, GuiElectionSessionV1,
+    GuiElectionSummaryV1, GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
-    GuiLiveAnchorConfigResultV1, GuiParticipationSummaryV1, GuiPreparedBallotExportV1,
-    GuiPreparedBallotStatusV1, GuiSavedVoterCredentialDeleteResultV1, GuiSavedVoterCredentialsV1,
-    GuiTallySummaryV1, GuiTransportAnchorVerificationV1, GuiVoterCastLockStateV1,
-    GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1,
-    GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
-    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, LoadedElectionWorkspaceV1,
-    TransportAuthorityRootSetV1, TransportAuthorityRootV1, VoterGovernanceCredentialV1,
-    backup_voter_credential_to_path_v1, copy_validated_voter_credential_to_default_v1,
-    create_draft_workspace_id_v1, delete_election_workspace_v1,
-    delete_saved_voter_credential_v1, ensure_election_workspaces_directory_v1,
-    ensure_voter_cast_locks_directory_v1, ensure_private_intake_inbox_directory_v1,
-    ensure_voter_credentials_directory_v1, ensure_voter_election_status_directory_v1,
-    file_summary_for_public_key, ingest_private_intake_inbox_into_session_v1,
-    load_persisted_election_status_v1, mark_workspace_organizer_authority_v1,
-    verify_and_apply_election_status_statement_v1,
-    GuiPrivateIntakeSyncSummaryV1, import_voter_credential_from_path_v1,
+    GuiLiveAnchorConfigResultV1, GuiLiveAnchorStepRequestV1, GuiLiveAnchorStepResultV1,
+    GuiParticipationSummaryV1, GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1,
+    GuiPrivateIntakeSyncSummaryV1, GuiSavedVoterCredentialDeleteResultV1,
+    GuiSavedVoterCredentialsV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
+    GuiVoterCastLockStateV1, GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1,
+    GuiVoterCredentialStatusV1, GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1,
+    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
+    LoadedElectionWorkspaceV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
+    TransportDescriptorV1, VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
+    copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
+    delete_election_workspace_v1, delete_saved_voter_credential_v1, enforce_publish_privacy_floor,
+    ensure_election_workspaces_directory_v1, ensure_private_intake_inbox_directory_v1,
+    ensure_voter_cast_locks_directory_v1, ensure_voter_credentials_directory_v1,
+    ensure_voter_election_status_directory_v1, file_summary_for_public_key,
+    import_voter_credential_from_path_v1, ingest_private_intake_inbox_into_session_v1,
     inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
     list_election_workspaces_v1, list_saved_voter_credentials_v1,
-    mark_draft_workspace_superseded_v1, parse_public_governance_key_hex_v1,
+    load_persisted_election_status_v1, mark_draft_workspace_superseded_v1,
+    mark_workspace_organizer_authority_v1, parse_decision, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, resume_election_workspace_v1,
-    TransportDescriptorV1, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
-    verify_archive_directory_v1, verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
-    voter_credentials_directory_v1, workspace_id_for_session_v1, write_archive_directory_v1,
+    run_step_with_transports, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
+    verify_and_apply_election_status_statement_v1, verify_archive_directory_v1,
+    verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
+    voter_credentials_directory_v1, walletd_auth_env_var_name, workspace_id_for_session_v1,
+    write_archive_directory_v1,
     write_draft_workspace_revision_v1, write_election_artifacts_v1,
     write_finalized_archive_v1_with_governance_document,
     write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
     write_session_workspace_revision_v1,
+};
+use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
+use tari_cc_private_ballot_ootle_anchor_network_adapters::{
+    IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
+    WalletdAnchorNetworkAdapter, WalletdAuthSecret,
 };
 use tari_cc_private_ballot_transport_gateway::PrivateSubmissionCoordinatorV1;
 use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
@@ -437,7 +443,10 @@ impl AppState {
     /// verdict always describes exactly the session a subsequent read will
     /// observe — no install/swap interleaving can split them.
     fn ensure_organizer_authority(&self) -> Result<(), CommandError> {
-        let guard = self.session.lock().map_err(|_| CommandError::state_poisoned())?;
+        let guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
         match guard.as_ref() {
             Some(active) if active.authority == SessionAuthorityV1::Organizer => Ok(()),
             Some(_) => Err(CommandError::organizer_authority_required()),
@@ -447,7 +456,10 @@ impl AppState {
 
     /// The current session authority (public projection for the frontend).
     fn active_authority(&self) -> Result<Option<SessionAuthorityV1>, CommandError> {
-        let guard = self.session.lock().map_err(|_| CommandError::state_poisoned())?;
+        let guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
         Ok(guard.as_ref().map(|active| active.authority))
     }
 
@@ -1416,7 +1428,10 @@ fn resume_election_workspace(
                 organizer_workspace: true,
             })
         }
-        LoadedElectionWorkspaceV1::Session { workspace, mut session } => {
+        LoadedElectionWorkspaceV1::Session {
+            workspace,
+            mut session,
+        } => {
             // Restore authenticated lifecycle knowledge before installing so
             // the resumed session reflects the last accepted status evidence.
             reapply_persisted_election_status(&app, &mut session)?;
@@ -1498,7 +1513,12 @@ fn open_voting(
             session.open()?;
             Ok(())
         })?;
-    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Open);
+    publish_lifecycle_to_intake(
+        &app,
+        &state,
+        &summary.manifest_hash_hex,
+        ElectionLifecycleStateV1::Open,
+    );
     Ok(summary)
 }
 
@@ -1551,15 +1571,17 @@ fn fence_close_before_commit(
         let Some(session) = guard.as_ref().map(|active| &active.session) else {
             return Err(CommandError::no_session());
         };
-        if !matches!(
-            session.lifecycle_state_v1(),
-            ElectionLifecycleStateV1::Open
-        ) {
+        if !matches!(session.lifecycle_state_v1(), ElectionLifecycleStateV1::Open) {
             return Ok(());
         }
         session.summary().manifest_hash_hex.clone()
     };
-    publish_lifecycle_to_intake(app, state, &manifest_hash_hex, ElectionLifecycleStateV1::Closed);
+    publish_lifecycle_to_intake(
+        app,
+        state,
+        &manifest_hash_hex,
+        ElectionLifecycleStateV1::Closed,
+    );
     Ok(())
 }
 
@@ -1576,7 +1598,12 @@ fn mark_verified(
             Ok(())
         })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
-    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Verified);
+    publish_lifecycle_to_intake(
+        &app,
+        &state,
+        &summary.manifest_hash_hex,
+        ElectionLifecycleStateV1::Verified,
+    );
     Ok(summary)
 }
 
@@ -1594,7 +1621,12 @@ fn finalize_election(
             Ok(())
         })?;
     invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
-    publish_lifecycle_to_intake(&app, &state, &summary.manifest_hash_hex, ElectionLifecycleStateV1::Finalized);
+    publish_lifecycle_to_intake(
+        &app,
+        &state,
+        &summary.manifest_hash_hex,
+        ElectionLifecycleStateV1::Finalized,
+    );
     Ok(summary)
 }
 
@@ -1900,11 +1932,18 @@ fn verify_transport_archive_anchor(
 /// The frontend supplies only public operator locators, paths, and policy
 /// acknowledgement fields. Rust derives manifest hash, archive hash,
 /// finalized status, and accepted count from the archive verifier.
+///
+/// ORGANIZER-AUTHORITATIVE: only the ballot office's authoritative session
+/// may generate a publish config. Archive verification is CPU-bound, so it
+/// runs on the blocking thread pool.
 #[tauri::command]
-fn write_live_anchor_config_from_verified_archive(
+async fn write_live_anchor_config_from_verified_archive(
     request: GuiLiveAnchorConfigRequestV1,
+    state: tauri::State<'_, AppState>,
 ) -> Result<GuiLiveAnchorConfigResultV1, CommandError> {
-    Ok(write_live_anchor_config_from_verified_archive_v1(&request)?)
+    state.ensure_organizer_authority()?;
+    run_blocking_command(move || Ok(write_live_anchor_config_from_verified_archive_v1(&request)?))
+        .await
 }
 
 /// Inspects one canonical anchor application config (read-only, no network).
@@ -1923,6 +1962,120 @@ fn inspect_anchor_snapshot(path: String) -> Result<GuiAnchorSnapshotInspectionV1
 #[tauri::command]
 fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1, CommandError> {
     Ok(inspect_anchor_evidence_v1(Path::new(&path))?)
+}
+
+/// Performs at most one bounded live Ootle anchor lifecycle step.
+///
+/// ORGANIZER-AUTHORITATIVE: only the ballot office may publish. Each call
+/// performs at most one lifecycle transition (prepare, approve, submit, or
+/// one receipt poll) and never sleeps, so the UI stays responsive. The
+/// walletd bearer token is resolved from a named environment variable —
+/// never passed through the frontend. Archive re-verification, privacy floor,
+/// and config-binding checks all run before any network action.
+#[tauri::command]
+async fn run_live_anchor_lifecycle_step(
+    request: GuiLiveAnchorStepRequestV1,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiLiveAnchorStepResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    run_blocking_command(move || {
+        let decision = parse_decision(&request.decision)?;
+        let config = AnchorAppConfig::from_canonical_file(Path::new(&request.config_path))
+            .map_err(|_| {
+                CommandError::new(
+                    "ANCHOR_APP_CONFIGURATION_FAILURE",
+                    "INVALID_INPUT",
+                    "anchor application config failed validation",
+                )
+            })?;
+        enforce_publish_privacy_floor(&config)?;
+
+        // HIGH-3 endpoint policy: refuse a non-loopback walletd/indexer endpoint
+        // BEFORE reading any secret, so the bearer token is never even loaded
+        // for an attacker-chosen remote host. The shared driver re-checks this
+        // before any transport call as defense in depth.
+        if !config.network_adapter().walletd_endpoint().is_loopback()
+            || !config.network_adapter().indexer_endpoint().is_loopback()
+        {
+            return Err(GuiCoreError::anchor_publish_endpoint_not_loopback().into());
+        }
+
+        // HIGH-3 secret boundary: the optional walletd bearer token is read ONLY
+        // from the single backend-owned environment variable. The frontend can
+        // never choose an arbitrary variable name (a confused-deputy
+        // exfiltration risk) — it only signals whether to attach the token via
+        // `use_walletd_auth`. The token never enters the config, snapshots,
+        // evidence, logs, or error strings.
+        let auth = if request.use_walletd_auth {
+            match std::env::var(walletd_auth_env_var_name()) {
+                Ok(token) => Some(WalletdAuthSecret::new(token).map_err(|_| {
+                    CommandError::from(GuiCoreError::anchor_publish_auth_token_invalid())
+                })?),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(_) => {
+                    return Err(GuiCoreError::anchor_publish_auth_env_name_invalid().into());
+                }
+            }
+        } else {
+            None
+        };
+        let config = config.with_walletd_auth(auth).map_err(|_| {
+            CommandError::new(
+                "ANCHOR_APP_CONFIGURATION_FAILURE",
+                "INVALID_INPUT",
+                "anchor application config failed validation",
+            )
+        })?;
+
+        let executor = TokioBlockingExecutor::new_current_thread().map_err(|_| {
+            CommandError::new(
+                "GUI_ANCHOR_PUBLISH_EXECUTOR_FAILED",
+                "UNAVAILABLE",
+                "the bounded network executor could not be constructed",
+            )
+        })?;
+        let network = config.anchor_record_network().clone();
+        let walletd_endpoint = config.network_adapter().walletd_endpoint().clone();
+        let indexer_endpoint = config.network_adapter().indexer_endpoint().clone();
+        // MEDIUM-2: apply the configured per-request timeout at the real network
+        // boundary so a hung walletd/indexer request cannot park the worker.
+        let request_timeout = config
+            .network_adapter()
+            .request_timeout_secs()
+            .map(std::time::Duration::from_secs);
+
+        let walletd_transport = RealWalletdTransport::new(
+            &walletd_endpoint,
+            config.network_adapter().auth(),
+            request_timeout,
+            executor.clone(),
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "ANCHOR_PUBLISH_TRANSPORT_UNAVAILABLE",
+                "UNAVAILABLE",
+                "a network transport could not be constructed from the configured endpoints",
+            )
+        })?;
+        let indexer_transport =
+            RealIndexerTransport::new(&indexer_endpoint, request_timeout, executor).map_err(|_| {
+                CommandError::new(
+                    "ANCHOR_PUBLISH_TRANSPORT_UNAVAILABLE",
+                    "UNAVAILABLE",
+                    "a network transport could not be constructed from the configured endpoints",
+                )
+            })?;
+
+        Ok(run_step_with_transports(
+            config,
+            Path::new(&request.archive_directory),
+            decision,
+            WalletdAnchorNetworkAdapter::new(walletd_transport, network),
+            IndexerReceiptNetworkAdapter::new(indexer_transport),
+            None,
+        )?)
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2382,9 +2535,11 @@ async fn unlock_saved_voter_credential(
         let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
         let credentials_dir = credentials_directory(&app)?;
         let state = app.state::<AppState>();
-        state
-            .inner()
-            .unlock_saved_credential_in_dir(&credentials_dir, &public_key, passphrase.as_str())
+        state.inner().unlock_saved_credential_in_dir(
+            &credentials_dir,
+            &public_key,
+            passphrase.as_str(),
+        )
     })
     .await
 }
@@ -2807,7 +2962,10 @@ fn prepare_voter_ballot_in_state(
 ) -> Result<GuiPreparedBallotStatusV1, CommandError> {
     // Own the preparation slot FIRST so a concurrent abandonment sweep (or a
     // second direct IPC caller) can never observe this operation as abandoned.
-    let _preparation_slot = state.preparation_slot.lock().map_err(|_| CommandError::state_poisoned())?;
+    let _preparation_slot = state
+        .preparation_slot
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
     let transport_descriptor = configured_managed_tor_descriptor(state)?;
     let (artifacts, lifecycle_state) = {
         let session_guard = state
@@ -3215,7 +3373,9 @@ mod tests {
             Some(SessionAuthorityV1::Organizer)
         );
         // With an organizer-owned session the gate passes.
-        state.ensure_organizer_authority().expect("organizer allowed");
+        state
+            .ensure_organizer_authority()
+            .expect("organizer allowed");
     }
 
     #[test]
@@ -3231,17 +3391,19 @@ mod tests {
                     "imported-revision".to_owned(),
                 )
                 .expect("basics");
-            draft.set_voters(vec![{
-                let credential =
-                    VoterGovernanceCredentialV1::generate().expect("generated key");
-                credential
-                    .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
-                    .expect("status")
-                    .public_governance_key_hex
-                    .expect("public key")
-            }])
-            .expect("voters");
-            draft.set_options(vec![("yes".to_owned(), "Yes".to_owned())])
+            draft
+                .set_voters(vec![{
+                    let credential =
+                        VoterGovernanceCredentialV1::generate().expect("generated key");
+                    credential
+                        .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
+                        .expect("status")
+                        .public_governance_key_hex
+                        .expect("public key")
+                }])
+                .expect("voters");
+            draft
+                .set_options(vec![("yes".to_owned(), "Yes".to_owned())])
                 .expect("options");
             draft.set_rules(1, 1, false).expect("rules");
             draft
@@ -3290,17 +3452,19 @@ mod tests {
                     "switched-revision".to_owned(),
                 )
                 .expect("basics");
-            draft.set_voters(vec![{
-                let credential =
-                    VoterGovernanceCredentialV1::generate().expect("generated key");
-                credential
-                    .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
-                    .expect("status")
-                    .public_governance_key_hex
-                    .expect("public key")
-            }])
-            .expect("voters");
-            draft.set_options(vec![("yes".to_owned(), "Yes".to_owned())])
+            draft
+                .set_voters(vec![{
+                    let credential =
+                        VoterGovernanceCredentialV1::generate().expect("generated key");
+                    credential
+                        .pending_status_with_origin(GuiVoterCredentialOriginV1::Generated)
+                        .expect("status")
+                        .public_governance_key_hex
+                        .expect("public key")
+                }])
+                .expect("voters");
+            draft
+                .set_options(vec![("yes".to_owned(), "Yes".to_owned())])
                 .expect("options");
             draft.set_rules(1, 1, false).expect("rules");
             draft
@@ -3910,13 +4074,12 @@ mod tests {
             &signing_key,
         )
         .expect("fixture descriptor signs");
-        let root_anchor = (OFFICE_ROOT_KEY_ID.to_owned(), *signing_key.verifying_key().as_bytes());
-        let managed =
-            managed_tor_test::test_configured_state(descriptor, roots, root_anchor);
-        *state
-            .managed_tor_test
-            .lock()
-            .expect("managed lock") = Some(managed);
+        let root_anchor = (
+            OFFICE_ROOT_KEY_ID.to_owned(),
+            *signing_key.verifying_key().as_bytes(),
+        );
+        let managed = managed_tor_test::test_configured_state(descriptor, roots, root_anchor);
+        *state.managed_tor_test.lock().expect("managed lock") = Some(managed);
     }
 
     #[cfg(feature = "managed-tor-test")]
@@ -3966,11 +4129,8 @@ mod tests {
         let session = session_guard.as_ref().map(|a| &a.session).expect("session");
         let voter_guard = state.voter.lock().expect("voter lock");
         let voter = voter_guard.as_ref().expect("voter session");
-        let workflow = voter.workflow_status(
-            session.artifacts(),
-            session.lifecycle_state_v1(),
-            true,
-        );
+        let workflow =
+            voter.workflow_status(session.artifacts(), session.lifecycle_state_v1(), true);
         drop(session_guard);
         drop(voter_guard);
         assert_eq!(workflow.cast_lock_state, "NOT_CAST");
@@ -4014,9 +4174,11 @@ mod tests {
         select_substitute_option(&state);
 
         // Repaired resolver: completes against this state and binds correctly.
-        let endpoint =
-            managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
-        assert!(endpoint.is_some(), "descriptor must bind to active election");
+        let endpoint = managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
+        assert!(
+            endpoint.is_some(),
+            "descriptor must bind to active election"
+        );
 
         let prepared =
             prepare_voter_ballot_in_state(&state, None).expect("shell preparation succeeds");
@@ -4053,8 +4215,8 @@ mod tests {
             })
         };
         for _ in 0..8 {
-            let prepared = prepare_voter_ballot_in_state(&state, None)
-                .expect("preparation under polling");
+            let prepared =
+                prepare_voter_ballot_in_state(&state, None).expect("preparation under polling");
             assert_eq!(prepared.state, "Ready");
         }
         stop.store(true, Ordering::SeqCst);
@@ -4065,7 +4227,9 @@ mod tests {
         loop {
             match poller.is_finished() {
                 true => break,
-                false if started.elapsed() < deadline => std::thread::sleep(Duration::from_millis(10)),
+                false if started.elapsed() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
                 false => panic!("status poller deadlocked against preparation"),
             }
         }
@@ -4114,8 +4278,7 @@ mod tests {
             let state = Arc::clone(&state);
             std::thread::spawn(move || {
                 for _ in 0..250 {
-                    managed_tor_test::running_transport_endpoint(&state)
-                        .expect("endpoint read");
+                    managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
                     std::thread::yield_now();
                 }
             })
@@ -4188,8 +4351,7 @@ mod tests {
             assert_eq!(workflow.prepared_ballot.state, "Invalidated");
             assert_eq!(workflow.cast_lock_state, "NOT_CAST");
 
-            let retry =
-                voter.prepare_ballot(session.artifacts(), session.lifecycle_state_v1());
+            let retry = voter.prepare_ballot(session.artifacts(), session.lifecycle_state_v1());
             drop(session_guard);
             drop(voter_guard);
             let retry = retry.expect("retry after abandonment succeeds");
@@ -4233,21 +4395,20 @@ mod tests {
         let dir = TestDir::new("cast-lock-shell-prepare");
         let cast_locks_dir = dir.join("cast-locks");
         ensure_voter_cast_locks_directory_v1(&cast_locks_dir).expect("cast locks dir");
-        let fingerprint =
-            public_credential_fingerprint_hex_v1(&public_key).expect("fingerprint");
+        let fingerprint = public_credential_fingerprint_hex_v1(&public_key).expect("fingerprint");
         let manifest_hash_hex = {
             let guard = state.session.lock().expect("session lock");
             GuiVoterElectionBindingV1::from_artifacts(
-                guard.as_ref().map(|a| &a.session).expect("session").artifacts(),
+                guard
+                    .as_ref()
+                    .map(|a| &a.session)
+                    .expect("session")
+                    .artifacts(),
             )
             .manifest_hash_hex
         };
         // Forge the DURABLE local cast the way export/cast would record it.
-        write_cast_record_cast_for_test(
-            &cast_locks_dir,
-            &fingerprint,
-            &manifest_hash_hex,
-        );
+        write_cast_record_cast_for_test(&cast_locks_dir, &fingerprint, &manifest_hash_hex);
 
         let prepared = prepare_voter_ballot_in_state(&state, Some(cast_locks_dir.as_path()))
             .expect_err("a durably locked voter cannot prepare again");
@@ -4257,14 +4418,9 @@ mod tests {
     /// Writes a present-but-malformed durable record at the canonical cast
     /// path. Recovery is fail-closed: an unreadable record resolves to
     /// `CAST_PENDING` (locked), never `NOT_CAST`, so preparation refuses.
-    fn write_cast_record_cast_for_test(
-        dir: &Path,
-        fingerprint_hex: &str,
-        manifest_hash_hex: &str,
-    ) {
+    fn write_cast_record_cast_for_test(dir: &Path, fingerprint_hex: &str, manifest_hash_hex: &str) {
         use std::fs;
-        let path =
-            dir.join(format!("{fingerprint_hex}-{manifest_hash_hex}.castlock"));
+        let path = dir.join(format!("{fingerprint_hex}-{manifest_hash_hex}.castlock"));
         fs::write(&path, b"not-a-canonical-record").expect("write malformed record");
     }
 
@@ -4284,8 +4440,8 @@ mod tests {
     /// failure; ordinary contention merely delays.
     #[test]
     fn concurrent_workflow_status_polling_and_preparation_never_deadlock() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
 
         let dir = TestDir::new("workflow-status-poll-prepare");
@@ -4382,8 +4538,7 @@ mod tests {
         assert!(slot.is_ok(), "preparation_slot must be free before prepare");
         drop(slot);
 
-        let prepared = prepare_voter_ballot_in_state(&state, None)
-            .expect("preparation succeeds");
+        let prepared = prepare_voter_ballot_in_state(&state, None).expect("preparation succeeds");
         assert_eq!(prepared.state, "Ready");
     }
 }
@@ -4418,6 +4573,7 @@ pub fn run() {
             verify_archive,
             verify_transport_archive_anchor,
             write_live_anchor_config_from_verified_archive,
+            run_live_anchor_lifecycle_step,
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,

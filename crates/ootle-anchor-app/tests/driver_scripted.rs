@@ -4,6 +4,8 @@
 //! transports. No socket is opened, no real walletd or indexer is contacted,
 //! and no transaction is submitted to a live network.
 
+#![cfg(feature = "test-support")]
+
 mod common;
 
 use tari_cc_private_ballot_ootle_anchor_app::{

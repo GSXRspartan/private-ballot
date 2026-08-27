@@ -2181,14 +2181,11 @@ mod tests {
         // The two-computer phantom-selection root cause: a FROZEN election
         // must REFUSE selection outright so no checkbox can become workflow
         // state while voting has not opened.
-        let error = match select_candidate_a(
-            &mut session,
-            &artifacts,
-            ElectionLifecycleStateV1::Frozen,
-        ) {
-            Ok(_) => panic!("frozen election must refuse selection"),
-            Err(error) => error,
-        };
+        let error =
+            match select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Frozen) {
+                Ok(_) => panic!("frozen election must refuse selection"),
+                Err(error) => error,
+            };
         assert_eq!(error.code(), "ELECTION_NOT_OPEN");
 
         let status = session.selection_status(&artifacts, ElectionLifecycleStateV1::Frozen);
@@ -2228,14 +2225,11 @@ mod tests {
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         let mut session = eligible_session(&artifacts);
 
-        let error = match select_candidate_a(
-            &mut session,
-            &artifacts,
-            ElectionLifecycleStateV1::Closed,
-        ) {
-            Ok(_) => panic!("closed election must refuse selection"),
-            Err(error) => error,
-        };
+        let error =
+            match select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Closed) {
+                Ok(_) => panic!("closed election must refuse selection"),
+                Err(error) => error,
+            };
         assert_eq!(error.code(), "ELECTION_NOT_OPEN");
 
         let status = session.selection_status(&artifacts, ElectionLifecycleStateV1::Closed);
@@ -2808,7 +2802,11 @@ mod tests {
     fn open_preparable_session() -> (GuiElectionArtifactsV1, GuiVoterSessionV1) {
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         let mut session = eligible_session(&artifacts);
-        ok(select_candidate_a(&mut session, &artifacts, ElectionLifecycleStateV1::Open));
+        ok(select_candidate_a(
+            &mut session,
+            &artifacts,
+            ElectionLifecycleStateV1::Open,
+        ));
         (artifacts, session)
     }
 
@@ -2827,7 +2825,9 @@ mod tests {
 
         assert_code(result, "GUI_PREPARATION_TASK_FAILED");
         assert_eq!(session.preparing_operation_id(), None);
-        let status = session.prepared_ballot.status(ElectionLifecycleStateV1::Open);
+        let status = session
+            .prepared_ballot
+            .status(ElectionLifecycleStateV1::Open);
         assert_eq!(status.state, "Invalidated");
         assert!(!status.ready_to_export);
         // Cast boundary untouched and a retry succeeds for real.
@@ -2840,14 +2840,13 @@ mod tests {
     fn abandoned_preparing_operation_is_recoverable_fail_closed() {
         let (_artifacts, mut session) = open_preparable_session();
         let token = ok(session.begin_preparation_operation(ElectionLifecycleStateV1::Open));
-        assert_eq!(
-            session.preparing_operation_id(),
-            Some(token.operation_id())
-        );
+        assert_eq!(session.preparing_operation_id(), Some(token.operation_id()));
 
         assert!(session.fail_abandoned_preparation());
         assert_eq!(session.preparing_operation_id(), None);
-        let status = session.prepared_ballot.status(ElectionLifecycleStateV1::Open);
+        let status = session
+            .prepared_ballot
+            .status(ElectionLifecycleStateV1::Open);
         assert_eq!(status.state, "Invalidated");
 
         // Recovery is idempotent outside Preparing and never touches cast state.
@@ -2877,8 +2876,7 @@ mod tests {
     fn preparation_refused_for_foreign_election_leaves_no_preparing_state() {
         // A session bound to another election must refuse before any
         // `Preparing` state exists, and must leave cast state untouched.
-        let other_election_artifacts =
-            artifacts(false, limits(1, 2, false), b"other-election");
+        let other_election_artifacts = artifacts(false, limits(1, 2, false), b"other-election");
         let mut session = eligible_session(&other_election_artifacts);
         let artifacts = artifacts(false, limits(1, 2, false), b"election-a");
         assert_code(

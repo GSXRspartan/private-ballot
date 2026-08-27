@@ -612,6 +612,8 @@ describe("guided disclosure adds no backend surface", () => {
       "api.exportVoterTransportBundle(",
       "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",
+      "api.writeLiveAnchorConfig(",
+      "api.runLiveAnchorLifecycleStep(",
     ]);
     for (const call of new Set(manageApiCalls)) {
       assert.ok(allowedManage.has(call), `unexpected Manage API call: ${call}`);

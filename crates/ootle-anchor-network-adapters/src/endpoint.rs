@@ -8,12 +8,30 @@
 //! locator data, not secrets) but never includes credentials.
 
 use core::fmt;
+use core::net::Ipv6Addr;
 use core::str::FromStr;
 
-use url::Url;
+use url::{Host, Url};
 
 /// Maximum byte length of the optional bounded base path.
 pub const MAX_ENDPOINT_BASE_PATH_BYTES: usize = 256;
+
+/// Returns whether a parsed URL's host is a loopback address.
+///
+/// True for the IPv4 loopback block `127.0.0.0/8`, the IPv6 loopback `::1`, and
+/// the literal domain `localhost` (case-insensitive). This is the trusted-host
+/// predicate the live publish path uses to guarantee the walletd bearer token
+/// and every anchor request can only ever reach the organizer's own machine —
+/// never an attacker-chosen remote host.
+fn url_host_is_loopback(url: &Url) -> bool {
+    match url.host() {
+        // The whole 127.0.0.0/8 block is loopback (covers 127.0.0.1).
+        Some(Host::Ipv4(addr)) => addr.octets()[0] == 127,
+        Some(Host::Ipv6(addr)) => addr == Ipv6Addr::LOCALHOST,
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
 
 /// Rejection categories for endpoint configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +191,14 @@ impl WalletdEndpoint {
     pub fn as_str(&self) -> &str {
         self.url.as_str()
     }
+
+    /// Returns whether this endpoint targets a loopback host (`127.0.0.0/8`,
+    /// `::1`, or `localhost`). The live publish path requires this so the
+    /// walletd bearer token can never be sent to a non-local host.
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        url_host_is_loopback(&self.url)
+    }
 }
 
 impl FromStr for WalletdEndpoint {
@@ -239,6 +265,13 @@ impl IndexerEndpoint {
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.url.as_str()
+    }
+
+    /// Returns whether this endpoint targets a loopback host (`127.0.0.0/8`,
+    /// `::1`, or `localhost`).
+    #[must_use]
+    pub fn is_loopback(&self) -> bool {
+        url_host_is_loopback(&self.url)
     }
 }
 
@@ -388,5 +421,34 @@ mod tests {
         let i =
             IndexerEndpoint::parse("http://127.0.0.1:12500").unwrap_or_else(|e| panic!("{e:?}"));
         assert_ne!(w.as_str(), i.as_str());
+    }
+
+    #[test]
+    fn loopback_hosts_are_recognized() {
+        for raw in [
+            "http://127.0.0.1:12009",
+            "http://127.5.6.7:1",
+            "http://localhost:12009",
+            "http://LocalHost:12009",
+            "http://[::1]:12009",
+        ] {
+            let endpoint = WalletdEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(endpoint.is_loopback(), "{raw} must be loopback");
+        }
+    }
+
+    #[test]
+    fn non_loopback_hosts_are_not_loopback() {
+        for raw in [
+            "http://10.0.0.5:12009",
+            "http://192.168.1.10:12009",
+            "https://indexer.example.com:443",
+            "http://[2001:db8::1]:12009",
+            "http://126.0.0.1:12009",
+            "http://128.0.0.1:12009",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(!endpoint.is_loopback(), "{raw} must not be loopback");
+        }
     }
 }

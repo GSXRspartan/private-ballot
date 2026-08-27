@@ -21,7 +21,10 @@ use crate::binding::WalletdAnchorBindingV1;
 use crate::client::{
     WalletdAnchorClient, WalletdDecisionCommandV1, WalletdRequestStatusV1, WalletdSubmitCommandV1,
 };
-use crate::convert::{build_fee_bearing_walletd_create_request, build_walletd_create_request};
+use crate::convert::{
+    WalletdCreateAnchorRequestV1, build_fee_bearing_walletd_create_request,
+    build_walletd_create_request,
+};
 use crate::errors::WalletdAnchorAdapterError;
 use crate::identifiers::{WalletdFeeComponentRef, WalletdRequestId, WalletdSealSignerRef};
 use crate::registry::{
@@ -250,6 +253,29 @@ impl WalletdAnchorCoordinator {
         seal_signer: WalletdSealSignerRef,
         ttl_secs: Option<u64>,
     ) -> Result<PreparedWalletdAnchorRequestV1, WalletdAnchorAdapterError> {
+        let (build_result, create) = Self::build_fee_bearing_create_request(
+            build_request,
+            fee_component,
+            seal_signer,
+            ttl_secs,
+        )?;
+        self.prepare_fee_bearing_prebuilt(client, &build_result, &create)
+    }
+
+    /// Constructs the exact fee-bearing walletd create request without sending
+    /// it. The application driver uses this narrow split to durably record the
+    /// deterministic request id and fingerprint before the network boundary.
+    ///
+    /// It is not an idempotency claim: walletd currently provides no lookup by
+    /// these project-owned values. A lost create response must therefore be
+    /// reconciled by an operator rather than retried blindly.
+    pub fn build_fee_bearing_create_request(
+        build_request: &OotleAnchorTransactionBuildRequestV1,
+        fee_component: &WalletdFeeComponentRef,
+        seal_signer: WalletdSealSignerRef,
+        ttl_secs: Option<u64>,
+    ) -> Result<(OotleAnchorBuildResultV1, WalletdCreateAnchorRequestV1), WalletdAnchorAdapterError>
+    {
         // Resolve the opaque account into a pinned component address here, at the
         // single leaf that is allowed to, and build the fee-bearing transaction.
         let component = fee_component.component_address();
@@ -262,6 +288,22 @@ impl WalletdAnchorCoordinator {
             seal_signer,
             ttl_secs,
         )?;
+        Ok((build_result, create))
+    }
+
+    /// Sends a fee-bearing create request previously built by
+    /// [`Self::build_fee_bearing_create_request`], then records the prepared
+    /// request locally on success.
+    ///
+    /// The split exists only so the application can make the pre-create intent
+    /// durable before this method reaches walletd. The supplied create request
+    /// retains the exact fee-bearing build result and re-inspected binding.
+    pub fn prepare_fee_bearing_prebuilt<C: WalletdAnchorClient>(
+        &mut self,
+        client: &mut C,
+        build_result: &OotleAnchorBuildResultV1,
+        create: &WalletdCreateAnchorRequestV1,
+    ) -> Result<PreparedWalletdAnchorRequestV1, WalletdAnchorAdapterError> {
         let outcome = client.create_transaction_request(&create)?;
 
         let project_request_id = create.project_request_id().clone();

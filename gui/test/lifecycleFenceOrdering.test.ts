@@ -48,7 +48,7 @@ describe("intake-fence publication ordering", () => {
   it("open_voting publishes OPEN only AFTER its durable commit (never fail open)", () => {
     const body = sliceFn(shellLib, "open_voting");
     const commitAt = body.indexOf("mutate_session_transactionally(&app, &state");
-    const publishAt = body.indexOf("publish_lifecycle_to_intake(&app, &state");
+    const publishAt = body.indexOf("publish_lifecycle_to_intake(");
     assert.ok(commitAt >= 0, "open_voting commits through the transaction boundary");
     assert.ok(publishAt >= 0, "open_voting publishes OPEN to the intake fence");
     assert.ok(
@@ -64,7 +64,7 @@ describe("intake-fence publication ordering", () => {
     // A non-OPEN session must not make signed status answers lie: no publish.
     assert.match(body, /return Ok\(\(\)\);/);
     assert.match(body, /publish_lifecycle_to_intake\(/);
-    assert.match(body, /ElectionLifecycleStateV1::Closed\)/);
+    assert.match(body, /ElectionLifecycleStateV1::Closed/);
   });
 
   it("post-close transitions can never re-arm admission", () => {

@@ -23,9 +23,10 @@ use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     ApprovedWalletdAnchorRequestV1, OotleAnchorTransactionBuildRequestV1,
     PreparedWalletdAnchorRequestV1, SubmittedWalletdAnchorRequestV1, WalletdAnchorAdapterError,
-    WalletdAnchorCoordinator, WalletdAnchorSnapshotV1, WalletdDecisionRequestV1,
-    WalletdFeeComponentRef, WalletdRecoveryStateV1, WalletdRequestDecisionV1, WalletdSealSignerRef,
-    WalletdSubmissionStateV1, WalletdSubmitRequestV1,
+    WalletdAnchorCoordinator, WalletdAnchorSnapshotV1, WalletdCreateAnchorRequestV1,
+    WalletdDecisionRequestV1, WalletdFeeComponentRef, WalletdRecoveryStateV1,
+    WalletdRequestDecisionV1, WalletdSealSignerRef, WalletdSubmissionStateV1,
+    WalletdSubmitRequestV1,
 };
 
 use crate::policy::PollingPolicy;
@@ -345,6 +346,39 @@ impl AnchorLifecycleOrchestrator {
             seal_signer,
             ttl_secs,
         )?;
+
+        self.prepared = Some(prepared.clone());
+        self.approved = None;
+        self.submitted = None;
+        self.query = None;
+        self.cached_receipt = None;
+        self.diagnostic = None;
+        self.phase = UnifiedAnchorLifecyclePhase::Prepared;
+
+        Ok(self.report(LifecycleStepOutcome::Prepared))
+    }
+
+    /// Records a prepared request from an exact fee-bearing create request that
+    /// was constructed before the application crossed the walletd boundary.
+    ///
+    /// This is intentionally the same lifecycle transition as
+    /// [`Self::prepare_fee_bearing`], but lets the application persist its
+    /// pre-create intent before `client.create_transaction_request` runs.
+    pub fn prepare_fee_bearing_prebuilt<
+        C: tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorClient,
+    >(
+        &mut self,
+        client: &mut C,
+        build_result: &tari_cc_private_ballot_ootle_walletd_anchor_adapter::OotleAnchorBuildResultV1,
+        create: &WalletdCreateAnchorRequestV1,
+    ) -> Result<LifecycleStepReport, LifecycleError> {
+        if self.phase.is_terminal() {
+            return Ok(self.idempotent_no_op());
+        }
+
+        let prepared = self
+            .walletd
+            .prepare_fee_bearing_prebuilt(client, build_result, create)?;
 
         self.prepared = Some(prepared.clone());
         self.approved = None;

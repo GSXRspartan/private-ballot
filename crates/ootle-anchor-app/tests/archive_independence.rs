@@ -6,6 +6,8 @@
 //! byte-identical across outcomes, and that the snapshot and evidence files
 //! contain no secret material.
 
+#![cfg(feature = "test-support")]
+
 mod common;
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleAnchorRecordV1};

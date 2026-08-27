@@ -82,6 +82,11 @@ impl TokioBlockingExecutor {
     /// the binary panic-free.
     pub fn new_current_thread() -> Result<Self, TokioRuntimeBuildError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
+            // The time driver is required so `block_on_bounded` can enforce the
+            // configured per-request timeout via `tokio::time::timeout`. Only
+            // the `rt` and `time` Tokio features are enabled: still no
+            // multi-thread worker and no `net` driver.
+            .enable_time()
             .build()
             .map_err(|_| TokioRuntimeBuildError::Build)?;
         Ok(Self::new(runtime))
@@ -91,6 +96,48 @@ impl TokioBlockingExecutor {
     #[must_use]
     pub fn handle(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::time::Duration;
+    use std::time::Instant;
+
+    fn executor() -> TokioBlockingExecutor {
+        match TokioBlockingExecutor::new_current_thread() {
+            Ok(executor) => executor,
+            Err(_) => panic!("current-thread runtime must build"),
+        }
+    }
+
+    #[test]
+    fn bounded_block_returns_elapsed_for_a_never_completing_future() {
+        let started = Instant::now();
+        let outcome: Result<(), BlockingExecutorError> = executor().block_on_bounded(
+            std::future::pending::<()>(),
+            Some(Duration::from_millis(50)),
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(outcome, Err(BlockingExecutorError::Elapsed));
+        // The deadline must actually bound the wait (well under any test timeout).
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "bounded wait exceeded the deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_block_returns_ready_output_before_the_deadline() {
+        let outcome = executor().block_on_bounded(async { 7_u32 }, Some(Duration::from_secs(30)));
+        assert_eq!(outcome, Ok(7));
+    }
+
+    #[test]
+    fn none_timeout_runs_unbounded_to_completion() {
+        let outcome = executor().block_on_bounded(async { 9_u32 }, None);
+        assert_eq!(outcome, Ok(9));
     }
 }
 
@@ -107,5 +154,32 @@ impl BlockingExecutor for TokioBlockingExecutor {
             return Err(BlockingExecutorError::AlreadyInsideAsyncRuntime);
         }
         Ok(self.runtime.block_on(future))
+    }
+
+    fn block_on_bounded<F, T>(
+        &self,
+        future: F,
+        timeout: Option<core::time::Duration>,
+    ) -> Result<T, BlockingExecutorError>
+    where
+        F: core::future::Future<Output = T>,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(BlockingExecutorError::AlreadyInsideAsyncRuntime);
+        }
+        match timeout {
+            None => Ok(self.runtime.block_on(future)),
+            Some(deadline) => self.runtime.block_on(async move {
+                // The time driver (enabled in `new_current_thread`) bounds the
+                // wait. An elapsed deadline surfaces as `Elapsed`, which the
+                // real transport maps to a transport timeout (state unknown →
+                // recover, never a blind resubmit) — it never silently drops
+                // the request result.
+                match tokio::time::timeout(deadline, future).await {
+                    Ok(output) => Ok(output),
+                    Err(_elapsed) => Err(BlockingExecutorError::Elapsed),
+                }
+            }),
+        }
     }
 }

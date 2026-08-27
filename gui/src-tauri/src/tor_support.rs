@@ -155,15 +155,15 @@ mod tests {
     fn allowlist_is_small_and_absolute() {
         assert!(TOR_EXECUTABLE_ALLOWLIST_V1.len() <= 4);
         for entry in TOR_EXECUTABLE_ALLOWLIST_V1 {
-            assert!(Path::new(entry).is_absolute(), "allowlist entry must be absolute: {entry}");
+            assert!(
+                Path::new(entry).is_absolute(),
+                "allowlist entry must be absolute: {entry}"
+            );
         }
     }
 
     #[test]
     fn known_validated_windows_test_install_is_in_allowlist() {
-        assert!(
-            TOR_EXECUTABLE_ALLOWLIST_V1
-                .contains(&r"C:\purr-tools\tor-expert\tor\tor.exe")
-        );
+        assert!(TOR_EXECUTABLE_ALLOWLIST_V1.contains(&r"C:\purr-tools\tor-expert\tor\tor.exe"));
     }
 }

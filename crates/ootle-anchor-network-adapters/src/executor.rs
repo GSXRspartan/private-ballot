@@ -30,6 +30,7 @@
 //! never modified.
 
 use core::future::Future;
+use core::time::Duration;
 use std::task::{Context, Poll, Waker};
 
 /// Bounded error returned when a [`BlockingExecutor`] cannot drive a future to
@@ -42,6 +43,12 @@ pub enum BlockingExecutorError {
     /// The executor detected it was called from inside an incompatible active
     /// async runtime.
     AlreadyInsideAsyncRuntime,
+    /// The future did not complete within the caller-supplied deadline. The
+    /// observable state is now unknown (mirrors a transport timeout), so the
+    /// transport surfaces this as [`crate::TransportErrorCategory::Timeout`]
+    /// rather than an executor failure — a submit that times out must recover,
+    /// never blind-resubmit.
+    Elapsed,
 }
 
 impl BlockingExecutorError {
@@ -50,6 +57,7 @@ impl BlockingExecutorError {
         match self {
             Self::WouldBlock => "EXECUTOR_WOULD_BLOCK",
             Self::AlreadyInsideAsyncRuntime => "EXECUTOR_ALREADY_INSIDE_ASYNC_RUNTIME",
+            Self::Elapsed => "EXECUTOR_ELAPSED",
         }
     }
 }
@@ -72,6 +80,24 @@ pub trait BlockingExecutor {
     /// Drives `future` to completion and returns its output, or a bounded
     /// [`BlockingExecutorError`] if the executor cannot block.
     fn block_on<F: Future<Output = T>, T>(&self, future: F) -> Result<T, BlockingExecutorError>;
+
+    /// Drives `future` to completion but no longer than `timeout`.
+    ///
+    /// When `timeout` is `None`, this is exactly [`Self::block_on`]. When it is
+    /// `Some(deadline)`, an implementation that owns a real reactor bounds the
+    /// wait and returns [`BlockingExecutorError::Elapsed`] if the deadline
+    /// passes first. The default implementation ignores the deadline (it is
+    /// suitable only for the test-only [`SimpleBlockingExecutor`], whose futures
+    /// are already resolved); every production executor overrides it so the
+    /// configured request timeout is enforced at the real network boundary.
+    fn block_on_bounded<F: Future<Output = T>, T>(
+        &self,
+        future: F,
+        timeout: Option<Duration>,
+    ) -> Result<T, BlockingExecutorError> {
+        let _ = timeout;
+        self.block_on(future)
+    }
 }
 
 /// A test-only executor that polls a future once.

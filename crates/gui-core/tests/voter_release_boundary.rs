@@ -255,13 +255,19 @@ fn pre_staging_auth_failure_and_delivery_outage_are_distinguishable() {
     assert_eq!(error.context(), Some("release-descriptor-auth"));
     assert!(error.code().starts_with("GUI_RELEASE_DESCRIPTOR_"));
     assert_ne!(error.code(), "GUI_PRIVATE_TRANSPORT_UNAVAILABLE");
-    assert!(carrier.envelopes.is_empty(), "no bytes may leave pre-staging");
+    assert!(
+        carrier.envelopes.is_empty(),
+        "no bytes may leave pre-staging"
+    );
     assert!(!ok(cast_record_exists_v1(
         &env.cast_dir,
         &fixture.manifest_hex,
         &fixture.fingerprint
     )));
-    assert_eq!(fixture.session.cast_lock_state(), GuiVoterCastLockStateV1::NotCast);
+    assert_eq!(
+        fixture.session.cast_lock_state(),
+        GuiVoterCastLockStateV1::NotCast
+    );
 
     // (2) POST-staging: a valid, authenticated descriptor with a dead carrier
     //     (the ballot office is unreachable) stages the exact envelope, persists
@@ -273,19 +279,33 @@ fn pre_staging_auth_failure_and_delivery_outage_are_distinguishable() {
     let mut dead = RecordingCarrier::failing();
     let result = ok(fixture2.release(&env2, &descriptor, &mut dead));
     assert_eq!(result.cast_lock_state, "CAST_PENDING");
-    assert_eq!(result.diagnostic_stage, Some("PRIVATE_TRANSPORT_UNAVAILABLE"));
-    assert_eq!(dead.envelopes.len(), 1, "the carrier was invoked (post-staging)");
+    assert_eq!(
+        result.diagnostic_stage,
+        Some("PRIVATE_TRANSPORT_UNAVAILABLE")
+    );
+    assert_eq!(
+        dead.envelopes.len(),
+        1,
+        "the carrier was invoked (post-staging)"
+    );
     assert!(ok(cast_record_exists_v1(
         &env2.cast_dir,
         &fixture2.manifest_hex,
         &fixture2.fingerprint
     )));
     assert!(
-        staged_release_envelope_path_v1(&env2.staging_dir, &fixture2.manifest_hex, &fixture2.fingerprint)
-            .exists(),
+        staged_release_envelope_path_v1(
+            &env2.staging_dir,
+            &fixture2.manifest_hex,
+            &fixture2.fingerprint
+        )
+        .exists(),
         "the exact envelope is durably staged before delivery is attempted",
     );
-    assert_eq!(fixture2.session.cast_lock_state(), GuiVoterCastLockStateV1::CastPending);
+    assert_eq!(
+        fixture2.session.cast_lock_state(),
+        GuiVoterCastLockStateV1::CastPending
+    );
 }
 
 // -------------------------------------------------------------------------

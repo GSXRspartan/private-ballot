@@ -30,12 +30,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
 use tari_cc_private_ballot_gui_core::{
-    AppliedElectionStatusV1, AuthenticatedElectionStatusStatementV1,
-    ElectionStatusKnowledgeV1, PersistedElectionStatusRecordV1,
+    AppliedElectionStatusV1, AuthenticatedElectionStatusStatementV1, ElectionStatusKnowledgeV1,
+    MAX_ELECTION_STATUS_STATEMENT_BYTES, PersistedElectionStatusRecordV1,
     TransportAuthorityRootSetV1, TransportAuthorityRootV1,
     ensure_voter_election_status_directory_v1, load_persisted_election_status_v1,
     persist_election_status_record_v1, reserve_next_status_generation_v1,
-    verify_and_apply_election_status_statement_v1, MAX_ELECTION_STATUS_STATEMENT_BYTES,
+    verify_and_apply_election_status_statement_v1,
 };
 
 use crate::managed_tor_test::configured_transport_root_anchor;
@@ -143,8 +143,7 @@ fn export_election_status_blocking(
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())?;
     let status_dir = ensure_voter_election_status_directory_v1(&app_data_root)?;
-    let generation =
-        reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)?;
+    let generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)?;
 
     // Read the AUTHORITATIVE lifecycle at signing time (short lock).
     let lifecycle_state = {
@@ -476,9 +475,12 @@ fn fetch_election_status_blocking(
     };
     let carrier = TorSocksPrivateReleaseCarrierV1::new(socks_addr, TorCarrierTimeoutsV1::default())
         .map_err(|_| status_unavailable())?;
-    let statement_bytes =
-        fetch_election_status_over_tor(carrier.socks_addr(), &descriptor, &TorCarrierTimeoutsV1::default())
-            .map_err(|_| status_unavailable())?;
+    let statement_bytes = fetch_election_status_over_tor(
+        carrier.socks_addr(),
+        &descriptor,
+        &TorCarrierTimeoutsV1::default(),
+    )
+    .map_err(|_| status_unavailable())?;
     if statement_bytes.len() > MAX_ELECTION_STATUS_STATEMENT_BYTES {
         return Err(status_unsafe_file());
     }

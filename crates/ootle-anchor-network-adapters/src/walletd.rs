@@ -47,7 +47,7 @@ pub use tari_ootle_walletd_client::types::{
 use crate::auth::WalletdAuthSecret;
 use crate::endpoint::WalletdEndpoint;
 use crate::error::{TransportError, TransportErrorCategory};
-use crate::executor::BlockingExecutor;
+use crate::executor::{BlockingExecutor, BlockingExecutorError};
 
 /// Synchronous, injectable walletd wire-transport seam.
 ///
@@ -122,14 +122,17 @@ pub trait WalletdWireTransport {
 pub struct RealWalletdTransport<E: BlockingExecutor> {
     client: WalletDaemonClient,
     executor: E,
+    request_timeout: Option<core::time::Duration>,
 }
 
 impl<E: BlockingExecutor> RealWalletdTransport<E> {
     /// Constructs a real walletd transport.
     ///
     /// The `endpoint` is the walletd JSON-RPC URL. The optional `auth` is a
-    /// bearer JWT or API key. The `executor` is provided by the application
-    /// (e.g. a tokio `Handle` wrapper). No network connection is opened.
+    /// bearer JWT or API key. The optional `request_timeout` bounds every
+    /// walletd request at the real network boundary; when `None` the request is
+    /// unbounded. The `executor` is provided by the application (e.g. a tokio
+    /// `Handle` wrapper). No network connection is opened.
     ///
     /// # Errors
     ///
@@ -138,12 +141,37 @@ impl<E: BlockingExecutor> RealWalletdTransport<E> {
     pub fn new(
         endpoint: &WalletdEndpoint,
         auth: Option<&WalletdAuthSecret>,
+        request_timeout: Option<core::time::Duration>,
         executor: E,
     ) -> Result<Self, TransportError> {
         let token = auth.map(WalletdAuthSecret::as_jwt_string);
         let client = WalletDaemonClient::connect(endpoint.as_str(), token)
             .map_err(|_error| TransportError::from_category(TransportErrorCategory::Unknown))?;
-        Ok(Self { client, executor })
+        Ok(Self {
+            client,
+            executor,
+            request_timeout,
+        })
+    }
+}
+
+/// Maps a bounded-executor outcome into a transport result. An elapsed deadline
+/// becomes [`TransportErrorCategory::Timeout`] (state unknown → recover, never
+/// blind-resubmit); any other executor failure is `ExecutorUnavailable`.
+fn resolve_executor_outcome<T>(
+    outcome: Result<
+        Result<T, tari_ootle_walletd_client::error::WalletDaemonClientError>,
+        BlockingExecutorError,
+    >,
+) -> Result<T, TransportError> {
+    match outcome {
+        Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
+        Err(BlockingExecutorError::Elapsed) => Err(TransportError::from_category(
+            TransportErrorCategory::Timeout,
+        )),
+        Err(_) => Err(TransportError::from_category(
+            TransportErrorCategory::ExecutorUnavailable,
+        )),
     }
 }
 
@@ -153,12 +181,7 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
         request: &TransactionRequestCreateRequest,
     ) -> Result<TransactionRequestCreateResponse, TransportError> {
         let future = self.client.create_transaction_request(request);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 
     fn approve_transaction_request(
@@ -166,12 +189,7 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
         request: &TransactionRequestDecisionRequest,
     ) -> Result<TransactionRequestDecisionResponse, TransportError> {
         let future = self.client.approve_transaction_request(request);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 
     fn reject_transaction_request(
@@ -179,12 +197,7 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
         request: &TransactionRequestDecisionRequest,
     ) -> Result<TransactionRequestDecisionResponse, TransportError> {
         let future = self.client.reject_transaction_request(request);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 
     fn get_transaction_request(
@@ -192,12 +205,7 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
         request: &TransactionRequestGetRequest,
     ) -> Result<TransactionRequestGetResponse, TransportError> {
         let future = self.client.get_transaction_request(request);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 
     fn submit_transaction_request(
@@ -205,12 +213,7 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
         request: &TransactionRequestSubmitRequest,
     ) -> Result<TransactionRequestSubmitResponse, TransportError> {
         let future = self.client.submit_transaction_request(request);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_walletd_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 }
 

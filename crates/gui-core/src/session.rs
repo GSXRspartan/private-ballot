@@ -287,10 +287,7 @@ impl GuiElectionSessionV1 {
         &mut self,
         package_bytes: &[u8],
     ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
-        if !matches!(
-            self.lifecycle.state(),
-            ElectionLifecycleStateV1::Open
-        ) {
+        if !matches!(self.lifecycle.state(), ElectionLifecycleStateV1::Open) {
             return Err(GuiCoreError::new(
                 ValidationCode::ElectionNotOpen.as_str(),
                 crate::error::GuiErrorCategory::InvalidLifecycleTransition,

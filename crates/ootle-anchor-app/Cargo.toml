@@ -16,11 +16,14 @@ tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../ootle-anchor
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 tari-cc-private-ballot-archive = { path = "../archive" }
 
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 
 [features]
 default = []
 offline-test-raw-hashes = []
+# Compiles synthetic archive/terminal-index seams for this crate's offline
+# integration harness only. Production builds deliberately leave it disabled.
+test-support = []
 
 [lib]
 name = "tari_cc_private_ballot_ootle_anchor_app"

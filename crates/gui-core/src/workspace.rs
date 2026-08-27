@@ -73,8 +73,7 @@ const MAX_SUPERSEDED_MARKER_BYTES_V1: usize = 1024;
 /// malformed marker means the workspace confers NO organizer authority.
 const ORGANIZER_AUTHORITY_MARKER_FILE_NAME: &str = "organizer-authority";
 const ORGANIZER_AUTHORITY_TMP_FILE_NAME: &str = "organizer-authority.tmp";
-const ORGANIZER_AUTHORITY_MAGIC_V1: &[u8] =
-    b"TARI_PRIVATE_BALLOT_WORKSPACE_ORGANIZER_AUTHORITY_V1";
+const ORGANIZER_AUTHORITY_MAGIC_V1: &[u8] = b"TARI_PRIVATE_BALLOT_WORKSPACE_ORGANIZER_AUTHORITY_V1";
 const MAX_ORGANIZER_AUTHORITY_MARKER_BYTES_V1: usize = 256;
 
 /// Public, organizer-safe discovery summary.

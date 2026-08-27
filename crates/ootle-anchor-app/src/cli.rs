@@ -43,13 +43,11 @@ pub enum CliMode {
     },
 }
 
-/// Arguments for the lifecycle mode (unchanged from the original binary).
+/// Arguments for the lifecycle mode.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LifecycleArgs {
     /// `--config <path>` value, if supplied.
     pub config_path: Option<String>,
-    /// `--auth-env <name>` value, if supplied.
-    pub auth_env: Option<String>,
     /// `--archive <finalized-archive-dir>` value, required for live lifecycle runs.
     pub archive_path: Option<String>,
     /// Whether `--approve` was supplied.
@@ -157,7 +155,7 @@ const MODE_WRITE_CONFIG: &str = "--write-config";
 const MODE_VERIFY_EVIDENCE: &str = "--verify-evidence";
 const MODE_INSPECT_SNAPSHOT: &str = "--inspect-snapshot";
 
-const LIFECYCLE_VALUE_FLAGS: &[&str] = &["--config", "--auth-env", "--archive"];
+const LIFECYCLE_VALUE_FLAGS: &[&str] = &["--config", "--archive"];
 const LIFECYCLE_BARE_FLAGS: &[&str] = &["--approve", "--reject", "--dry-run"];
 
 /// Parses the CLI argument set into a [`CliMode`].
@@ -279,7 +277,6 @@ fn parse_lifecycle(args: &[String]) -> Result<CliMode, String> {
     validate_args(args)?;
 
     let config_path = find_flag_value(args, "--config");
-    let auth_env = find_flag_value(args, "--auth-env");
     let archive_path = find_flag_value(args, "--archive");
     let approve = args.iter().any(|a| a == "--approve");
     let reject = args.iter().any(|a| a == "--reject");
@@ -287,7 +284,6 @@ fn parse_lifecycle(args: &[String]) -> Result<CliMode, String> {
 
     Ok(CliMode::Lifecycle(LifecycleArgs {
         config_path,
-        auth_env,
         archive_path,
         approve,
         reject,
@@ -562,6 +558,18 @@ mod tests {
     #[test]
     fn unknown_arg_in_lifecycle_rejected() {
         let args = vec![prog(), "--bogus".to_owned()];
+        assert_eq!(parse(&args), Err(CONFIG_FAILURE.to_owned()));
+    }
+
+    #[test]
+    fn caller_selected_auth_environment_is_rejected() {
+        let args = vec![
+            prog(),
+            "--config".to_owned(),
+            "anchor.cbor".to_owned(),
+            "--auth-env".to_owned(),
+            "OTHER_SECRET".to_owned(),
+        ];
         assert_eq!(parse(&args), Err(CONFIG_FAILURE.to_owned()));
     }
 }

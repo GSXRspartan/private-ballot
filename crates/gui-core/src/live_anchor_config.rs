@@ -12,9 +12,10 @@ use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorConfigInputProvenanceV1, AnchorLiveApprovalFactsV1,
     MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES, SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
+    path_guard::path_is_within_archive,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerEndpoint, NetworkAdapterConfig, WalletdEndpoint,
+    IndexerEndpoint, NetworkAdapterConfig, OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1, WalletdEndpoint,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     WalletdFeeComponentRef, WalletdSealSignerRef,
@@ -170,7 +171,12 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
     let output_path = PathBuf::from(&request.output_config_path);
     let snapshot_path = PathBuf::from(&request.snapshot_path);
     let evidence_path = PathBuf::from(&request.evidence_path);
-    validate_paths(&output_path, &snapshot_path, &evidence_path)?;
+    validate_paths(
+        &output_path,
+        &snapshot_path,
+        &evidence_path,
+        Path::new(&request.archive_directory),
+    )?;
     if output_path.exists() {
         return Err(GuiCoreError::live_anchor_config_output_exists());
     }
@@ -181,14 +187,22 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
     let indexer_endpoint = IndexerEndpoint::parse(&request.indexer_endpoint)
         .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
+    // HIGH-3 endpoint policy: for the organizer-local standalone/testnet
+    // architecture, both endpoints must be loopback so the walletd bearer token
+    // and every anchor request can only ever reach this machine.
+    if !walletd_endpoint.is_loopback() || !indexer_endpoint.is_loopback() {
+        return Err(GuiCoreError::live_anchor_endpoint_not_loopback());
+    }
     let account_reference = AnchorAccountReference::new(request.account_reference.clone())
         .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
     let fee_component = WalletdFeeComponentRef::parse(&request.fee_component)
         .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
     let seal_signer = parse_seal_signer(&request.seal_signer_kind, &request.seal_signer_id)?;
     let max_fee = AnchorMaxFeeV1::from_units(request.max_fee);
-    if max_fee.value() == 0 {
-        return Err(GuiCoreError::live_anchor_operator_config_invalid());
+    // MEDIUM-3 fee policy: zero is rejected, and an over-large budget is capped
+    // by the shared policy ceiling (also enforced in NetworkAdapterConfig::new).
+    if max_fee.value() == 0 || max_fee.value() > OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 {
+        return Err(GuiCoreError::live_anchor_max_fee_out_of_policy());
     }
 
     let network_adapter = NetworkAdapterConfig::new(
@@ -327,7 +341,12 @@ fn validate_declared_seal_public_key(value: &str) -> Result<(), GuiCoreError> {
     Ok(())
 }
 
-fn validate_paths(output: &Path, snapshot: &Path, evidence: &Path) -> Result<(), GuiCoreError> {
+fn validate_paths(
+    output: &Path,
+    snapshot: &Path,
+    evidence: &Path,
+    archive_dir: &Path,
+) -> Result<(), GuiCoreError> {
     for path in [output, snapshot, evidence] {
         if !path.is_absolute() {
             return Err(GuiCoreError::new(
@@ -336,6 +355,14 @@ fn validate_paths(output: &Path, snapshot: &Path, evidence: &Path) -> Result<(),
                 Some("live-anchor-config"),
                 "live anchor config paths must be absolute",
             ));
+        }
+        // HIGH-2 containment guard: no mutable Ootle output/state file may equal
+        // or descend from the finalized archive directory. Writing there after
+        // archive verification would mutate the "finalized" archive and break
+        // later independent verification. The default detached sidecar layout
+        // (siblings next to the archive dir) stays non-self-referential.
+        if path_is_within_archive(path, archive_dir) {
+            return Err(GuiCoreError::live_anchor_output_within_archive());
         }
     }
 

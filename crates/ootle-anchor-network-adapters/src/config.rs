@@ -18,6 +18,28 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
 use crate::auth::WalletdAuthSecret;
 use crate::endpoint::{IndexerEndpoint, WalletdEndpoint};
 
+/// Hard policy ceiling for the anchor transaction's maximum fee, in the
+/// ledger's smallest unit.
+///
+/// The anchor transaction is minimal: exactly one `pay_fee_from_component` plus
+/// one `EmitLog`. Its real fee is on the order of the operator default of
+/// 1,000 units (see the GUI default). This ceiling is ~10,000× that default —
+/// generous headroom for any fee-market fluctuation while making it impossible
+/// for a mis-entered or a maliciously modified frontend to authorize a
+/// wallet-draining budget (e.g. `u64::MAX`). The ceiling bounds only the
+/// operator-authorized spend limit; it is not a protocol constant and never
+/// enters the anchor-record digest (which commits to network + manifest hash +
+/// archive hash only).
+pub const OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1: u64 = 10_000_000;
+
+/// Minimum accepted request timeout, in seconds. Zero is rejected so a
+/// misconfigured "0s" can never make every request time out instantly.
+pub const OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1: u64 = 1;
+
+/// Maximum accepted request timeout, in seconds (ten minutes). Bounds an
+/// over-large value so a single request can never park a worker indefinitely.
+pub const OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1: u64 = 600;
+
 /// Rejection categories for application configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkAdapterConfigError {
@@ -25,8 +47,13 @@ pub enum NetworkAdapterConfigError {
     UnsupportedNetwork,
     /// The maximum fee was zero.
     InvalidMaxFee,
+    /// The maximum fee exceeded [`OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1`].
+    MaxFeeAboveCeiling,
     /// The receipt-query attempt count was zero.
     InvalidReceiptQueryAttempts,
+    /// The optional request timeout was present but outside the sane bounds
+    /// [`OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1`]..=[`OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1`].
+    InvalidRequestTimeout,
 }
 
 impl NetworkAdapterConfigError {
@@ -35,7 +62,9 @@ impl NetworkAdapterConfigError {
         match self {
             Self::UnsupportedNetwork => "CONFIG_UNSUPPORTED_NETWORK",
             Self::InvalidMaxFee => "CONFIG_INVALID_MAX_FEE",
+            Self::MaxFeeAboveCeiling => "CONFIG_MAX_FEE_ABOVE_CEILING",
             Self::InvalidReceiptQueryAttempts => "CONFIG_INVALID_RECEIPT_QUERY_ATTEMPTS",
+            Self::InvalidRequestTimeout => "CONFIG_INVALID_REQUEST_TIMEOUT",
         }
     }
 }
@@ -92,8 +121,19 @@ impl NetworkAdapterConfig {
         if max_fee.value() == 0 {
             return Err(NetworkAdapterConfigError::InvalidMaxFee);
         }
+        if max_fee.value() > OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 {
+            return Err(NetworkAdapterConfigError::MaxFeeAboveCeiling);
+        }
         if receipt_query_max_attempts == 0 {
             return Err(NetworkAdapterConfigError::InvalidReceiptQueryAttempts);
+        }
+        if let Some(secs) = request_timeout_secs {
+            if !(OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1
+                ..=OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1)
+                .contains(&secs)
+            {
+                return Err(NetworkAdapterConfigError::InvalidRequestTimeout);
+            }
         }
         Ok(Self {
             network,
@@ -264,6 +304,76 @@ mod tests {
         assert_eq!(
             result.err().unwrap_or_else(|| panic!("expected error")),
             NetworkAdapterConfigError::InvalidReceiptQueryAttempts
+        );
+    }
+
+    fn config_with_fee_and_timeout(
+        fee: u64,
+        timeout: Option<u64>,
+    ) -> Result<NetworkAdapterConfig, NetworkAdapterConfigError> {
+        NetworkAdapterConfig::new(
+            valid_network(),
+            valid_endpoint(),
+            valid_indexer_endpoint(),
+            valid_fee_component(),
+            WalletdSealSignerRef::AccountKey { index: 0 },
+            AnchorMaxFeeV1::from_units(fee),
+            timeout,
+            8,
+            None,
+        )
+    }
+
+    #[test]
+    fn max_fee_at_policy_ceiling_is_accepted() {
+        let config = config_with_fee_and_timeout(OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1, Some(30))
+            .unwrap_or_else(|e| panic!("ceiling fee must be accepted: {e:?}"));
+        assert_eq!(
+            config.max_fee().value(),
+            OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1
+        );
+    }
+
+    #[test]
+    fn max_fee_above_policy_ceiling_is_rejected() {
+        assert_eq!(
+            config_with_fee_and_timeout(OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 + 1, Some(30))
+                .err()
+                .unwrap_or_else(|| panic!("expected error")),
+            NetworkAdapterConfigError::MaxFeeAboveCeiling
+        );
+        assert_eq!(
+            config_with_fee_and_timeout(u64::MAX, Some(30))
+                .err()
+                .unwrap_or_else(|| panic!("expected error")),
+            NetworkAdapterConfigError::MaxFeeAboveCeiling
+        );
+    }
+
+    #[test]
+    fn request_timeout_bounds_are_enforced() {
+        // In-range values (including the exact bounds) are accepted.
+        assert!(config_with_fee_and_timeout(1000, None).is_ok());
+        assert!(
+            config_with_fee_and_timeout(1000, Some(OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1))
+                .is_ok()
+        );
+        assert!(
+            config_with_fee_and_timeout(1000, Some(OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1))
+                .is_ok()
+        );
+        // Zero and over-max are rejected.
+        assert_eq!(
+            config_with_fee_and_timeout(1000, Some(0))
+                .err()
+                .unwrap_or_else(|| panic!("expected error")),
+            NetworkAdapterConfigError::InvalidRequestTimeout
+        );
+        assert_eq!(
+            config_with_fee_and_timeout(1000, Some(OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1 + 1))
+                .err()
+                .unwrap_or_else(|| panic!("expected error")),
+            NetworkAdapterConfigError::InvalidRequestTimeout
         );
     }
 }

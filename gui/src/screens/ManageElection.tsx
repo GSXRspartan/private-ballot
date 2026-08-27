@@ -16,6 +16,8 @@ import {
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
+  GuiLiveAnchorConfigResultV1,
+  GuiLiveAnchorStepResultV1,
   GuiTallySummaryV1,
   OrganizerIntakeStatusV1,
 } from "../api/types";
@@ -49,7 +51,6 @@ import {
   LifecyclePill,
   Notice,
   Pill,
-  Placeholder,
 } from "../components/ui";
 import { LockIcon } from "../components/icons";
 import { ProgressSteps } from "../components/ProgressSteps";
@@ -119,6 +120,30 @@ export function ManageElection() {
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  // Organizer-side Ootle aggregate anchor publish state.
+  const [anchorConfigResult, setAnchorConfigResult] =
+    useState<GuiLiveAnchorConfigResultV1 | null>(null);
+  const [anchorStepResult, setAnchorStepResult] =
+    useState<GuiLiveAnchorStepResultV1 | null>(null);
+  const [anchorBusy, setAnchorBusy] = useState(false);
+  const [anchorNetwork, setAnchorNetwork] = useState("esmeralda");
+  const [anchorWalletdEndpoint, setAnchorWalletdEndpoint] = useState(
+    "http://127.0.0.1:12009",
+  );
+  const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
+    "http://127.0.0.1:12500",
+  );
+  const [anchorAccountRef, setAnchorAccountRef] = useState("organizer-fee-account");
+  const [anchorFeeComponent, setAnchorFeeComponent] = useState("");
+  const [anchorSealSignerKind, setAnchorSealSignerKind] = useState("account");
+  const [anchorSealSignerId, setAnchorSealSignerId] = useState("0");
+  const [anchorSealPubKey, setAnchorSealPubKey] = useState("");
+  const [anchorMaxFee, setAnchorMaxFee] = useState(1000);
+  const [anchorFloor, setAnchorFloor] = useState(2);
+  const [anchorDedicatedWallet, setAnchorDedicatedWallet] = useState(false);
+  // The frontend only chooses whether to attach the token; the backend reads
+  // the single fixed WALLETD_AUTH_TOKEN variable and never an arbitrary name.
+  const [anchorUseAuth, setAnchorUseAuth] = useState(false);
   // Guided organizer workspace (progressive disclosure, presentation only).
   // Default = guided mode: the current lifecycle phase's controls are
   // prominent, completed phases collapse to compact summaries, and future
@@ -542,6 +567,84 @@ export function ManageElection() {
       );
     } catch (error) {
       showError(error);
+    }
+  };
+
+  const anchorPaths = (archiveDirName: string) => ({
+    configPath: `${archiveDirName}-anchor-config.cbor`,
+    snapshotPath: `${archiveDirName}-anchor-snapshot.cbor`,
+    evidencePath: `${archiveDirName}-anchor-evidence.cbor`,
+  });
+
+  const onPrepareAnchorConfig = async () => {
+    if (!archiveResult) return;
+    clearLocalError();
+    setAnchorBusy(true);
+    setAnchorConfigResult(null);
+    setAnchorStepResult(null);
+    const { configPath, snapshotPath, evidencePath } = anchorPaths(
+      archiveResult.directory,
+    );
+    try {
+      const result = await api.writeLiveAnchorConfig({
+        archive_directory: archiveResult.directory,
+        output_config_path: configPath,
+        network: anchorNetwork,
+        walletd_endpoint: anchorWalletdEndpoint,
+        indexer_endpoint: anchorIndexerEndpoint,
+        account_reference: anchorAccountRef,
+        fee_component: anchorFeeComponent,
+        seal_signer_kind: anchorSealSignerKind,
+        seal_signer_id: anchorSealSignerId,
+        declared_seal_public_key: anchorSealPubKey,
+        dedicated_organizer_wallet_attested: anchorDedicatedWallet,
+        max_fee: anchorMaxFee,
+        required_accepted_ballot_floor: anchorFloor,
+        reduced_anonymity_acknowledged: true,
+        snapshot_path: snapshotPath,
+        evidence_path: evidencePath,
+        backoff_base_secs: 1,
+        backoff_cap_secs: 10,
+        receipt_query_attempts: 8,
+        request_timeout_secs: 30,
+        ttl_secs: null,
+      });
+      setAnchorConfigResult(result);
+      recordAction("Prepared anchor configuration");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnchorBusy(false);
+    }
+  };
+
+  const onAnchorStep = async (decision: "approve" | "reject" | "none") => {
+    if (!archiveResult || !anchorConfigResult) return;
+    clearLocalError();
+    setAnchorBusy(true);
+    const { snapshotPath, evidencePath } = anchorPaths(archiveResult.directory);
+    try {
+      const result = await api.runLiveAnchorLifecycleStep({
+        config_path: anchorConfigResult.config_path,
+        archive_directory: archiveResult.directory,
+        use_walletd_auth: anchorUseAuth,
+        decision,
+      });
+      setAnchorStepResult(result);
+      if (result.phase_is_terminal_success) {
+        recordAction(`Anchor finalized: ${result.phase}`);
+      } else if (result.phase_is_terminal) {
+        recordAction(`Anchor terminal: ${result.phase}`);
+      } else {
+        recordAction(`Anchor step: ${result.phase}`);
+      }
+      // Keep snapshot/evidence paths in sync for the inspection screens.
+      void snapshotPath;
+      void evidencePath;
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnchorBusy(false);
     }
   };
 
@@ -1541,13 +1644,263 @@ export function ManageElection() {
 
         {showControl("anchor") && (
         <Card title="Anchor">
-          <Placeholder>
+          <Notice tone="info">
             Optional public integrity anchor: anchor the aggregate finalized archive commitment
-            on Tari Ootle. Individual votes are not written to Ootle. Anchor submission runs
-            through the Phase 4 operator application, not this screen — inspect the resulting
-            snapshot and evidence on the Anchor and Evidence screens. Anchoring is optional and
-            non-binding.
-          </Placeholder>
+            on Tari Ootle. Individual votes are not written to Ootle. Anchoring is optional and
+            non-binding — the independently verified offline archive remains authoritative.
+          </Notice>
+          {!archiveResult && (
+            <p className="form-hint">Write and verify the final archive first.</p>
+          )}
+          {archiveResult && (
+            <>
+              <div className="field-list">
+                <Field label="Archive directory">
+                  <HashValue value={archiveResult.directory} />
+                </Field>
+                <Field label="Archive hash">
+                  <HashValue value={archiveResult.archive_hash_hex} />
+                </Field>
+              </div>
+
+              {!anchorConfigResult && (
+                <>
+                  <div className="card-grid">
+                    <div className="form-row">
+                      <label htmlFor="anchor-network">Network</label>
+                      <select
+                        id="anchor-network"
+                        value={anchorNetwork}
+                        onChange={(e) => setAnchorNetwork(e.target.value)}
+                      >
+                        <option value="esmeralda">esmeralda (testnet)</option>
+                        <option value="igor">igor (testnet)</option>
+                        <option value="localnet">localnet</option>
+                      </select>
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-walletd">Walletd endpoint</label>
+                      <input
+                        id="anchor-walletd"
+                        type="text"
+                        value={anchorWalletdEndpoint}
+                        onChange={(e) => setAnchorWalletdEndpoint(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-indexer">Indexer endpoint</label>
+                      <input
+                        id="anchor-indexer"
+                        type="text"
+                        value={anchorIndexerEndpoint}
+                        onChange={(e) => setAnchorIndexerEndpoint(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-account">Fee account</label>
+                      <input
+                        id="anchor-account"
+                        type="text"
+                        value={anchorAccountRef}
+                        onChange={(e) => setAnchorAccountRef(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-fee-comp">Fee component address</label>
+                      <input
+                        id="anchor-fee-comp"
+                        type="text"
+                        value={anchorFeeComponent}
+                        placeholder="component_..."
+                        onChange={(e) => setAnchorFeeComponent(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-seal-kind">Seal signer</label>
+                      <select
+                        id="anchor-seal-kind"
+                        value={anchorSealSignerKind}
+                        onChange={(e) => setAnchorSealSignerKind(e.target.value)}
+                      >
+                        <option value="account">account key</option>
+                        <option value="transaction">transaction key</option>
+                        <option value="imported">imported key</option>
+                      </select>
+                      <input
+                        id="anchor-seal-id"
+                        type="number"
+                        min="0"
+                        value={anchorSealSignerId}
+                        onChange={(e) => setAnchorSealSignerId(e.target.value)}
+                        style={{ width: "5rem" }}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-seal-pubkey">Declared seal public key</label>
+                      <input
+                        id="anchor-seal-pubkey"
+                        type="text"
+                        value={anchorSealPubKey}
+                        onChange={(e) => setAnchorSealPubKey(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-maxfee">Max fee</label>
+                      <input
+                        id="anchor-maxfee"
+                        type="number"
+                        min="1"
+                        value={anchorMaxFee}
+                        onChange={(e) => setAnchorMaxFee(Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-floor">Accepted ballot floor (min 2)</label>
+                      <input
+                        id="anchor-floor"
+                        type="number"
+                        min="2"
+                        value={anchorFloor}
+                        onChange={(e) => setAnchorFloor(Number(e.target.value))}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={anchorUseAuth}
+                          onChange={(e) => setAnchorUseAuth(e.target.checked)}
+                        />{" "}
+                        Attach walletd bearer token from the WALLETD_AUTH_TOKEN
+                        environment variable
+                      </label>
+                    </div>
+                    <div className="form-row">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={anchorDedicatedWallet}
+                          onChange={(e) => setAnchorDedicatedWallet(e.target.checked)}
+                        />{" "}
+                        Dedicated organizer-only wallet (attested)
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={
+                        !canAct ||
+                        anchorBusy ||
+                        !anchorDedicatedWallet ||
+                        !anchorSealPubKey ||
+                        !anchorFeeComponent ||
+                        anchorFloor < 2
+                      }
+                      onClick={() => void onPrepareAnchorConfig()}
+                    >
+                      Prepare anchor configuration
+                    </button>
+                  </div>
+                  {anchorFloor < 2 && (
+                    <Notice tone="error">
+                      A minimum floor of 2 is required so a one-voter aggregate anchor cannot be
+                      casually published.
+                    </Notice>
+                  )}
+                </>
+              )}
+
+              {anchorConfigResult && (
+                <>
+                  <div className="field-list">
+                    <Field label="Anchor digest">
+                      <HashValue value={anchorConfigResult.anchor_digest_hex} />
+                      <CopyButton value={anchorConfigResult.anchor_digest_hex} />
+                    </Field>
+                    <Field label="Manifest hash">
+                      <HashValue value={anchorConfigResult.manifest_hash_hex} />
+                    </Field>
+                    <Field label="Archive hash">
+                      <HashValue value={anchorConfigResult.archive_hash_hex} />
+                    </Field>
+                    <Field label="Accepted ballots">
+                      {anchorConfigResult.accepted_ballot_count}
+                    </Field>
+                    <Field label="Floor enforced">
+                      {anchorConfigResult.required_accepted_ballot_floor}
+                    </Field>
+                  </div>
+
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={!canAct || anchorBusy}
+                      onClick={() => void onAnchorStep("approve")}
+                    >
+                      {anchorBusy ? "Working…" : "Publish aggregate anchor"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      disabled={!canAct || anchorBusy}
+                      onClick={() => void onAnchorStep("reject")}
+                    >
+                      Reject
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={!canAct || anchorBusy}
+                      onClick={() => void onAnchorStep("none")}
+                    >
+                      Check status
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {anchorStepResult && (
+                <div className="field-list">
+                  <Field label="Anchor status">
+                    {anchorStepResult.phase_is_terminal_success ? (
+                      <Pill tone="ok">{anchorStepResult.phase}</Pill>
+                    ) : anchorStepResult.phase_is_terminal ? (
+                      <Pill tone="error">{anchorStepResult.phase}</Pill>
+                    ) : (
+                      <Pill tone="info">{anchorStepResult.phase}</Pill>
+                    )}
+                  </Field>
+                  <Field label="Machine code">{anchorStepResult.machine_code}</Field>
+                  {anchorStepResult.transaction_id && (
+                    <Field label="Transaction">
+                      <HashValue value={anchorStepResult.transaction_id} />
+                    </Field>
+                  )}
+                  {anchorStepResult.evidence_written && (
+                    <Field label="Evidence">
+                      <HashValue value={anchorStepResult.evidence_path} />
+                    </Field>
+                  )}
+                  {anchorStepResult.diagnostic && (
+                    <Field label="Diagnostic">{anchorStepResult.diagnostic}</Field>
+                  )}
+                  {anchorStepResult.next_backoff_secs !== null && (
+                    <Field label="Next poll backoff">
+                      {anchorStepResult.next_backoff_secs}s
+                    </Field>
+                  )}
+                </div>
+              )}
+              <BackendErrorNotice
+                error={localError}
+                onDismiss={() => setLocalError(null)}
+              />
+            </>
+          )}
         </Card>
         )}
       </div>

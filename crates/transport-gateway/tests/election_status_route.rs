@@ -30,12 +30,12 @@ use hpke::{Kem as KemTrait, Serializable, kem::X25519HkdfSha256};
 
 use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 use tari_cc_private_ballot_gui_core::{
-    AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1,
-    ElectionStatusKnowledgeV1, GuiElectionSessionV1, BatchPolicyV1, PaddingPolicyV1,
-    PrivateBallotEnvelopeV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
-    TransportDescriptorV1, TransportRoutePolicyV1, verify_and_apply_election_status_statement_v1,
+    AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1, BatchPolicyV1,
+    ElectionStatusKnowledgeV1, GuiElectionSessionV1, PaddingPolicyV1, PrivateBallotEnvelopeV1,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    TransportRoutePolicyV1, verify_and_apply_election_status_statement_v1,
 };
-use tari_cc_private_ballot_protocol::{Blake3HashProviderV1};
+use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 use tari_cc_private_ballot_transport_gateway::{
     GatewayReceiverKeyV1, OpaqueEnvelopeCollectorV1, OpaqueEnvelopeGatewayHandlerV1,
     ThreadSafeCollectorHandlerV1, TransportGatewaySimulatorV1,
@@ -120,7 +120,9 @@ fn handler_fixture() -> HandlerFixture {
     secret.copy_from_slice(receiver_secret.to_bytes().as_slice());
 
     let manifest = common::manifest();
-    let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("hash");
+    let manifest_hash = manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .expect("hash");
     // The SAME root key signs the descriptor AND the status statements.
     let root_signing_key = SigningKey::from_bytes(&[81; 32]);
     let receipt_key = SigningKey::from_bytes(&[82; 32]);
@@ -147,11 +149,10 @@ fn handler_fixture() -> HandlerFixture {
         &root_signing_key,
     )
     .expect("descriptor");
-    let roots =
-        TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
-            key_id: ROOT_KEY_ID.to_owned(),
-            public_key: root_signing_key.verifying_key().to_bytes(),
-        });
+    let roots = TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
+        key_id: ROOT_KEY_ID.to_owned(),
+        public_key: root_signing_key.verifying_key().to_bytes(),
+    });
     HandlerFixture {
         descriptor,
         receiver_secret: secret,
@@ -176,8 +177,8 @@ fn fenced_handler(
     let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
     // Substrate session is OPEN on purpose: fencing must come from the fence.
     let session = Arc::new(Mutex::new(common::open_session()));
-    let receiver_key = GatewayReceiverKeyV1::from_secret_bytes(fixture.receiver_secret)
-        .expect("receiver key");
+    let receiver_key =
+        GatewayReceiverKeyV1::from_secret_bytes(fixture.receiver_secret).expect("receiver key");
     let handler = ThreadSafeCollectorHandlerV1::new(
         gateway.clone(),
         Arc::new(fixture.descriptor.clone()),
@@ -276,7 +277,11 @@ fn closed_fence_refuses_valid_envelopes_before_any_acceptance() {
         .expect("seal")
         .to_canonical_cbor()
         .expect("encode");
-    let (code, body) = drive_once(&collector, &mut handler, octet_post("/v1/opaque-envelope", &encoded));
+    let (code, body) = drive_once(
+        &collector,
+        &mut handler,
+        octet_post("/v1/opaque-envelope", &encoded),
+    );
     assert_eq!(code, 503, "closed election fences ballots with 503");
     assert!(body.is_empty(), "rejections carry no receipt bytes");
 
@@ -304,18 +309,26 @@ fn open_fence_admits_and_status_stays_truthful() {
         .expect("seal")
         .to_canonical_cbor()
         .expect("encode");
-    let (frozen_code, _) =
-        drive_once(&collector, &mut handler, octet_post("/v1/opaque-envelope", &encoded));
+    let (frozen_code, _) = drive_once(
+        &collector,
+        &mut handler,
+        octet_post("/v1/opaque-envelope", &encoded),
+    );
     assert_eq!(frozen_code, 503, "pre-open election fences ballots");
 
     // ...and once the organizer commits OPEN, admission proceeds.
     fence.observe(ElectionLifecycleStateV1::Open, None);
-    let (open_code, open_body) =
-        drive_once(&collector, &mut handler, octet_post("/v1/opaque-envelope", &encoded));
+    let (open_code, open_body) = drive_once(
+        &collector,
+        &mut handler,
+        octet_post("/v1/opaque-envelope", &encoded),
+    );
     assert_eq!(open_code, 200, "open election admits a valid ballot");
     let receipt =
-        tari_cc_private_ballot_gui_core::AuthenticatedTransportReceiptV1::from_canonical_cbor(&open_body)
-            .expect("authenticated receipt");
+        tari_cc_private_ballot_gui_core::AuthenticatedTransportReceiptV1::from_canonical_cbor(
+            &open_body,
+        )
+        .expect("authenticated receipt");
     assert_eq!(
         receipt.receipt().state,
         tari_cc_private_ballot_gui_core::VoterReceiptStateV1::Accepted
@@ -438,5 +451,8 @@ fn physical_regression_frozen_then_open_on_one_running_collector_with_voter_appl
         &mut voter,
     )
     .expect("voter must learn the close through the same live endpoint");
-    assert_eq!(applied_closed.effective_state, ElectionLifecycleStateV1::Closed);
+    assert_eq!(
+        applied_closed.effective_state,
+        ElectionLifecycleStateV1::Closed
+    );
 }

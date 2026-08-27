@@ -366,11 +366,8 @@ impl AuthenticatedElectionStatusStatementV1 {
         if self.registry_commitment != expected_registry_commitment {
             return Err(ElectionStatusErrorV1::WrongRegistryCommitment);
         }
-        match roots.verify_by_root_id(
-            &self.root_key_id,
-            &self.signing_message()?,
-            &self.signature,
-        ) {
+        match roots.verify_by_root_id(&self.root_key_id, &self.signing_message()?, &self.signature)
+        {
             Ok(()) => Ok(()),
             Err(TransportError::CryptoFailure) => Err(ElectionStatusErrorV1::InvalidSignature),
             Err(_) => Err(ElectionStatusErrorV1::UntrustedRoot),
@@ -817,10 +814,7 @@ pub fn load_persisted_election_status_v1(
     let array_len = reader.read_array_len().map_err(|_| status_malformed())?;
     if array_len != 5
         || reader.read_unsigned().map_err(|_| status_malformed())? != RECORD_VERSION
-        || reader
-            .read_text_string()
-            .map_err(|_| status_malformed())?
-            != RECORD_TYPE_ID
+        || reader.read_text_string().map_err(|_| status_malformed())? != RECORD_TYPE_ID
     {
         return Err(status_malformed());
     }
@@ -939,7 +933,9 @@ pub fn issued_status_generation_path_v1(
     manifest_hash_hex: &str,
 ) -> Result<PathBuf, GuiCoreError> {
     validate_manifest_hash_hex(manifest_hash_hex)?;
-    Ok(status_dir.join(format!("{ISSUED_GENERATION_PREFIX}{manifest_hash_hex}.cbor")))
+    Ok(status_dir.join(format!(
+        "{ISSUED_GENERATION_PREFIX}{manifest_hash_hex}.cbor"
+    )))
 }
 
 /// Reads the highest status generation this organizer has ever issued for one
@@ -970,10 +966,7 @@ pub fn read_issued_status_generation_v1(
     let mut reader = CanonicalCborReader::new(&bytes);
     let ok = reader.read_array_len().map_err(|_| status_malformed())? == 3
         && reader.read_unsigned().map_err(|_| status_malformed())? == RECORD_VERSION
-        && reader
-            .read_text_string()
-            .map_err(|_| status_malformed())?
-            == ISSUED_TYPE_ID;
+        && reader.read_text_string().map_err(|_| status_malformed())? == ISSUED_TYPE_ID;
     if !ok {
         return Err(status_malformed());
     }
@@ -1061,11 +1054,7 @@ impl AuthoritativeLifecycleFenceV1 {
     /// is `Some` (a durable reservation from the issuance ledger), it is used
     /// verbatim; otherwise the internal monotonic counter advances. Re-setting
     /// an unchanged state is idempotent and keeps the current generation.
-    pub fn observe(
-        &self,
-        state: ElectionLifecycleStateV1,
-        explicit_generation: Option<u64>,
-    ) {
+    pub fn observe(&self, state: ElectionLifecycleStateV1, explicit_generation: Option<u64>) {
         let Ok(mut guard) = self.inner.lock() else {
             return;
         };
@@ -1158,12 +1147,11 @@ mod tests {
     fn root_fixture() -> RootFixture {
         let signing_key = SigningKey::from_bytes(&[0x42; 32]);
         let root_public_key = signing_key.verifying_key().to_bytes();
-        let roots = TransportAuthorityRootSetV1::new(
-            crate::transport::TransportAuthorityRootV1::Pinned {
+        let roots =
+            TransportAuthorityRootSetV1::new(crate::transport::TransportAuthorityRootV1::Pinned {
                 key_id: TEST_ROOT_KEY_ID.to_owned(),
                 public_key: root_public_key,
-            },
-        );
+            });
         RootFixture {
             signing_key,
             roots,
@@ -1199,10 +1187,7 @@ mod tests {
         }
     }
 
-    fn verify_ok(
-        fixture: &RootFixture,
-        statement: &AuthenticatedElectionStatusStatementV1,
-    ) {
+    fn verify_ok(fixture: &RootFixture, statement: &AuthenticatedElectionStatusStatementV1) {
         let (election_id, manifest_hash, registry_commitment) = election_binding();
         if let Err(error) = statement.verify(
             &fixture.roots,
@@ -1230,9 +1215,7 @@ mod tests {
         assert_eq!(decoded, statement);
         // The encoding is canonical and deterministic.
         assert_eq!(
-            decoded
-                .to_canonical_cbor()
-                .expect("re-encode must succeed"),
+            decoded.to_canonical_cbor().expect("re-encode must succeed"),
             bytes
         );
     }
@@ -1306,12 +1289,11 @@ mod tests {
         let statement = signed_statement(&fixture, ElectionLifecycleStateV1::Open, 2);
         // A different pinned root must not accept the same artifact.
         let other_signing_key = SigningKey::from_bytes(&[0x43; 32]);
-        let other_roots = TransportAuthorityRootSetV1::new(
-            crate::transport::TransportAuthorityRootV1::Pinned {
+        let other_roots =
+            TransportAuthorityRootSetV1::new(crate::transport::TransportAuthorityRootV1::Pinned {
                 key_id: TEST_ROOT_KEY_ID.to_owned(),
                 public_key: other_signing_key.verifying_key().to_bytes(),
-            },
-        );
+            });
         let (election_id, manifest_hash, registry_commitment) = election_binding();
         let error = statement
             .verify(
@@ -1493,7 +1475,11 @@ mod tests {
     fn planning_accepts_first_authenticated_observation_forward_only() {
         let knowledge = ElectionStatusKnowledgeV1::new();
         let planned = knowledge
-            .plan(ElectionLifecycleStateV1::Open, 5, ElectionLifecycleStateV1::Frozen)
+            .plan(
+                ElectionLifecycleStateV1::Open,
+                5,
+                ElectionLifecycleStateV1::Frozen,
+            )
             .expect("first OPEN observation plans");
         assert_eq!(planned, ElectionLifecycleStateV1::Open);
 
@@ -1620,8 +1606,12 @@ mod tests {
             root_public_key: fixture.root_public_key,
             statement,
         };
-        persist_election_status_record_v1(dir.path(), &manifest_hash_lower_hex_v1(manifest_hash), &record)
-            .expect("record must persist");
+        persist_election_status_record_v1(
+            dir.path(),
+            &manifest_hash_lower_hex_v1(manifest_hash),
+            &record,
+        )
+        .expect("record must persist");
 
         // Loading under a DIFFERENT election identity must fail closed.
         let error = load_persisted_election_status_v1(
@@ -1689,4 +1679,3 @@ mod tests {
         }
     }
 }
-

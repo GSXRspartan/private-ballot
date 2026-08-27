@@ -51,8 +51,16 @@ pub fn verify_transport_archive_anchor_v1(
         return Ok(result);
     }
 
-    let evidence_metadata = std::fs::symlink_metadata(evidence_path)
-        .map_err(|_| GuiCoreError::file_not_found("anchor-evidence"))?;
+    // A finalized, verified archive with NO anchor evidence is a clean
+    // "archive verified, OOTLE not anchored" — never an archive failure. The
+    // detached sidecar design means the evidence file is legitimately absent
+    // until (and unless) the organizer publishes an anchor, so an absent
+    // evidence file returns the archive-verified `INCLUDED` state, not an error.
+    let evidence_metadata = match std::fs::symlink_metadata(evidence_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(_) => return Err(GuiCoreError::io_failure("anchor-evidence")),
+    };
     if !evidence_metadata.is_file() || evidence_metadata.len() > MAX_EVIDENCE_FILE_BYTES as u64 {
         return Err(GuiCoreError::new(
             "GUI_ANCHOR_EVIDENCE_INVALID",

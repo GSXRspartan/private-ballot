@@ -44,6 +44,7 @@ mod hex;
 pub mod inspect;
 pub mod intake;
 pub mod live_anchor_config;
+pub mod live_anchor_driver;
 pub mod participation;
 pub mod private_intake_inbox;
 pub mod session;
@@ -70,20 +71,20 @@ pub use archive_writer::{
     write_finalized_archive_v1_with_transport_binding,
 };
 pub use artifacts::GuiElectionArtifactsV1;
-pub use election_status::{
-    AppliedElectionStatusV1, AuthenticatedElectionStatusStatementV1,
-    AuthoritativeLifecycleFenceV1, ElectionStatusErrorV1, ElectionStatusKnowledgeV1,
-    MAX_ELECTION_STATUS_STATEMENT_BYTES, PersistedElectionStatusRecordV1,
-    VOTER_ELECTION_STATUS_DIRECTORY_NAME, ensure_voter_election_status_directory_v1,
-    issued_status_generation_path_v1, load_persisted_election_status_v1,
-    manifest_hash_lower_hex_v1, persist_election_status_record_v1,
-    read_issued_status_generation_v1, reserve_next_status_generation_v1,
-    verify_and_apply_election_status_statement_v1, voter_election_status_record_path_v1,
-};
 pub use creation::{
     GuiBallotPresentationType, GuiDraftOptionV1, GuiDraftVoterV1, GuiElectionCreationResultV1,
     GuiElectionDraftPreviewV1, GuiElectionDraftSnapshotV1, GuiElectionDraftV1,
     GuiElectionExportFileV1, GuiElectionExportResultV1, write_election_artifacts_v1,
+};
+pub use election_status::{
+    AppliedElectionStatusV1, AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1,
+    ElectionStatusErrorV1, ElectionStatusKnowledgeV1, MAX_ELECTION_STATUS_STATEMENT_BYTES,
+    PersistedElectionStatusRecordV1, VOTER_ELECTION_STATUS_DIRECTORY_NAME,
+    ensure_voter_election_status_directory_v1, issued_status_generation_path_v1,
+    load_persisted_election_status_v1, manifest_hash_lower_hex_v1,
+    persist_election_status_record_v1, read_issued_status_generation_v1,
+    reserve_next_status_generation_v1, verify_and_apply_election_status_statement_v1,
+    voter_election_status_record_path_v1,
 };
 pub use error::{GuiCoreError, GuiErrorCategory};
 pub use governance::{
@@ -102,6 +103,11 @@ pub use intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
 pub use live_anchor_config::{
     GuiLiveAnchorConfigRequestV1, GuiLiveAnchorConfigResultV1,
     write_live_anchor_config_from_verified_archive_v1,
+};
+pub use live_anchor_driver::{
+    GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1, GuiLiveAnchorStepRequestV1,
+    GuiLiveAnchorStepResultV1, enforce_publish_privacy_floor, map_driver_error, parse_decision,
+    run_step_with_transports, walletd_auth_env_var_name,
 };
 pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,

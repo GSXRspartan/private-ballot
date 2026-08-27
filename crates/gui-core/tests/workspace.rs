@@ -1972,7 +1972,10 @@ fn draft_workspaces_are_always_organizer_context() {
         listed[0].organizer_workspace,
         "drafts are organizer-created objects by construction"
     );
-    match ok(resume_election_workspace_v1(&root, &draft_id), "resume draft") {
+    match ok(
+        resume_election_workspace_v1(&root, &draft_id),
+        "resume draft",
+    ) {
         LoadedElectionWorkspaceV1::Draft { workspace, .. } => {
             assert!(workspace.organizer_workspace)
         }

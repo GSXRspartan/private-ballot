@@ -20,6 +20,10 @@ import type {
   GuiArchiveWriteResultV1,
   GuiBallotPresentationType,
   GuiBallotIntakeResultV1,
+  GuiLiveAnchorConfigRequestV1,
+  GuiLiveAnchorConfigResultV1,
+  GuiLiveAnchorStepRequestV1,
+  GuiLiveAnchorStepResultV1,
   GuiPrivateIntakeSyncSummaryV1,
   GuiCommandError,
   GuiElectionCreationResultV1,
@@ -190,6 +194,14 @@ export const api = {
 
   inspectAnchorEvidence: (path: string) =>
     call<GuiAnchorEvidenceInspectionV1>("inspect_anchor_evidence", { path }),
+
+  writeLiveAnchorConfig: (request: GuiLiveAnchorConfigRequestV1) =>
+    call<GuiLiveAnchorConfigResultV1>("write_live_anchor_config_from_verified_archive", {
+      request,
+    }),
+
+  runLiveAnchorLifecycleStep: (request: GuiLiveAnchorStepRequestV1) =>
+    call<GuiLiveAnchorStepResultV1>("run_live_anchor_lifecycle_step", { request }),
 
   // Organizer election creation (Slice 5A6).
   getOrCreateElectionDraft: () =>

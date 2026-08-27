@@ -360,7 +360,7 @@ fn lifecycle_approve_and_reject_rejected() {
 }
 
 #[test]
-fn lifecycle_config_and_auth_env_parse() {
+fn lifecycle_config_cannot_select_an_auth_environment() {
     let args = vec![
         prog(),
         "--config".to_owned(),
@@ -368,14 +368,7 @@ fn lifecycle_config_and_auth_env_parse() {
         "--auth-env".to_owned(),
         "NAME".to_owned(),
     ];
-    let mode = parse(&args).expect("parse");
-    match mode {
-        CliMode::Lifecycle(l) => {
-            assert_eq!(l.config_path.as_deref(), Some("c"));
-            assert_eq!(l.auth_env.as_deref(), Some("NAME"));
-        }
-        _ => panic!("expected lifecycle"),
-    }
+    assert_eq!(parse(&args), Err(CONFIG_FAILURE.to_owned()));
 }
 
 #[test]

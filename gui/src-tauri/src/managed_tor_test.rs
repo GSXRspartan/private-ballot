@@ -544,10 +544,7 @@ pub fn configure_managed_tor_test(
     // Capture the pinned root anchor (key id + public key) for authenticated
     // election-status verification. The bundle loader guarantees a Pinned root.
     let root_anchor = match &bundle.root {
-        TransportAuthorityRootV1::Pinned {
-            key_id,
-            public_key,
-        } => (key_id.clone(), *public_key),
+        TransportAuthorityRootV1::Pinned { key_id, public_key } => (key_id.clone(), *public_key),
         TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
             return Err(CommandError::new(
                 "GUI_VOTER_BUNDLE_UNTRUSTED",
@@ -614,9 +611,7 @@ pub fn voter_tor_status(tor_exe_path: Option<String>) -> Result<VoterTorStatusV1
 /// real SOCKS5 readiness probe. Returns Ready only after valid SOCKS5
 /// negotiation. No ballot is released by this command.
 #[tauri::command]
-pub async fn start_managed_tor(
-    app: AppHandle,
-) -> Result<ManagedTorTestStatusV1, CommandError> {
+pub async fn start_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
         start_managed_tor_blocking(state.inner())
@@ -694,20 +689,22 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
         stderr_log: stderr_log.clone(),
     };
     let start = Instant::now();
-    let controller = ManagedTorControllerV1::start(&config, &spawner, &mut probe, || start.elapsed())
-        .map_err(|_| {
-            // Classify the failure from the captured child stderr so diagnostics
-            // and tests can distinguish spawn/early-exit/lock/bind/config/timeout.
-            // The user-facing message stays friendly; the bounded kind label is
-            // attached as error context (no path or secret).
-            let kind = classify_start_failure_from_log(&stderr_log);
-            CommandError::new(
-                "GUI_TOR_START_FAILED",
-                "UNAVAILABLE",
-                "tor.exe failed to start or the SOCKS5 listener did not become ready",
-            )
-            .with_context(kind.as_context_label().to_owned())
-        })?;
+    let controller =
+        ManagedTorControllerV1::start(&config, &spawner, &mut probe, || start.elapsed()).map_err(
+            |_| {
+                // Classify the failure from the captured child stderr so diagnostics
+                // and tests can distinguish spawn/early-exit/lock/bind/config/timeout.
+                // The user-facing message stays friendly; the bounded kind label is
+                // attached as error context (no path or secret).
+                let kind = classify_start_failure_from_log(&stderr_log);
+                CommandError::new(
+                    "GUI_TOR_START_FAILED",
+                    "UNAVAILABLE",
+                    "tor.exe failed to start or the SOCKS5 listener did not become ready",
+                )
+                .with_context(kind.as_context_label().to_owned())
+            },
+        )?;
 
     let mut managed = state
         .managed_tor_test
@@ -737,9 +734,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
 /// Stops the managed voter Tor process (bounded). Only the child this
 /// application launched is terminated.
 #[tauri::command]
-pub async fn stop_managed_tor(
-    app: AppHandle,
-) -> Result<ManagedTorTestStatusV1, CommandError> {
+pub async fn stop_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
         stop_managed_tor_blocking(state.inner())
@@ -1240,10 +1235,8 @@ pub(crate) fn test_configured_state(
 mod tests {
     use super::*;
 
-    const HASH_A: &str =
-        "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
-    const HASH_B: &str =
-        "0000000000000000000000000000000000000000000000000000000000000000";
+    const HASH_A: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    const HASH_B: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     fn app_root() -> PathBuf {
         PathBuf::from(if cfg!(windows) {
@@ -1258,11 +1251,13 @@ mod tests {
         let dir = voter_tor_data_subpath(&app_root(), HASH_A).expect("valid hash");
         assert!(dir.starts_with(app_root()));
         assert!(
-            dir.to_string_lossy().contains(VOTER_TOR_ROOT_DIRECTORY_NAME),
+            dir.to_string_lossy()
+                .contains(VOTER_TOR_ROOT_DIRECTORY_NAME),
             "voter data dir must live under the app-owned private-tor-voter directory"
         );
         assert!(
-            dir.to_string_lossy().contains(&format!("election-{HASH_A}")),
+            dir.to_string_lossy()
+                .contains(&format!("election-{HASH_A}")),
             "voter data dir must be scoped to the election manifest hash"
         );
     }
@@ -1271,7 +1266,10 @@ mod tests {
     fn different_elections_get_different_voter_data_dirs() {
         let a = voter_tor_data_subpath(&app_root(), HASH_A).expect("a");
         let b = voter_tor_data_subpath(&app_root(), HASH_B).expect("b");
-        assert_ne!(a, b, "a different election must never reuse another's data dir");
+        assert_ne!(
+            a, b,
+            "a different election must never reuse another's data dir"
+        );
     }
 
     #[test]
@@ -1350,7 +1348,10 @@ mod tests {
         assert!(first.is_dir() && second.is_dir());
         for dir in [&first, &second] {
             let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-            assert!(name.starts_with("run-"), "run dir name is app-generated: {name}");
+            assert!(
+                name.starts_with("run-"),
+                "run dir name is app-generated: {name}"
+            );
         }
         std::fs::remove_dir_all(&base).ok();
     }
@@ -1374,7 +1375,10 @@ mod tests {
         assert!(keep.is_dir(), "the current run directory is never removed");
         assert!(!stale.exists(), "a prior owned run directory is cleaned up");
         assert!(unrelated.is_dir(), "unrelated siblings are never touched");
-        assert!(base.join("legacy-lock").exists(), "non-run files are never touched");
+        assert!(
+            base.join("legacy-lock").exists(),
+            "non-run files are never touched"
+        );
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -1395,7 +1399,9 @@ mod tests {
             PortBindFailure,
         );
         assert_eq!(
-            classify_managed_tor_start_failure("[err] Failed to parse/validate config: unknown option"),
+            classify_managed_tor_start_failure(
+                "[err] Failed to parse/validate config: unknown option"
+            ),
             ConfigError,
         );
         assert_eq!(
@@ -1405,7 +1411,10 @@ mod tests {
         // A clean Tor writes nothing to stderr; an empty tail means it stayed up
         // but the SOCKS listener never became ready in time.
         assert_eq!(classify_managed_tor_start_failure(""), ReadinessTimeout);
-        assert_eq!(classify_managed_tor_start_failure("   \n  "), ReadinessTimeout);
+        assert_eq!(
+            classify_managed_tor_start_failure("   \n  "),
+            ReadinessTimeout
+        );
         // The labels are distinct, bounded, and path-free.
         let labels = [
             DataDirectoryLock,

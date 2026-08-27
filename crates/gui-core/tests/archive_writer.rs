@@ -787,6 +787,103 @@ fn unrelated_or_non_success_phase4_evidence_never_marks_transport_anchored() {
 }
 
 #[test]
+fn missing_anchor_evidence_reports_verified_but_not_anchored() {
+    // LOW: a finalized, verified, transport-bound archive with NO anchor
+    // evidence is a clean "ARCHIVE VERIFIED / OOTLE NOT ANCHORED" — never an
+    // archive failure. The detached sidecar design leaves the evidence file
+    // legitimately absent until an anchor is actually published.
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-transport-anchor-missing-evidence");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &transport_binding(&session),
+    )
+    .expect("bound archive must write");
+    let absent_evidence = dir.join("nonexistent-anchor-evidence.cbor");
+    assert!(!absent_evidence.exists());
+
+    let result = verify_transport_archive_anchor_v1(&target, &absent_evidence)
+        .expect("missing evidence must not be an error");
+    assert_eq!(result.state, "INCLUDED");
+    assert!(result.archive_verified);
+    assert!(result.archive_finalized);
+    assert!(result.transport_binding_verified);
+    assert!(!result.anchor_verified);
+}
+
+#[test]
+fn live_config_rejects_output_inside_archive_directory() {
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-live-config-within-archive");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &live_transport_binding(&session, false),
+    )
+    .expect("finalized bound archive must write");
+    let floor = verify_archive_directory_v1(&target)
+        .expect("archive must verify")
+        .accepted_count as u64;
+
+    let mut request = live_config_request(&dir, &target, floor, false);
+    // Redirect the snapshot INSIDE the finalized archive directory.
+    request.snapshot_path = target
+        .join("anchor-snapshot.cbor")
+        .to_string_lossy()
+        .into_owned();
+    let error = write_live_anchor_config_from_verified_archive_v1(&request)
+        .expect_err("an output inside the archive must be rejected");
+    assert_eq!(error.code(), "GUI_LIVE_ANCHOR_OUTPUT_WITHIN_ARCHIVE");
+}
+
+#[test]
+fn live_config_rejects_non_loopback_walletd_endpoint() {
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-live-config-remote-walletd");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &live_transport_binding(&session, false),
+    )
+    .expect("finalized bound archive must write");
+    let floor = verify_archive_directory_v1(&target)
+        .expect("archive must verify")
+        .accepted_count as u64;
+
+    let mut request = live_config_request(&dir, &target, floor, false);
+    request.walletd_endpoint = "https://walletd.attacker.example:443".to_owned();
+    let error = write_live_anchor_config_from_verified_archive_v1(&request)
+        .expect_err("a remote walletd endpoint must be rejected");
+    assert_eq!(error.code(), "GUI_LIVE_ANCHOR_ENDPOINT_NOT_LOOPBACK");
+}
+
+#[test]
+fn live_config_rejects_max_fee_above_policy_ceiling() {
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-live-config-fat-fee");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &live_transport_binding(&session, false),
+    )
+    .expect("finalized bound archive must write");
+    let floor = verify_archive_directory_v1(&target)
+        .expect("archive must verify")
+        .accepted_count as u64;
+
+    let mut request = live_config_request(&dir, &target, floor, false);
+    request.max_fee = 1_000_000_000; // well above the 10,000,000-unit ceiling
+    let error = write_live_anchor_config_from_verified_archive_v1(&request)
+        .expect_err("an over-policy fee budget must be rejected");
+    assert_eq!(error.code(), "GUI_LIVE_ANCHOR_MAX_FEE_OUT_OF_POLICY");
+}
+
+#[test]
 fn exact_finalized_accept_evidence_marks_transport_anchored() {
     let session = finalized_session_with_ballots();
     let dir = TestDir::new("archive-transport-anchor-accepted");

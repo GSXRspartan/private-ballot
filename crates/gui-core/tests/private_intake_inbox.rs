@@ -15,8 +15,8 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionSessionV1, LoadedElectionWorkspaceV1, append_accepted_ballot_package_to_inbox_v1,
     ballot_package_digest_hex_v1, ensure_election_workspaces_directory_v1,
     ensure_private_intake_inbox_directory_v1, ingest_private_intake_inbox_into_session_v1,
-    private_intake_inbox_directory_v1, resume_election_workspace_v1,
-    workspace_id_for_session_v1, write_session_workspace_revision_v1,
+    private_intake_inbox_directory_v1, resume_election_workspace_v1, workspace_id_for_session_v1,
+    write_session_workspace_revision_v1,
 };
 
 use common::{TestDir, open_session, triptych_package_bytes};
@@ -27,8 +27,8 @@ fn accepted_package_from_inbox_enters_the_session() {
     let inbox = dir.join("inbox");
     let package = triptych_package_bytes(0, &[b"candidate-a"]);
 
-    let wrote = append_accepted_ballot_package_to_inbox_v1(&inbox, &package)
-        .expect("append must succeed");
+    let wrote =
+        append_accepted_ballot_package_to_inbox_v1(&inbox, &package).expect("append must succeed");
     assert!(wrote, "a fresh package must be written");
 
     let mut session = open_session();
@@ -61,12 +61,7 @@ fn exact_retry_is_content_addressed_and_never_double_counts() {
     let files: Vec<_> = fs::read_dir(&inbox)
         .expect("inbox readable")
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .ends_with(".package")
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".package"))
         .collect();
     assert_eq!(files.len(), 1, "exactly one content-addressed file exists");
     assert_eq!(
@@ -81,7 +76,8 @@ fn exact_retry_is_content_addressed_and_never_double_counts() {
 
     // Ingesting again is idempotent: the same package is now a duplicate
     // nullifier and never re-counted.
-    let second = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("re-sync");
+    let second =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("re-sync");
     assert_eq!(second.discovered, 1);
     assert_eq!(second.newly_accepted, 0);
     assert_eq!(second.duplicates, 1);
@@ -95,8 +91,11 @@ fn existing_digest_file_must_match_before_duplicate_append_succeeds() {
     let package = triptych_package_bytes(0, &[b"candidate-a"]);
     let digest_hex = ballot_package_digest_hex_v1(&package);
     fs::create_dir_all(&inbox).expect("inbox");
-    fs::write(inbox.join(format!("{digest_hex}.package")), b"not-the-package")
-        .expect("write corrupt existing digest file");
+    fs::write(
+        inbox.join(format!("{digest_hex}.package")),
+        b"not-the-package",
+    )
+    .expect("write corrupt existing digest file");
 
     let result = append_accepted_ballot_package_to_inbox_v1(&inbox, &package);
     assert!(
@@ -117,10 +116,14 @@ fn different_ballot_same_nullifier_is_rejected() {
     assert!(append_accepted_ballot_package_to_inbox_v1(&inbox, &ballot_b).expect("append b"));
 
     let mut session = open_session();
-    let summary = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest");
+    let summary =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest");
     assert_eq!(summary.discovered, 2);
     assert_eq!(summary.newly_accepted, 1, "only the first vote counts");
-    assert_eq!(summary.duplicates, 1, "the same-nullifier ballot is a duplicate");
+    assert_eq!(
+        summary.duplicates, 1,
+        "the same-nullifier ballot is a duplicate"
+    );
     assert_eq!(session.accepted_count(), 1, "double-vote rule is preserved");
 }
 
@@ -160,7 +163,10 @@ fn accepted_tor_ballot_survives_workspace_restart_and_tally_sees_it() {
     // Close and tally on the recovered workspace.
     resumed.close().expect("close");
     let tally = resumed.tally().expect("tally after close");
-    assert_eq!(tally.accepted_ballots, 1, "tally sees the durable Tor ballot");
+    assert_eq!(
+        tally.accepted_ballots, 1,
+        "tally sees the durable Tor ballot"
+    );
 }
 
 #[test]
@@ -180,19 +186,35 @@ fn restart_reconciliation_discovers_durable_package_without_a_worker_counter() {
 
     // Fresh session standing in for the post-restart authoritative workspace.
     let mut session = open_session();
-    assert_eq!(session.accepted_count(), 0, "worker/session counters start at 0");
+    assert_eq!(
+        session.accepted_count(),
+        0,
+        "worker/session counters start at 0"
+    );
 
-    let first = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("reconcile");
+    let first =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("reconcile");
     assert_eq!(first.discovered, 1);
-    assert_eq!(first.newly_accepted, 1, "the durable package is rediscovered");
-    assert_eq!(session.accepted_count(), 1, "election accepted count becomes 1");
+    assert_eq!(
+        first.newly_accepted, 1,
+        "the durable package is rediscovered"
+    );
+    assert_eq!(
+        session.accepted_count(),
+        1,
+        "election accepted count becomes 1"
+    );
 
     // A second reconciliation pass does not double count.
     let second =
         ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("reconcile again");
     assert_eq!(second.newly_accepted, 0, "second reconciliation is a no-op");
     assert_eq!(second.duplicates, 1);
-    assert_eq!(session.accepted_count(), 1, "no double count on re-reconcile");
+    assert_eq!(
+        session.accepted_count(),
+        1,
+        "no double count on re-reconcile"
+    );
 }
 
 #[test]
@@ -221,7 +243,10 @@ fn empty_or_duplicate_only_reconciliation_signals_no_workspace_write() {
     let repeat =
         ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("duplicate-only");
     assert_eq!(repeat.discovered, 1);
-    assert_eq!(repeat.newly_accepted, 0, "duplicate-only inbox → no workspace write");
+    assert_eq!(
+        repeat.newly_accepted, 0,
+        "duplicate-only inbox → no workspace write"
+    );
     assert_eq!(repeat.duplicates, 1);
 }
 
@@ -275,7 +300,10 @@ fn inbox_file_content_must_match_its_digest_name() {
 
     let mut session = open_session();
     let result = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session);
-    assert!(result.is_err(), "a digest/content mismatch must fail closed");
+    assert!(
+        result.is_err(),
+        "a digest/content mismatch must fail closed"
+    );
     assert_eq!(session.accepted_count(), 0);
 }
 
@@ -290,7 +318,8 @@ fn stray_non_package_files_are_ignored() {
     fs::write(inbox.join("deadbeef.package.tmp"), b"partial").expect("tmp write");
 
     let mut session = open_session();
-    let summary = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest");
+    let summary =
+        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest");
     assert_eq!(summary.discovered, 1);
     assert_eq!(summary.newly_accepted, 1);
 }
@@ -315,7 +344,10 @@ fn inbox_directory_is_app_owned_and_election_scoped() {
 
     let resolved = private_intake_inbox_directory_v1(app_data_root, &manifest_hash_hex)
         .expect("valid election hash resolves");
-    assert!(resolved.starts_with(app_data_root), "inbox lives under app-data");
+    assert!(
+        resolved.starts_with(app_data_root),
+        "inbox lives under app-data"
+    );
     assert!(
         resolved
             .to_string_lossy()
@@ -399,9 +431,8 @@ fn reconciliation_refuses_once_results_are_sealed() {
     // ...then seal the results: further lifecycle progression succeeds, but
     // reconciliation is refused outright in VERIFIED/FINALIZED.
     session.mark_verified().expect("verify");
-    let verified_error =
-        ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
-            .expect_err("sealed results refuse reconciliation");
+    let verified_error = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session)
+        .expect_err("sealed results refuse reconciliation");
     assert_eq!(verified_error.code(), "ELECTION_NOT_OPEN");
 
     session.finalize().expect("finalize");
@@ -420,8 +451,9 @@ fn frozen_sessions_refuse_reconciliation_like_generic_intake() {
 
     // An inbox can never contain pre-acceptance evidence for a FROZEN
     // election; if one somehow does, the frozen session refuses it.
-    let mut frozen = tari_cc_private_ballot_gui_core::GuiElectionSessionV1::new(common::artifacts())
-        .expect("frozen session");
+    let mut frozen =
+        tari_cc_private_ballot_gui_core::GuiElectionSessionV1::new(common::artifacts())
+            .expect("frozen session");
     assert!(
         ingest_private_intake_inbox_into_session_v1(&inbox, &mut frozen).is_err(),
         "frozen sessions refuse inbox reconciliation"

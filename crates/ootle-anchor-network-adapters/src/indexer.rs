@@ -39,7 +39,7 @@ use tari_template_lib_types::LogLevel;
 
 use crate::endpoint::IndexerEndpoint;
 use crate::error::{TransportError, TransportErrorCategory};
-use crate::executor::BlockingExecutor;
+use crate::executor::{BlockingExecutor, BlockingExecutorError};
 
 /// Maximum byte length of a copied rejection reason.
 const MAX_REJECTION_REASON_BYTES: usize = 4096;
@@ -83,21 +83,52 @@ pub trait IndexerReceiptWireTransport {
 pub struct RealIndexerTransport<E: BlockingExecutor> {
     client: IndexerRestApiClient,
     executor: E,
+    request_timeout: Option<core::time::Duration>,
 }
 
 impl<E: BlockingExecutor> RealIndexerTransport<E> {
     /// Constructs a real indexer transport.
     ///
-    /// No network connection is opened.
+    /// The optional `request_timeout` bounds every indexer request at the real
+    /// network boundary; when `None` the request is unbounded. No network
+    /// connection is opened.
     ///
     /// # Errors
     ///
     /// Returns a bounded [`TransportError`] if the pinned client cannot be
     /// constructed (malformed endpoint URL).
-    pub fn new(endpoint: &IndexerEndpoint, executor: E) -> Result<Self, TransportError> {
+    pub fn new(
+        endpoint: &IndexerEndpoint,
+        request_timeout: Option<core::time::Duration>,
+        executor: E,
+    ) -> Result<Self, TransportError> {
         let client = IndexerRestApiClient::connect(endpoint.as_str())
             .map_err(|_error| TransportError::from_category(TransportErrorCategory::Unknown))?;
-        Ok(Self { client, executor })
+        Ok(Self {
+            client,
+            executor,
+            request_timeout,
+        })
+    }
+}
+
+/// Maps a bounded-executor outcome into an indexer transport result. An elapsed
+/// deadline becomes [`TransportErrorCategory::Timeout`]; any other executor
+/// failure is `ExecutorUnavailable`.
+fn resolve_indexer_outcome<T>(
+    outcome: Result<
+        Result<T, tari_indexer_client::error::IndexerRestClientError>,
+        BlockingExecutorError,
+    >,
+) -> Result<T, TransportError> {
+    match outcome {
+        Ok(result) => result.map_err(|e| TransportError::from_indexer_client(&e)),
+        Err(BlockingExecutorError::Elapsed) => Err(TransportError::from_category(
+            TransportErrorCategory::Timeout,
+        )),
+        Err(_) => Err(TransportError::from_category(
+            TransportErrorCategory::ExecutorUnavailable,
+        )),
     }
 }
 
@@ -107,12 +138,7 @@ impl<E: BlockingExecutor> IndexerReceiptWireTransport for RealIndexerTransport<E
         address: tari_template_lib_types::TransactionReceiptAddress,
     ) -> Result<GetTransactionReceiptResponse, TransportError> {
         let future = self.client.get_transaction_receipt(address);
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_indexer_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_indexer_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 
     fn get_transaction_result(
@@ -120,12 +146,7 @@ impl<E: BlockingExecutor> IndexerReceiptWireTransport for RealIndexerTransport<E
         request: &GetTransactionResultRequest,
     ) -> Result<GetTransactionResultResponse, TransportError> {
         let future = self.client.get_transaction_result(request.clone());
-        match self.executor.block_on(future) {
-            Ok(result) => result.map_err(|e| TransportError::from_indexer_client(&e)),
-            Err(_executor_error) => Err(TransportError::from_category(
-                TransportErrorCategory::ExecutorUnavailable,
-            )),
-        }
+        resolve_indexer_outcome(self.executor.block_on_bounded(future, self.request_timeout))
     }
 }
 

@@ -2,8 +2,9 @@
 //! by the Phase 4 operator-tooling slice).
 //!
 //! Thin wrapper that parses the manual flag set, dispatches to the selected
-//! mode, and for the lifecycle mode loads the canonical config, optionally
-//! loads walletd auth from an environment variable, constructs one
+//! mode, and for the lifecycle mode loads the canonical config, verifies both
+//! local endpoints, optionally loads walletd auth from the one fixed backend
+//! environment variable, constructs one
 //! current-thread Tokio runtime, builds the real Slice 4A9 transports, creates
 //! or restores the driver, runs it, and prints the human-review summary plus
 //! the stable machine code and locator paths.
@@ -25,7 +26,7 @@ use std::process::ExitCode;
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorAppDriver, DriverRunOutcome, MachineReportCode, OperatorDecision,
-    TokioBlockingExecutor, cli,
+    TokioBlockingExecutor, WALLETD_AUTH_TOKEN_ENV_VAR_V1, cli,
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
@@ -71,7 +72,6 @@ fn run() -> Result<(), String> {
 fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
     let cli::LifecycleArgs {
         config_path,
-        auth_env,
         archive_path,
         approve,
         reject,
@@ -90,19 +90,20 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
             .map_err(|_| MachineReportCode::ConfigurationFailure.as_str().to_owned());
     }
 
+    // Refuse caller-controlled remote endpoints before resolving any bearer
+    // token. This CLI shares the GUI/Tauri fixed loopback policy and never
+    // accepts an environment-variable selector from its caller.
+    ensure_loopback_endpoints(&config)?;
+
     let Some(archive_path) = archive_path else {
         return Err(MachineReportCode::ConfigurationFailure.as_str().to_owned());
     };
 
-    // Load optional walletd auth from the named environment variable. The
-    // auth never enters the canonical config, Debug output, snapshots, or
-    // evidence.
-    let auth = match auth_env {
-        Some(name) => env::var(&name)
-            .ok()
-            .and_then(|raw| WalletdAuthSecret::new(raw).ok()),
-        None => None,
-    };
+    // Resolve the optional bearer only after endpoint validation, from the
+    // single backend-owned variable shared with the GUI/Tauri path. Its value
+    // never enters canonical config bytes, Debug output, snapshots, evidence,
+    // logs, or error strings.
+    let auth = load_loopback_walletd_auth(&config, env::var)?;
     let config = config
         .with_walletd_auth(auth)
         .map_err(|_| MachineReportCode::ConfigurationFailure.as_str().to_owned())?;
@@ -112,15 +113,22 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
     let network = config.anchor_record_network().clone();
     let walletd_endpoint = config.network_adapter().walletd_endpoint().clone();
     let indexer_endpoint = config.network_adapter().indexer_endpoint().clone();
+    // Apply the configured per-request timeout at the real network boundary.
+    let request_timeout = config
+        .network_adapter()
+        .request_timeout_secs()
+        .map(std::time::Duration::from_secs);
 
     let walletd_transport = RealWalletdTransport::new(
         &walletd_endpoint,
         config.network_adapter().auth(),
+        request_timeout,
         executor.clone(),
     )
     .map_err(|_| MachineReportCode::TransportFailure.as_str().to_owned())?;
-    let indexer_transport = RealIndexerTransport::new(&indexer_endpoint, executor.clone())
-        .map_err(|_| MachineReportCode::TransportFailure.as_str().to_owned())?;
+    let indexer_transport =
+        RealIndexerTransport::new(&indexer_endpoint, request_timeout, executor.clone())
+            .map_err(|_| MachineReportCode::TransportFailure.as_str().to_owned())?;
 
     let walletd_adapter = WalletdAnchorNetworkAdapter::new(walletd_transport, network.clone());
     let indexer_adapter = IndexerReceiptNetworkAdapter::new(indexer_transport);
@@ -148,6 +156,30 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
     match outcome {
         DriverRunOutcome::FinalizedAccept(_) => Ok(()),
         _ => Err(outcome.report_code().as_str().to_owned()),
+    }
+}
+
+fn ensure_loopback_endpoints(config: &AnchorAppConfig) -> Result<(), String> {
+    let adapter = config.network_adapter();
+    if !adapter.walletd_endpoint().is_loopback() || !adapter.indexer_endpoint().is_loopback() {
+        return Err(MachineReportCode::ConfigurationFailure.as_str().to_owned());
+    }
+    Ok(())
+}
+
+fn load_loopback_walletd_auth(
+    config: &AnchorAppConfig,
+    read_env: impl FnOnce(&'static str) -> Result<String, env::VarError>,
+) -> Result<Option<WalletdAuthSecret>, String> {
+    ensure_loopback_endpoints(config)?;
+    match read_env(WALLETD_AUTH_TOKEN_ENV_VAR_V1) {
+        Ok(raw) => WalletdAuthSecret::new(raw)
+            .map(Some)
+            .map_err(|_| MachineReportCode::ConfigurationFailure.as_str().to_owned()),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(MachineReportCode::ConfigurationFailure.as_str().to_owned())
+        }
     }
 }
 
@@ -206,4 +238,96 @@ fn to_lower_hex(bytes: &[u8; 32]) -> String {
         out.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::path::PathBuf;
+
+    use super::{
+        WALLETD_AUTH_TOKEN_ENV_VAR_V1, ensure_loopback_endpoints, load_loopback_walletd_auth,
+    };
+    use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
+    use tari_cc_private_ballot_anchor_transport::{AnchorAccountReference, AnchorMaxFeeV1};
+    use tari_cc_private_ballot_archive::ArchiveHashV1;
+    use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, AnchorLiveApprovalFactsV1};
+    use tari_cc_private_ballot_ootle_anchor_network_adapters::{
+        IndexerEndpoint, NetworkAdapterConfig, WalletdEndpoint,
+    };
+    use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
+        WalletdFeeComponentRef, WalletdSealSignerRef,
+    };
+    use tari_cc_private_ballot_protocol::ManifestHash;
+
+    fn config(walletd: &str, indexer: &str) -> AnchorAppConfig {
+        let network = OotleNetworkIdV1::new("esmeralda".to_owned()).expect("network");
+        let component =
+            WalletdFeeComponentRef::parse(&("component_".to_owned() + &"11".repeat(32)))
+                .expect("fee component");
+        let adapter = NetworkAdapterConfig::new(
+            network.clone(),
+            WalletdEndpoint::parse(walletd).expect("walletd endpoint"),
+            IndexerEndpoint::parse(indexer).expect("indexer endpoint"),
+            component,
+            WalletdSealSignerRef::AccountKey { index: 0 },
+            AnchorMaxFeeV1::from_units(1_000),
+            Some(30),
+            8,
+            None,
+        )
+        .expect("network adapter");
+        let facts = AnchorLiveApprovalFactsV1::new(
+            2,
+            2,
+            false,
+            false,
+            "seal-public-key-attested".to_owned(),
+            true,
+            true,
+        )
+        .expect("facts");
+        AnchorAppConfig::new_archive_verified_with_live_approval_facts(
+            adapter,
+            AnchorAccountReference::new("fee-account".to_owned()).expect("account"),
+            ManifestHash::new([0x11; 32]),
+            ArchiveHashV1::new([0x22; 32]),
+            network,
+            PathBuf::from("C:/tmp/snapshot.cbor"),
+            PathBuf::from("C:/tmp/evidence.cbor"),
+            1,
+            1,
+            None,
+            facts,
+        )
+    }
+
+    #[test]
+    fn nonloopback_endpoint_is_rejected_before_auth_resolution() {
+        let config = config("http://10.0.0.5:12009", "http://127.0.0.1:12500");
+        let read = Cell::new(false);
+        let result = load_loopback_walletd_auth(&config, |_| {
+            read.set(true);
+            Ok("must-not-be-read".to_owned())
+        });
+        assert!(result.is_err());
+        assert!(
+            !read.get(),
+            "endpoint rejection must precede secret resolution"
+        );
+        assert!(ensure_loopback_endpoints(&config).is_err());
+    }
+
+    #[test]
+    fn loopback_cli_resolves_only_the_shared_fixed_auth_variable() {
+        let config = config("http://127.0.0.1:12009", "http://127.0.0.1:12500");
+        let mut selected = String::new();
+        let auth = load_loopback_walletd_auth(&config, |name| {
+            selected = name.to_owned();
+            Ok("fixed-walletd-token".to_owned())
+        })
+        .expect("loopback auth read");
+        assert_eq!(selected, WALLETD_AUTH_TOKEN_ENV_VAR_V1);
+        assert!(auth.is_some());
+    }
 }

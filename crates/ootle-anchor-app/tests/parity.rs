@@ -5,6 +5,8 @@
 //! disk snapshot equals the in-memory orchestrator snapshot after a round
 //! trip.
 
+#![cfg(feature = "test-support")]
+
 mod common;
 
 use tari_cc_private_ballot_ootle_anchor_app::{

@@ -268,9 +268,7 @@ pub fn ingest_private_intake_inbox_into_session_v1(
             // pass on a stray entry.
             continue;
         };
-        inspected = inspected
-            .checked_add(1)
-            .ok_or_else(too_many_inbox_files)?;
+        inspected = inspected.checked_add(1).ok_or_else(too_many_inbox_files)?;
         if inspected > MAX_PRIVATE_INTAKE_INBOX_FILES_V1 {
             return Err(too_many_inbox_files());
         }
@@ -352,7 +350,8 @@ pub(crate) fn ensure_direct_directory(path: &Path) -> Result<(), GuiCoreError> {
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path).map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?;
+            fs::create_dir_all(path)
+                .map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?;
             let metadata = fs::symlink_metadata(path)
                 .map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?;
             if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {

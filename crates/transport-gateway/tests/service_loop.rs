@@ -305,7 +305,10 @@ fn inbox_persistence_failure_emits_no_receipt_and_does_not_report_accepted() {
 
     let (code, body) = post_envelope(addr, &envelope);
     assert_eq!(code, 500, "durable inbox failure must fail closed");
-    assert!(body.is_empty(), "no authenticated receipt bytes are emitted");
+    assert!(
+        body.is_empty(),
+        "no authenticated receipt bytes are emitted"
+    );
     assert_eq!(
         fixture.service_loop.accepted_unique_count(),
         0,
