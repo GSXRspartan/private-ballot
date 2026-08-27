@@ -359,6 +359,16 @@ pub fn map_driver_error(error: DriverError) -> GuiCoreError {
             GuiErrorCategory::InvalidLifecycleTransition,
             "a prior walletd create result is unknown and requires operator reconciliation",
         ),
+        DriverError::EventTemplateRequired => (
+            "ANCHOR_PUBLISH_EVENT_TEMPLATE_REQUIRED",
+            GuiErrorCategory::InvalidInput,
+            "the live anchor config is missing the required v0.39.2 event-template deployment binding for the selected network",
+        ),
+        DriverError::IndexerEpochUnavailable => (
+            "ANCHOR_PUBLISH_INDEXER_EPOCH_UNAVAILABLE",
+            GuiErrorCategory::Unavailable,
+            "the configured indexer did not confirm the configured network and current epoch before publishing",
+        ),
     };
     GuiCoreError::new(code, category, Some("anchor-publish"), message)
 }

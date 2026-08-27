@@ -117,7 +117,10 @@ impl WalletdFeeComponentRef {
 
     /// Returns the resolved pinned Ootle component address (leaf-internal).
     #[must_use]
-    pub(crate) const fn component_address(&self) -> ComponentAddress {
+    /// Returns the already-validated pinned component address for the narrow
+    /// pre-CREATE input-detection/reinspection path. It never parses caller
+    /// input and exposes no wallet secret.
+    pub const fn component_address(&self) -> ComponentAddress {
         self.component
     }
 

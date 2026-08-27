@@ -20,24 +20,24 @@ tari-cc-private-ballot-anchor = { path = "../anchor" }
 # is rehashed here.
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 
-# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# --- Pinned Tari Ootle v0.39.2, git rev dd1d731 (exact-revision pin) ---
 # The confirmed walletd JSON-RPC request/response wire types for the
 # transaction_requests.create / approve / reject lifecycle. Same exact revision
 # as Slice 4A5 so a single crate instance resolves. No branch, tag, or floating
 # HEAD.
-tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies KeyId / EffectiveStatus, the public field types of the walletd
 # request/response structs. Named ONLY to construct and read those structs behind
 # project-owned wrappers; this project never calls a signing or key-derivation
 # API and no wallet-SDK type appears in this crate's public surface. Same rev.
-tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies ComponentAddress (resolved fee account) and the TransactionId whose
 # 32-byte value the leaf canonicalizes into a project AnchorTransactionId. Named
 # ONLY at this leaf to resolve the fee component address and canonicalize the
 # sealed transaction identifier; no wallet-SDK/Ootle type appears in the public
 # surface. Same exact revision so a single crate instance resolves.
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 
 [dev-dependencies]
 # Project types the offline test suites name directly.

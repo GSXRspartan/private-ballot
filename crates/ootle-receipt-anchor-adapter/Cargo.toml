@@ -24,26 +24,26 @@ tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter"
 # Project-owned anchor record/digest/network-id types named at this boundary.
 tari-cc-private-ballot-anchor = { path = "../anchor" }
 
-# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# --- Pinned Tari Ootle v0.39.2, git rev dd1d731 (exact-revision pin) ---
 # The confirmed sealed transaction identifier whose 32 bytes this leaf parses
 # back from the project AnchorTransactionId and turns into the persisted receipt
 # substate address (TransactionId::into_receipt_address). Same exact revision as
 # Slices 4A5/4A6 so a single crate instance resolves.
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies TransactionReceiptAddress (the persisted receipt substate address) and
 # LogLevel (the exact field type of a receipt LogEntry). Same rev.
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies the persisted TransactionReceipt, its FinalizeOutcome (full vs
 # fee-only), LogEntry, and Epoch — the exact pinned receipt this slice converts
 # into the project receipt DTO. Same rev.
-tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # The confirmed indexer receipt-response wire type
 # (GetTransactionReceiptResponse) named at the single conversion seam. Built with
 # default-features disabled so the reqwest/HTTP/TLS `client` stack is NOT
 # compiled into project code: this slice makes no network call. The same crate
 # instance is already resolved offline (pulled without `client` by
 # tari_ootle_wallet_sdk), so this adds no HTTP dependency and no version drift.
-tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0", default-features = false }
+tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b", default-features = false }
 
 [dev-dependencies]
 # Project types the offline test suites name directly.
@@ -58,10 +58,10 @@ tari-cc-private-ballot-archive = { path = "../archive" }
 # Pinned Ootle receipt types the conversion tests construct directly to build
 # real and malformed receipts. Pinned to the exact same git revision as the
 # library dependencies so a single crate instance resolves.
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0", default-features = false }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b", default-features = false }
 
 [lints]
 workspace = true

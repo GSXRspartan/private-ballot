@@ -63,6 +63,19 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+// v0.39.2 anchor event-template CONTRACT constants. The template *source* is
+// shared across every network deployment, so the module name, the full stored
+// event topic, and the callable function are fixed contract facts — they are
+// NOT network identity and are the same on esmeralda, igor, localnet, or any
+// future network. Only the published `template_address` and the compiled
+// artifact digest differ per network deployment; the operator supplies those
+// for whichever network they select. The backend re-derives and re-validates
+// every one of these values, so the constants here are presentation defaults,
+// never the security authority.
+const ANCHOR_TEMPLATE_MODULE_V1 = "tari_private_ballot_anchor";
+const ANCHOR_EVENT_TOPIC_SUFFIX_V1 = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1";
+const ANCHOR_TEMPLATE_EVENT_TOPIC_V1 = `${ANCHOR_TEMPLATE_MODULE_V1}.${ANCHOR_EVENT_TOPIC_SUFFIX_V1}`;
+
 /**
  * Manage Election (organizer): Load Election via native file pickers, then walk
  * the append-only lifecycle. Loading validates canonical encodings, recomputes
@@ -133,6 +146,14 @@ export function ManageElection() {
   const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
     "http://127.0.0.1:12500",
   );
+  // Per-network published event-template deployment. These are runtime data:
+  // the address and artifact digest are assigned when the shared template is
+  // published on the selected network, so they change per network and are
+  // never compiled into the app. An empty address fails closed in the backend.
+  const [anchorTemplateAddress, setAnchorTemplateAddress] = useState("");
+  const [anchorTemplateArtifactDigest, setAnchorTemplateArtifactDigest] =
+    useState("");
+  const [anchorMaxEpochDelta, setAnchorMaxEpochDelta] = useState(12);
   const [anchorAccountRef, setAnchorAccountRef] = useState("organizer-fee-account");
   const [anchorFeeComponent, setAnchorFeeComponent] = useState("");
   const [anchorSealSignerKind, setAnchorSealSignerKind] = useState("account");
@@ -592,6 +613,11 @@ export function ManageElection() {
         network: anchorNetwork,
         walletd_endpoint: anchorWalletdEndpoint,
         indexer_endpoint: anchorIndexerEndpoint,
+        template_address: anchorTemplateAddress.trim(),
+        template_module: ANCHOR_TEMPLATE_MODULE_V1,
+        template_event_topic: ANCHOR_TEMPLATE_EVENT_TOPIC_V1,
+        template_artifact_digest_hex: anchorTemplateArtifactDigest.trim(),
+        max_epoch_delta: anchorMaxEpochDelta,
         account_reference: anchorAccountRef,
         fee_component: anchorFeeComponent,
         seal_signer_kind: anchorSealSignerKind,
@@ -1694,6 +1720,46 @@ export function ManageElection() {
                         type="text"
                         value={anchorIndexerEndpoint}
                         onChange={(e) => setAnchorIndexerEndpoint(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-template-address">
+                        Template address ({anchorNetwork})
+                      </label>
+                      <input
+                        id="anchor-template-address"
+                        type="text"
+                        value={anchorTemplateAddress}
+                        placeholder="template_..."
+                        onChange={(e) => setAnchorTemplateAddress(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-template-digest">
+                        Template artifact digest
+                      </label>
+                      <input
+                        id="anchor-template-digest"
+                        type="text"
+                        value={anchorTemplateArtifactDigest}
+                        placeholder="64 lowercase hex"
+                        onChange={(e) =>
+                          setAnchorTemplateArtifactDigest(e.target.value)
+                        }
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-max-epoch-delta">
+                        Max epoch delta
+                      </label>
+                      <input
+                        id="anchor-max-epoch-delta"
+                        type="number"
+                        min="1"
+                        value={anchorMaxEpochDelta}
+                        onChange={(e) =>
+                          setAnchorMaxEpochDelta(Number(e.target.value))
+                        }
                       />
                     </div>
                     <div className="form-row">

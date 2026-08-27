@@ -22,6 +22,7 @@
 //! [`OotleAnchorRecordV1`]: tari_cc_private_ballot_anchor::OotleAnchorRecordV1
 
 mod agreement;
+mod event;
 mod errors;
 mod fake;
 mod identifiers;
@@ -31,6 +32,12 @@ mod traits;
 mod verification;
 
 pub use agreement::compare_receipt_observations;
+pub use event::{
+    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
+    DEFAULT_ANCHOR_MAX_EPOCH_DELTA_V1, MAX_ANCHOR_EVENT_METADATA_BYTES_V2,
+    MAX_ANCHOR_EVENT_METADATA_FIELDS_V2, OOTLE_MAX_EPOCH_WINDOW_V1, AnchorEpochBindingV1,
+    AnchorEventBindingError, AnchorEventPayloadV2, AnchorEventProofV2, AnchorTemplateBindingV1,
+};
 pub use errors::{
     AnchorApprovalError, AnchorIdentifierError, AnchorLogPayloadError,
     AnchorObservationAgreementError, AnchorPreparationError, AnchorReceiptQueryError,
@@ -55,7 +62,9 @@ pub use traits::{
     AnchorReceiptSource, AnchorTransactionApprover, AnchorTransactionRequestStore,
     AnchorTransactionSubmitter,
 };
-pub use verification::{VerifiedAnchorEvidenceV1, verify_anchor_receipt, verify_query_outcome};
+pub use verification::{
+    VerifiedAnchorEvidenceV1, verify_anchor_receipt, verify_query_outcome, verify_v39_event_receipt,
+};
 
 /// Re-exported bounded network identifier, reused unchanged from the anchor
 /// crate so the transport layer commits to the same network-name validation.

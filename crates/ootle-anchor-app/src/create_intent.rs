@@ -15,8 +15,11 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdCreateAnchorRequ
 
 use crate::config::AnchorAppConfig;
 
-const CREATE_INTENT_RECORD_TYPE_V1: &str =
-    "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PRECREATE_INTENT_V1";
+// V1 records (`…_PRECREATE_INTENT_V1`) are still read for fail-closed
+// recovery via their sidecar path, but only V2 records are written now, so the
+// V1 record-type marker is intentionally no longer referenced in code.
+const CREATE_INTENT_RECORD_TYPE_V2: &str =
+    "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PRECREATE_INTENT_V2";
 
 /// Bounded failure while maintaining the durable pre-create intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +56,15 @@ impl std::error::Error for CreateIntentFileError {}
 #[must_use]
 pub fn create_intent_path(snapshot_path: &Path) -> PathBuf {
     let mut value = snapshot_path.as_os_str().to_os_string();
+    value.push(".create-intent-v2");
+    PathBuf::from(value)
+}
+
+/// Returns the legacy V1 sidecar path. It remains a read-only compatibility
+/// input: an unresolved historical intent blocks a V4 create exactly as an
+/// unresolved V2 intent does.
+fn create_intent_v1_path(snapshot_path: &Path) -> PathBuf {
+    let mut value = snapshot_path.as_os_str().to_os_string();
     value.push(".create-intent-v1");
     PathBuf::from(value)
 }
@@ -60,12 +72,14 @@ pub fn create_intent_path(snapshot_path: &Path) -> PathBuf {
 /// Returns whether a pre-create intent exists. An unreadable path is an error
 /// so callers can fail closed rather than assuming a create is safe to retry.
 pub fn exists(snapshot_path: &Path) -> Result<bool, CreateIntentFileError> {
-    let path = create_intent_path(snapshot_path);
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(CreateIntentFileError::IoFailure),
+    for path in [create_intent_path(snapshot_path), create_intent_v1_path(snapshot_path)] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(CreateIntentFileError::IoFailure),
+        }
     }
+    Ok(false)
 }
 
 /// Atomically persists the exact deterministic identifiers and binding
@@ -105,17 +119,22 @@ pub fn write_atomic(
 
 /// Removes the intent only after the prepared lifecycle snapshot is durable.
 pub fn clear(snapshot_path: &Path) -> Result<(), CreateIntentFileError> {
-    match std::fs::remove_file(create_intent_path(snapshot_path)) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(CreateIntentFileError::IoFailure),
+    for path in [create_intent_path(snapshot_path), create_intent_v1_path(snapshot_path)] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(CreateIntentFileError::IoFailure),
+        }
     }
+    Ok(())
 }
 
 fn encode(config: &AnchorAppConfig, create: &WalletdCreateAnchorRequestV1) -> Vec<u8> {
     let binding = create.binding();
+    let template = binding.template_binding();
+    let epoch = binding.epoch_binding();
     format!(
-        "record_type={CREATE_INTENT_RECORD_TYPE_V1}\nproject_request_id={}\nnetwork={}\naccount={}\nmanifest_hash={}\narchive_hash={}\nanchor_digest={}\ntransaction_fingerprint={}\nmax_fee_units={}\nfee_component={}\nttl_secs={}\n",
+        "record_type={CREATE_INTENT_RECORD_TYPE_V2}\nproject_request_id={}\nnetwork={}\naccount={}\nmanifest_hash={}\narchive_hash={}\nanchor_digest={}\ntransaction_fingerprint={}\nmax_fee_units={}\nfee_component={}\nttl_secs={}\ntemplate_address={}\ntemplate_module={}\ntemplate_function={}\nevent_topic={}\ntemplate_artifact_digest={}\nobserved_epoch={}\nmax_epoch={}\n",
         create.project_request_id().as_str(),
         binding.network().as_str(),
         binding.account().as_str(),
@@ -128,6 +147,13 @@ fn encode(config: &AnchorAppConfig, create: &WalletdCreateAnchorRequestV1) -> Ve
         config
             .ttl_secs()
             .map_or_else(|| "none".to_owned(), |value| value.to_string()),
+        template.map_or("missing", |value| value.template_address()),
+        template.map_or("missing", |value| value.module()),
+        template.map_or("missing", |value| value.function()),
+        template.map_or("missing", |value| value.full_event_topic()),
+        template.map_or_else(|| "missing".to_owned(), |value| hex(value.artifact_digest())),
+        epoch.map_or_else(|| "missing".to_owned(), |value| value.observed_epoch().to_string()),
+        epoch.map_or_else(|| "missing".to_owned(), |value| value.max_epoch().to_string()),
     )
     .into_bytes()
 }
@@ -155,7 +181,7 @@ mod tests {
         let snapshot = std::path::Path::new("C:/anchor/archive-anchor-snapshot.cbor");
         assert_eq!(
             create_intent_path(snapshot),
-            std::path::PathBuf::from("C:/anchor/archive-anchor-snapshot.cbor.create-intent-v1")
+            std::path::PathBuf::from("C:/anchor/archive-anchor-snapshot.cbor.create-intent-v2")
         );
     }
 }

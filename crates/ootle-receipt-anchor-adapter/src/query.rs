@@ -10,7 +10,8 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorLogPayloadV1, AnchorRequestId, AnchorTransactionId,
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorRequestId,
+    AnchorTemplateBindingV1, AnchorTransactionId,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
@@ -34,6 +35,8 @@ pub struct AnchorReceiptQueryV1 {
     anchor_digest: OotleAnchorRecordHashV1,
     payload: AnchorLogPayloadV1,
     fingerprint: OotleAnchorInspectionFingerprintV1,
+    template_binding: Option<AnchorTemplateBindingV1>,
+    epoch_binding: Option<AnchorEpochBindingV1>,
 }
 
 impl AnchorReceiptQueryV1 {
@@ -53,6 +56,8 @@ impl AnchorReceiptQueryV1 {
             anchor_digest: binding.anchor_digest(),
             payload: *binding.payload(),
             fingerprint: binding.fingerprint(),
+            template_binding: binding.template_binding().cloned(),
+            epoch_binding: binding.epoch_binding(),
         }
     }
 
@@ -94,6 +99,12 @@ impl AnchorReceiptQueryV1 {
         }
         if self.fingerprint != binding.fingerprint() {
             return Err(ReceiptQueryBindingError::FingerprintMismatch);
+        }
+        if self.template_binding.as_ref() != binding.template_binding() {
+            return Err(ReceiptQueryBindingError::TemplateMismatch);
+        }
+        if self.epoch_binding != binding.epoch_binding() {
+            return Err(ReceiptQueryBindingError::EpochMismatch);
         }
         // The account is part of the frozen binding; a divergence here is a
         // payload-independent binding tamper. It is checked last because network,
@@ -151,5 +162,17 @@ impl AnchorReceiptQueryV1 {
     #[must_use]
     pub const fn fingerprint(&self) -> OotleAnchorInspectionFingerprintV1 {
         self.fingerprint
+    }
+
+    /// Returns the pinned v0.39.2 template identity, when this is a V2 query.
+    #[must_use]
+    pub const fn template_binding(&self) -> Option<&AnchorTemplateBindingV1> {
+        self.template_binding.as_ref()
+    }
+
+    /// Returns the persisted indexer-observed epoch and transaction expiry.
+    #[must_use]
+    pub const fn epoch_binding(&self) -> Option<AnchorEpochBindingV1> {
+        self.epoch_binding
     }
 }

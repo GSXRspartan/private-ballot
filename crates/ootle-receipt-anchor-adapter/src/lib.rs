@@ -41,7 +41,7 @@
 //! verification failure, or disagreement — leaves every offline election artifact
 //! unchanged.
 //!
-//! # Confirmed pinned indexer APIs (rev `92023e0`)
+//! # Confirmed pinned indexer APIs (rev `dd1d731`, v0.39.2)
 //!
 //! * Receipt retrieval: `IndexerRestApiClient::get_transaction_receipt(TransactionReceiptAddress) -> GetTransactionReceiptResponse { receipt: TransactionReceipt }`
 //!   (`clients/tari_indexer_client/src/rest_api_client.rs:260`).
@@ -92,7 +92,8 @@ pub use state::{
 /// Deterministic project-owned receipt builders for the offline fake and tests.
 pub mod receipt_scenarios {
     pub use crate::scenarios::{
-        FAKE_LEDGER_POSITION, accepted_conflicting_anchor_logs, accepted_duplicate_anchor_logs,
+        FAKE_LEDGER_POSITION, SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
+        accepted_conflicting_anchor_logs, accepted_duplicate_anchor_logs, accepted_event_receipt,
         accepted_malformed_anchor_log, accepted_missing_anchor_log, accepted_receipt,
         accepted_with_unrelated_logs, accepted_wrong_anchor_log, fee_only_receipt, receipt,
         rejected_receipt, walletd_accepted_receipt,

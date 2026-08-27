@@ -1,45 +1,31 @@
-//! Project-owned unsigned-transaction inspection evidence (Section E).
-//!
-//! [`OotleUnsignedAnchorTransactionEvidenceV1`] is the inspection result the
-//! adapter returns. It carries only observed structure plus the bound project
-//! context. It contains no private key, no signed transaction, no claimed
-//! transaction identifier, and no finality status: an Ootle transaction
-//! identifier exists only after sealing, which this slice never performs.
+//! Project-owned v0.39.2 unsigned-transaction inspection evidence.
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
-use tari_cc_private_ballot_anchor_transport::{AnchorAccountReference, AnchorLogPayloadV1};
+use tari_cc_private_ballot_anchor_transport::{
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorEventPayloadV2, AnchorTemplateBindingV1,
+};
 
-/// Adapter-owned inspection fingerprint of a constructed unsigned transaction.
-///
-/// This is a domain-separated BLAKE3 digest of the unsigned transaction's
-/// canonical CBOR encoding under a unique adapter frame. It is **not** a
-/// transaction identifier and must never be presented as one: it enables
-/// deterministic comparison of two constructions, nothing more.
+/// Domain-separated BLAKE3 fingerprint of canonical unsigned transaction CBOR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OotleAnchorInspectionFingerprintV1([u8; 32]);
 
 impl OotleAnchorInspectionFingerprintV1 {
-    /// Wraps 32 already-derived fingerprint bytes.
     #[must_use]
-    pub const fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the raw fingerprint bytes.
+    pub const fn new(bytes: [u8; 32]) -> Self { Self(bytes) }
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
+    pub const fn as_bytes(&self) -> &[u8; 32] { &self.0 }
 }
 
-/// Structural evidence for one constructed, unsigned anchor transaction.
+/// Structural proof that a transaction is the exact pinned event anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OotleUnsignedAnchorTransactionEvidenceV1 {
     pub(crate) network: OotleNetworkIdV1,
     pub(crate) ootle_network_byte: u8,
     pub(crate) account: AnchorAccountReference,
     pub(crate) anchor_digest: OotleAnchorRecordHashV1,
-    pub(crate) anchor_log_payload: AnchorLogPayloadV1,
+    pub(crate) event_payload: AnchorEventPayloadV2,
+    pub(crate) template_binding: AnchorTemplateBindingV1,
+    pub(crate) epoch_binding: AnchorEpochBindingV1,
     pub(crate) instruction_count: usize,
     pub(crate) anchor_instruction_index: usize,
     pub(crate) fee_instructions_present: bool,
@@ -50,81 +36,32 @@ pub struct OotleUnsignedAnchorTransactionEvidenceV1 {
 }
 
 impl OotleUnsignedAnchorTransactionEvidenceV1 {
-    /// Returns the bound project network identifier.
     #[must_use]
-    pub const fn network(&self) -> &OotleNetworkIdV1 {
-        &self.network
-    }
-
-    /// Returns the bound Ootle network byte.
+    pub const fn network(&self) -> &OotleNetworkIdV1 { &self.network }
     #[must_use]
-    pub const fn ootle_network_byte(&self) -> u8 {
-        self.ootle_network_byte
-    }
-
-    /// Returns the fee-paying account reference.
+    pub const fn ootle_network_byte(&self) -> u8 { self.ootle_network_byte }
     #[must_use]
-    pub const fn account(&self) -> &AnchorAccountReference {
-        &self.account
-    }
-
-    /// Returns the anchored record digest.
+    pub const fn account(&self) -> &AnchorAccountReference { &self.account }
     #[must_use]
-    pub const fn anchor_digest(&self) -> OotleAnchorRecordHashV1 {
-        self.anchor_digest
-    }
-
-    /// Returns the exact anchor log payload.
+    pub const fn anchor_digest(&self) -> OotleAnchorRecordHashV1 { self.anchor_digest }
     #[must_use]
-    pub const fn anchor_log_payload(&self) -> &AnchorLogPayloadV1 {
-        &self.anchor_log_payload
-    }
-
-    /// Returns the total number of normal instructions (always one).
+    pub const fn event_payload(&self) -> AnchorEventPayloadV2 { self.event_payload }
     #[must_use]
-    pub const fn instruction_count(&self) -> usize {
-        self.instruction_count
-    }
-
-    /// Returns the index of the anchor instruction (always zero).
+    pub const fn template_binding(&self) -> &AnchorTemplateBindingV1 { &self.template_binding }
     #[must_use]
-    pub const fn anchor_instruction_index(&self) -> usize {
-        self.anchor_instruction_index
-    }
-
-    /// Returns whether any fee instruction is present.
-    ///
-    /// False for a fee-less construction (Slice 4A5); true for a fee-bearing
-    /// construction carrying exactly one `pay_fee_from_component` instruction
-    /// (Slice 4A6B).
+    pub const fn epoch_binding(&self) -> AnchorEpochBindingV1 { self.epoch_binding }
     #[must_use]
-    pub const fn fee_instructions_present(&self) -> bool {
-        self.fee_instructions_present
-    }
-
-    /// Returns the number of substate inputs (always zero).
+    pub const fn instruction_count(&self) -> usize { self.instruction_count }
     #[must_use]
-    pub const fn input_count(&self) -> usize {
-        self.input_count
-    }
-
-    /// Returns the number of attached blobs (always zero).
+    pub const fn anchor_instruction_index(&self) -> usize { self.anchor_instruction_index }
     #[must_use]
-    pub const fn blob_count(&self) -> usize {
-        self.blob_count
-    }
-
-    /// Returns the inspected unsigned transaction schema version.
+    pub const fn fee_instructions_present(&self) -> bool { self.fee_instructions_present }
     #[must_use]
-    pub const fn unsigned_schema_version(&self) -> u16 {
-        self.unsigned_schema_version
-    }
-
-    /// Returns the adapter-owned inspection fingerprint.
-    ///
-    /// This is not a transaction identifier.
+    pub const fn input_count(&self) -> usize { self.input_count }
     #[must_use]
-    pub const fn fingerprint(&self) -> OotleAnchorInspectionFingerprintV1 {
-        self.fingerprint
-    }
+    pub const fn blob_count(&self) -> usize { self.blob_count }
+    #[must_use]
+    pub const fn unsigned_schema_version(&self) -> u16 { self.unsigned_schema_version }
+    #[must_use]
+    pub const fn fingerprint(&self) -> OotleAnchorInspectionFingerprintV1 { self.fingerprint }
 }

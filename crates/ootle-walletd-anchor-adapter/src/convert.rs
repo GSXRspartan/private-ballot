@@ -21,10 +21,13 @@
 //! [`OotleAnchorBuildResultV1`]: tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorBuildResultV1
 //! [`UnsignedTransaction`]: tari_ootle_transaction::UnsignedTransaction
 
-use tari_cc_private_ballot_anchor_transport::{AnchorClientReferenceV1, AnchorRequestId};
+use tari_cc_private_ballot_anchor_transport::{
+    AnchorClientReferenceV1, AnchorLogPayloadV1, AnchorRequestId,
+};
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     AnchorInspectionExpectationV1, OotleAnchorBuildResultV1, OotleAnchorInspectionFingerprintV1,
-    inspect_fee_bearing_anchor_transaction, inspect_unsigned_anchor_transaction, map_ootle_network,
+    inspect_detected_fee_bearing_anchor_transaction, inspect_fee_bearing_anchor_transaction,
+    inspect_unsigned_anchor_transaction, map_ootle_network,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 use tari_ootle_walletd_client::types::TransactionRequestCreateRequest;
@@ -117,6 +120,23 @@ fn derive_project_request_id(binding: &WalletdAnchorBindingV1) -> AnchorRequestI
     framed.extend_from_slice(binding.anchor_digest().as_bytes());
     framed.push(0);
     framed.extend_from_slice(binding.fingerprint().as_bytes());
+    if let Some(template) = binding.template_binding() {
+        framed.push(0);
+        framed.extend_from_slice(template.template_address().as_bytes());
+        framed.push(0);
+        framed.extend_from_slice(template.module().as_bytes());
+        framed.push(0);
+        framed.extend_from_slice(template.function().as_bytes());
+        framed.push(0);
+        framed.extend_from_slice(template.full_event_topic().as_bytes());
+        framed.push(0);
+        framed.extend_from_slice(template.artifact_digest());
+    }
+    if let Some(epoch) = binding.epoch_binding() {
+        framed.push(0);
+        framed.extend_from_slice(&epoch.observed_epoch().to_be_bytes());
+        framed.extend_from_slice(&epoch.max_epoch().to_be_bytes());
+    }
     // The hexadecimal encoding of a 32-byte hash is always a valid bounded
     // identifier, so this construction cannot fail.
     match AnchorRequestId::new(to_lower_hex_32(&provider.hash(&framed))) {
@@ -150,8 +170,9 @@ pub fn build_walletd_create_request(
         preparation.network().clone(),
         ootle_network,
         preparation.fee_account().clone(),
-        preparation.anchor_digest(),
-        *preparation.anchor_payload(),
+        preparation.event_payload(),
+        preparation.template_binding().clone(),
+        preparation.epoch_binding(),
     );
     let evidence =
         inspect_unsigned_anchor_transaction(build_result.unsigned_transaction(), &expectation)
@@ -165,13 +186,15 @@ pub fn build_walletd_create_request(
         });
     }
 
-    let binding = WalletdAnchorBindingV1::new(
+    let binding = WalletdAnchorBindingV1::new_v2(
         preparation.network().clone(),
         preparation.fee_account().clone(),
         preparation.anchor_digest(),
-        *preparation.anchor_payload(),
+        AnchorLogPayloadV1::from_digest(preparation.anchor_digest()),
         preparation.max_fee(),
         evidence.fingerprint(),
+        preparation.template_binding().clone(),
+        preparation.epoch_binding(),
     );
 
     let project_request_id = derive_project_request_id(&binding);
@@ -221,8 +244,8 @@ pub fn build_fee_bearing_walletd_create_request(
 ) -> Result<WalletdCreateAnchorRequestV1, WalletdAnchorAdapterError> {
     let preparation = build_result.walletd_preparation();
 
-    // Re-run the fee-aware Slice 4A5 safety inspection over the unsigned
-    // transaction: exactly one anchor EmitLog plus exactly one pay_fee to the
+    // Re-run the fee-aware safety inspection over the unsigned transaction:
+    // exactly one anchor `CallFunction` plus exactly one pay_fee to the
     // resolved fee component locking the bound maximum fee.
     let ootle_network = map_ootle_network(preparation.network())
         .map_err(WalletdAnchorAdapterError::UnsafeUnsignedTransaction)?;
@@ -230,15 +253,25 @@ pub fn build_fee_bearing_walletd_create_request(
         preparation.network().clone(),
         ootle_network,
         preparation.fee_account().clone(),
-        preparation.anchor_digest(),
-        *preparation.anchor_payload(),
+        preparation.event_payload(),
+        preparation.template_binding().clone(),
+        preparation.epoch_binding(),
     );
-    let evidence = inspect_fee_bearing_anchor_transaction(
-        build_result.unsigned_transaction(),
-        &expectation,
-        fee_component,
-        preparation.max_fee(),
-    )
+    let evidence = if build_result.unsigned_transaction().inputs().is_empty() {
+        inspect_fee_bearing_anchor_transaction(
+            build_result.unsigned_transaction(),
+            &expectation,
+            fee_component,
+            preparation.max_fee(),
+        )
+    } else {
+        inspect_detected_fee_bearing_anchor_transaction(
+            build_result.unsigned_transaction(),
+            &expectation,
+            fee_component,
+            preparation.max_fee(),
+        )
+    }
     .map_err(WalletdAnchorAdapterError::UnsafeUnsignedTransaction)?;
 
     if evidence.fingerprint() != build_result.evidence().fingerprint() {
@@ -247,13 +280,15 @@ pub fn build_fee_bearing_walletd_create_request(
         });
     }
 
-    let binding = WalletdAnchorBindingV1::new(
+    let binding = WalletdAnchorBindingV1::new_v2(
         preparation.network().clone(),
         preparation.fee_account().clone(),
         preparation.anchor_digest(),
-        *preparation.anchor_payload(),
+        AnchorLogPayloadV1::from_digest(preparation.anchor_digest()),
         preparation.max_fee(),
         evidence.fingerprint(),
+        preparation.template_binding().clone(),
+        preparation.epoch_binding(),
     );
 
     let project_request_id = derive_project_request_id(&binding);

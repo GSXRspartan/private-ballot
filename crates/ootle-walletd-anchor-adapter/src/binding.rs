@@ -9,7 +9,8 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 
@@ -24,6 +25,8 @@ pub struct WalletdAnchorBindingV1 {
     payload: AnchorLogPayloadV1,
     max_fee: AnchorMaxFeeV1,
     fingerprint: OotleAnchorInspectionFingerprintV1,
+    template_binding: Option<AnchorTemplateBindingV1>,
+    epoch_binding: Option<AnchorEpochBindingV1>,
 }
 
 impl WalletdAnchorBindingV1 {
@@ -44,6 +47,34 @@ impl WalletdAnchorBindingV1 {
             payload,
             max_fee,
             fingerprint,
+            template_binding: None,
+            epoch_binding: None,
+        }
+    }
+
+    /// Assembles the v0.39.2 event-template binding. The legacy constructor is
+    /// retained only so existing V1 snapshots remain decodable.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_v2(
+        network: OotleNetworkIdV1,
+        account: AnchorAccountReference,
+        anchor_digest: OotleAnchorRecordHashV1,
+        payload: AnchorLogPayloadV1,
+        max_fee: AnchorMaxFeeV1,
+        fingerprint: OotleAnchorInspectionFingerprintV1,
+        template_binding: AnchorTemplateBindingV1,
+        epoch_binding: AnchorEpochBindingV1,
+    ) -> Self {
+        Self {
+            network,
+            account,
+            anchor_digest,
+            payload,
+            max_fee,
+            fingerprint,
+            template_binding: Some(template_binding),
+            epoch_binding: Some(epoch_binding),
         }
     }
 
@@ -83,6 +114,19 @@ impl WalletdAnchorBindingV1 {
         self.fingerprint
     }
 
+    /// Returns the mandatory v0.39.2 template binding for newly-created
+    /// event anchors. `None` identifies a legacy V1 snapshot.
+    #[must_use]
+    pub fn template_binding(&self) -> Option<&AnchorTemplateBindingV1> {
+        self.template_binding.as_ref()
+    }
+
+    /// Returns the persisted v0.39.2 observed/max epoch binding.
+    #[must_use]
+    pub const fn epoch_binding(&self) -> Option<AnchorEpochBindingV1> {
+        self.epoch_binding
+    }
+
     /// Checks that `supplied` agrees with `self` field by field.
     ///
     /// Field order fixes which specific error a caller sees first: network,
@@ -111,6 +155,9 @@ impl WalletdAnchorBindingV1 {
         }
         if self.fingerprint != supplied.fingerprint {
             return Err(WalletdAnchorAdapterError::FingerprintMismatch);
+        }
+        if self.template_binding != supplied.template_binding || self.epoch_binding != supplied.epoch_binding {
+            return Err(WalletdAnchorAdapterError::PayloadMismatch);
         }
         Ok(())
     }

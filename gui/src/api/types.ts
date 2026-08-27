@@ -347,6 +347,16 @@ export interface GuiLiveAnchorConfigRequestV1 {
   network: string;
   walletd_endpoint: string;
   indexer_endpoint: string;
+  /** Published v0.39.2 event-template address for the selected network. */
+  template_address: string;
+  /** Event-template module name (shared template-contract constant). */
+  template_module: string;
+  /** Full stored event topic (module-derived template-contract constant). */
+  template_event_topic: string;
+  /** Lowercase BLAKE3-256 digest of the compiled template artifact. */
+  template_artifact_digest_hex: string;
+  /** Bounded number of epochs after the indexer's observed epoch. */
+  max_epoch_delta: number;
   account_reference: string;
   fee_component: string;
   seal_signer_kind: string;
@@ -382,6 +392,12 @@ export interface GuiLiveAnchorConfigResultV1 {
   dedicated_organizer_wallet_attested: boolean;
   config_file_blake3_256: string;
   config_file_bytes: number;
+  /** Pinned event-template address written into the V4 config. */
+  template_address: string;
+  /** Pinned full event topic written into the V4 config. */
+  template_event_topic: string;
+  /** Configured max-epoch window written into the V4 config. */
+  max_epoch_delta: number;
 }
 
 /** Bounded command error payload (mirror of the shell's CommandError). */

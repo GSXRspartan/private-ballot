@@ -11,8 +11,9 @@
 use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_anchor::{OOTLE_ANCHOR_PURPOSE_ID_V1, OotleNetworkIdV1};
-use tari_cc_private_ballot_anchor_transport::AnchorAccountReference;
-use tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1;
+use tari_cc_private_ballot_anchor_transport::{
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorMaxFeeV1, AnchorTemplateBindingV1,
+};
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, NetworkAdapterConfig, NetworkAdapterConfigError, WalletdAuthSecret,
@@ -36,6 +37,8 @@ pub const CONFIG_RECORD_TYPE_ID_V1: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_
 pub const CONFIG_RECORD_TYPE_ID_V2: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V2";
 /// Stable record-type / version identifier for the live-approval-facts config envelope.
 pub const CONFIG_RECORD_TYPE_ID_V3: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V3";
+/// Stable record type for the v0.39.2 event-template and epoch-policy config.
+pub const CONFIG_RECORD_TYPE_ID_V4: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_APP_CONFIG_V4";
 
 /// Hash-algorithm identifier written into the config envelope.
 pub const CONFIG_HASH_ALGORITHM_ID_V1: &str = BLAKE3_256_HASH_ALGORITHM_ID_V1;
@@ -51,6 +54,7 @@ const ENVELOPE_FIELD_COUNT: usize = 4;
 const BODY_FIELD_COUNT_V1: usize = 16;
 const BODY_FIELD_COUNT_V2: usize = 17;
 const BODY_FIELD_COUNT_V3: usize = 18;
+const BODY_FIELD_COUNT_V4: usize = 20;
 const LIVE_APPROVAL_FACTS_FIELD_COUNT: usize = 9;
 const MAX_PATH_BYTES: usize = 4_096;
 pub const MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES: usize = 256;
@@ -319,6 +323,8 @@ pub struct AnchorAppConfig {
     backoff_cap_secs: u64,
     ttl_secs: Option<u64>,
     live_approval_facts: Option<AnchorLiveApprovalFactsV1>,
+    event_template: Option<AnchorTemplateBindingV1>,
+    max_epoch_delta: Option<u64>,
 }
 
 impl AnchorAppConfig {
@@ -443,7 +449,29 @@ impl AnchorAppConfig {
             backoff_cap_secs,
             ttl_secs,
             live_approval_facts: None,
+            event_template: None,
+            max_epoch_delta: None,
         }
+    }
+
+    /// Adds the immutable v0.39.2 event-template identity and bounded max-epoch
+    /// policy to a verified live configuration.
+    ///
+    /// V4 is intentionally opt-in: V1–V3 remain readable for historic offline
+    /// evidence, but new live anchors require these values.
+    pub fn with_event_template_binding(
+        mut self,
+        event_template: AnchorTemplateBindingV1,
+        max_epoch_delta: u64,
+    ) -> Result<Self, ConfigFileError> {
+        AnchorEpochBindingV1::from_observed_epoch(0, max_epoch_delta)
+            .map_err(|_| ConfigFileError::InvalidData)?;
+        if self.live_approval_facts.is_none() {
+            return Err(ConfigFileError::InvalidData);
+        }
+        self.event_template = Some(event_template);
+        self.max_epoch_delta = Some(max_epoch_delta);
+        Ok(self)
     }
 
     /// Loads a canonical config from `path`.
@@ -489,7 +517,9 @@ impl AnchorAppConfig {
         let body = encode_body(self)?;
         let framed = config_domain_input(&body);
         let digest = Blake3HashProviderV1.hash(&framed);
-        let record_type = if self.live_approval_facts.is_some() {
+        let record_type = if self.event_template.is_some() && self.max_epoch_delta.is_some() {
+            CONFIG_RECORD_TYPE_ID_V4
+        } else if self.live_approval_facts.is_some() {
             CONFIG_RECORD_TYPE_ID_V3
         } else {
             CONFIG_RECORD_TYPE_ID_V2
@@ -572,6 +602,8 @@ impl AnchorAppConfig {
             backoff_cap_secs: self.backoff_cap_secs,
             ttl_secs: self.ttl_secs,
             live_approval_facts: self.live_approval_facts,
+            event_template: self.event_template,
+            max_epoch_delta: self.max_epoch_delta,
         })
     }
 
@@ -646,6 +678,18 @@ impl AnchorAppConfig {
     pub fn live_approval_facts(&self) -> Option<&AnchorLiveApprovalFactsV1> {
         self.live_approval_facts.as_ref()
     }
+
+    /// Returns the pinned v0.39.2 event-template identity for new live anchors.
+    #[must_use]
+    pub fn event_template(&self) -> Option<&AnchorTemplateBindingV1> {
+        self.event_template.as_ref()
+    }
+
+    /// Returns the configured bounded max-epoch delta for new live anchors.
+    #[must_use]
+    pub const fn max_epoch_delta(&self) -> Option<u64> {
+        self.max_epoch_delta
+    }
 }
 
 fn encode_envelope(
@@ -678,6 +722,7 @@ fn decode_envelope(bytes: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
         CONFIG_RECORD_TYPE_ID_V1 => ConfigRecordVersion::V1,
         CONFIG_RECORD_TYPE_ID_V2 => ConfigRecordVersion::V2,
         CONFIG_RECORD_TYPE_ID_V3 => ConfigRecordVersion::V3,
+        CONFIG_RECORD_TYPE_ID_V4 => ConfigRecordVersion::V4,
         _ => return Err(ConfigFileError::UnsupportedProtocolVersion),
     };
     if reader.read_text_string().map_err(from_protocol)? != CONFIG_HASH_ALGORITHM_ID_V1 {
@@ -700,7 +745,9 @@ fn decode_envelope(bytes: &[u8]) -> Result<AnchorAppConfig, ConfigFileError> {
 fn encode_body(config: &AnchorAppConfig) -> Result<Vec<u8>, ConfigFileError> {
     let adapter = config.network_adapter();
     let mut writer = CanonicalCborWriter::new();
-    let field_count = if config.live_approval_facts().is_some() {
+    let field_count = if config.event_template().is_some() && config.max_epoch_delta().is_some() {
+        BODY_FIELD_COUNT_V4
+    } else if config.live_approval_facts().is_some() {
         BODY_FIELD_COUNT_V3
     } else {
         BODY_FIELD_COUNT_V2
@@ -761,6 +808,14 @@ fn encode_body(config: &AnchorAppConfig) -> Result<Vec<u8>, ConfigFileError> {
     if let Some(facts) = config.live_approval_facts() {
         encode_live_approval_facts(&mut writer, facts)?;
     }
+    // 19/20. The V4 template identity and bounded epoch policy are appended so
+    // V1–V3 bodies remain byte-for-byte decodable.
+    if let (Some(template), Some(max_epoch_delta)) =
+        (config.event_template(), config.max_epoch_delta())
+    {
+        encode_event_template_binding(&mut writer, template)?;
+        writer.write_unsigned(max_epoch_delta);
+    }
 
     Ok(writer.into_bytes())
 }
@@ -770,6 +825,7 @@ enum ConfigRecordVersion {
     V1,
     V2,
     V3,
+    V4,
 }
 
 fn decode_body(
@@ -782,6 +838,7 @@ fn decode_body(
         ConfigRecordVersion::V1 => BODY_FIELD_COUNT_V1,
         ConfigRecordVersion::V2 => BODY_FIELD_COUNT_V2,
         ConfigRecordVersion::V3 => BODY_FIELD_COUNT_V3,
+        ConfigRecordVersion::V4 => BODY_FIELD_COUNT_V4,
     };
     if field_count != expected_count {
         return Err(ConfigFileError::InvalidCbor);
@@ -789,7 +846,7 @@ fn decode_body(
 
     let input_provenance = match record_version {
         ConfigRecordVersion::V1 => AnchorConfigInputProvenanceV1::OfflineTestRawHashes,
-        ConfigRecordVersion::V2 | ConfigRecordVersion::V3 => {
+        ConfigRecordVersion::V2 | ConfigRecordVersion::V3 | ConfigRecordVersion::V4 => {
             AnchorConfigInputProvenanceV1::from_str(
                 reader.read_text_string().map_err(from_protocol)?,
             )?
@@ -823,7 +880,17 @@ fn decode_body(
     let ttl_secs = decode_option_u64(&mut reader)?;
     let live_approval_facts = match record_version {
         ConfigRecordVersion::V1 | ConfigRecordVersion::V2 => None,
-        ConfigRecordVersion::V3 => Some(decode_live_approval_facts(&mut reader)?),
+        ConfigRecordVersion::V3 | ConfigRecordVersion::V4 => Some(decode_live_approval_facts(&mut reader)?),
+    };
+    let (event_template, max_epoch_delta) = match record_version {
+        ConfigRecordVersion::V4 => {
+            let template = decode_event_template_binding(&mut reader)?;
+            let delta = reader.read_unsigned().map_err(from_protocol)?;
+            AnchorEpochBindingV1::from_observed_epoch(0, delta)
+                .map_err(|_| ConfigFileError::InvalidData)?;
+            (Some(template), Some(delta))
+        }
+        ConfigRecordVersion::V1 | ConfigRecordVersion::V2 | ConfigRecordVersion::V3 => (None, None),
     };
 
     reader.finish().map_err(from_protocol)?;
@@ -870,7 +937,37 @@ fn decode_body(
         backoff_cap_secs,
         ttl_secs,
         live_approval_facts,
+        event_template,
+        max_epoch_delta,
     })
+}
+
+fn encode_event_template_binding(
+    writer: &mut CanonicalCborWriter,
+    binding: &AnchorTemplateBindingV1,
+) -> Result<(), ConfigFileError> {
+    writer.write_array_len(5).map_err(from_protocol)?;
+    writer.write_text_string(binding.template_address()).map_err(from_protocol)?;
+    writer.write_text_string(binding.module()).map_err(from_protocol)?;
+    writer.write_text_string(binding.function()).map_err(from_protocol)?;
+    writer.write_text_string(binding.full_event_topic()).map_err(from_protocol)?;
+    writer.write_byte_string(binding.artifact_digest()).map_err(from_protocol)?;
+    Ok(())
+}
+
+fn decode_event_template_binding(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<AnchorTemplateBindingV1, ConfigFileError> {
+    if reader.read_array_len().map_err(from_protocol)? != 5 {
+        return Err(ConfigFileError::InvalidCbor);
+    }
+    let template_address = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let module = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let function = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let topic = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let artifact_digest = read_digest(reader)?;
+    AnchorTemplateBindingV1::new(template_address, module, function, topic, artifact_digest)
+        .map_err(|_| ConfigFileError::InvalidData)
 }
 
 fn encode_live_approval_facts(

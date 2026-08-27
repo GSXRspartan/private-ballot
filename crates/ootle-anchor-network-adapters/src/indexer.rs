@@ -18,24 +18,26 @@
 //! Neither the pinned receipt type nor the result type crosses the trait
 //! boundary: the seam that names them is [`IndexerReceiptWireTransport`].
 
+use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorFinalStatusV1, AnchorLogLevelV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
+    AnchorFinalStatusV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     IndexerAnchorReceiptClient, IndexerReceiptFetchV1, IndexerReceiptTransportError,
     convert_receipt_response, transaction_id_to_ootle,
 };
+use tari_cc_private_ballot_ootle_anchor_adapter::map_ootle_network;
 use tari_consensus_types::Decision;
 use tari_engine_types::Epoch;
+use tari_engine_types::events::Event;
 use tari_engine_types::fees::FeeReceipt;
-use tari_engine_types::logs::LogEntry;
 use tari_engine_types::transaction_receipt::{DiffSummary, FinalizeOutcome, TransactionReceipt};
+use tari_template_lib_types::{Metadata, TemplateAddress};
 use tari_indexer_client::rest_api_client::IndexerRestApiClient;
 use tari_indexer_client::types::{
-    GetTransactionReceiptResponse, GetTransactionResultRequest, GetTransactionResultResponse,
+    GetNetworkInfoResponse, GetTransactionReceiptResponse, GetTransactionResultRequest, GetTransactionResultResponse,
     IndexerTransactionFinalizedResult,
 };
-use tari_template_lib_types::LogLevel;
 
 use crate::endpoint::IndexerEndpoint;
 use crate::error::{TransportError, TransportErrorCategory};
@@ -49,6 +51,13 @@ const MAX_REJECTION_REASON_BYTES: usize = 4096;
 /// The real implementation wraps [`IndexerRestApiClient`]; the test
 /// implementation is fully scripted and opens no socket.
 pub trait IndexerReceiptWireTransport {
+    /// Retrieves the configured indexer's network identity and current epoch.
+    ///
+    /// This is deliberately a separate, bounded read made before constructing a
+    /// v0.39.2 transaction. A caller must never infer an epoch from wall-clock
+    /// time or from an unverified endpoint name.
+    fn get_network_info(&mut self) -> Result<GetNetworkInfoResponse, TransportError>;
+
     /// Retrieves the persisted receipt substate for a transaction.
     ///
     /// # Errors
@@ -133,6 +142,11 @@ fn resolve_indexer_outcome<T>(
 }
 
 impl<E: BlockingExecutor> IndexerReceiptWireTransport for RealIndexerTransport<E> {
+    fn get_network_info(&mut self) -> Result<GetNetworkInfoResponse, TransportError> {
+        let future = self.client.get_network_info();
+        resolve_indexer_outcome(self.executor.block_on_bounded(future, self.request_timeout))
+    }
+
     fn get_transaction_receipt(
         &mut self,
         address: tari_template_lib_types::TransactionReceiptAddress,
@@ -166,16 +180,6 @@ pub enum ScriptedIndexerResponse {
     Error(TransportError),
 }
 
-/// Converts a project-owned log level to the pinned wire level.
-fn log_level_to_wire(level: AnchorLogLevelV1) -> LogLevel {
-    match level {
-        AnchorLogLevelV1::Error => LogLevel::Error,
-        AnchorLogLevelV1::Warn => LogLevel::Warn,
-        AnchorLogLevelV1::Info => LogLevel::Info,
-        AnchorLogLevelV1::Debug => LogLevel::Debug,
-    }
-}
-
 /// Constructs a `TransactionReceipt` from a project-owned receipt for the
 /// scripted transport.
 fn build_transaction_receipt(receipt: &AnchorReceiptV1) -> TransactionReceipt {
@@ -184,20 +188,33 @@ fn build_transaction_receipt(receipt: &AnchorReceiptV1) -> TransactionReceipt {
         AnchorFinalStatusV1::FeeOnlyAccepted => FinalizeOutcome::FeeIntentCommit,
         AnchorFinalStatusV1::Rejected => FinalizeOutcome::Commit,
     };
-    let logs: Vec<LogEntry> = receipt
-        .logs()
-        .iter()
-        .map(|entry| LogEntry::new(log_level_to_wire(entry.level()), entry.message().to_owned()))
-        .collect();
     let epoch = receipt.ledger_position().unwrap_or(0);
+    // A real finalized receipt carries the template's events; the scripted
+    // transport faithfully reconstructs the wire events from the project-owned
+    // detached event proofs so a v0.39.2 event-anchor round-trips through the
+    // wire receipt exactly as it would from a real indexer.
+    let events: Vec<Event> = receipt
+        .event_proofs_v2()
+        .iter()
+        .map(|proof| {
+            let hash_hex = proof
+                .template_address()
+                .strip_prefix("template_")
+                .unwrap_or(proof.template_address());
+            let template_address = TemplateAddress::from_hex(hash_hex)
+                .unwrap_or_else(|_| TemplateAddress::from_array([0_u8; 32]));
+            let metadata: Metadata = proof.metadata().iter().cloned().collect();
+            Event::new(None, template_address, proof.topic().to_owned(), metadata)
+        })
+        .collect();
     TransactionReceipt {
         outcome,
         diff_summary: DiffSummary::default(),
         fee_withdrawals: Box::default(),
-        events: Box::default(),
-        logs: logs.into_boxed_slice(),
+        events: events.into_boxed_slice(),
         fee_receipt: FeeReceipt::default(),
         epoch: Epoch(epoch),
+        intent_commitment: Default::default(),
     }
 }
 
@@ -239,6 +256,7 @@ pub struct ScriptedIndexerTransport {
     captured_result_request: Option<GetTransactionResultRequest>,
     receipt_calls: u64,
     result_calls: u64,
+    network_info: GetNetworkInfoResponse,
 }
 
 impl Default for ScriptedIndexerTransport {
@@ -257,12 +275,29 @@ impl ScriptedIndexerTransport {
             captured_result_request: None,
             receipt_calls: 0,
             result_calls: 0,
+            // Existing offline scenarios use Esmeralda fixtures. This value is
+            // only a deterministic seam; live construction always asks the
+            // configured loopback indexer through the real transport.
+            network_info: GetNetworkInfoResponse {
+                network: tari_ootle_transaction::Network::Esmeralda,
+                network_byte: tari_ootle_transaction::Network::Esmeralda.as_byte(),
+                epoch: Epoch::from(1_u64),
+            },
         }
     }
 
     /// Sets the scripted response.
     pub fn set_response(&mut self, response: ScriptedIndexerResponse) {
         self.response = response;
+    }
+
+    /// Sets the deterministic network/epoch response used by pre-CREATE tests.
+    pub fn set_network_info(&mut self, network: tari_ootle_transaction::Network, epoch: u64) {
+        self.network_info = GetNetworkInfoResponse {
+            network,
+            network_byte: network.as_byte(),
+            epoch: Epoch::from(epoch),
+        };
     }
 
     /// Returns the captured receipt-address, if one was sent.
@@ -293,6 +328,10 @@ impl ScriptedIndexerTransport {
 }
 
 impl IndexerReceiptWireTransport for ScriptedIndexerTransport {
+    fn get_network_info(&mut self) -> Result<GetNetworkInfoResponse, TransportError> {
+        Ok(self.network_info.clone())
+    }
+
     fn get_transaction_receipt(
         &mut self,
         address: tari_template_lib_types::TransactionReceiptAddress,
@@ -384,6 +423,26 @@ impl<T: IndexerReceiptWireTransport> IndexerReceiptNetworkAdapter<T> {
     /// Returns a mutable reference to the inner transport.
     pub fn transport_mut(&mut self) -> &mut T {
         &mut self.transport
+    }
+
+    /// Obtains the epoch from this exact indexer and proves that its network is
+    /// the configured project network before a transaction can be constructed.
+    ///
+    /// The resulting value is persisted in the v0.39.2 pre-CREATE intent as
+    /// part of [`AnchorEpochBindingV1`], not recalculated after a restart.
+    pub fn observed_network_epoch(
+        &mut self,
+        expected: &OotleNetworkIdV1,
+    ) -> Result<u64, TransportError> {
+        let expected_network = map_ootle_network(expected)
+            .map_err(|_| TransportError::from_category(TransportErrorCategory::UnsupportedApi))?;
+        let response = self.transport.get_network_info()?;
+        if response.network != expected_network || response.network_byte != expected_network.as_byte() {
+            return Err(TransportError::from_category(
+                TransportErrorCategory::MalformedResponse,
+            ));
+        }
+        Ok(response.epoch.as_u64())
     }
 
     /// Constructs a rejected `AnchorReceiptV1` from a transaction-result

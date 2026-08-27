@@ -49,6 +49,7 @@ const DECLARED_SEAL_PUBLIC_KEY: &str = "seal-public-key-attested";
 /// reject *before* any network action.
 #[derive(Debug, Default)]
 struct RefusingWalletdCounters {
+    detect: AtomicU64,
     create: AtomicU64,
     approve: AtomicU64,
     reject: AtomicU64,
@@ -71,6 +72,17 @@ impl RefusingWalletdTransport {
 }
 
 impl WalletdWireTransport for RefusingWalletdTransport {
+    fn detect_transaction_inputs(
+        &mut self,
+        _request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionDetectInputsRequest,
+    ) -> Result<
+        tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionDetectInputsResponse,
+        TransportError,
+    > {
+        self.counters.detect.fetch_add(1, Ordering::SeqCst);
+        Err(Self::unavailable())
+    }
+
     fn create_transaction_request(
         &mut self,
         _request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionRequestCreateRequest,
@@ -171,6 +183,11 @@ fn live_config(
         None,
         facts,
     )
+    .with_event_template_binding(
+        common::scenario_event_template(),
+        common::SCENARIO_MAX_EPOCH_DELTA,
+    )
+    .expect("event template binding must attach")
 }
 
 fn assert_code(error: GuiCoreError, code: &str) {
@@ -353,6 +370,16 @@ struct CountingWalletdTransport {
 }
 
 impl WalletdWireTransport for CountingWalletdTransport {
+    fn detect_transaction_inputs(
+        &mut self,
+        request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionDetectInputsRequest,
+    ) -> Result<
+        tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionDetectInputsResponse,
+        TransportError,
+    > {
+        self.inner.detect_transaction_inputs(request)
+    }
+
     fn create_transaction_request(
         &mut self,
         request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionRequestCreateRequest,
@@ -520,7 +547,12 @@ fn publish_output_inside_archive_is_rejected_before_any_transport() {
         1,
         None,
         facts,
-    );
+    )
+    .with_event_template_binding(
+        common::scenario_event_template(),
+        common::SCENARIO_MAX_EPOCH_DELTA,
+    )
+    .expect("event template binding must attach");
     let counters = Arc::new(RefusingWalletdCounters::default());
     let terminal_root = dir.join("terminal-index");
     let _ = std::fs::create_dir_all(&terminal_root);

@@ -15,7 +15,7 @@ use curve25519_dalek_v4::scalar::Scalar;
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
     AnchorAccountReference, AnchorLogPayloadV1, AnchorMaxFeeV1, AnchorRequestId,
-    AnchorTransactionId,
+    AnchorTemplateBindingV1, AnchorTransactionId,
 };
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ballot::{
@@ -355,6 +355,12 @@ impl TestDir {
         let id = UNIQUE_COUNTER.fetch_add(1, Ordering::SeqCst);
         let path =
             std::env::temp_dir().join(format!("gui-core-test-{}-{label}-{id}", std::process::id()));
+        // Windows recycles process ids and the per-process counter restarts at
+        // zero, so a prior run's directory can still be present at this exact
+        // path. Remove any stale contents so each test starts from a clean slate
+        // (a leftover terminal-index record for the same election would otherwise
+        // spuriously trip the conflict guard).
+        let _ = std::fs::remove_dir_all(&path);
         if let Err(error) = std::fs::create_dir_all(&path) {
             panic!("test temp dir must be creatable: {error}");
         }
@@ -389,6 +395,31 @@ pub fn anchor_network() -> OotleNetworkIdV1 {
     match OotleNetworkIdV1::new("esmeralda".to_owned()) {
         Ok(network) => network,
         Err(_) => panic!("fixture network must be valid"),
+    }
+}
+
+/// Bounded max-epoch window used by the live anchor test configuration.
+pub const SCENARIO_MAX_EPOCH_DELTA: u64 = 12;
+
+/// The v0.39.2 event-template deployment binding used by the live anchor tests.
+///
+/// It reuses the exact published address and module that the scripted receipt
+/// scenarios carry, so a scripted accepted receipt verifies against the config's
+/// template binding.
+pub fn scenario_event_template() -> AnchorTemplateBindingV1 {
+    use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
+        SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
+    };
+    let topic = format!("{SCENARIO_TEMPLATE_MODULE}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    match AnchorTemplateBindingV1::new(
+        SCENARIO_TEMPLATE_ADDRESS.to_owned(),
+        SCENARIO_TEMPLATE_MODULE.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    ) {
+        Ok(binding) => binding,
+        Err(_) => panic!("scenario event template must be valid"),
     }
 }
 
@@ -641,7 +672,9 @@ pub fn write_accepted_anchor_evidence_for(
         1,
         None,
         live_approval_facts,
-    );
+    )
+    .with_event_template_binding(scenario_event_template(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|_| panic!("event template binding must attach"));
     let runtime = VerifiedRuntimeArchiveFactsV1::matching_config_for_test(&config)
         .unwrap_or_else(|_| panic!("runtime archive facts must construct"));
     let transaction_id = anchor_transaction_id();

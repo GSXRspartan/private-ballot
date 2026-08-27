@@ -67,6 +67,7 @@ pub use indexer::{
 };
 pub use walletd::{
     RealWalletdTransport, ScriptedWalletdResponse, ScriptedWalletdTransport,
+    TransactionDetectInputsRequest, TransactionDetectInputsResponse,
     TransactionRequestCreateRequest, TransactionRequestCreateResponse,
     TransactionRequestDecisionRequest, TransactionRequestDecisionResponse,
     TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestSubmitRequest,

@@ -3,14 +3,15 @@
 //! Pinned Tari Ootle walletd prepare/approve/submit adapter (offline, Slices
 //! 4A6A + 4A6B).
 //!
-//! This leaf crate takes a completed Slice 4A5
-//! [`OotleAnchorBuildResultV1`] — a single-`EmitLog` unsigned Ootle transaction
-//! plus its project-owned inspection evidence — and drives the confirmed walletd
+//! This leaf crate takes a completed
+//! [`OotleAnchorBuildResultV1`] — a single-`CallFunction` unsigned Ootle
+//! transaction (invoking the pinned stateless event-only anchor template) plus
+//! its project-owned inspection evidence — and drives the confirmed walletd
 //! lifecycle from creation through submission and transaction-id recovery:
 //!
 //! 1. [`WalletdAnchorCoordinator::prepare_fee_bearing`] resolves the fee account
-//!    component, builds a **fee-bearing** transaction (one anchor `EmitLog` plus
-//!    one `pay_fee_from_component`), re-inspects it, and creates a frozen walletd
+//!    component, builds a **fee-bearing** transaction (one anchor `CallFunction`
+//!    plus one `pay_fee_from_component`), re-inspects it, and creates a frozen walletd
 //!    request that walletd stores verbatim. (The legacy fee-less
 //!    [`WalletdAnchorCoordinator::prepare`] is retained for the approval-gate
 //!    reference path but is not submittable.)
@@ -37,7 +38,7 @@
 //! transaction transitively binds the fee account and amount.
 //!
 //! It depends on the exact pinned Tari Ootle revision (`tari-ootle` git rev
-//! `92023e0`, v0.37.0 workspace) for the walletd wire types, and on the wallet
+//! `dd1d731`, v0.39.2 workspace) for the walletd wire types, and on the wallet
 //! SDK only to name those types' public fields ([`KeyId`], `EffectiveStatus`).
 //!
 //! It deliberately never:

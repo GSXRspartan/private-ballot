@@ -186,6 +186,25 @@ fn round_trip_finalized_accept() {
 }
 
 #[test]
+fn round_trip_v2_event_template_binding() {
+    // A v0.39.2 snapshot carries the event-template deployment identity and the
+    // frozen bounded epoch window in its binding; the codec must preserve them
+    // across a persist/restore cycle (regression guard for the V2 binding fields
+    // that a live driver relies on at restore time).
+    let snapshot = known_answer_snapshot_v2();
+    let walletd = snapshot
+        .walletd_snapshots()
+        .first()
+        .expect("v2 snapshot has a walletd binding");
+    assert!(
+        walletd.binding().template_binding().is_some(),
+        "fixture must be a v0.39.2 binding"
+    );
+    assert!(walletd.binding().epoch_binding().is_some());
+    assert_roundtrip_eq(snapshot);
+}
+
+#[test]
 fn round_trip_finalized_fee_only() {
     let walletd = walletd_snapshot(
         WalletdRequestDecisionV1::Approved,

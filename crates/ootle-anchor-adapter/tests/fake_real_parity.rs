@@ -1,16 +1,16 @@
-//! Section I / Section M(13) — the deterministic 4A4 fake and the real Ootle
-//! construction adapter agree on every project-boundary value.
+//! The deterministic fake and the real Ootle construction adapter agree on every
+//! project-boundary value.
 //!
-//! Parity is asserted only over project-owned values: anchor digest, exact anchor
-//! log payload bytes, network, account, fee policy, and client reference, plus
-//! the shared invariants that neither side claims a transaction identifier before
-//! submission and neither claims finality. The fake's post-submission transaction
-//! identifier is fake-only and is deliberately never compared to the unsigned
-//! Ootle transaction.
+//! Parity is asserted only over project-owned values: anchor digest, network,
+//! account, fee policy, and client reference, plus the shared invariants that
+//! neither side claims a transaction identifier before submission and neither
+//! claims finality. The fake's post-submission transaction identifier is
+//! fake-only and is deliberately never compared to the unsigned Ootle
+//! transaction.
 
 mod common;
 
-use common::{binding, client_reference};
+use common::{binding, client_reference, epoch_binding, template_binding};
 use tari_cc_private_ballot_anchor_transport::{
     AnchorLifecycleState, AnchorMaxFeeV1, AnchorPreparationRequest, AnchorTransactionRequestStore,
     DeterministicAnchorFake,
@@ -28,9 +28,13 @@ fn fake_and_real_adapter_agree_on_every_project_boundary_value() {
         Some(client_reference("parity-1")),
     );
     let adapter_request =
-        OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation.clone());
+        OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+            preparation.clone(),
+            template_binding(),
+            epoch_binding(),
+        );
 
-    // Deterministic 4A4 fake path.
+    // Deterministic fake path.
     let mut fake = DeterministicAnchorFake::new();
     let Ok(prepared) = fake.create_request(&preparation) else {
         panic!("fake preparation must succeed");
@@ -43,23 +47,21 @@ fn fake_and_real_adapter_agree_on_every_project_boundary_value() {
     let evidence = result.evidence();
     let preparation_dto = result.walletd_preparation();
 
-    // Anchor digest parity.
+    // Anchor digest parity: the fake, the real evidence, and the v0.39.2 event
+    // payload all commit to the exact same aggregate anchor digest.
     assert_eq!(prepared.anchor_digest(), evidence.anchor_digest());
-
-    // Exact anchor log payload bytes parity — fake payload, evidence payload, and
-    // the real EmitLog message all agree byte for byte.
-    let fake_payload_bytes = prepared.payload().to_encoded_string();
-    let evidence_payload_bytes = evidence.anchor_log_payload().to_encoded_string();
+    assert_eq!(evidence.event_payload().digest(), prepared.anchor_digest());
     assert_eq!(
-        fake_payload_bytes.as_bytes(),
-        evidence_payload_bytes.as_bytes()
+        prepared.payload().digest(),
+        evidence.event_payload().digest()
     );
+
+    // The real transaction is exactly one `publish_anchor` CallFunction.
     match result.unsigned_transaction().instructions() {
-        [Instruction::EmitLog { message, .. }] => {
-            let emitted: &str = message.as_ref();
-            assert_eq!(emitted.as_bytes(), fake_payload_bytes.as_bytes());
+        [Instruction::CallFunction { function, .. }] => {
+            assert_eq!(&**function, "publish_anchor");
         }
-        other => panic!("expected exactly one EmitLog, got {}", other.len()),
+        other => panic!("expected exactly one CallFunction, got {}", other.len()),
     }
 
     // Network parity.
@@ -75,10 +77,7 @@ fn fake_and_real_adapter_agree_on_every_project_boundary_value() {
     );
 
     // Fee policy parity at the project boundary.
-    assert_eq!(
-        prepared.max_fee().value(),
-        preparation_dto.max_fee().value()
-    );
+    assert_eq!(prepared.max_fee().value(), preparation_dto.max_fee().value());
     assert_eq!(preparation_dto.max_fee().value(), 4_242);
 
     // Client reference parity.
@@ -124,7 +123,11 @@ fn fake_idempotency_reference_matches_the_preserved_real_reference() {
     );
 
     let Ok(result) = build_unsigned_anchor_transaction(
-        &OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation),
+        &OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+            preparation,
+            template_binding(),
+            epoch_binding(),
+        ),
     ) else {
         panic!("real construction must succeed");
     };

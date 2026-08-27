@@ -12,7 +12,8 @@ use tari_cc_private_ballot_anchor::{
     OotleAnchorRecordHashV1, OotleAnchorRecordV1, OotleNetworkIdV1,
 };
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorLogPayloadV1, AnchorMaxFeeV1, AnchorTransactionId,
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorTemplateBindingV1, AnchorTransactionId,
 };
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
@@ -24,6 +25,9 @@ use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::UnifiedAnchorLif
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, NetworkAdapterConfig, ScriptedIndexerResponse, ScriptedIndexerTransport,
     ScriptedWalletdResponse, ScriptedWalletdTransport, WalletdEndpoint,
+};
+use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
+    SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptQuerySnapshotV1, AnchorReceiptQueryStateV1, AnchorReceiptQueryV1,
@@ -458,8 +462,62 @@ pub fn reduced_live_approval_facts()
     .unwrap_or_else(|_| panic!("reduced live approval facts must construct"))
 }
 
+/// Bounded max-epoch window used by the live anchor test configuration.
+pub const SCENARIO_MAX_EPOCH_DELTA: u64 = 12;
+
+/// The v0.39.2 event-template deployment binding matching the scenario receipts.
+#[must_use]
+pub fn template_binding() -> AnchorTemplateBindingV1 {
+    let topic = format!("{SCENARIO_TEMPLATE_MODULE}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    match AnchorTemplateBindingV1::new(
+        SCENARIO_TEMPLATE_ADDRESS.to_owned(),
+        SCENARIO_TEMPLATE_MODULE.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    ) {
+        Ok(binding) => binding,
+        Err(_) => panic!("test template binding must be valid"),
+    }
+}
+
+/// A valid observed/max epoch binding for tests (observed 100, delta 12).
+#[must_use]
+pub fn epoch_binding() -> AnchorEpochBindingV1 {
+    match AnchorEpochBindingV1::from_observed_epoch(100, SCENARIO_MAX_EPOCH_DELTA) {
+        Ok(binding) => binding,
+        Err(_) => panic!("test epoch binding must be valid"),
+    }
+}
+
 #[must_use]
 pub fn live_config() -> AnchorAppConfig {
+    match AnchorAppConfig::new_archive_verified_with_live_approval_facts(
+        network_adapter(),
+        canonical_account(),
+        canonical_manifest_hash(),
+        canonical_archive_hash(),
+        canonical_network(),
+        snapshot_path(),
+        evidence_path(),
+        1,
+        1,
+        None,
+        live_approval_facts(),
+    )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    {
+        Ok(config) => config,
+        Err(_) => panic!("event template binding must attach"),
+    }
+}
+
+/// A live (V3) config with no event-template binding, used to restore a legacy
+/// (template-less) snapshot. The driver restores it against a legacy binding
+/// exactly as before v0.39.2; only *creating* a new anchor requires the V4
+/// event-template config.
+#[must_use]
+pub fn restore_config() -> AnchorAppConfig {
     AnchorAppConfig::new_archive_verified_with_live_approval_facts(
         network_adapter(),
         canonical_account(),
@@ -499,6 +557,8 @@ pub fn walletd_request_id() -> WalletdRequestId {
     WalletdRequestId::from_walletd(1)
 }
 
+/// A legacy (V1) binding, retained so the historical snapshot golden vector and
+/// the V1 decode/inspect paths keep exercising a template-less binding.
 #[must_use]
 pub fn canonical_binding() -> WalletdAnchorBindingV1 {
     WalletdAnchorBindingV1::new(
@@ -508,6 +568,34 @@ pub fn canonical_binding() -> WalletdAnchorBindingV1 {
         canonical_payload(),
         max_fee(),
         fingerprint(),
+    )
+}
+
+/// A v0.39.2 (V2) binding carrying the immutable event-template deployment
+/// identity and the frozen bounded epoch window. This is what the live driver
+/// produces, so restore-time binding tests use it against a V4 config.
+#[must_use]
+pub fn canonical_binding_v2() -> WalletdAnchorBindingV1 {
+    WalletdAnchorBindingV1::new_v2(
+        canonical_network(),
+        canonical_account(),
+        canonical_anchor_digest(),
+        canonical_payload(),
+        max_fee(),
+        fingerprint(),
+        template_binding(),
+        epoch_binding(),
+    )
+}
+
+/// A v0.39.2 submitted request bound to the V2 binding.
+#[must_use]
+pub fn canonical_submitted_v2() -> SubmittedWalletdAnchorRequestV1 {
+    SubmittedWalletdAnchorRequestV1::new(
+        project_request_id(),
+        walletd_request_id(),
+        canonical_transaction_id(),
+        canonical_binding_v2(),
     )
 }
 
@@ -524,6 +612,13 @@ pub fn canonical_submitted() -> SubmittedWalletdAnchorRequestV1 {
 #[must_use]
 pub fn canonical_query() -> AnchorReceiptQueryV1 {
     AnchorReceiptQueryV1::from_submitted(&canonical_submitted())
+}
+
+/// The v0.39.2 receipt query, derived from the V2 submitted handle so it carries
+/// the event-template binding used by the event-verification path.
+#[must_use]
+pub fn canonical_query_v2() -> AnchorReceiptQueryV1 {
+    AnchorReceiptQueryV1::from_submitted(&canonical_submitted_v2())
 }
 
 #[must_use]
@@ -558,6 +653,26 @@ pub fn receipt_snapshot(
 ) -> AnchorReceiptQuerySnapshotV1 {
     AnchorReceiptQuerySnapshotV1::new(
         canonical_query(),
+        state,
+        last_final_status,
+        verified,
+        sequence,
+        None,
+    )
+}
+
+/// The v0.39.2 (V2-query) analogue of [`receipt_snapshot`]. Its query is derived
+/// from the V2 submitted handle so the snapshot's stored query matches the one
+/// the codec reconstructs from the persisted V2 binding on restore.
+#[must_use]
+pub fn receipt_snapshot_v2(
+    state: AnchorReceiptQueryStateV1,
+    last_final_status: Option<tari_cc_private_ballot_anchor_transport::AnchorFinalStatusV1>,
+    verified: bool,
+    sequence: u64,
+) -> AnchorReceiptQuerySnapshotV1 {
+    AnchorReceiptQuerySnapshotV1::new(
+        canonical_query_v2(),
         state,
         last_final_status,
         verified,
@@ -620,6 +735,113 @@ pub fn known_answer_snapshot() -> AnchorLifecycleRecoverySnapshot {
         vec![walletd],
         vec![receipt],
         Some(canonical_submitted()),
+        PollingPolicy::from_consumed(8, 5),
+        UnifiedAnchorLifecyclePhase::FinalizedAccept,
+        None,
+    )
+}
+
+/// The v0.39.2 (V2-binding) analogue of [`submitted_snapshot`].
+#[must_use]
+pub fn submitted_snapshot_v2() -> AnchorLifecycleRecoverySnapshot {
+    let walletd = walletd_snapshot_v2(
+        WalletdRequestDecisionV1::Approved,
+        WalletdSubmissionStateV1::Submitted,
+        Some(canonical_transaction_id()),
+        Some(WalletdEffectiveStatusV1::Submitted),
+        0,
+        1,
+    );
+    let receipt = receipt_snapshot_v2(
+        AnchorReceiptQueryStateV1::SubmittedNotQueried,
+        None,
+        false,
+        1,
+    );
+    AnchorLifecycleRecoverySnapshot::new(
+        vec![walletd],
+        vec![receipt],
+        Some(canonical_submitted_v2()),
+        PollingPolicy::new(8),
+        UnifiedAnchorLifecyclePhase::Submitted,
+        None,
+    )
+}
+
+/// The v0.39.2 (V2-binding) analogue of [`polling_in_progress_snapshot`].
+#[must_use]
+pub fn polling_in_progress_snapshot_v2(consumed: u32) -> AnchorLifecycleRecoverySnapshot {
+    let walletd = walletd_snapshot_v2(
+        WalletdRequestDecisionV1::Approved,
+        WalletdSubmissionStateV1::Submitted,
+        Some(canonical_transaction_id()),
+        Some(WalletdEffectiveStatusV1::Submitted),
+        0,
+        1,
+    );
+    let receipt = receipt_snapshot_v2(
+        AnchorReceiptQueryStateV1::ReceiptNotFound,
+        None,
+        false,
+        u64::from(consumed),
+    );
+    AnchorLifecycleRecoverySnapshot::new(
+        vec![walletd],
+        vec![receipt],
+        Some(canonical_submitted_v2()),
+        PollingPolicy::from_consumed(8, consumed),
+        UnifiedAnchorLifecyclePhase::PollingInProgress,
+        None,
+    )
+}
+
+/// A v0.39.2 walletd snapshot whose binding carries the event-template and epoch.
+#[must_use]
+pub fn walletd_snapshot_v2(
+    decision: WalletdRequestDecisionV1,
+    submission: WalletdSubmissionStateV1,
+    transaction_id: Option<AnchorTransactionId>,
+    status: Option<WalletdEffectiveStatusV1>,
+    retry: u32,
+    sequence: u64,
+) -> WalletdAnchorSnapshotV1 {
+    WalletdAnchorSnapshotV1::new(
+        project_request_id(),
+        walletd_request_id(),
+        canonical_binding_v2(),
+        decision,
+        submission,
+        transaction_id,
+        status,
+        retry,
+        sequence,
+        None,
+    )
+}
+
+/// The v0.39.2 (V2-binding) analogue of [`known_answer_snapshot`]: what the live
+/// driver actually persists, so restore-time binding validation against a V4
+/// config matches on the template deployment and bounded epoch window.
+#[must_use]
+pub fn known_answer_snapshot_v2() -> AnchorLifecycleRecoverySnapshot {
+    let walletd = walletd_snapshot_v2(
+        WalletdRequestDecisionV1::Approved,
+        WalletdSubmissionStateV1::Submitted,
+        Some(canonical_transaction_id()),
+        Some(WalletdEffectiveStatusV1::Submitted),
+        0,
+        1,
+    );
+    let receipt = receipt_snapshot_v2(
+        AnchorReceiptQueryStateV1::ReceiptFinalizedAccept,
+        Some(tari_cc_private_ballot_anchor_transport::AnchorFinalStatusV1::Accepted),
+        true,
+        1,
+    );
+    AnchorLifecycleRecoverySnapshot::new(
+        vec![walletd],
+        vec![receipt],
+        Some(canonical_submitted_v2()),
         PollingPolicy::from_consumed(8, 5),
         UnifiedAnchorLifecyclePhase::FinalizedAccept,
         None,

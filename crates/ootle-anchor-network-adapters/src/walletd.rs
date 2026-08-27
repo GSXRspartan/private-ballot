@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::AnchorTransactionId;
 use tari_cc_private_ballot_ootle_anchor_adapter::{
-    OotleAnchorInspectionFingerprintV1, fingerprint_unsigned_anchor_transaction,
+    OotleAnchorBuildResultV1, OotleAnchorInspectionFingerprintV1,
+    fingerprint_unsigned_anchor_transaction,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     WalletdAnchorClient, WalletdCreateAnchorRequestV1, WalletdCreateOutcomeV1,
@@ -35,6 +36,7 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     canonicalize_transaction_id,
 };
 use tari_ootle_transaction::{Network, TransactionBuilder, TransactionId, UnsignedTransaction};
+use tari_template_lib_types::ComponentAddress;
 use tari_ootle_wallet_sdk::models::{KeyBranch, KeyId};
 use tari_ootle_walletd_client::WalletDaemonClient;
 pub use tari_ootle_walletd_client::types::{
@@ -42,6 +44,7 @@ pub use tari_ootle_walletd_client::types::{
     TransactionRequestDecisionRequest, TransactionRequestDecisionResponse,
     TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestInfo,
     TransactionRequestSubmitRequest, TransactionRequestSubmitResponse,
+    TransactionDetectInputsRequest, TransactionDetectInputsResponse,
 };
 
 use crate::auth::WalletdAuthSecret;
@@ -55,6 +58,13 @@ use crate::executor::{BlockingExecutor, BlockingExecutorError};
 /// sync through a [`BlockingExecutor`]. The test implementation is fully
 /// scripted and opens no socket.
 pub trait WalletdWireTransport {
+    /// Resolves the frozen transaction's dependency inputs without submitting
+    /// it. The returned transaction is re-inspected before CREATE.
+    fn detect_transaction_inputs(
+        &mut self,
+        request: &TransactionDetectInputsRequest,
+    ) -> Result<TransactionDetectInputsResponse, TransportError>;
+
     /// Creates a frozen transaction request.
     ///
     /// # Errors
@@ -176,6 +186,14 @@ fn resolve_executor_outcome<T>(
 }
 
 impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
+    fn detect_transaction_inputs(
+        &mut self,
+        request: &TransactionDetectInputsRequest,
+    ) -> Result<TransactionDetectInputsResponse, TransportError> {
+        let future = self.client.detect_transaction_inputs(request);
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
+    }
+
     fn create_transaction_request(
         &mut self,
         request: &TransactionRequestCreateRequest,
@@ -281,7 +299,7 @@ fn status_to_wire(
 /// only reads `request_id`, `status`, and `transaction_id`), so a minimal
 /// empty transaction suffices.
 fn minimal_unsigned_transaction() -> UnsignedTransaction {
-    TransactionBuilder::new(Network::LocalNet).build_unsigned()
+    TransactionBuilder::new(Network::LocalNet, 1_u64.into()).build_unsigned()
 }
 
 /// Constructs a `TransactionRequestInfo` from scripted fields.
@@ -312,6 +330,8 @@ fn scripted_request_info(
 /// request for endpoint-shape validation. No socket is opened.
 #[derive(Debug, Clone)]
 pub struct ScriptedWalletdTransport {
+    detected_transaction: Option<UnsignedTransaction>,
+    captured_detect: Option<TransactionDetectInputsRequest>,
     create_response: ScriptedWalletdResponse,
     approve_response: ScriptedWalletdResponse,
     reject_response: ScriptedWalletdResponse,
@@ -328,6 +348,7 @@ pub struct ScriptedWalletdTransport {
     reject_calls: u64,
     get_calls: u64,
     submit_calls: u64,
+    detect_calls: u64,
 }
 
 impl Default for ScriptedWalletdTransport {
@@ -356,6 +377,8 @@ impl ScriptedWalletdTransport {
             submit_response: ScriptedWalletdResponse::SubmitError(TransportError::from_category(
                 TransportErrorCategory::NotFound,
             )),
+            detected_transaction: None,
+            captured_detect: None,
             captured_create: None,
             captured_approve: None,
             captured_reject: None,
@@ -367,6 +390,7 @@ impl ScriptedWalletdTransport {
             reject_calls: 0,
             get_calls: 0,
             submit_calls: 0,
+            detect_calls: 0,
         }
     }
 
@@ -398,6 +422,18 @@ impl ScriptedWalletdTransport {
     /// Sets the frozen transaction returned by scripted status lookups.
     pub fn set_get_transaction(&mut self, transaction: UnsignedTransaction) {
         self.get_transaction = Some(transaction);
+    }
+
+    /// Sets the exact transaction returned by the deterministic input-detect
+    /// seam. If omitted, the request transaction is echoed unchanged.
+    pub fn set_detected_transaction(&mut self, transaction: UnsignedTransaction) {
+        self.detected_transaction = Some(transaction);
+    }
+
+    /// Returns the captured input-detection request, if one was sent.
+    #[must_use]
+    pub fn captured_detect(&self) -> Option<&TransactionDetectInputsRequest> {
+        self.captured_detect.as_ref()
     }
 
     /// Returns the captured create request, if one was sent.
@@ -459,6 +495,12 @@ impl ScriptedWalletdTransport {
     pub const fn submit_calls(&self) -> u64 {
         self.submit_calls
     }
+
+    /// Returns the number of input-detection calls.
+    #[must_use]
+    pub const fn detect_calls(&self) -> u64 {
+        self.detect_calls
+    }
 }
 
 /// Converts a project-owned `AnchorTransactionId` to a pinned `TransactionId`.
@@ -470,6 +512,20 @@ fn transaction_id_to_wire(id: &AnchorTransactionId) -> TransactionId {
 }
 
 impl WalletdWireTransport for ScriptedWalletdTransport {
+    fn detect_transaction_inputs(
+        &mut self,
+        request: &TransactionDetectInputsRequest,
+    ) -> Result<TransactionDetectInputsResponse, TransportError> {
+        self.detect_calls += 1;
+        self.captured_detect = Some(request.clone());
+        Ok(TransactionDetectInputsResponse {
+            transaction: self
+                .detected_transaction
+                .clone()
+                .unwrap_or_else(|| request.transaction.clone()),
+        })
+    }
+
     fn create_transaction_request(
         &mut self,
         request: &TransactionRequestCreateRequest,
@@ -669,6 +725,35 @@ impl<T: WalletdWireTransport> WalletdAnchorNetworkAdapter<T> {
                 WalletdAnchorAdapterError::WalletdUnavailable
             }
         }
+    }
+
+    /// Obtains walletd's declared input closure and accepts it only after the
+    /// exact v0.39.2 function/fee/network/max-epoch inspection succeeds.
+    ///
+    /// This happens before durable CREATE intent and before walletd's create
+    /// endpoint, so an altered response cannot be approved or submitted.
+    pub fn detect_anchor_inputs(
+        &mut self,
+        build_result: &OotleAnchorBuildResultV1,
+        fee_component: ComponentAddress,
+    ) -> Result<
+        OotleAnchorBuildResultV1,
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        self.ensure_network_matches(build_result.walletd_preparation().network())?;
+        let request = TransactionDetectInputsRequest {
+            transaction: build_result.unsigned_transaction().clone(),
+            use_unversioned: true,
+        };
+        let response = self
+            .transport
+            .detect_transaction_inputs(&request)
+            .map_err(Self::map_transport_error)?;
+        build_result
+            .with_detected_fee_inputs(response.transaction, fee_component)
+            .map_err(
+                tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError::UnsafeUnsignedTransaction,
+            )
     }
 }
 

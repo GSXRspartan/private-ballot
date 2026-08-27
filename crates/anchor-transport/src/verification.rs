@@ -14,6 +14,7 @@ use crate::identifiers::AnchorTransactionId;
 use crate::model::{
     AnchorFinalStatusV1, AnchorQueryOutcomeV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
 };
+use crate::event::{ANCHOR_EVENT_DIGEST_KEY_V1, AnchorTemplateBindingV1};
 use crate::payload::{ANCHOR_LOG_PAYLOAD_CANDIDATE_PREFIX_V1, AnchorLogPayloadV1};
 
 /// Verified, bound anchor evidence produced by a successful verification.
@@ -140,6 +141,89 @@ pub fn verify_query_outcome(
         | AnchorQueryOutcomeV1::NotFinalized
         | AnchorQueryOutcomeV1::Unknown => Err(AnchorReceiptVerificationError::NotFinalized),
     }
+}
+
+/// Verifies the v0.39.2 receipt-event proof path.
+///
+/// A receipt is authoritative only when it is addressed by the known
+/// transaction id, reports a full finalized commit, and contains exactly one
+/// event from the pinned template with the pinned full topic and the one
+/// permitted metadata key. Historical V1 receipts continue through
+/// [`verify_anchor_receipt`]; this path never treats indexer event search as
+/// proof of absence.
+pub fn verify_v39_event_receipt(
+    expected_transaction: &AnchorTransactionId,
+    expected_network: &OotleNetworkIdV1,
+    expected_template: &AnchorTemplateBindingV1,
+    expected_payload: &crate::event::AnchorEventPayloadV2,
+    receipt: &AnchorReceiptV1,
+) -> Result<VerifiedAnchorEvidenceV1, AnchorReceiptVerificationError> {
+    if receipt.transaction_id() != expected_transaction {
+        return Err(AnchorReceiptVerificationError::WrongTransaction);
+    }
+    if receipt.network() != expected_network {
+        return Err(AnchorReceiptVerificationError::WrongNetwork);
+    }
+    match receipt.final_status() {
+        AnchorFinalStatusV1::Accepted => {}
+        AnchorFinalStatusV1::FeeOnlyAccepted => {
+            return Err(AnchorReceiptVerificationError::FeeOnlyAcceptance);
+        }
+        AnchorFinalStatusV1::Rejected => {
+            return Err(AnchorReceiptVerificationError::RejectedTransaction);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for event in receipt.event_proofs_v2() {
+        let has_digest_key = event
+            .metadata()
+            .iter()
+            .any(|(key, _)| key == ANCHOR_EVENT_DIGEST_KEY_V1);
+        if event.template_address() == expected_template.template_address()
+            && event.topic() != expected_template.full_event_topic()
+        {
+            return Err(AnchorReceiptVerificationError::WrongEventTopic);
+        }
+        if event.topic() == expected_template.full_event_topic()
+            && event.template_address() != expected_template.template_address()
+        {
+            return Err(AnchorReceiptVerificationError::WrongEventTemplate);
+        }
+        if event.topic() == expected_template.full_event_topic() || has_digest_key {
+            candidates.push(event);
+        }
+    }
+
+    let [event] = candidates.as_slice() else {
+        return if candidates.is_empty() {
+            Err(AnchorReceiptVerificationError::MissingAnchorEvent)
+        } else {
+            Err(AnchorReceiptVerificationError::DuplicateAnchorEvents)
+        };
+    };
+    if event.template_address() != expected_template.template_address() {
+        return Err(AnchorReceiptVerificationError::WrongEventTemplate);
+    }
+    if event.topic() != expected_template.full_event_topic() {
+        return Err(AnchorReceiptVerificationError::WrongEventTopic);
+    }
+    let [(key, digest)] = event.metadata() else {
+        return Err(AnchorReceiptVerificationError::UnexpectedEventMetadata);
+    };
+    if key != ANCHOR_EVENT_DIGEST_KEY_V1 {
+        return Err(AnchorReceiptVerificationError::MalformedAnchorEvent);
+    }
+    if digest != &expected_payload.digest_hex() {
+        return Err(AnchorReceiptVerificationError::WrongAnchorDigest);
+    }
+    Ok(VerifiedAnchorEvidenceV1 {
+        transaction_id: receipt.transaction_id().clone(),
+        network: receipt.network().clone(),
+        anchor_digest: expected_payload.digest(),
+        ledger_position: receipt.ledger_position(),
+        source: receipt.source(),
+    })
 }
 
 /// Collects and strictly parses every project anchor log in a receipt.

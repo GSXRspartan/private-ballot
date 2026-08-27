@@ -10,12 +10,15 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest, AnchorReceiptV1,
+    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorPreparationRequest, AnchorReceiptV1, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{
     AnchorLifecycleOrchestrator, PollingPolicy, UnifiedAnchorLifecyclePhase,
+};
+use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
+    SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     FakeIndexerReceiptClient, FakeReceiptStep, receipt_scenarios,
@@ -84,7 +87,32 @@ pub fn fee_component() -> WalletdFeeComponentRef {
     }
 }
 
-/// Builds a fee-less Slice 4A5 build request from its parts.
+/// The v0.39.2 event-template deployment binding matching the scenario receipts.
+#[must_use]
+pub fn template_binding() -> AnchorTemplateBindingV1 {
+    let topic = format!("{SCENARIO_TEMPLATE_MODULE}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    match AnchorTemplateBindingV1::new(
+        SCENARIO_TEMPLATE_ADDRESS.to_owned(),
+        SCENARIO_TEMPLATE_MODULE.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    ) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test template binding must be valid"),
+    }
+}
+
+/// A valid observed/max epoch binding for tests (observed 100, delta 12).
+#[must_use]
+pub fn epoch_binding() -> AnchorEpochBindingV1 {
+    match AnchorEpochBindingV1::from_observed_epoch(100, 12) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test epoch binding must be valid"),
+    }
+}
+
+/// Builds a v0.39.2 build request (with template + epoch binding) from its parts.
 #[must_use]
 pub fn build_request(
     network_value: &str,
@@ -99,7 +127,11 @@ pub fn build_request(
     );
     let preparation =
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(max_fee), None);
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation)
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        preparation,
+        template_binding(),
+        epoch_binding(),
+    )
 }
 
 /// The canonical build request on Esmeralda with account `fee-account` and

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorBindingV1, AnchorLogPayloadV1, AnchorPreparationRequest,
+    AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorPreparationRequest,
 };
 use tari_cc_private_ballot_archive::{
     ArchiveDirectoryVerificationV1, ArchiveHashV1, verify_archive_directory_v1,
@@ -44,7 +44,7 @@ use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptCoordinator, AnchorReceiptQueryV1, VerifiedIndexerAnchorV1,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
-    WalletdAnchorAdapterError, WalletdAnchorCoordinator, WalletdAnchorSnapshotV1,
+    WalletdAnchorAdapterError, WalletdAnchorSnapshotV1,
     WalletdSubmissionStateV1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, ManifestHash};
@@ -133,6 +133,11 @@ pub enum DriverError {
     /// request id/fingerprint, so the caller must reconcile it manually rather
     /// than issuing a blind second create.
     CreateRecoveryRequired,
+    /// A live v0.39.2 config has no pinned event-template identity.
+    EventTemplateRequired,
+    /// The configured loopback indexer could not provide a matching network
+    /// identity and current epoch before CREATE.
+    IndexerEpochUnavailable,
 }
 
 impl DriverError {
@@ -166,6 +171,8 @@ impl DriverError {
             Self::PublishLockUnavailable => "DRIVER_PUBLISH_LOCK_UNAVAILABLE",
             Self::CreateIntent(error) => error.as_str(),
             Self::CreateRecoveryRequired => "DRIVER_CREATE_RECOVERY_REQUIRED",
+            Self::EventTemplateRequired => "DRIVER_EVENT_TEMPLATE_REQUIRED",
+            Self::IndexerEpochUnavailable => "DRIVER_INDEXER_EPOCH_UNAVAILABLE",
         }
     }
 }
@@ -1175,6 +1182,34 @@ where
             return Err(DriverError::ConfigSnapshotBindingMismatch);
         }
 
+        // v0.39.2 event-template deployment binding and bounded epoch window. A
+        // live v0.39.2 config and the persisted binding must agree on the pinned
+        // per-network template deployment and the frozen epoch window. A legacy
+        // (pre-v0.39.2) snapshot carries neither and stays restorable only against
+        // an equally legacy config; a version skew between the two — one carries
+        // the template binding, the other does not — is a mismatch. This never
+        // weakens the v0.39.2 check: when the config pins a template, the binding
+        // must pin the same template and matching epoch window, and a template-less
+        // binding is rejected.
+        match (config.event_template(), binding.template_binding()) {
+            (Some(configured_template), Some(persisted_template)) => {
+                if persisted_template != configured_template {
+                    return Err(DriverError::ConfigSnapshotBindingMismatch);
+                }
+                let epoch = binding
+                    .epoch_binding()
+                    .ok_or(DriverError::ConfigSnapshotBindingMismatch)?;
+                let configured_delta = config
+                    .max_epoch_delta()
+                    .ok_or(DriverError::EventTemplateRequired)?;
+                if epoch.max_epoch().saturating_sub(epoch.observed_epoch()) != configured_delta {
+                    return Err(DriverError::ConfigSnapshotBindingMismatch);
+                }
+            }
+            (None, None) => {}
+            _ => return Err(DriverError::ConfigSnapshotBindingMismatch),
+        }
+
         Ok(())
     }
 
@@ -1188,6 +1223,25 @@ where
 
     fn step_prepare(&mut self) -> Result<(), DriverError> {
         let archive = self.build_archive_proof_inputs()?;
+        let template = self
+            .config
+            .event_template()
+            .ok_or(DriverError::EventTemplateRequired)?
+            .clone();
+        let max_epoch_delta = self
+            .config
+            .max_epoch_delta()
+            .ok_or(DriverError::EventTemplateRequired)?;
+        // The epoch is a fact supplied by the same configured loopback indexer
+        // that later proves the receipt. It is queried before construction, not
+        // derived from local time, and any endpoint/network ambiguity fails
+        // closed before a walletd CREATE can be issued.
+        let observed_epoch = self
+            .indexer_adapter
+            .observed_network_epoch(self.config.anchor_record_network())
+            .map_err(|_| DriverError::IndexerEpochUnavailable)?;
+        let epoch = AnchorEpochBindingV1::from_observed_epoch(observed_epoch, max_epoch_delta)
+            .map_err(|_| DriverError::IndexerEpochUnavailable)?;
         let payload = AnchorLogPayloadV1::from_digest(archive.anchor_digest());
         let binding = AnchorBindingV1::new(
             self.config.anchor_record_network().clone(),
@@ -1196,10 +1250,29 @@ where
         );
         let max_fee = self.config.network_adapter().max_fee();
         let preparation = AnchorPreparationRequest::new(binding, max_fee, None);
-        let build_request = tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation);
-        let (build_result, create) = WalletdAnchorCoordinator::build_fee_bearing_create_request(
+        let build_request = tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+            preparation,
+            template,
+            epoch,
+        );
+        let fee_component = self.config.network_adapter().fee_component().component_address();
+        let initial_build = tari_cc_private_ballot_ootle_anchor_adapter::build_fee_bearing_anchor_transaction(
             &build_request,
-            self.config.network_adapter().fee_component(),
+            fee_component,
+        )
+        .map_err(|error| DriverError::Lifecycle(LifecycleError::Walletd(
+            WalletdAnchorAdapterError::UnsafeUnsignedTransaction(error),
+        )))?;
+        // v0.39.2 walletd must resolve the dependency closure before CREATE.
+        // Reinspection of this response is inside the network adapter and
+        // rejects any mutation beyond inputs before the durable intent exists.
+        let build_result = self
+            .walletd_adapter
+            .detect_anchor_inputs(&initial_build, fee_component)
+            .map_err(|error| DriverError::Lifecycle(LifecycleError::Walletd(error)))?;
+        let create = tari_cc_private_ballot_ootle_walletd_anchor_adapter::build_fee_bearing_walletd_create_request(
+            &build_result,
+            fee_component,
             self.config.network_adapter().seal_signer(),
             self.config.ttl_secs(),
         )

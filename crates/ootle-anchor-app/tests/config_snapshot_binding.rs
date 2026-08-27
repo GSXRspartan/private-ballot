@@ -48,7 +48,7 @@ fn adapter_with_max_fee(max_fee_value: u64) -> NetworkAdapterConfig {
 }
 
 fn base_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConfig {
-    AnchorAppConfig::new_archive_verified(
+    AnchorAppConfig::new_archive_verified_with_live_approval_facts(
         network_adapter(),
         canonical_account(),
         canonical_manifest_hash(),
@@ -59,7 +59,10 @@ fn base_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConf
         1,
         1,
         None,
+        live_approval_facts(),
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|e| panic!("event template binding must attach: {e}"))
 }
 
 fn live_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConfig {
@@ -76,6 +79,8 @@ fn live_config_with_paths(snap_path: PathBuf, ev_path: PathBuf) -> AnchorAppConf
         None,
         live_approval_facts(),
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|e| panic!("event template binding must attach: {e}"))
 }
 
 #[test]
@@ -212,7 +217,9 @@ fn restore_with_different_max_fee_rejected() {
 fn restore_with_unchanged_config_succeeds() {
     let snap_path = snapshot_path();
     let ev_path = evidence_path();
-    write_snapshot_atomic(&snap_path, &known_answer_snapshot())
+    // The live driver persists a V2 binding (event template + epoch), so an
+    // unchanged V4 config must restore against it.
+    write_snapshot_atomic(&snap_path, &known_answer_snapshot_v2())
         .unwrap_or_else(|e| panic!("snapshot write failed: {e}"));
 
     let config = base_config_with_paths(snap_path, ev_path);

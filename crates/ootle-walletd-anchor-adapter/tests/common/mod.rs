@@ -7,8 +7,8 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorClientReferenceV1, AnchorLogPayloadV1,
-    AnchorMaxFeeV1, AnchorPreparationRequest,
+    AnchorAccountReference, AnchorBindingV1, AnchorClientReferenceV1, AnchorEpochBindingV1,
+    AnchorLogPayloadV1, AnchorMaxFeeV1, AnchorPreparationRequest, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     OotleAnchorBuildResultV1, OotleAnchorTransactionBuildRequestV1,
@@ -52,7 +52,34 @@ pub fn payload(byte: u8) -> AnchorLogPayloadV1 {
     AnchorLogPayloadV1::from_digest(digest(byte))
 }
 
-/// Builds an adapter build request from its parts.
+/// A valid pinned event-template deployment identity for tests. The address is
+/// a canonical `template_<64 hex>` string that round-trips through the adapter's
+/// construction/inspection parser.
+pub fn template_binding() -> AnchorTemplateBindingV1 {
+    let module = "tari_private_ballot_anchor";
+    let topic = format!("{module}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    match AnchorTemplateBindingV1::new(
+        format!("template_{}", "11".repeat(32)),
+        module.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    ) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test template binding must be valid"),
+    }
+}
+
+/// A valid observed/max epoch binding for tests (observed 100, delta 12).
+pub fn epoch_binding() -> AnchorEpochBindingV1 {
+    match AnchorEpochBindingV1::from_observed_epoch(100, 12) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test epoch binding must be valid"),
+    }
+}
+
+/// Builds a v0.39.2 adapter build request (with the mandatory template and epoch
+/// binding) from its parts.
 pub fn build_request(
     network_value: &str,
     account_value: &str,
@@ -70,7 +97,11 @@ pub fn build_request(
         AnchorMaxFeeV1::from_units(max_fee),
         client.map(client_reference),
     );
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation)
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        preparation,
+        template_binding(),
+        epoch_binding(),
+    )
 }
 
 /// Builds a valid Slice 4A5 build result from its parts.

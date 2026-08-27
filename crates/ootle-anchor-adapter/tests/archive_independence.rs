@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{account, network};
+use common::{account, epoch_binding, network, template_binding};
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
     AnchorBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1, AnchorPreparationRequest,
@@ -44,11 +44,11 @@ fn request_on(
     payload: AnchorLogPayloadV1,
 ) -> OotleAnchorTransactionBuildRequestV1 {
     let binding = AnchorBindingV1::new(network(network_value), account("fee-account"), payload);
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(AnchorPreparationRequest::new(
-        binding,
-        AnchorMaxFeeV1::from_units(1_000),
-        None,
-    ))
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None),
+        template_binding(),
+        epoch_binding(),
+    )
 }
 
 #[test]

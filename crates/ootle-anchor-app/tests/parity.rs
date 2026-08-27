@@ -73,7 +73,12 @@ fn driver_happy_path_agrees_with_orchestrator_harness() {
     );
     let preparation =
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None);
-    let build_request = OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation);
+    let build_request =
+        OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+            preparation,
+            template_binding(),
+            epoch_binding(),
+        );
     let _ = orch
         .prepare_fee_bearing(
             &mut wadapter,
@@ -137,7 +142,12 @@ fn driver_poll_exhausted_agrees_with_orchestrator_harness() {
     );
     let preparation =
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None);
-    let build_request = OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation);
+    let build_request =
+        OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+            preparation,
+            template_binding(),
+            epoch_binding(),
+        );
     let _ = orch
         .prepare_fee_bearing(
             &mut wadapter,
@@ -192,6 +202,8 @@ fn exhausted_config() -> tari_cc_private_ballot_ootle_anchor_app::AnchorAppConfi
         None,
         live_approval_facts(),
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|e| panic!("event template binding must attach: {e}"))
 }
 
 #[test]

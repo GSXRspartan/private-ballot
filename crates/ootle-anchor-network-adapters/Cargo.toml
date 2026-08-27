@@ -26,33 +26,33 @@ tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter"
 tari-cc-private-ballot-anchor-transport = { path = "../anchor-transport" }
 tari-cc-private-ballot-anchor = { path = "../anchor" }
 
-# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
+# --- Pinned Tari Ootle v0.39.2, git rev dd1d731 (exact-revision pin) ---
 # The confirmed walletd JSON-RPC client (WalletDaemonClient) and its wire
 # request/response types. reqwest is a mandatory dependency of this crate;
 # the network-adapter crate does not create a runtime. Same exact revision
 # as Slices 4A5–4A8 so a single crate instance resolves.
-tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_walletd_client = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies KeyId and EffectiveStatus, the public field types of the walletd
 # request/response structs. Named only at this leaf; no wallet-SDK type
 # appears in this crate's public API surface. Same rev.
-tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_wallet_sdk = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies TransactionId (canonicalization and receipt-address derivation)
 # and Network (network mapping). The serde feature is enabled so the wire
 # request types serialize correctly. Same rev.
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0", features = ["serde"] }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b", features = ["serde"] }
 # Supplies ComponentAddress (resolved fee account) and TransactionReceiptAddress
 # (the persisted receipt substate address). Same rev.
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies TransactionReceipt, FinalizeOutcome, LogEntry, and Epoch — the
 # exact pinned receipt types the indexer adapter converts. Same rev.
-tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_engine_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # The confirmed indexer REST client (IndexerRestApiClient) and its wire
 # request/response types. The default `client` feature enables reqwest;
 # the network-adapter crate does not create a runtime. Same rev.
-tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_indexer_client = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Supplies the Decision enum (Commit/Abort) used by the indexer transaction-result
 # variant to distinguish full acceptance from rejection. Same rev.
-tari_consensus_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_consensus_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # URL parsing for endpoint configuration validation. Already in the lock via reqwest.
 url = "2"
 # JSON serialization for offline endpoint-shape validation tests. Already in the lock.

@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
-use tari_cc_private_ballot_anchor_transport::{AnchorAccountReference, AnchorMaxFeeV1};
+use tari_cc_private_ballot_anchor_transport::{
+    ANCHOR_EVENT_FUNCTION_V1, AnchorAccountReference, AnchorMaxFeeV1, AnchorTemplateBindingV1,
+};
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorConfigInputProvenanceV1, AnchorLiveApprovalFactsV1,
@@ -38,6 +40,16 @@ pub struct GuiLiveAnchorConfigRequestV1 {
     pub walletd_endpoint: String,
     /// Public indexer endpoint.
     pub indexer_endpoint: String,
+    /// Immutable published v0.39.2 event-template address for this network.
+    pub template_address: String,
+    /// Immutable event-template module name.
+    pub template_module: String,
+    /// Full stored event topic; it must equal the module-derived contract topic.
+    pub template_event_topic: String,
+    /// Lowercase BLAKE3-256 digest of the compiled template artifact.
+    pub template_artifact_digest_hex: String,
+    /// Bounded number of epochs after the indexer's observed epoch.
+    pub max_epoch_delta: u64,
     /// Public fee-account reference.
     pub account_reference: String,
     /// Public fee component address.
@@ -105,6 +117,12 @@ pub struct GuiLiveAnchorConfigResultV1 {
     pub config_file_blake3_256: String,
     /// Config file byte size.
     pub config_file_bytes: usize,
+    /// Pinned event-template address in the V4 config.
+    pub template_address: String,
+    /// Pinned full event topic in the V4 config.
+    pub template_event_topic: String,
+    /// Configured max-epoch window.
+    pub max_epoch_delta: u64,
 }
 
 /// Generates a live anchor config from a verified finalized archive.
@@ -193,6 +211,14 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
     if !walletd_endpoint.is_loopback() || !indexer_endpoint.is_loopback() {
         return Err(GuiCoreError::live_anchor_endpoint_not_loopback());
     }
+    let template_binding = AnchorTemplateBindingV1::new(
+        request.template_address.clone(),
+        request.template_module.clone(),
+        ANCHOR_EVENT_FUNCTION_V1.to_owned(),
+        request.template_event_topic.clone(),
+        parse_lower_hash(&request.template_artifact_digest_hex)?,
+    )
+    .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
     let account_reference = AnchorAccountReference::new(request.account_reference.clone())
         .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
     let fee_component = WalletdFeeComponentRef::parse(&request.fee_component)
@@ -241,7 +267,9 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         request.backoff_cap_secs,
         request.ttl_secs,
         live_approval_facts,
-    );
+    )
+    .with_event_template_binding(template_binding.clone(), request.max_epoch_delta)
+    .map_err(GuiCoreError::from)?;
     let canonical_bytes = config.to_canonical_bytes().map_err(GuiCoreError::from)?;
     let decoded =
         AnchorAppConfig::from_canonical_bytes(&canonical_bytes).map_err(GuiCoreError::from)?;
@@ -259,6 +287,11 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         || !decoded_facts.finalized_archive()
         || !decoded_facts.dedicated_organizer_wallet_attested()
         || decoded_facts.seal_public_key_assurance() != SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED
+    {
+        return Err(GuiCoreError::live_anchor_operator_config_invalid());
+    }
+    if decoded.event_template() != Some(&template_binding)
+        || decoded.max_epoch_delta() != Some(request.max_epoch_delta)
     {
         return Err(GuiCoreError::live_anchor_operator_config_invalid());
     }
@@ -293,6 +326,9 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         dedicated_organizer_wallet_attested: request.dedicated_organizer_wallet_attested,
         config_file_blake3_256: crate::hex::to_lower_hex(&config_file_hash),
         config_file_bytes: file_bytes.len(),
+        template_address: request.template_address.clone(),
+        template_event_topic: request.template_event_topic.clone(),
+        max_epoch_delta: request.max_epoch_delta,
     })
 }
 
@@ -316,6 +352,20 @@ fn parse_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
     }
     let mut bytes = [0_u8; 32];
     for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        bytes[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
+    }
+    Ok(bytes)
+}
+
+/// Parses the deployment artifact identity without accepting a second textual
+/// representation. Unlike historical archive hashes, this operator-supplied
+/// runtime identity is required to be canonical lowercase hex.
+fn parse_lower_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
+        return Err(GuiCoreError::live_anchor_operator_config_invalid());
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
         bytes[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
     }
     Ok(bytes)

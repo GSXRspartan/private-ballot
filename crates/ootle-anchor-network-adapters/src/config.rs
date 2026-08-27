@@ -22,7 +22,8 @@ use crate::endpoint::{IndexerEndpoint, WalletdEndpoint};
 /// ledger's smallest unit.
 ///
 /// The anchor transaction is minimal: exactly one `pay_fee_from_component` plus
-/// one `EmitLog`. Its real fee is on the order of the operator default of
+/// one `CallFunction` to the stateless event template. Its real fee is on the
+/// order of the operator default of
 /// 1,000 units (see the GUI default). This ceiling is ~10,000× that default —
 /// generous headroom for any fee-market fluctuation while making it impossible
 /// for a mis-entered or a maliciously modified frontend to authorize a

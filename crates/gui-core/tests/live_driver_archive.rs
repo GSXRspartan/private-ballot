@@ -25,7 +25,8 @@ use tari_cc_private_ballot_ootle_anchor_app::{
 };
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::UnifiedAnchorLifecyclePhase;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerReceiptNetworkAdapter, ScriptedIndexerTransport, TransactionRequestCreateRequest,
+    IndexerReceiptNetworkAdapter, ScriptedIndexerTransport, TransactionDetectInputsRequest,
+    TransactionDetectInputsResponse, TransactionRequestCreateRequest,
     TransactionRequestCreateResponse, TransactionRequestDecisionRequest,
     TransactionRequestDecisionResponse, TransactionRequestGetRequest,
     TransactionRequestGetResponse, TransactionRequestSubmitRequest,
@@ -70,6 +71,13 @@ impl CountingWalletdTransport {
 }
 
 impl WalletdWireTransport for CountingWalletdTransport {
+    fn detect_transaction_inputs(
+        &mut self,
+        _request: &TransactionDetectInputsRequest,
+    ) -> Result<TransactionDetectInputsResponse, TransportError> {
+        Err(Self::unavailable())
+    }
+
     fn create_transaction_request(
         &mut self,
         _request: &TransactionRequestCreateRequest,
@@ -186,6 +194,11 @@ fn live_config_for_archive(
         None,
         facts,
     )
+    .with_event_template_binding(
+        common::scenario_event_template(),
+        common::SCENARIO_MAX_EPOCH_DELTA,
+    )
+    .expect("event template binding must attach")
 }
 
 fn write_finalized_bound_archive(

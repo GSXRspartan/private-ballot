@@ -496,6 +496,9 @@ pub struct AnchorReceiptV1 {
     rejection_reason: Option<String>,
     ledger_position: Option<u64>,
     source: AnchorReceiptSourceKindV1,
+    // Absent for historical V1 log receipts. Present only when the v0.39.2
+    // receipt converter copied bounded event facts for detached verification.
+    event_proofs_v2: Vec<crate::event::AnchorEventProofV2>,
 }
 
 impl AnchorReceiptV1 {
@@ -518,6 +521,7 @@ impl AnchorReceiptV1 {
             rejection_reason,
             ledger_position,
             source,
+            event_proofs_v2: Vec::new(),
         }
     }
 
@@ -561,6 +565,20 @@ impl AnchorReceiptV1 {
     #[must_use]
     pub const fn source(&self) -> AnchorReceiptSourceKindV1 {
         self.source
+    }
+
+    /// Adds bounded v0.39.2 event facts while retaining the V1 constructor and
+    /// V1 log-reader compatibility for historical archives.
+    #[must_use]
+    pub fn with_event_proofs_v2(mut self, event_proofs_v2: Vec<crate::event::AnchorEventProofV2>) -> Self {
+        self.event_proofs_v2 = event_proofs_v2;
+        self
+    }
+
+    /// Returns the raw bounded event facts copied from a v0.39.2 receipt.
+    #[must_use]
+    pub fn event_proofs_v2(&self) -> &[crate::event::AnchorEventProofV2] {
+        &self.event_proofs_v2
     }
 }
 

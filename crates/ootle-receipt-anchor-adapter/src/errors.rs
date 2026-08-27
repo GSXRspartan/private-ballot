@@ -113,5 +113,9 @@ stable_error! {
         PayloadMismatch => "RECEIPT_QUERY_PAYLOAD_MISMATCH",
         /// The query's unsigned-transaction fingerprint did not match the binding.
         FingerprintMismatch => "RECEIPT_QUERY_FINGERPRINT_MISMATCH",
+        /// The v0.39.2 template identity did not match the submitted binding.
+        TemplateMismatch => "RECEIPT_QUERY_TEMPLATE_MISMATCH",
+        /// The frozen v0.39.2 epoch binding did not match the submitted binding.
+        EpochMismatch => "RECEIPT_QUERY_EPOCH_MISMATCH",
     }
 }

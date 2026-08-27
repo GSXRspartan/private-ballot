@@ -27,8 +27,8 @@ use std::path::Path;
 
 use tari_cc_private_ballot_anchor::OotleAnchorRecordHashV1;
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorFinalStatusV1, AnchorLogPayloadV1, AnchorRequestId,
-    AnchorTransactionId,
+    AnchorAccountReference, AnchorEpochBindingV1, AnchorFinalStatusV1, AnchorLogPayloadV1,
+    AnchorRequestId, AnchorTemplateBindingV1, AnchorTransactionId,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorInspectionFingerprintV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{
@@ -68,7 +68,14 @@ pub const SNAPSHOT_DOMAIN_LABEL_V1: &str =
 const ENVELOPE_FIELD_COUNT: usize = 4;
 const BODY_FIELD_COUNT: usize = 6;
 const WALLETD_SNAPSHOT_FIELD_COUNT: usize = 10;
+/// A legacy (V1) binding is a 6-element array; a v0.39.2 (V2) binding appends
+/// the event-template sub-array and the epoch sub-array for 8 elements. The
+/// decoder distinguishes the two by the array length, so historical V1 snapshots
+/// remain byte-identical and decodable.
 const BINDING_FIELD_COUNT: usize = 6;
+const BINDING_FIELD_COUNT_V2: usize = 8;
+const TEMPLATE_BINDING_FIELD_COUNT: usize = 5;
+const EPOCH_BINDING_FIELD_COUNT: usize = 2;
 const RECEIPT_SNAPSHOT_FIELD_COUNT: usize = 6;
 const QUERY_FIELD_COUNT: usize = 8;
 const SUBMITTED_HANDLE_FIELD_COUNT: usize = 4;
@@ -489,8 +496,13 @@ fn encode_binding(
     writer: &mut CanonicalCborWriter,
     binding: &WalletdAnchorBindingV1,
 ) -> Result<(), SnapshotFileError> {
+    let v2 = binding.template_binding().zip(binding.epoch_binding());
     writer
-        .write_array_len(BINDING_FIELD_COUNT)
+        .write_array_len(if v2.is_some() {
+            BINDING_FIELD_COUNT_V2
+        } else {
+            BINDING_FIELD_COUNT
+        })
         .map_err(from_protocol)?;
     writer
         .write_text_string(binding.network().as_str())
@@ -508,13 +520,55 @@ fn encode_binding(
     writer
         .write_byte_string(binding.fingerprint().as_bytes())
         .map_err(from_protocol)?;
+    if let Some((template, epoch)) = v2 {
+        encode_template_binding(writer, template)?;
+        encode_epoch_binding(writer, epoch)?;
+    }
+    Ok(())
+}
+
+fn encode_template_binding(
+    writer: &mut CanonicalCborWriter,
+    template: &AnchorTemplateBindingV1,
+) -> Result<(), SnapshotFileError> {
+    writer
+        .write_array_len(TEMPLATE_BINDING_FIELD_COUNT)
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(template.template_address())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(template.module())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(template.function())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(template.full_event_topic())
+        .map_err(from_protocol)?;
+    writer
+        .write_byte_string(template.artifact_digest())
+        .map_err(from_protocol)?;
+    Ok(())
+}
+
+fn encode_epoch_binding(
+    writer: &mut CanonicalCborWriter,
+    epoch: AnchorEpochBindingV1,
+) -> Result<(), SnapshotFileError> {
+    writer
+        .write_array_len(EPOCH_BINDING_FIELD_COUNT)
+        .map_err(from_protocol)?;
+    writer.write_unsigned(epoch.observed_epoch());
+    writer.write_unsigned(epoch.max_epoch());
     Ok(())
 }
 
 fn decode_binding(
     reader: &mut CanonicalCborReader<'_>,
 ) -> Result<WalletdAnchorBindingV1, SnapshotFileError> {
-    if reader.read_array_len().map_err(from_protocol)? != BINDING_FIELD_COUNT {
+    let field_count = reader.read_array_len().map_err(from_protocol)?;
+    if field_count != BINDING_FIELD_COUNT && field_count != BINDING_FIELD_COUNT_V2 {
         return Err(SnapshotFileError::InvalidCbor);
     }
     let network = tari_cc_private_ballot_anchor::OotleNetworkIdV1::new(
@@ -531,6 +585,20 @@ fn decode_binding(
         reader.read_unsigned().map_err(from_protocol)?,
     );
     let fingerprint = OotleAnchorInspectionFingerprintV1::new(read_digest(reader)?);
+    if field_count == BINDING_FIELD_COUNT_V2 {
+        let template = decode_template_binding(reader)?;
+        let epoch = decode_epoch_binding(reader)?;
+        return Ok(WalletdAnchorBindingV1::new_v2(
+            network,
+            account,
+            anchor_digest,
+            payload,
+            max_fee,
+            fingerprint,
+            template,
+            epoch,
+        ));
+    }
     Ok(WalletdAnchorBindingV1::new(
         network,
         account,
@@ -539,6 +607,32 @@ fn decode_binding(
         max_fee,
         fingerprint,
     ))
+}
+
+fn decode_template_binding(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<AnchorTemplateBindingV1, SnapshotFileError> {
+    if reader.read_array_len().map_err(from_protocol)? != TEMPLATE_BINDING_FIELD_COUNT {
+        return Err(SnapshotFileError::InvalidCbor);
+    }
+    let template_address = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let module = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let function = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let topic = reader.read_text_string().map_err(from_protocol)?.to_owned();
+    let artifact_digest = read_digest(reader)?;
+    AnchorTemplateBindingV1::new(template_address, module, function, topic, artifact_digest)
+        .map_err(|_| SnapshotFileError::InvalidData)
+}
+
+fn decode_epoch_binding(
+    reader: &mut CanonicalCborReader<'_>,
+) -> Result<AnchorEpochBindingV1, SnapshotFileError> {
+    if reader.read_array_len().map_err(from_protocol)? != EPOCH_BINDING_FIELD_COUNT {
+        return Err(SnapshotFileError::InvalidCbor);
+    }
+    let observed_epoch = reader.read_unsigned().map_err(from_protocol)?;
+    let max_epoch = reader.read_unsigned().map_err(from_protocol)?;
+    AnchorEpochBindingV1::new(observed_epoch, max_epoch).map_err(|_| SnapshotFileError::InvalidData)
 }
 
 // ---------------------------------------------------------------------------

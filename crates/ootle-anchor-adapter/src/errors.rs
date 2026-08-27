@@ -23,6 +23,15 @@ pub enum OotleAnchorAdapterError {
         /// Fixed, non-secret reason text.
         reason: &'static str,
     },
+    /// A legacy V1 preparation was used to try to construct a new v0.39.2
+    /// event anchor without an immutable template identity.
+    MissingEventBinding,
+    /// A legacy V1 preparation omitted the observed/max epoch binding required
+    /// by v0.39.2 transaction construction.
+    MissingEpochBinding,
+    /// The configured published template address could not be parsed by the
+    /// pinned Ootle address parser.
+    InvalidTemplateAddress,
     /// The anchor log payload could not be converted for transaction use.
     PayloadConversion,
     /// The anchor payload string exceeded the Ootle bounded-string limit.
@@ -51,6 +60,9 @@ pub enum OotleAnchorAdapterError {
     ArbitraryBlobAttached,
     /// The transaction carried an unexpected substate input.
     UnexpectedInput,
+    /// Walletd input detection returned no dependency inputs for the
+    /// fee-component transaction, so the pre-CREATE response is not accepted.
+    MissingDetectedInput,
     /// The transaction carried a fee instruction where none was expected (the
     /// fee-less construction path), or carried more than one fee instruction in
     /// the fee-bearing path.
@@ -73,6 +85,10 @@ pub enum OotleAnchorAdapterError {
     AnchorDigestMismatch,
     /// The transaction's bound network did not match the expected network.
     NetworkBindingMismatch,
+    /// The transaction's frozen max epoch differed from the durable binding.
+    MaxEpochBindingMismatch,
+    /// The normal instruction was not the pinned template function call.
+    TemplateCallMismatch,
     /// The unsigned transaction reported an unsupported schema version.
     UnsupportedTransactionSchema {
         /// The reported, unsupported schema version.
@@ -99,6 +115,15 @@ impl fmt::Display for OotleAnchorAdapterError {
             }
             Self::InvalidFeeConfiguration { reason } => {
                 write!(formatter, "invalid fee configuration: {reason}")
+            }
+            Self::MissingEventBinding => {
+                formatter.write_str("v0.39.2 event template binding is required")
+            }
+            Self::MissingEpochBinding => {
+                formatter.write_str("v0.39.2 observed/max epoch binding is required")
+            }
+            Self::InvalidTemplateAddress => {
+                formatter.write_str("invalid pinned event-template address")
             }
             Self::PayloadConversion => formatter.write_str("anchor log payload conversion failed"),
             Self::BoundedStringConversion => {
@@ -127,6 +152,9 @@ impl fmt::Display for OotleAnchorAdapterError {
             }
             Self::ArbitraryBlobAttached => formatter.write_str("unexpected blob attached"),
             Self::UnexpectedInput => formatter.write_str("unexpected substate input present"),
+            Self::MissingDetectedInput => {
+                formatter.write_str("walletd input detection returned no declared dependency input")
+            }
             Self::UnexpectedFeeInstruction => {
                 formatter.write_str("unexpected fee instruction present")
             }
@@ -150,6 +178,12 @@ impl fmt::Display for OotleAnchorAdapterError {
             }
             Self::NetworkBindingMismatch => {
                 formatter.write_str("unsigned transaction is bound to the wrong network")
+            }
+            Self::MaxEpochBindingMismatch => {
+                formatter.write_str("unsigned transaction has the wrong max epoch")
+            }
+            Self::TemplateCallMismatch => {
+                formatter.write_str("unsigned transaction has the wrong template call")
             }
             Self::UnsupportedTransactionSchema { schema_version } => {
                 write!(

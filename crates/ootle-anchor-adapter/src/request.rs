@@ -9,8 +9,8 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorClientReferenceV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest,
+    AnchorAccountReference, AnchorClientReferenceV1, AnchorEpochBindingV1, AnchorEventPayloadV2,
+    AnchorLogPayloadV1, AnchorMaxFeeV1, AnchorPreparationRequest, AnchorTemplateBindingV1,
 };
 
 /// Input describing exactly one anchor transaction to construct.
@@ -22,13 +22,38 @@ use tari_cc_private_ballot_anchor_transport::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OotleAnchorTransactionBuildRequestV1 {
     preparation: AnchorPreparationRequest,
+    template_binding: Option<AnchorTemplateBindingV1>,
+    epoch_binding: Option<AnchorEpochBindingV1>,
 }
 
 impl OotleAnchorTransactionBuildRequestV1 {
     /// Wraps an offline preparation request as an adapter build request.
     #[must_use]
     pub fn from_preparation_request(preparation: AnchorPreparationRequest) -> Self {
-        Self { preparation }
+        Self {
+            preparation,
+            template_binding: None,
+            epoch_binding: None,
+        }
+    }
+
+    /// Binds an existing preparation request to the approved v0.39.2 event
+    /// template and a pre-observed bounded epoch window.
+    ///
+    /// The legacy constructor remains for reading historical V1 state, but it
+    /// deliberately cannot construct a new v0.39.2 transaction without this
+    /// explicit immutable deployment identity and expiry binding.
+    #[must_use]
+    pub fn from_preparation_request_with_event_binding(
+        preparation: AnchorPreparationRequest,
+        template_binding: AnchorTemplateBindingV1,
+        epoch_binding: AnchorEpochBindingV1,
+    ) -> Self {
+        Self {
+            preparation,
+            template_binding: Some(template_binding),
+            epoch_binding: Some(epoch_binding),
+        }
     }
 
     /// Returns the wrapped preparation request.
@@ -53,6 +78,27 @@ impl OotleAnchorTransactionBuildRequestV1 {
     #[must_use]
     pub fn payload(&self) -> &AnchorLogPayloadV1 {
         self.preparation.binding().payload()
+    }
+
+    /// Returns the exact v0.39.2 event payload derived from the unchanged
+    /// canonical anchor digest.
+    #[must_use]
+    pub fn event_payload(&self) -> AnchorEventPayloadV2 {
+        AnchorEventPayloadV2::from_digest(self.anchor_digest())
+    }
+
+    /// Returns the pinned published-template identity, if this request is a
+    /// new v0.39.2 event anchor rather than a legacy V1 record.
+    #[must_use]
+    pub fn template_binding(&self) -> Option<&AnchorTemplateBindingV1> {
+        self.template_binding.as_ref()
+    }
+
+    /// Returns the persisted observed/max epoch pair for a new v0.39.2 event
+    /// anchor, if present.
+    #[must_use]
+    pub const fn epoch_binding(&self) -> Option<AnchorEpochBindingV1> {
+        self.epoch_binding
     }
 
     /// Returns the bound anchor-record digest.

@@ -1,35 +1,39 @@
-//! Sections C/D/E/H and Section M(1,4,5,6,7,11,12,14) — anchor log construction,
-//! unsigned transaction construction, and inspection evidence.
+//! v0.39.2 event-anchor construction and inspection evidence.
+//!
+//! Construction now emits exactly one `CallFunction` to the pinned stateless
+//! event template (never the removed `EmitLog`). The build result is always
+//! internally consistent because construction runs the same pure inspection used
+//! to reject invalid transactions.
 
 mod common;
 
-use common::{build_request, payload, valid_request};
-use tari_cc_private_ballot_anchor_transport::AnchorLogPayloadV1;
-use tari_cc_private_ballot_ootle_anchor_adapter::{
-    ANCHOR_EMIT_LOG_LEVEL, AnchorTransactionConstructor, OotleAnchorBuildResultV1,
-    PinnedOotleAnchorTransactionConstructor, build_anchor_emit_log,
-    build_unsigned_anchor_transaction,
+use common::{
+    build_request, epoch_binding, template_binding, valid_request,
 };
-use tari_ootle_transaction::{Instruction, UnsignedTransaction};
-use tari_template_lib_types::LogLevel;
+use tari_cc_private_ballot_ootle_anchor_adapter::{
+    AnchorTransactionConstructor, OotleAnchorAdapterError, OotleAnchorBuildResultV1,
+    PinnedOotleAnchorTransactionConstructor, build_unsigned_anchor_transaction,
+};
+use tari_ootle_transaction::{Instruction, Network, UnsignedTransaction};
 
-/// Extracts the message of the single EmitLog instruction, asserting shape.
-fn sole_emit_log_message(unsigned: &UnsignedTransaction) -> String {
+/// Asserts the sole instruction is the pinned `publish_anchor` call.
+fn assert_sole_publish_anchor_call(unsigned: &UnsignedTransaction) {
     match unsigned.instructions() {
-        [Instruction::EmitLog { level, message }] => {
-            assert_eq!(*level, LogLevel::Info, "anchor log level must be Info");
-            let text: &str = message.as_ref();
-            text.to_owned()
+        [Instruction::CallFunction { function, .. }] => {
+            assert_eq!(
+                &**function, "publish_anchor",
+                "anchor call must invoke publish_anchor"
+            );
         }
         other => panic!(
-            "expected exactly one EmitLog, got {} instructions",
+            "expected exactly one CallFunction, got {} instructions",
             other.len()
         ),
     }
 }
 
 fn build(request_digest: u8) -> OotleAnchorBuildResultV1 {
-    match build_unsigned_anchor_transaction(&build_request(
+    match build_unsigned_anchor_transaction(&common::build_request_v2(
         "esmeralda",
         "fee-account",
         request_digest,
@@ -42,38 +46,12 @@ fn build(request_digest: u8) -> OotleAnchorBuildResultV1 {
 }
 
 #[test]
-fn anchor_emit_log_message_is_byte_for_byte_the_payload_and_103_bytes() {
-    // Section C: level Info, exact payload bytes, exactly 103 bytes.
-    let payload = payload(0x5a);
-    let expected = payload.to_encoded_string();
-    assert_eq!(expected.len(), 103);
-    assert_eq!(AnchorLogPayloadV1::exact_encoded_len(), 103);
-
-    let Ok(Instruction::EmitLog { level, message }) = build_anchor_emit_log(&payload) else {
-        panic!("emit log construction must succeed and be an EmitLog");
-    };
-
-    assert_eq!(level, ANCHOR_EMIT_LOG_LEVEL);
-    assert_eq!(level, LogLevel::Info);
-
-    let message_text: &str = message.as_ref();
-    // Byte-for-byte equality with the canonical payload string.
-    assert_eq!(message_text.as_bytes(), expected.as_bytes());
-    assert_eq!(message_text.len(), 103);
-}
-
-#[test]
-fn construction_yields_exactly_one_anchor_instruction_at_index_zero() {
+fn construction_yields_exactly_one_call_function_at_index_zero() {
     let result = build(0x22);
     let unsigned = result.unsigned_transaction();
 
-    // Exactly one instruction, the anchor EmitLog, no duplicates.
     assert_eq!(unsigned.instructions().len(), 1);
-    let message = sole_emit_log_message(unsigned);
-    assert_eq!(
-        message.as_bytes(),
-        payload(0x22).to_encoded_string().as_bytes()
-    );
+    assert_sole_publish_anchor_call(unsigned);
 
     let evidence = result.evidence();
     assert_eq!(evidence.instruction_count(), 1);
@@ -81,15 +59,11 @@ fn construction_yields_exactly_one_anchor_instruction_at_index_zero() {
 }
 
 #[test]
-fn constructed_transaction_has_no_fees_inputs_or_blobs() {
-    // Sections D/E and Section M(18): walletd-injected-fee architecture.
+fn fee_less_construction_has_no_fees_inputs_or_blobs() {
     let result = build(0x22);
     let unsigned = result.unsigned_transaction();
 
-    assert!(
-        unsigned.fee_instructions().is_empty(),
-        "no fee instructions"
-    );
+    assert!(unsigned.fee_instructions().is_empty(), "no fee instructions");
     assert!(unsigned.inputs().is_empty(), "no inputs");
     assert!(unsigned.blobs().is_empty(), "no blobs");
 
@@ -100,31 +74,32 @@ fn constructed_transaction_has_no_fees_inputs_or_blobs() {
 }
 
 #[test]
-fn evidence_reports_bound_network_digest_payload_and_schema() {
-    // Section E and Section M(11): schema/version and bound context.
+fn evidence_binds_network_digest_template_epoch_and_schema() {
     let result = build(0x22);
     let evidence = result.evidence();
 
     assert_eq!(evidence.network().as_str(), "esmeralda");
-    assert_eq!(evidence.ootle_network_byte(), 0x26); // Network::Esmeralda
+    assert_eq!(evidence.ootle_network_byte(), Network::Esmeralda.as_byte());
     assert_eq!(evidence.account().as_str(), "fee-account");
     assert_eq!(evidence.anchor_digest(), common::digest(0x22));
-    assert_eq!(
-        evidence.anchor_log_payload().to_encoded_string(),
-        payload(0x22).to_encoded_string()
-    );
+    assert_eq!(evidence.event_payload().digest(), common::digest(0x22));
+    assert_eq!(evidence.template_binding(), &template_binding());
+    assert_eq!(evidence.epoch_binding(), epoch_binding());
     assert_eq!(evidence.unsigned_schema_version(), 1);
     assert_eq!(
         evidence.unsigned_schema_version(),
         result.unsigned_transaction().schema_version()
     );
+    // The transaction is frozen against the bounded max epoch, not wall clock.
+    assert_eq!(
+        result.unsigned_transaction().max_epoch().as_u64(),
+        epoch_binding().max_epoch()
+    );
 }
 
 #[test]
-fn walletd_preparation_preserves_fee_account_and_max_fee() {
-    // Section D: the offline walletd preparation DTO carries the explicit fee
-    // account and maximum fee for later walletd injection.
-    let request = build_request("esmeralda", "treasury", 0x33, 7_777, Some("client-1"));
+fn walletd_preparation_preserves_fee_account_max_fee_template_and_epoch() {
+    let request = common::build_request_v2("esmeralda", "treasury", 0x33, 7_777, Some("client-1"));
     let Ok(result) = build_unsigned_anchor_transaction(&request) else {
         panic!("construction must succeed");
     };
@@ -134,6 +109,8 @@ fn walletd_preparation_preserves_fee_account_and_max_fee() {
     assert_eq!(preparation.fee_account().as_str(), "treasury");
     assert_eq!(preparation.max_fee().value(), 7_777);
     assert_eq!(preparation.anchor_digest(), common::digest(0x33));
+    assert_eq!(preparation.template_binding(), &template_binding());
+    assert_eq!(preparation.epoch_binding(), epoch_binding());
     match preparation.client_reference() {
         Some(reference) => assert_eq!(reference.as_str(), "client-1"),
         None => panic!("client reference must be preserved"),
@@ -142,7 +119,6 @@ fn walletd_preparation_preserves_fee_account_and_max_fee() {
 
 #[test]
 fn repeated_construction_is_deterministic() {
-    // Section M(14): identical requests yield identical fingerprints and evidence.
     let first = build(0x44);
     let second = build(0x44);
 
@@ -162,7 +138,6 @@ fn repeated_construction_is_deterministic() {
 
 #[test]
 fn constructor_trait_matches_the_free_function() {
-    // Section H: the trait implementation is the free construction function.
     let request = valid_request();
     let constructor = PinnedOotleAnchorTransactionConstructor;
 
@@ -174,4 +149,16 @@ fn constructor_trait_matches_the_free_function() {
     };
 
     assert_eq!(via_trait.evidence(), via_function.evidence());
+}
+
+#[test]
+fn legacy_request_without_event_binding_is_fail_closed() {
+    // A request built through the legacy (template-less) constructor can never
+    // construct a v0.39.2 transaction: the immutable template deployment identity
+    // and bounded epoch window are mandatory.
+    let legacy = build_request("esmeralda", "fee-account", 0x22, 1_000, None);
+    assert_eq!(
+        build_unsigned_anchor_transaction(&legacy).err(),
+        Some(OotleAnchorAdapterError::MissingEventBinding)
+    );
 }

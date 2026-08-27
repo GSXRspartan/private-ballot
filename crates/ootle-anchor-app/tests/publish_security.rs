@@ -82,6 +82,8 @@ fn live_config_with(
         None,
         facts,
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .expect("event template binding must attach")
 }
 
 fn scripted_driver(
@@ -141,6 +143,8 @@ fn config_with_fee(fee: u64) -> AnchorAppConfig {
         None,
         facts,
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .expect("event template binding must attach")
 }
 
 fn anchor_digest(config: &AnchorAppConfig) -> [u8; 32] {

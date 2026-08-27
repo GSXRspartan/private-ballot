@@ -18,13 +18,13 @@ tari-cc-private-ballot-anchor = { path = "../anchor" }
 # frame. No election artifact is rehashed here.
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 
-# --- Pinned Tari Ootle v0.37.0, git rev 92023e0 (exact-revision pin) ---
-# The confirmed TransactionBuilder / Instruction::EmitLog / UnsignedTransaction /
-# Network API comes from this git checkout (Slice 4A3), so it must not be
+# --- Pinned Tari Ootle v0.39.2, git rev dd1d731 (exact-revision pin) ---
+# The confirmed TransactionBuilder / CallFunction / UnsignedTransaction / Epoch /
+# Network API comes from this git checkout, so it must not be
 # substituted with a crates.io release. No branch, no tag, no floating HEAD.
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-# Supplies LogLevel and MaxString, the exact field types of Instruction::EmitLog.
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+# Supplies TemplateAddress and ComponentAddress at the transaction boundary.
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 # Canonical CBOR encoder for the pinned UnsignedTransaction, used only to derive
 # the adapter-owned inspection fingerprint. Version pinned to the Ootle
 # workspace's minicbor so no additional version is introduced.
@@ -41,8 +41,8 @@ tari-cc-private-ballot-archive = { path = "../archive" }
 # Pinned Ootle types the mutation tests construct directly to build invalid
 # transactions. Pinned to the exact same git revision as the library dependency
 # so both resolve to a single crate instance.
-tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
-tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "92023e0" }
+tari_ootle_transaction = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
+tari_template_lib_types = { git = "https://github.com/tari-project/tari-ootle", rev = "dd1d731295638a9711db588337207c88620c7d6b" }
 
 [lints]
 workspace = true

@@ -169,6 +169,18 @@ stable_error! {
         DuplicateAnchorLogs => "ANCHOR_RECEIPT_DUPLICATE_ANCHOR_LOGS",
         /// More than one differing project anchor log was present.
         ConflictingAnchorLogs => "ANCHOR_RECEIPT_CONFLICTING_ANCHOR_LOGS",
+        /// No v0.39.2 anchor event was present in the finalized receipt.
+        MissingAnchorEvent => "ANCHOR_RECEIPT_MISSING_ANCHOR_EVENT",
+        /// An event named the anchor template ABI but came from another template.
+        WrongEventTemplate => "ANCHOR_RECEIPT_WRONG_EVENT_TEMPLATE",
+        /// An event from the pinned template had a different stored topic.
+        WrongEventTopic => "ANCHOR_RECEIPT_WRONG_EVENT_TOPIC",
+        /// An anchor event carried no value or a non-canonical digest value.
+        MalformedAnchorEvent => "ANCHOR_RECEIPT_MALFORMED_ANCHOR_EVENT",
+        /// An anchor event carried metadata in addition to the sole digest key.
+        UnexpectedEventMetadata => "ANCHOR_RECEIPT_UNEXPECTED_EVENT_METADATA",
+        /// More than one candidate anchor event appeared in the receipt.
+        DuplicateAnchorEvents => "ANCHOR_RECEIPT_DUPLICATE_ANCHOR_EVENTS",
     }
 }
 

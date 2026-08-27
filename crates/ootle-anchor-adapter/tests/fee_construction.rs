@@ -1,19 +1,19 @@
-//! Fee-bearing construction and inspection (Slice 4A6B fee strategy 2).
+//! Fee-bearing v0.39.2 construction and inspection.
 //!
 //! The fee-bearing path adds exactly one `pay_fee_from_component` fee instruction
 //! to the frozen transaction so the confirmed `transaction_requests.submit` path —
 //! which seals verbatim and injects no fee — can produce a valid transaction. The
-//! normal instruction list is still exactly one anchor `EmitLog`, and the fee
-//! instruction touches only the configured fee account.
+//! normal instruction list is still exactly one anchor `CallFunction`, and the
+//! fee instruction touches only the configured fee account.
 
 mod common;
 
-use common::{build_request, valid_request};
+use common::{build_request_v2, valid_request};
 use tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1;
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     AnchorInspectionExpectationV1, OotleAnchorAdapterError, build_fee_bearing_anchor_transaction,
     build_unsigned_anchor_transaction, inspect_fee_bearing_anchor_transaction,
-    inspect_unsigned_anchor_transaction, map_ootle_network,
+    inspect_unsigned_anchor_transaction,
 };
 use tari_template_lib_types::ComponentAddress;
 
@@ -33,20 +33,14 @@ fn other_fee_component() -> ComponentAddress {
     }
 }
 
-/// Builds the inspection expectation for a request.
+/// Builds the inspection expectation for a v0.39.2 request (template + epoch).
 fn expectation_for(
     request: &tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1,
 ) -> AnchorInspectionExpectationV1 {
-    let Ok(ootle_network) = map_ootle_network(request.network()) else {
-        panic!("network must map");
-    };
-    AnchorInspectionExpectationV1::new(
-        request.network().clone(),
-        ootle_network,
-        request.account().clone(),
-        request.anchor_digest(),
-        *request.payload(),
-    )
+    match AnchorInspectionExpectationV1::for_request(request) {
+        Ok(expectation) => expectation,
+        Err(error) => panic!("expectation must build, got {error:?}"),
+    }
 }
 
 #[test]
@@ -57,7 +51,7 @@ fn fee_bearing_build_has_one_emit_log_one_pay_fee_and_no_inputs() {
     };
 
     let unsigned = result.unsigned_transaction();
-    assert_eq!(unsigned.instructions().len(), 1, "one anchor EmitLog");
+    assert_eq!(unsigned.instructions().len(), 1, "one anchor CallFunction");
     assert_eq!(unsigned.fee_instructions().len(), 1, "one pay_fee");
     assert!(unsigned.inputs().is_empty(), "no inputs (no auto-fill)");
     assert!(unsigned.blobs().is_empty(), "no blobs");
@@ -167,8 +161,8 @@ fn fee_account_change_changes_the_fingerprint() {
 
 #[test]
 fn fee_amount_change_changes_the_fingerprint() {
-    let low = build_request("esmeralda", "fee-account", 0x22, 1_000, None);
-    let high = build_request("esmeralda", "fee-account", 0x22, 2_000, None);
+    let low = build_request_v2("esmeralda", "fee-account", 0x22, 1_000, None);
+    let high = build_request_v2("esmeralda", "fee-account", 0x22, 2_000, None);
     let Ok(a) = build_fee_bearing_anchor_transaction(&low, fee_component()) else {
         panic!("build must succeed");
     };

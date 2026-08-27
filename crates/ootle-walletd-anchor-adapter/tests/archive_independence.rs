@@ -58,8 +58,10 @@ fn build_result_for(payload: AnchorLogPayloadV1) -> OotleAnchorBuildResultV1 {
         },
         payload,
     );
-    let request = OotleAnchorTransactionBuildRequestV1::from_preparation_request(
+    let request = OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None),
+        common::template_binding(),
+        common::epoch_binding(),
     );
     match build_unsigned_anchor_transaction(&request) {
         Ok(result) => result,
@@ -78,11 +80,11 @@ fn build_request_for(payload: AnchorLogPayloadV1) -> OotleAnchorTransactionBuild
         },
         payload,
     );
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(AnchorPreparationRequest::new(
-        binding,
-        AnchorMaxFeeV1::from_units(1_000),
-        None,
-    ))
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None),
+        common::template_binding(),
+        common::epoch_binding(),
+    )
 }
 
 #[test]

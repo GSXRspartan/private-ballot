@@ -21,31 +21,30 @@
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorFinalStatusV1, AnchorLogEntryV1, AnchorLogLevelV1, AnchorReceiptSourceKindV1,
-    AnchorReceiptV1, AnchorTransactionId,
+    AnchorEventProofV2, AnchorFinalStatusV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
+    AnchorTransactionId,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::canonicalize_transaction_id;
-use tari_engine_types::logs::LogEntry;
 use tari_engine_types::transaction_receipt::{FinalizeOutcome, TransactionReceipt};
 use tari_indexer_client::types::GetTransactionReceiptResponse;
 use tari_ootle_transaction::TransactionId;
-use tari_template_lib_types::LogLevel;
 
 use crate::errors::{ReceiptConversionError, ReceiptIdentifierError};
 
 /// Exact number of lowercase hexadecimal characters in a project transaction id.
 pub const TRANSACTION_ID_HEX_LEN: usize = 64;
 
-/// Maximum number of log entries copied out of a single receipt.
+/// Maximum number of receipt events (v0.39.2) — or historical V1 log entries —
+/// copied out of a single receipt.
 ///
-/// A well-formed anchor transaction commits one anchor `EmitLog` plus a small
-/// number of engine/fee logs. This ceiling bounds the copied diagnostics so a
+/// A well-formed anchor transaction emits exactly one anchor event plus a small
+/// number of engine/fee events. This ceiling bounds the copied facts so a
 /// hostile or malformed receipt cannot force an unbounded allocation.
 pub const MAX_RECEIPT_LOG_ENTRIES: usize = 256;
 
-/// Maximum UTF-8 byte length of a single copied receipt log message.
-///
-/// Comfortably larger than the fixed 103-byte anchor payload, but still bounded.
+/// Maximum UTF-8 byte length of a single copied historical V1 receipt log
+/// message. Retained for reading historical V1 log-based evidence; v0.39.2
+/// event metadata is bounded separately by `AnchorEventProofV2`.
 pub const MAX_RECEIPT_LOG_MESSAGE_BYTES: usize = 4096;
 
 /// Converts a sealed pinned Ootle [`TransactionId`] into the project identifier.
@@ -104,16 +103,6 @@ const fn lower_hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-/// Maps the pinned receipt log level into the project log level.
-const fn map_log_level(level: LogLevel) -> AnchorLogLevelV1 {
-    match level {
-        LogLevel::Error => AnchorLogLevelV1::Error,
-        LogLevel::Warn => AnchorLogLevelV1::Warn,
-        LogLevel::Info => AnchorLogLevelV1::Info,
-        LogLevel::Debug => AnchorLogLevelV1::Debug,
-    }
-}
-
 /// Maps the pinned finalize outcome into the project finalized status.
 ///
 /// The persisted receipt substate exists only for a committed transaction, so
@@ -128,25 +117,13 @@ const fn map_finalize_outcome(outcome: FinalizeOutcome) -> AnchorFinalStatusV1 {
     }
 }
 
-/// Copies a single pinned receipt log entry into a bounded project log entry.
-fn convert_log_entry(entry: &LogEntry) -> Result<AnchorLogEntryV1, ReceiptConversionError> {
-    // Use the raw message field, never the `Display` (which prepends the level):
-    // the anchor payload must be preserved byte-for-byte for strict parsing.
-    if entry.message.len() > MAX_RECEIPT_LOG_MESSAGE_BYTES {
-        return Err(ReceiptConversionError::LogMessageTooLong);
-    }
-    Ok(AnchorLogEntryV1::new(
-        map_log_level(entry.level),
-        entry.message.clone(),
-    ))
-}
-
 /// Converts a persisted pinned Ootle [`TransactionReceipt`] into the project
 /// receipt DTO (Section E).
 ///
 /// Only confirmed fields are mapped: the finalized status (from the outcome), the
-/// ordered logs (preserving order and exact UTF-8 message contents), and the
-/// epoch as the opaque ledger position. The transaction identifier and network
+/// bounded receipt events (preserving template address, topic, every metadata
+/// field, event index, intent commitment, and epoch), and the epoch as the
+/// opaque ledger position. The transaction identifier and network
 /// are supplied by the caller (the persisted receipt is addressed by, not a
 /// carrier of, the transaction id, and carries no network field), and the source
 /// is recorded as the independent indexer. No organizer identity, block
@@ -156,35 +133,55 @@ fn convert_log_entry(entry: &LogEntry) -> Result<AnchorLogEntryV1, ReceiptConver
 ///
 /// # Errors
 ///
-/// Returns a [`ReceiptConversionError`] if the receipt carries more logs than
-/// [`MAX_RECEIPT_LOG_ENTRIES`] or any log message exceeds
-/// [`MAX_RECEIPT_LOG_MESSAGE_BYTES`].
+/// Returns a [`ReceiptConversionError`] if the receipt carries more events
+/// than [`MAX_RECEIPT_LOG_ENTRIES`] or its bounded event facts cannot be copied.
 pub fn convert_transaction_receipt(
     receipt: &TransactionReceipt,
     transaction_id: &AnchorTransactionId,
     network: &OotleNetworkIdV1,
 ) -> Result<AnchorReceiptV1, ReceiptConversionError> {
-    let logs = receipt.logs();
-    if logs.len() > MAX_RECEIPT_LOG_ENTRIES {
+    let events = receipt.events();
+    if events.len() > MAX_RECEIPT_LOG_ENTRIES {
         return Err(ReceiptConversionError::TooManyLogs);
     }
 
-    let mut converted_logs = Vec::with_capacity(logs.len());
-    for entry in logs {
-        converted_logs.push(convert_log_entry(entry)?);
+    let mut event_proofs = Vec::with_capacity(events.len());
+    for (index, event) in events.iter().enumerate() {
+        let metadata = event.payload().clone().into_iter().collect();
+        let event_index = u16::try_from(index).map_err(|_| ReceiptConversionError::TooManyLogs)?;
+        // Render the canonical `template_<64 hex>` address string. The pinned
+        // `TemplateAddress` is a bare `Hash32` whose `Display` is only the 64 hex
+        // characters, so the `template_` prefix is added here to match the exact
+        // address string the configured `AnchorTemplateBindingV1` (and the
+        // verifier) carry. Storing the bare hex would make every legitimate
+        // receipt fail event verification with a spurious wrong-template error.
+        let proof = AnchorEventProofV2::new(
+            format!("template_{}", event.template_address()),
+            event.topic().to_owned(),
+            metadata,
+            event_index,
+            receipt.epoch().as_u64(),
+            receipt.intent_commitment().into_array(),
+        )
+        .map_err(|_| ReceiptConversionError::DiagnosticTooLong)?;
+        event_proofs.push(proof);
     }
 
     Ok(AnchorReceiptV1::new(
         transaction_id.clone(),
         network.clone(),
         map_finalize_outcome(*receipt.outcome()),
-        converted_logs,
+        // V1 log data is intentionally empty for a v0.39.2 receipt. A new
+        // lifecycle queries `event_proofs_v2`; historical V1 evidence remains
+        // readable through the unchanged log field.
+        Vec::new(),
         // A committed receipt carries no rejection reason; its outcome already
         // states full versus fee-only. No third-party diagnostic is copied.
         None,
         Some(receipt.epoch().as_u64()),
         AnchorReceiptSourceKindV1::IndependentIndexer,
-    ))
+    )
+    .with_event_proofs_v2(event_proofs))
 }
 
 /// Converts a confirmed indexer [`GetTransactionReceiptResponse`] into the
@@ -210,21 +207,23 @@ pub fn convert_receipt_response(
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RECEIPT_LOG_ENTRIES, MAX_RECEIPT_LOG_MESSAGE_BYTES, convert_transaction_receipt,
-        transaction_id_from_ootle, transaction_id_to_ootle,
+        MAX_RECEIPT_LOG_ENTRIES, convert_transaction_receipt, transaction_id_from_ootle,
+        transaction_id_to_ootle,
     };
     use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
     use tari_cc_private_ballot_anchor_transport::{
-        AnchorFinalStatusV1, AnchorLogLevelV1, AnchorReceiptSourceKindV1, AnchorTransactionId,
+        AnchorFinalStatusV1, AnchorReceiptSourceKindV1, AnchorTransactionId,
     };
     use tari_engine_types::Epoch;
+    use tari_engine_types::events::Event;
     use tari_engine_types::fees::FeeReceipt;
-    use tari_engine_types::logs::LogEntry;
     use tari_engine_types::transaction_receipt::{
         DiffSummary, FinalizeOutcome, TransactionReceipt,
     };
     use tari_ootle_transaction::TransactionId;
-    use tari_template_lib_types::LogLevel;
+    use tari_template_lib_types::{Metadata, TemplateAddress};
+
+    const ANCHOR_TOPIC: &str = "tari_private_ballot_anchor.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1";
 
     fn transaction_id(text: &str) -> AnchorTransactionId {
         match AnchorTransactionId::new(text.to_owned()) {
@@ -240,19 +239,32 @@ mod tests {
         }
     }
 
+    fn template_address() -> TemplateAddress {
+        match TemplateAddress::from_hex(&"11".repeat(32)) {
+            Ok(address) => address,
+            Err(_error) => panic!("test template address must parse"),
+        }
+    }
+
+    /// Builds a v0.39.2 anchor event carrying the sole digest metadata key.
+    fn anchor_event(digest_hex: &str) -> Event {
+        let metadata: Metadata = [("anchor_digest", digest_hex)].into_iter().collect();
+        Event::new(None, template_address(), ANCHOR_TOPIC.to_owned(), metadata)
+    }
+
     fn make_receipt(
         outcome: FinalizeOutcome,
-        logs: Vec<LogEntry>,
+        events: Vec<Event>,
         epoch: u64,
     ) -> TransactionReceipt {
         TransactionReceipt {
             outcome,
             diff_summary: DiffSummary::default(),
             fee_withdrawals: Box::default(),
-            events: Box::default(),
-            logs: logs.into_boxed_slice(),
+            events: events.into_boxed_slice(),
             fee_receipt: FeeReceipt::default(),
             epoch: Epoch(epoch),
+            intent_commitment: Default::default(),
         }
     }
 
@@ -313,15 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn commit_receipt_maps_to_full_acceptance_preserving_ordered_logs() {
+    fn commit_receipt_maps_to_full_acceptance_and_copies_the_anchor_event() {
         let id = transaction_id(&"11".repeat(32));
-        let logs = vec![
-            LogEntry::new(LogLevel::Info, "first".to_owned()),
-            LogEntry::new(LogLevel::Warn, "second".to_owned()),
-            LogEntry::new(LogLevel::Error, "third".to_owned()),
-            LogEntry::new(LogLevel::Debug, "fourth".to_owned()),
-        ];
-        let receipt = make_receipt(FinalizeOutcome::Commit, logs, 42);
+        let digest_hex = "22".repeat(32);
+        let receipt = make_receipt(FinalizeOutcome::Commit, vec![anchor_event(&digest_hex)], 42);
 
         let Ok(converted) = convert_transaction_receipt(&receipt, &id, &network()) else {
             panic!("commit receipt must convert");
@@ -336,19 +343,25 @@ mod tests {
         assert_eq!(converted.transaction_id(), &id);
         assert_eq!(converted.network(), &network());
 
-        let observed: Vec<(AnchorLogLevelV1, &str)> = converted
-            .logs()
-            .iter()
-            .map(|entry| (entry.level(), entry.message()))
-            .collect();
+        // V1 log data is empty for a v0.39.2 receipt; the event facts land in the
+        // detached event-proof channel instead.
+        assert!(converted.logs().is_empty());
+        let proofs = converted.event_proofs_v2();
+        assert_eq!(proofs.len(), 1);
+        let proof = &proofs[0];
+        // The template address is copied in canonical `template_<64 hex>` form so
+        // it matches the configured template binding exactly (regression guard:
+        // the bare `Hash32` display would silently fail event verification).
         assert_eq!(
-            observed,
-            vec![
-                (AnchorLogLevelV1::Info, "first"),
-                (AnchorLogLevelV1::Warn, "second"),
-                (AnchorLogLevelV1::Error, "third"),
-                (AnchorLogLevelV1::Debug, "fourth"),
-            ]
+            proof.template_address(),
+            format!("template_{}", "11".repeat(32))
+        );
+        assert_eq!(proof.topic(), ANCHOR_TOPIC);
+        assert_eq!(proof.event_index(), 0);
+        assert_eq!(proof.receipt_epoch(), 42);
+        assert_eq!(
+            proof.metadata(),
+            &[("anchor_digest".to_owned(), digest_hex.clone())]
         );
     }
 
@@ -365,40 +378,29 @@ mod tests {
             AnchorFinalStatusV1::FeeOnlyAccepted
         );
         assert_ne!(converted.final_status(), AnchorFinalStatusV1::Accepted);
+        assert!(converted.event_proofs_v2().is_empty());
     }
 
     #[test]
-    fn oversized_log_message_is_rejected_before_dto() {
-        let id = transaction_id(&"33".repeat(32));
-        let oversized = "x".repeat(MAX_RECEIPT_LOG_MESSAGE_BYTES + 1);
-        let receipt = make_receipt(
-            FinalizeOutcome::Commit,
-            vec![LogEntry::new(LogLevel::Info, oversized)],
-            1,
-        );
-        assert!(convert_transaction_receipt(&receipt, &id, &network()).is_err());
-    }
-
-    #[test]
-    fn too_many_logs_is_rejected_before_dto() {
+    fn too_many_events_is_rejected_before_dto() {
         let id = transaction_id(&"44".repeat(32));
-        let logs = (0..=MAX_RECEIPT_LOG_ENTRIES)
-            .map(|_| LogEntry::new(LogLevel::Info, "log".to_owned()))
+        let events = (0..=MAX_RECEIPT_LOG_ENTRIES)
+            .map(|_| anchor_event(&"22".repeat(32)))
             .collect::<Vec<_>>();
-        let receipt = make_receipt(FinalizeOutcome::Commit, logs, 1);
+        let receipt = make_receipt(FinalizeOutcome::Commit, events, 1);
         assert!(convert_transaction_receipt(&receipt, &id, &network()).is_err());
     }
 
     #[test]
-    fn exact_max_logs_is_accepted() {
+    fn exact_max_events_is_accepted() {
         let id = transaction_id(&"55".repeat(32));
-        let logs = (0..MAX_RECEIPT_LOG_ENTRIES)
-            .map(|_| LogEntry::new(LogLevel::Info, "log".to_owned()))
+        let events = (0..MAX_RECEIPT_LOG_ENTRIES)
+            .map(|_| anchor_event(&"22".repeat(32)))
             .collect::<Vec<_>>();
-        let receipt = make_receipt(FinalizeOutcome::Commit, logs, 1);
+        let receipt = make_receipt(FinalizeOutcome::Commit, events, 1);
         let Ok(converted) = convert_transaction_receipt(&receipt, &id, &network()) else {
             panic!("exact-max receipt must convert");
         };
-        assert_eq!(converted.logs().len(), MAX_RECEIPT_LOG_ENTRIES);
+        assert_eq!(converted.event_proofs_v2().len(), MAX_RECEIPT_LOG_ENTRIES);
     }
 }

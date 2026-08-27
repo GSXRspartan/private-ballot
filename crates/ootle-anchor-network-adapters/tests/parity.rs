@@ -174,7 +174,9 @@ fn get_outcome_agrees() {
 fn indexer_full_acceptance_agrees() {
     let query = receipt_query();
     let tx_id = query.transaction_id().clone();
-    let receipt = receipt_scenarios::accepted_receipt(&tx_id, &network(), &payload(0x22));
+    // A v0.39.2 receipt carries events, not logs, so both the fake and the real
+    // wire-round-tripping adapter must reconstruct the identical project receipt.
+    let receipt = receipt_scenarios::accepted_event_receipt(&tx_id, &network(), &payload(0x22));
     let mut fake = FakeIndexerReceiptClient::new();
     fake.script(&tx_id, FakeReceiptStep::finalized(receipt.clone()));
     let fake_result = fake

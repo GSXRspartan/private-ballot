@@ -11,10 +11,10 @@
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorFinalStatusV1, AnchorLogPayloadV1, AnchorObservationAgreementError, AnchorQueryOutcomeV1,
-    AnchorReceiptSourceKindV1, AnchorReceiptV1, AnchorReceiptVerificationError,
-    AnchorTransactionId, VerifiedAnchorEvidenceV1, compare_receipt_observations,
-    verify_query_outcome,
+    AnchorEventPayloadV2, AnchorEventProofV2, AnchorFinalStatusV1, AnchorLogPayloadV1,
+    AnchorObservationAgreementError, AnchorQueryOutcomeV1, AnchorReceiptSourceKindV1,
+    AnchorReceiptV1, AnchorReceiptVerificationError, AnchorTransactionId, VerifiedAnchorEvidenceV1,
+    compare_receipt_observations, verify_query_outcome, verify_v39_event_receipt,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::SubmittedWalletdAnchorRequestV1;
 
@@ -38,6 +38,7 @@ pub struct VerifiedIndexerAnchorV1 {
     payload: AnchorLogPayloadV1,
     address_evidence: AnchorReceiptAddressEvidenceV1,
     final_status: AnchorFinalStatusV1,
+    event_proof: Option<AnchorEventProofV2>,
 }
 
 impl VerifiedIndexerAnchorV1 {
@@ -69,6 +70,13 @@ impl VerifiedIndexerAnchorV1 {
     #[must_use]
     pub const fn source(&self) -> AnchorReceiptSourceKindV1 {
         self.evidence.source()
+    }
+
+    /// Returns the detached v0.39.2 receipt event facts, if this was verified
+    /// through the event-template path rather than historical V1 logs.
+    #[must_use]
+    pub const fn event_proof(&self) -> Option<&AnchorEventProofV2> {
+        self.event_proof.as_ref()
     }
 }
 
@@ -378,18 +386,40 @@ impl AnchorReceiptCoordinator {
         let final_status = receipt.final_status();
         let outcome = AnchorQueryOutcomeV1::Finalized(receipt.clone());
 
-        match verify_query_outcome(
-            query.transaction_id(),
-            query.network(),
-            query.payload(),
-            &outcome,
-        ) {
+        let verification = match query.template_binding() {
+            Some(template) => verify_v39_event_receipt(
+                query.transaction_id(),
+                query.network(),
+                template,
+                &AnchorEventPayloadV2::from_digest(query.anchor_digest()),
+                &receipt,
+            ),
+            None => verify_query_outcome(
+                query.transaction_id(),
+                query.network(),
+                query.payload(),
+                &outcome,
+            ),
+        };
+
+        match verification {
             Ok(evidence) => {
+                let event_proof = query.template_binding().and_then(|template| {
+                    receipt
+                        .event_proofs_v2()
+                        .iter()
+                        .find(|event| {
+                            event.template_address() == template.template_address()
+                                && event.topic() == template.full_event_topic()
+                        })
+                        .cloned()
+                });
                 let verified = VerifiedIndexerAnchorV1 {
                     evidence,
                     payload: *query.payload(),
                     address_evidence: address_evidence.clone(),
                     final_status: AnchorFinalStatusV1::Accepted,
+                    event_proof,
                 };
                 AnchorReceiptQueryReportV1 {
                     state: AnchorReceiptQueryStateV1::ReceiptFinalizedAccept,

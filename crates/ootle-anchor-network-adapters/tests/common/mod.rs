@@ -1,17 +1,23 @@
 //! Shared test helpers for the network-adapter offline test suites.
+//!
+//! Each test binary includes this module; not every binary uses every helper or
+//! the imports a helper needs, so unused-helper/import warnings are allowed.
 
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use core::str::FromStr;
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest, AnchorTransactionId,
+    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorPreparationRequest, AnchorTemplateBindingV1, AnchorTransactionId,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     OotleAnchorTransactionBuildRequestV1, build_fee_bearing_anchor_transaction,
 };
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::AnchorReceiptQueryV1;
+use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
+    SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
+};
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     FakeWalletdAnchorClient, SubmittedWalletdAnchorRequestV1, WalletdAnchorCoordinator,
     WalletdCreateAnchorRequestV1, WalletdDecisionRequestV1, WalletdFeeComponentRef,
@@ -43,10 +49,31 @@ pub fn max_fee() -> AnchorMaxFeeV1 {
     AnchorMaxFeeV1::from_units(1_000)
 }
 
+pub fn template_binding() -> AnchorTemplateBindingV1 {
+    let topic = format!("{SCENARIO_TEMPLATE_MODULE}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    AnchorTemplateBindingV1::new(
+        SCENARIO_TEMPLATE_ADDRESS.to_owned(),
+        SCENARIO_TEMPLATE_MODULE.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    )
+    .unwrap_or_else(|e| panic!("test template binding must be valid: {e:?}"))
+}
+
+pub fn epoch_binding() -> AnchorEpochBindingV1 {
+    AnchorEpochBindingV1::from_observed_epoch(100, 12)
+        .unwrap_or_else(|e| panic!("test epoch binding must be valid: {e:?}"))
+}
+
 pub fn build_request() -> OotleAnchorTransactionBuildRequestV1 {
     let binding = AnchorBindingV1::new(network(), account(), payload(0x22));
     let preparation = AnchorPreparationRequest::new(binding, max_fee(), None);
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation)
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        preparation,
+        template_binding(),
+        epoch_binding(),
+    )
 }
 
 pub fn fee_component_address() -> ComponentAddress {

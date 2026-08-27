@@ -69,9 +69,9 @@ fn conversion_and_fake_capture_agree_on_every_field() {
         build.walletd_preparation().network()
     );
 
-    // The wire transaction inspects to exactly one anchor EmitLog with the exact
-    // payload, the expected network, the expected digest, and the same
-    // fingerprint — proving the frozen transaction is the Slice 4A5 transaction.
+    // The wire transaction inspects to exactly one anchor CallFunction with the
+    // exact digest, the expected network, and the same fingerprint — proving the
+    // frozen transaction is the exact pinned event-anchor transaction.
     let Ok(evidence) = inspect_unsigned_anchor_transaction(
         &real.wire_request().transaction,
         &esmeralda_expectation(),
@@ -79,7 +79,7 @@ fn conversion_and_fake_capture_agree_on_every_field() {
         panic!("wire transaction must inspect");
     };
     assert_eq!(evidence.instruction_count(), 1);
-    assert_eq!(evidence.anchor_log_payload(), &common::payload(0x22));
+    assert_eq!(evidence.event_payload().digest(), common::digest(0x22));
     assert_eq!(evidence.anchor_digest(), common::digest(0x22));
     assert_eq!(evidence.fingerprint(), build.evidence().fingerprint());
 

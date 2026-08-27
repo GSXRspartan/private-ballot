@@ -84,6 +84,8 @@ fn config_for_archive(archive_byte: u8) -> AnchorAppConfig {
         None,
         live_approval_facts(),
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|e| panic!("event template binding must attach: {e}"))
 }
 
 fn terminal_index_root(name: &str) -> std::path::PathBuf {
@@ -727,6 +729,8 @@ fn exhausted_config() -> tari_cc_private_ballot_ootle_anchor_app::AnchorAppConfi
         None,
         live_approval_facts(),
     )
+    .with_event_template_binding(template_binding(), SCENARIO_MAX_EPOCH_DELTA)
+    .unwrap_or_else(|e| panic!("event template binding must attach: {e}"))
 }
 
 fn restore_from_snapshot(
@@ -778,7 +782,7 @@ fn restore_from_snapshot_with_terminal_index_root(
 fn restart_after_submission_before_first_poll() {
     let tx = canonical_transaction_id();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
-    let mut restored = restore_from_snapshot(&submitted_snapshot(), indexer);
+    let mut restored = restore_from_snapshot(&submitted_snapshot_v2(), indexer);
     let outcome = match restored.run(OperatorDecision::Approve) {
         Ok(outcome) => outcome,
         Err(error) => panic!("restored run failed: {error}"),
@@ -799,7 +803,7 @@ fn terminal_index_absent_keeps_interrupted_recovery_supported() {
     let root = terminal_index_root("interrupted");
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
     let mut restored =
-        restore_from_snapshot_with_terminal_index_root(&submitted_snapshot(), indexer, root);
+        restore_from_snapshot_with_terminal_index_root(&submitted_snapshot_v2(), indexer, root);
     let submits_before = restored.walletd_adapter().transport().submit_calls();
     let outcome = restored
         .run(OperatorDecision::Approve)
@@ -818,7 +822,7 @@ fn terminal_index_absent_keeps_interrupted_recovery_supported() {
 fn restart_mid_poll() {
     let tx = canonical_transaction_id();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
-    let mut restored = restore_from_snapshot(&polling_in_progress_snapshot(2), indexer);
+    let mut restored = restore_from_snapshot(&polling_in_progress_snapshot_v2(2), indexer);
     let outcome = match restored.run(OperatorDecision::Approve) {
         Ok(outcome) => outcome,
         Err(error) => panic!("restored run failed: {error}"),
@@ -837,7 +841,7 @@ fn restart_mid_poll() {
 fn restart_after_finalized_accept_is_idempotent() {
     let tx = canonical_transaction_id();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
-    let mut restored = restore_from_snapshot(&known_answer_snapshot(), indexer);
+    let mut restored = restore_from_snapshot(&known_answer_snapshot_v2(), indexer);
     let outcome = match restored.run(OperatorDecision::Approve) {
         Ok(outcome) => outcome,
         Err(error) => panic!("restored run failed: {error}"),
@@ -857,7 +861,7 @@ fn transaction_id_remains_stable_across_restart() {
     let tx = canonical_transaction_id();
     let before = canonical_transaction_id().as_str().to_owned();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
-    let restored = restore_from_snapshot(&submitted_snapshot(), indexer);
+    let restored = restore_from_snapshot(&submitted_snapshot_v2(), indexer);
     let after = restored.transaction_id().map(|t| t.as_str().to_owned());
     assert_eq!(
         Some(before),
@@ -869,7 +873,7 @@ fn transaction_id_remains_stable_across_restart() {
 #[test]
 fn fingerprint_remains_stable_across_restart() {
     let tx = canonical_transaction_id();
-    let snapshot = submitted_snapshot();
+    let snapshot = submitted_snapshot_v2();
     let fingerprint_before = snapshot
         .walletd_snapshots()
         .first()
@@ -891,7 +895,7 @@ fn fingerprint_remains_stable_across_restart() {
 fn no_duplicate_transaction_on_restart() {
     let tx = canonical_transaction_id();
     let indexer = finalized_indexer_transport(accepted_receipt(&tx));
-    let mut restored = restore_from_snapshot(&submitted_snapshot(), indexer);
+    let mut restored = restore_from_snapshot(&submitted_snapshot_v2(), indexer);
     let submits_before = restored.walletd_adapter().transport().submit_calls();
     let _ = restored.run(OperatorDecision::Approve);
     let submits_after = restored.walletd_adapter().transport().submit_calls();
@@ -957,7 +961,9 @@ fn submit_timeout_persists_write_ahead_unknown_and_restart_recovers_first() {
 
 #[test]
 fn write_ahead_snapshot_persistence_failure_prevents_submit() {
-    let config = live_config();
+    // A legacy (template-less) approved snapshot restored against a matching
+    // template-less config; the write-ahead submit path needs no event template.
+    let config = restore_config();
     let snap_path = config.snapshot_path().to_owned();
     write_snapshot_atomic(&snap_path, &approved_snapshot())
         .unwrap_or_else(|error| panic!("approved snapshot write failed: {error}"));

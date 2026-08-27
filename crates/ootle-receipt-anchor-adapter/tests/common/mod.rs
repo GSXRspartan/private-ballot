@@ -10,10 +10,13 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest,
+    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
+    AnchorPreparationRequest, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1;
+use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
+    SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
+};
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::AnchorReceiptQueryV1;
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     FakeWalletdAnchorClient, SubmittedWalletdAnchorRequestV1, WalletdAnchorCoordinator,
@@ -80,7 +83,35 @@ pub fn fee_component() -> WalletdFeeComponentRef {
     }
 }
 
-/// Builds a fee-less Slice 4A5 build request from its parts.
+/// A valid pinned event-template deployment identity for tests.
+///
+/// It reuses the exact scenario deployment address/module so the queries built
+/// here verify against the anchor events the scenario receipts carry.
+#[must_use]
+pub fn template_binding() -> AnchorTemplateBindingV1 {
+    let topic = format!("{SCENARIO_TEMPLATE_MODULE}.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1");
+    match AnchorTemplateBindingV1::new(
+        SCENARIO_TEMPLATE_ADDRESS.to_owned(),
+        SCENARIO_TEMPLATE_MODULE.to_owned(),
+        "publish_anchor".to_owned(),
+        topic,
+        [0x33; 32],
+    ) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test template binding must be valid"),
+    }
+}
+
+/// A valid observed/max epoch binding for tests (observed 100, delta 12).
+#[must_use]
+pub fn epoch_binding() -> AnchorEpochBindingV1 {
+    match AnchorEpochBindingV1::from_observed_epoch(100, 12) {
+        Ok(binding) => binding,
+        Err(_error) => panic!("test epoch binding must be valid"),
+    }
+}
+
+/// Builds a v0.39.2 build request (with template + epoch binding) from its parts.
 #[must_use]
 pub fn build_request(
     network_value: &str,
@@ -95,7 +126,11 @@ pub fn build_request(
     );
     let preparation =
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(max_fee), None);
-    OotleAnchorTransactionBuildRequestV1::from_preparation_request(preparation)
+    OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
+        preparation,
+        template_binding(),
+        epoch_binding(),
+    )
 }
 
 /// Drives the real fee-bearing prepare -> approve -> submit flow to obtain a
@@ -135,8 +170,10 @@ pub fn submit(
 #[must_use]
 pub fn submit_payload(anchor_payload: AnchorLogPayloadV1) -> SubmittedWalletdAnchorRequestV1 {
     let binding = AnchorBindingV1::new(canonical_network(), account("fee-account"), anchor_payload);
-    let request = OotleAnchorTransactionBuildRequestV1::from_preparation_request(
+    let request = OotleAnchorTransactionBuildRequestV1::from_preparation_request_with_event_binding(
         AnchorPreparationRequest::new(binding, AnchorMaxFeeV1::from_units(1_000), None),
+        template_binding(),
+        epoch_binding(),
     );
     let mut client = FakeWalletdAnchorClient::new();
     let mut coordinator = WalletdAnchorCoordinator::new();

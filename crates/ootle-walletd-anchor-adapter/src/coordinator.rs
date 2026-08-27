@@ -233,8 +233,8 @@ impl WalletdAnchorCoordinator {
     ///
     /// Resolves the caller-supplied fee account component address into a pinned
     /// Ootle component address (the single place resolution happens), builds a
-    /// fee-bearing unsigned transaction carrying exactly one anchor `EmitLog` plus
-    /// one `pay_fee_from_component`, re-inspects it fee-aware, creates the frozen
+    /// fee-bearing unsigned transaction carrying exactly one anchor `CallFunction`
+    /// plus one `pay_fee_from_component`, re-inspects it fee-aware, creates the frozen
     /// walletd request, and records it as `Prepared`. Unlike [`Self::prepare`], the
     /// resulting request is submittable, because the confirmed
     /// `transaction_requests.submit` path seals the frozen transaction verbatim
