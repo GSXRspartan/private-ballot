@@ -5172,6 +5172,7 @@ dependencies = [
  "ed25519-dalek",
  "hpke",
  "serde",
+ "serde_json",
  "tari-cc-private-ballot-anchor",
  "tari-cc-private-ballot-anchor-transport",
  "tari-cc-private-ballot-archive",

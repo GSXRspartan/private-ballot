@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    ANCHOR_EVENT_FUNCTION_V1, AnchorAccountReference, AnchorMaxFeeV1, AnchorTemplateBindingV1,
+    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1, ANCHOR_TEMPLATE_MODULE_V1,
+    AnchorAccountReference, AnchorMaxFeeV1, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_archive::ArchiveHashV1;
 use tari_cc_private_ballot_ootle_anchor_app::{
@@ -213,9 +214,9 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
     }
     let template_binding = AnchorTemplateBindingV1::new(
         request.template_address.clone(),
-        request.template_module.clone(),
+        ANCHOR_TEMPLATE_MODULE_V1.to_owned(),
         ANCHOR_EVENT_FUNCTION_V1.to_owned(),
-        request.template_event_topic.clone(),
+        fixed_anchor_template_event_topic_v1(),
         parse_lower_hash(&request.template_artifact_digest_hex)?,
     )
     .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
@@ -327,9 +328,14 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         config_file_blake3_256: crate::hex::to_lower_hex(&config_file_hash),
         config_file_bytes: file_bytes.len(),
         template_address: request.template_address.clone(),
-        template_event_topic: request.template_event_topic.clone(),
+        template_event_topic: template_binding.full_event_topic().to_owned(),
         max_epoch_delta: request.max_epoch_delta,
     })
+}
+
+#[must_use]
+pub fn fixed_anchor_template_event_topic_v1() -> String {
+    format!("{ANCHOR_TEMPLATE_MODULE_V1}.{ANCHOR_EVENT_TOPIC_SUFFIX_V1}")
 }
 
 fn parse_seal_signer(kind: &str, id: &str) -> Result<WalletdSealSignerRef, GuiCoreError> {
@@ -361,7 +367,11 @@ fn parse_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
 /// representation. Unlike historical archive hashes, this operator-supplied
 /// runtime identity is required to be canonical lowercase hex.
 fn parse_lower_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
-    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
         return Err(GuiCoreError::live_anchor_operator_config_invalid());
     }
     let mut bytes = [0_u8; 32];

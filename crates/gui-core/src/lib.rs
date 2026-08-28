@@ -52,6 +52,7 @@ pub mod summary;
 pub mod tally;
 pub mod transport;
 pub mod transport_anchor;
+pub mod trusted_anchor_deployment;
 pub mod voter_cast_lock;
 pub mod voter_confirmation;
 pub mod voter_credential;
@@ -131,6 +132,17 @@ pub use transport::{
     VoterTransportReceiptV1, production_transport_authority_root_v1,
 };
 pub use transport_anchor::{GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1};
+pub use trusted_anchor_deployment::{
+    GuiTrustedOotleDeploymentFixedV1, GuiTrustedOotleDeploymentLockRequestV1,
+    GuiTrustedOotleDeploymentStatusV1, GuiTrustedOotleDeploymentV1,
+    GuiTrustedOotleTemplateWasmInspectionV1, MAX_TEMPLATE_WASM_BYTES_V1,
+    TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1,
+    TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1, inspect_template_wasm_v1, load_trusted_ootle_deployment_v1,
+    lock_trusted_ootle_deployment_v1, template_wasm_digest_for_bytes_v1,
+    trusted_ootle_deployment_event_topic_v1, trusted_ootle_deployment_fixed_v1,
+    trusted_ootle_deployment_path_v1, trusted_ootle_deployment_to_live_anchor_request_v1,
+    unlock_trusted_ootle_deployment_v1,
+};
 pub use voter_cast_lock::{
     GuiVoterCastLockStateV1, MAX_STAGED_RELEASE_ENVELOPE_BYTES, PendingReleaseRetryHandleV1,
     ProbePhaseALinkGuardV1, VOTER_CAST_LOCKS_DIRECTORY_NAME, cast_record_exists_v1,

@@ -29,11 +29,13 @@ use tari_cc_private_ballot_gui_core::{
     GuiParticipationSummaryV1, GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1,
     GuiPrivateIntakeSyncSummaryV1, GuiSavedVoterCredentialDeleteResultV1,
     GuiSavedVoterCredentialsV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
-    GuiVoterCastLockStateV1, GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1,
-    GuiVoterCredentialStatusV1, GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1,
-    GuiVoterSelectionStatusV1, GuiVoterSessionV1, GuiVoterWorkflowStatusV1,
-    LoadedElectionWorkspaceV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
-    TransportDescriptorV1, VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
+    GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentStatusV1,
+    GuiTrustedOotleTemplateWasmInspectionV1, GuiVoterCastLockStateV1,
+    GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1,
+    GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
+    GuiVoterSessionV1, GuiVoterWorkflowStatusV1, LoadedElectionWorkspaceV1,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
     copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
     delete_election_workspace_v1, delete_saved_voter_credential_v1, enforce_publish_privacy_floor,
     ensure_election_workspaces_directory_v1, ensure_private_intake_inbox_directory_v1,
@@ -41,18 +43,19 @@ use tari_cc_private_ballot_gui_core::{
     ensure_voter_election_status_directory_v1, file_summary_for_public_key,
     import_voter_credential_from_path_v1, ingest_private_intake_inbox_into_session_v1,
     inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    list_election_workspaces_v1, list_saved_voter_credentials_v1,
-    load_persisted_election_status_v1, mark_draft_workspace_superseded_v1,
+    inspect_template_wasm_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
+    load_persisted_election_status_v1, load_trusted_ootle_deployment_v1,
+    lock_trusted_ootle_deployment_v1, mark_draft_workspace_superseded_v1,
     mark_workspace_organizer_authority_v1, parse_decision, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, resume_election_workspace_v1,
-    run_step_with_transports, unlock_saved_voter_credential_v1, validate_workspace_id_v1,
+    run_step_with_transports, trusted_ootle_deployment_to_live_anchor_request_v1,
+    unlock_saved_voter_credential_v1, unlock_trusted_ootle_deployment_v1, validate_workspace_id_v1,
     verify_and_apply_election_status_statement_v1, verify_archive_directory_v1,
     verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
     voter_credentials_directory_v1, walletd_auth_env_var_name, workspace_id_for_session_v1,
-    write_archive_directory_v1,
-    write_draft_workspace_revision_v1, write_election_artifacts_v1,
+    write_archive_directory_v1, write_draft_workspace_revision_v1, write_election_artifacts_v1,
     write_finalized_archive_v1_with_governance_document,
     write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
     write_session_workspace_revision_v1,
@@ -897,11 +900,14 @@ impl AppState {
     }
 }
 
-fn workspaces_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
-    let app_data_root = app
-        .path()
+fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    app.path()
         .app_data_dir()
-        .map_err(|_| CommandError::app_data_unavailable())?;
+        .map_err(|_| CommandError::app_data_unavailable())
+}
+
+fn workspaces_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
+    let app_data_root = app_data_root(app)?;
     Ok(ensure_election_workspaces_directory_v1(&app_data_root)?)
 }
 
@@ -1938,12 +1944,70 @@ fn verify_transport_archive_anchor(
 /// runs on the blocking thread pool.
 #[tauri::command]
 async fn write_live_anchor_config_from_verified_archive(
-    request: GuiLiveAnchorConfigRequestV1,
+    mut request: GuiLiveAnchorConfigRequestV1,
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiLiveAnchorConfigResultV1, CommandError> {
     state.ensure_organizer_authority()?;
-    run_blocking_command(move || Ok(write_live_anchor_config_from_verified_archive_v1(&request)?))
-        .await
+    let app_data_root = app_data_root(&app)?;
+    run_blocking_command(move || {
+        let status = load_trusted_ootle_deployment_v1(&app_data_root)?;
+        let deployment = status
+            .deployment
+            .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
+        request = trusted_ootle_deployment_to_live_anchor_request_v1(request, &deployment)?;
+        Ok(write_live_anchor_config_from_verified_archive_v1(&request)?)
+    })
+    .await
+}
+
+/// Returns the organizer's locked public Ootle anchor deployment, if present.
+///
+/// ORGANIZER-AUTHORITATIVE: imported voter sessions cannot read or mutate this
+/// ballot-office deployment setting.
+#[tauri::command]
+fn trusted_ootle_deployment_status(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    Ok(load_trusted_ootle_deployment_v1(&app_data_root)?)
+}
+
+/// Inspects a selected local published-template WASM without uploading,
+/// executing, copying, or persisting its path.
+#[tauri::command]
+fn inspect_template_wasm(
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiTrustedOotleTemplateWasmInspectionV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    Ok(inspect_template_wasm_v1(Path::new(&path))?)
+}
+
+/// Locks the organizer's public Ootle anchor deployment for future V4 configs.
+#[tauri::command]
+fn lock_trusted_ootle_deployment(
+    request: GuiTrustedOotleDeploymentLockRequestV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    Ok(lock_trusted_ootle_deployment_v1(&app_data_root, &request)?)
+}
+
+/// Explicitly clears the organizer's locked public Ootle anchor deployment.
+#[tauri::command]
+fn unlock_trusted_ootle_deployment(
+    confirm: bool,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    Ok(unlock_trusted_ootle_deployment_v1(&app_data_root, confirm)?)
 }
 
 /// Inspects one canonical anchor application config (read-only, no network).
@@ -2057,14 +2121,18 @@ async fn run_live_anchor_lifecycle_step(
                 "a network transport could not be constructed from the configured endpoints",
             )
         })?;
-        let indexer_transport =
-            RealIndexerTransport::new(&indexer_endpoint, request_timeout, executor).map_err(|_| {
-                CommandError::new(
-                    "ANCHOR_PUBLISH_TRANSPORT_UNAVAILABLE",
-                    "UNAVAILABLE",
-                    "a network transport could not be constructed from the configured endpoints",
-                )
-            })?;
+        let indexer_transport = RealIndexerTransport::new(
+            &indexer_endpoint,
+            request_timeout,
+            executor,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "ANCHOR_PUBLISH_TRANSPORT_UNAVAILABLE",
+                "UNAVAILABLE",
+                "a network transport could not be constructed from the configured endpoints",
+            )
+        })?;
 
         Ok(run_step_with_transports(
             config,
@@ -4572,6 +4640,10 @@ pub fn run() {
             write_finalized_archive,
             verify_archive,
             verify_transport_archive_anchor,
+            trusted_ootle_deployment_status,
+            inspect_template_wasm,
+            lock_trusted_ootle_deployment,
+            unlock_trusted_ootle_deployment,
             write_live_anchor_config_from_verified_archive,
             run_live_anchor_lifecycle_step,
             inspect_anchor_config,

@@ -400,6 +400,43 @@ export interface GuiLiveAnchorConfigResultV1 {
   max_epoch_delta: number;
 }
 
+export interface GuiTrustedOotleDeploymentV1 {
+  schema: string;
+  network: string;
+  template_address: string;
+  template_artifact_digest_hex: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  locked_at_unix_ms: number;
+}
+
+export interface GuiTrustedOotleDeploymentFixedV1 {
+  schema: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+}
+
+export interface GuiTrustedOotleDeploymentStatusV1 {
+  locked: boolean;
+  deployment: GuiTrustedOotleDeploymentV1 | null;
+  fixed: GuiTrustedOotleDeploymentFixedV1;
+}
+
+export interface GuiTrustedOotleDeploymentLockRequestV1 {
+  network: string;
+  template_address: string;
+  selected_wasm_path: string;
+}
+
+export interface GuiTrustedOotleTemplateWasmInspectionV1 {
+  display_filename: string;
+  bytes: number;
+  digest_algorithm_id: string;
+  digest_hex: string;
+}
+
 /** Bounded command error payload (mirror of the shell's CommandError). */
 export interface GuiCommandError {
   code: string;

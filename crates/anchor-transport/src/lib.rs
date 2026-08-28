@@ -22,8 +22,8 @@
 //! [`OotleAnchorRecordV1`]: tari_cc_private_ballot_anchor::OotleAnchorRecordV1
 
 mod agreement;
-mod event;
 mod errors;
+mod event;
 mod fake;
 mod identifiers;
 mod model;
@@ -32,16 +32,17 @@ mod traits;
 mod verification;
 
 pub use agreement::compare_receipt_observations;
-pub use event::{
-    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
-    DEFAULT_ANCHOR_MAX_EPOCH_DELTA_V1, MAX_ANCHOR_EVENT_METADATA_BYTES_V2,
-    MAX_ANCHOR_EVENT_METADATA_FIELDS_V2, OOTLE_MAX_EPOCH_WINDOW_V1, AnchorEpochBindingV1,
-    AnchorEventBindingError, AnchorEventPayloadV2, AnchorEventProofV2, AnchorTemplateBindingV1,
-};
 pub use errors::{
     AnchorApprovalError, AnchorIdentifierError, AnchorLogPayloadError,
     AnchorObservationAgreementError, AnchorPreparationError, AnchorReceiptQueryError,
     AnchorReceiptVerificationError, AnchorRequestLookupError, AnchorSubmissionError,
+};
+pub use event::{
+    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
+    ANCHOR_TEMPLATE_MODULE_V1, AnchorEpochBindingV1, AnchorEventBindingError, AnchorEventPayloadV2,
+    AnchorEventProofV2, AnchorTemplateBindingV1, DEFAULT_ANCHOR_MAX_EPOCH_DELTA_V1,
+    MAX_ANCHOR_EVENT_METADATA_BYTES_V2, MAX_ANCHOR_EVENT_METADATA_FIELDS_V2,
+    OOTLE_MAX_EPOCH_WINDOW_V1,
 };
 pub use fake::{DeterministicAnchorFake, FakeFinality};
 pub use identifiers::{

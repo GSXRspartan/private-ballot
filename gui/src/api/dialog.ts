@@ -225,6 +225,24 @@ export async function pickGovernanceDocument(title: string): Promise<string | nu
 }
 
 /**
+ * Opens a native single-file picker for a published Ootle event-template WASM.
+ * The frontend receives only the selected local path; Rust reads, validates,
+ * and digests the bytes, and the path is not persisted.
+ */
+export async function pickTemplateWasm(
+  title = "Select published template WASM",
+): Promise<string | null> {
+  return openFile(
+    title,
+    [
+      { name: "WebAssembly module", extensions: ["wasm"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "electionArtifact",
+  );
+}
+
+/**
  * Opens a native single-file picker for an already-installed `tor.exe`
  * executable (controlled managed-Tor test only). The frontend receives only the
  * selected path; the Rust shell re-validates that it is an absolute regular file

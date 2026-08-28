@@ -284,6 +284,50 @@ impl GuiCoreError {
         )
     }
 
+    /// The trusted Ootle deployment record is invalid, unsupported, or corrupt.
+    #[must_use]
+    pub const fn trusted_ootle_deployment_invalid() -> Self {
+        Self::new(
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID",
+            GuiErrorCategory::InvalidInput,
+            Some("trusted-ootle-deployment"),
+            "the trusted Ootle anchor deployment record is invalid",
+        )
+    }
+
+    /// A trusted Ootle deployment already exists and must be unlocked first.
+    #[must_use]
+    pub const fn trusted_ootle_deployment_locked() -> Self {
+        Self::new(
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_LOCKED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("trusted-ootle-deployment"),
+            "unlock the current Ootle anchor deployment before replacing it",
+        )
+    }
+
+    /// A live anchor config was requested before a trusted deployment was locked.
+    #[must_use]
+    pub const fn trusted_ootle_deployment_required() -> Self {
+        Self::new(
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_REQUIRED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("trusted-ootle-deployment"),
+            "lock a trusted Ootle anchor deployment before preparing live anchor config",
+        )
+    }
+
+    /// Unlocking the trusted deployment requires an explicit confirmation flag.
+    #[must_use]
+    pub const fn trusted_ootle_deployment_unlock_not_confirmed() -> Self {
+        Self::new(
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_UNLOCK_NOT_CONFIRMED",
+            GuiErrorCategory::InvalidInput,
+            Some("trusted-ootle-deployment"),
+            "unlocking the trusted Ootle anchor deployment requires explicit confirmation",
+        )
+    }
+
     /// The live anchor config output path exists and force was not supplied.
     #[must_use]
     pub const fn live_anchor_config_output_exists() -> Self {

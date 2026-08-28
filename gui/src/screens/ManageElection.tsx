@@ -7,6 +7,7 @@ import {
   pickElectionArtifact,
   pickElectionStatusExportPath,
   pickGovernanceDocument,
+  pickTemplateWasm,
   pickTorExecutable,
 } from "../api/dialog";
 import {
@@ -19,6 +20,8 @@ import type {
   GuiLiveAnchorConfigResultV1,
   GuiLiveAnchorStepResultV1,
   GuiTallySummaryV1,
+  GuiTrustedOotleDeploymentStatusV1,
+  GuiTrustedOotleTemplateWasmInspectionV1,
   OrganizerIntakeStatusV1,
 } from "../api/types";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
@@ -62,19 +65,6 @@ function basename(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts[parts.length - 1] ?? path;
 }
-
-// v0.39.2 anchor event-template CONTRACT constants. The template *source* is
-// shared across every network deployment, so the module name, the full stored
-// event topic, and the callable function are fixed contract facts — they are
-// NOT network identity and are the same on esmeralda, igor, localnet, or any
-// future network. Only the published `template_address` and the compiled
-// artifact digest differ per network deployment; the operator supplies those
-// for whichever network they select. The backend re-derives and re-validates
-// every one of these values, so the constants here are presentation defaults,
-// never the security authority.
-const ANCHOR_TEMPLATE_MODULE_V1 = "tari_private_ballot_anchor";
-const ANCHOR_EVENT_TOPIC_SUFFIX_V1 = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1";
-const ANCHOR_TEMPLATE_EVENT_TOPIC_V1 = `${ANCHOR_TEMPLATE_MODULE_V1}.${ANCHOR_EVENT_TOPIC_SUFFIX_V1}`;
 
 /**
  * Manage Election (organizer): Load Election via native file pickers, then walk
@@ -132,6 +122,7 @@ export function ManageElection() {
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
+  const [confirmUnlockDeployment, setConfirmUnlockDeployment] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
   // Organizer-side Ootle aggregate anchor publish state.
   const [anchorConfigResult, setAnchorConfigResult] =
@@ -139,6 +130,9 @@ export function ManageElection() {
   const [anchorStepResult, setAnchorStepResult] =
     useState<GuiLiveAnchorStepResultV1 | null>(null);
   const [anchorBusy, setAnchorBusy] = useState(false);
+  const [deploymentBusy, setDeploymentBusy] = useState(false);
+  const [trustedDeploymentStatus, setTrustedDeploymentStatus] =
+    useState<GuiTrustedOotleDeploymentStatusV1 | null>(null);
   const [anchorNetwork, setAnchorNetwork] = useState("esmeralda");
   const [anchorWalletdEndpoint, setAnchorWalletdEndpoint] = useState(
     "http://127.0.0.1:12009",
@@ -146,13 +140,13 @@ export function ManageElection() {
   const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
     "http://127.0.0.1:12500",
   );
-  // Per-network published event-template deployment. These are runtime data:
-  // the address and artifact digest are assigned when the shared template is
-  // published on the selected network, so they change per network and are
-  // never compiled into the app. An empty address fails closed in the backend.
+  // Per-network published event-template deployment. The operator supplies only
+  // the network/address and selects the published WASM; Rust computes the
+  // artifact digest from the local bytes before lock/persistence.
   const [anchorTemplateAddress, setAnchorTemplateAddress] = useState("");
-  const [anchorTemplateArtifactDigest, setAnchorTemplateArtifactDigest] =
-    useState("");
+  const [anchorTemplateWasmPath, setAnchorTemplateWasmPath] = useState("");
+  const [anchorTemplateWasmInspection, setAnchorTemplateWasmInspection] =
+    useState<GuiTrustedOotleTemplateWasmInspectionV1 | null>(null);
   const [anchorMaxEpochDelta, setAnchorMaxEpochDelta] = useState(12);
   const [anchorAccountRef, setAnchorAccountRef] = useState("organizer-fee-account");
   const [anchorFeeComponent, setAnchorFeeComponent] = useState("");
@@ -252,6 +246,9 @@ export function ManageElection() {
       completedSummaries.push("Final archive written");
     }
   }
+
+  const trustedDeployment = trustedDeploymentStatus?.deployment ?? null;
+  const trustedDeploymentFixed = trustedDeploymentStatus?.fixed ?? null;
 
   const showError = (error: unknown) => {
     setLocalError(
@@ -380,6 +377,23 @@ export function ManageElection() {
     }
   };
 
+  const refreshTrustedDeployment = async () => {
+    if (!shellAvailable || !election || !isOrganizer) return;
+    try {
+      const status = await api.trustedOotleDeploymentStatus();
+      setTrustedDeploymentStatus(status);
+      if (status.deployment) {
+        setAnchorNetwork(status.deployment.network);
+        setAnchorTemplateAddress(status.deployment.template_address);
+        setAnchorTemplateWasmPath("");
+        setAnchorTemplateWasmInspection(null);
+      }
+    } catch (error) {
+      setTrustedDeploymentStatus(null);
+      showError(error);
+    }
+  };
+
   const intakeTorExepathOrUndefined = () =>
     intakeTorExePath.length > 0 ? intakeTorExePath : undefined;
 
@@ -389,9 +403,13 @@ export function ManageElection() {
   // reconciliation for the newly loaded/recovered election.
   useEffect(() => {
     prevAcceptedRef.current = null;
+    setTrustedDeploymentStatus(null);
     // Only an organizer context may query ballot-office intake status; the
     // backend rejects it for imported voter sessions, so we never ask.
-    if (election && shellAvailable && isOrganizer) void refreshOrganizerStatus();
+    if (election && shellAvailable && isOrganizer) {
+      void refreshOrganizerStatus();
+      void refreshTrustedDeployment();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election?.manifest_hash_hex, shellAvailable, isOrganizer]);
 
@@ -598,7 +616,15 @@ export function ManageElection() {
   });
 
   const onPrepareAnchorConfig = async () => {
-    if (!archiveResult) return;
+    if (!archiveResult || !trustedDeployment) {
+      setLocalError({
+        code: "GUI_TRUSTED_OOTLE_DEPLOYMENT_REQUIRED",
+        category: "INVALID_LIFECYCLE_TRANSITION",
+        context: "trusted-ootle-deployment",
+        message: "lock a trusted Ootle anchor deployment before preparing live anchor config",
+      });
+      return;
+    }
     clearLocalError();
     setAnchorBusy(true);
     setAnchorConfigResult(null);
@@ -610,13 +636,13 @@ export function ManageElection() {
       const result = await api.writeLiveAnchorConfig({
         archive_directory: archiveResult.directory,
         output_config_path: configPath,
-        network: anchorNetwork,
+        network: trustedDeployment.network,
         walletd_endpoint: anchorWalletdEndpoint,
         indexer_endpoint: anchorIndexerEndpoint,
-        template_address: anchorTemplateAddress.trim(),
-        template_module: ANCHOR_TEMPLATE_MODULE_V1,
-        template_event_topic: ANCHOR_TEMPLATE_EVENT_TOPIC_V1,
-        template_artifact_digest_hex: anchorTemplateArtifactDigest.trim(),
+        template_address: trustedDeployment.template_address,
+        template_module: trustedDeployment.template_module,
+        template_event_topic: trustedDeployment.template_event_topic,
+        template_artifact_digest_hex: trustedDeployment.template_artifact_digest_hex,
         max_epoch_delta: anchorMaxEpochDelta,
         account_reference: anchorAccountRef,
         fee_component: anchorFeeComponent,
@@ -641,6 +667,62 @@ export function ManageElection() {
       showError(error);
     } finally {
       setAnchorBusy(false);
+    }
+  };
+
+  const onPickTemplateWasm = async () => {
+    clearLocalError();
+    const picked = await pickTemplateWasm();
+    if (picked === null) return;
+    setDeploymentBusy(true);
+    setAnchorTemplateWasmPath(picked);
+    setAnchorTemplateWasmInspection(null);
+    try {
+      setAnchorTemplateWasmInspection(await api.inspectTemplateWasm(picked));
+    } catch (error) {
+      setAnchorTemplateWasmPath("");
+      showError(error);
+    } finally {
+      setDeploymentBusy(false);
+    }
+  };
+
+  const onLockTrustedDeployment = async () => {
+    clearLocalError();
+    setDeploymentBusy(true);
+    setAnchorConfigResult(null);
+    setAnchorStepResult(null);
+    try {
+      const status = await api.lockTrustedOotleDeployment({
+        network: anchorNetwork,
+        template_address: anchorTemplateAddress.trim(),
+        selected_wasm_path: anchorTemplateWasmPath,
+      });
+      setTrustedDeploymentStatus(status);
+      setAnchorTemplateWasmPath("");
+      setAnchorTemplateWasmInspection(null);
+      recordAction(`Locked Ootle anchor deployment (${status.deployment?.network ?? anchorNetwork})`);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setDeploymentBusy(false);
+    }
+  };
+
+  const onUnlockTrustedDeployment = async () => {
+    clearLocalError();
+    setDeploymentBusy(true);
+    setAnchorConfigResult(null);
+    setAnchorStepResult(null);
+    try {
+      const status = await api.unlockTrustedOotleDeployment();
+      setTrustedDeploymentStatus(status);
+      recordAction("Unlocked Ootle anchor deployment");
+      setConfirmUnlockDeployment(false);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setDeploymentBusy(false);
     }
   };
 
@@ -1689,7 +1771,59 @@ export function ManageElection() {
                 </Field>
               </div>
 
-              {!anchorConfigResult && (
+              <h4 className="screen-section">Ootle Anchor Deployment</h4>
+              <div className="field-list">
+                <Field label="Deployment lock">
+                  {trustedDeployment ? (
+                    <Pill tone="ok">LOCKED</Pill>
+                  ) : (
+                    <Pill tone="warn">UNLOCKED</Pill>
+                  )}
+                </Field>
+                <Field label="Template module">
+                  <span className="hash">{trustedDeploymentFixed?.template_module ?? "—"}</span>
+                </Field>
+                <Field label="Template function">
+                  <span className="hash">{trustedDeploymentFixed?.template_function ?? "—"}</span>
+                </Field>
+                <Field label="Event topic">
+                  <HashValue value={trustedDeploymentFixed?.template_event_topic} />
+                </Field>
+              </div>
+
+              {trustedDeployment ? (
+                <>
+                  <div className="field-list">
+                    <Field label="Network">{trustedDeployment.network}</Field>
+                    <Field label="Template address">
+                      <HashValue value={trustedDeployment.template_address} />
+                      <CopyButton value={trustedDeployment.template_address} />
+                    </Field>
+                    <Field label="Artifact digest">
+                      <HashValue value={trustedDeployment.template_artifact_digest_hex} />
+                      <CopyButton value={trustedDeployment.template_artifact_digest_hex} />
+                    </Field>
+                  </div>
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={!canAct || deploymentBusy || anchorBusy}
+                      onClick={() => void refreshTrustedDeployment()}
+                    >
+                      Reload deployment
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      disabled={!canAct || deploymentBusy || anchorBusy}
+                      onClick={() => setConfirmUnlockDeployment(true)}
+                    >
+                      Unlock / replace
+                    </button>
+                  </div>
+                </>
+              ) : (
                 <>
                   <div className="card-grid">
                     <div className="form-row">
@@ -1704,6 +1838,79 @@ export function ManageElection() {
                         <option value="localnet">localnet</option>
                       </select>
                     </div>
+                    <div className="form-row">
+                      <label htmlFor="anchor-template-address">
+                        Template address ({anchorNetwork})
+                      </label>
+                      <input
+                        id="anchor-template-address"
+                        type="text"
+                        value={anchorTemplateAddress}
+                        placeholder="template_..."
+                        onChange={(e) => setAnchorTemplateAddress(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row">
+                      <label>Published template WASM</label>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={!canAct || deploymentBusy}
+                        onClick={() => void onPickTemplateWasm()}
+                      >
+                        Select WASM file
+                      </button>
+                    </div>
+                  </div>
+                  {anchorTemplateWasmInspection && (
+                    <div className="field-list">
+                      <Field label="Selected">
+                        <span className="hash">
+                          {anchorTemplateWasmInspection.display_filename}
+                        </span>
+                      </Field>
+                      <Field label="Size">
+                        {anchorTemplateWasmInspection.bytes.toLocaleString()} bytes
+                      </Field>
+                      <Field label="Artifact digest">
+                        <HashValue value={anchorTemplateWasmInspection.digest_hex} />
+                        <CopyButton value={anchorTemplateWasmInspection.digest_hex} />
+                      </Field>
+                      <Field label="Digest source">
+                        Computed locally from selected WASM
+                      </Field>
+                    </div>
+                  )}
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={
+                        !canAct ||
+                        deploymentBusy ||
+                        !anchorTemplateAddress.trim() ||
+                        !anchorTemplateWasmPath ||
+                        !anchorTemplateWasmInspection
+                      }
+                      onClick={() => void onLockTrustedDeployment()}
+                    >
+                      {deploymentBusy ? "Locking..." : "Validate and lock deployment"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={!canAct || deploymentBusy}
+                      onClick={() => void refreshTrustedDeployment()}
+                    >
+                      Reload deployment
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {!anchorConfigResult && (
+                <>
+                  <div className="card-grid">
                     <div className="form-row">
                       <label htmlFor="anchor-walletd">Walletd endpoint</label>
                       <input
@@ -1720,32 +1927,6 @@ export function ManageElection() {
                         type="text"
                         value={anchorIndexerEndpoint}
                         onChange={(e) => setAnchorIndexerEndpoint(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-template-address">
-                        Template address ({anchorNetwork})
-                      </label>
-                      <input
-                        id="anchor-template-address"
-                        type="text"
-                        value={anchorTemplateAddress}
-                        placeholder="template_..."
-                        onChange={(e) => setAnchorTemplateAddress(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-template-digest">
-                        Template artifact digest
-                      </label>
-                      <input
-                        id="anchor-template-digest"
-                        type="text"
-                        value={anchorTemplateArtifactDigest}
-                        placeholder="64 lowercase hex"
-                        onChange={(e) =>
-                          setAnchorTemplateArtifactDigest(e.target.value)
-                        }
                       />
                     </div>
                     <div className="form-row">
@@ -1860,6 +2041,7 @@ export function ManageElection() {
                       disabled={
                         !canAct ||
                         anchorBusy ||
+                        !trustedDeployment ||
                         !anchorDedicatedWallet ||
                         !anchorSealPubKey ||
                         !anchorFeeComponent ||
@@ -2153,6 +2335,28 @@ export function ManageElection() {
           busy={lifecycleBusy}
           onConfirm={() => void onConfirmFinalize()}
           onCancel={() => setConfirmFinalize(false)}
+        />
+      )}
+
+      {confirmUnlockDeployment && (
+        <ConfirmDialog
+          title="Unlock Ootle deployment?"
+          body={
+            <>
+              <p>
+                Future live anchor configs will stop using the currently locked template
+                address and artifact digest.
+              </p>
+              <p>
+                Lock the replacement deployment before preparing another anchor config.
+              </p>
+            </>
+          }
+          confirmLabel="Unlock deployment"
+          confirmTone="danger"
+          busy={deploymentBusy}
+          onConfirm={() => void onUnlockTrustedDeployment()}
+          onCancel={() => setConfirmUnlockDeployment(false)}
         />
       )}
     </>

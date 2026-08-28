@@ -8,6 +8,8 @@ use tari_cc_private_ballot_anchor::OotleAnchorRecordHashV1;
 
 /// Event topic supplied by the template before the runtime prefixes its module.
 pub const ANCHOR_EVENT_TOPIC_SUFFIX_V1: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1";
+/// The fixed event-template module that owns the anchor publish function.
+pub const ANCHOR_TEMPLATE_MODULE_V1: &str = "tari_private_ballot_anchor";
 /// The sole metadata key allowed in an anchor event.
 pub const ANCHOR_EVENT_DIGEST_KEY_V1: &str = "anchor_digest";
 /// The template's sole callable anchor function.
@@ -116,17 +118,29 @@ impl AnchorEventProofV2 {
     }
 
     #[must_use]
-    pub fn template_address(&self) -> &str { &self.template_address }
+    pub fn template_address(&self) -> &str {
+        &self.template_address
+    }
     #[must_use]
-    pub fn topic(&self) -> &str { &self.topic }
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
     #[must_use]
-    pub fn metadata(&self) -> &[(String, String)] { &self.metadata }
+    pub fn metadata(&self) -> &[(String, String)] {
+        &self.metadata
+    }
     #[must_use]
-    pub const fn event_index(&self) -> u16 { self.event_index }
+    pub const fn event_index(&self) -> u16 {
+        self.event_index
+    }
     #[must_use]
-    pub const fn receipt_epoch(&self) -> u64 { self.receipt_epoch }
+    pub const fn receipt_epoch(&self) -> u64 {
+        self.receipt_epoch
+    }
     #[must_use]
-    pub const fn intent_commitment(&self) -> &[u8; 32] { &self.intent_commitment }
+    pub const fn intent_commitment(&self) -> &[u8; 32] {
+        &self.intent_commitment
+    }
 }
 
 impl AnchorEventPayloadV2 {
@@ -174,7 +188,9 @@ impl AnchorTemplateBindingV1 {
     ) -> Result<Self, AnchorEventBindingError> {
         if !(9..=128).contains(&template_address.len())
             || !template_address.starts_with("template_")
-            || template_address.bytes().any(|byte| byte.is_ascii_whitespace())
+            || template_address
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace())
         {
             return Err(AnchorEventBindingError::InvalidTemplateAddress);
         }

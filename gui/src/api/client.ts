@@ -47,6 +47,9 @@ import type {
   GuiSavedVoterCredentialsV1,
   GuiTallySummaryV1,
   GuiTransportAnchorVerificationV1,
+  GuiTrustedOotleDeploymentLockRequestV1,
+  GuiTrustedOotleDeploymentStatusV1,
+  GuiTrustedOotleTemplateWasmInspectionV1,
   GuiVoterCredentialBackupResultV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
@@ -194,6 +197,22 @@ export const api = {
 
   inspectAnchorEvidence: (path: string) =>
     call<GuiAnchorEvidenceInspectionV1>("inspect_anchor_evidence", { path }),
+
+  trustedOotleDeploymentStatus: () =>
+    call<GuiTrustedOotleDeploymentStatusV1>("trusted_ootle_deployment_status"),
+
+  inspectTemplateWasm: (path: string) =>
+    call<GuiTrustedOotleTemplateWasmInspectionV1>("inspect_template_wasm", { path }),
+
+  lockTrustedOotleDeployment: (request: GuiTrustedOotleDeploymentLockRequestV1) =>
+    call<GuiTrustedOotleDeploymentStatusV1>("lock_trusted_ootle_deployment", {
+      request,
+    }),
+
+  unlockTrustedOotleDeployment: () =>
+    call<GuiTrustedOotleDeploymentStatusV1>("unlock_trusted_ootle_deployment", {
+      confirm: true,
+    }),
 
   writeLiveAnchorConfig: (request: GuiLiveAnchorConfigRequestV1) =>
     call<GuiLiveAnchorConfigResultV1>("write_live_anchor_config_from_verified_archive", {
