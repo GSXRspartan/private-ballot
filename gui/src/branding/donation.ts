@@ -1,5 +1,5 @@
 /**
- * Voluntary developer donation destinations for Tari Private Ballot.
+ * Voluntary developer donation destinations for Private Ballot.
  *
  * These values are PUBLIC, static constants only. They are never connected
  * to any wallet, election state, eligibility logic, transport, archive, or
@@ -19,4 +19,4 @@ export const DONATION_YAT = "🐱🔒🌙🔒🐱";
 
 /** Plain-language disclaimer shown in the donation section. */
 export const DONATION_DISCLAIMER =
-  "Tari Private Ballot is independently developed and free to use. Donations are optional and never affect voting, verification, access, or election results.";
+  "Private Ballot is independently developed and free to use. Donations are optional and never affect voting, verification, access, or election results.";

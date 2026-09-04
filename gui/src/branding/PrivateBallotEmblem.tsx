@@ -1,5 +1,5 @@
 /**
- * Tari Private Ballot community emblem (React rendering).
+ * Private Ballot application emblem (React rendering).
  *
  * Renders the EXACT approved logo artwork. The source of truth is
  * gui/design/private-ballot-logo-reference.png; the files in gui/public are
@@ -40,7 +40,7 @@ interface EmblemProps {
 
 const PrivateBallotEmblem: React.FC<EmblemProps> = ({
   variant,
-  title = "Tari Private Ballot emblem",
+  title = "Private Ballot emblem",
   decorative = false,
   className,
 }) => {

@@ -43,13 +43,13 @@ export const NAV_ITEMS: NavItem[] = [
 ];
 
 /**
- * Application frame: left navigation, top toolbar (community project emblem
- * + "Tari Private Ballot" identity, lifecycle state, theme toggle), main
- * content region, and a status bar. Fully keyboard navigable.
+ * Application frame: left navigation, top toolbar (Private Ballot emblem +
+ * "Private Ballot" identity, lifecycle state, theme toggle), main content
+ * region, and a status bar. Fully keyboard navigable.
  *
- * The community emblem replaces the official Tari logo as the application
- * identity; this is an independent community project, not an official
- * Tari Labs application.
+ * The Private Ballot emblem is the application identity; this is an
+ * independent open-source project, not affiliated with or endorsed by
+ * Tari Labs.
  */
 export function AppFrame({
   section,

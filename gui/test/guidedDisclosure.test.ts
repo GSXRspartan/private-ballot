@@ -410,7 +410,7 @@ describe("organizer guided control matrix", () => {
 });
 
 describe("organizer guided-mode rendering", () => {
-  it("gates every control card through the guided matrix", () => {
+  it("gates lifecycle-specific control cards through the guided matrix", () => {
     for (const key of [
       "intake",
       "materials",
@@ -421,7 +421,6 @@ describe("organizer guided-mode rendering", () => {
       "tally",
       "verify",
       "finalArchive",
-      "anchor",
     ]) {
       assert.ok(
         manage.includes(`{showControl("${key}") && (`),
@@ -431,6 +430,10 @@ describe("organizer guided-mode rendering", () => {
     // The gate is presentation-only: show-all restores the full surface.
     assert.match(manage, /const guidedControls = showAllControls \? null : organizerGuidedControls\(lifecycle\)/);
     assert.match(manage, /guidedControls === null \|\| guidedControls\.includes\(control\)/);
+    // The anchor card remains visible, but raw production authority controls
+    // live behind the dedicated advanced disclosure.
+    assert.match(manage, /<Card title="Tari Anchor">/);
+    assert.match(manage, /Advanced: technical release verification/);
   });
 
   it("shows the phase heading only in guided mode (organizer context only)", () => {
@@ -460,10 +463,10 @@ describe("organizer guided-mode rendering", () => {
     assert.match(manage, /Final archive written/);
     // Completion is derived, never inferred: intake/materials summaries require
     // the provisioned-transport flag, tally the session tally, archive the
-    // session archive result.
+    // selected verified archive result.
     assert.match(manage, /organizerStatus\?\.transport_provisioned && !showControl\("intake"\)/);
     assert.match(manage, /tally !== null && !showControl\("tally"\)/);
-    assert.match(manage, /archiveResult !== null && !showControl\("finalArchive"\)/);
+    assert.match(manage, /archiveReadyForAnchor && !showControl\("finalArchive"\)/);
   });
 });
 
@@ -590,8 +593,8 @@ describe("guided disclosure adds no backend surface", () => {
       "api.submitPreparedVoterBallotPrivately(",
       "api.retryPrivateSubmission(",
       "api.privateTransportAvailability(",
-      "api.managedTorTestStatus(",
-      "api.configureManagedTorTest(",
+      "api.managedTorStatus(",
+      "api.configureManagedTor(",
       "api.startManagedTor(",
       "api.stopManagedTor(",
       "api.voterTorStatus(",
@@ -612,8 +615,39 @@ describe("guided disclosure adds no backend surface", () => {
       "api.exportVoterTransportBundle(",
       "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",
+      "api.anchorDeploymentCapabilities(",
+      "api.verifyArchive(",
+      "api.trustedOotleDeploymentStatus(",
+      "api.inspectTemplateWasm(",
+      "api.lockTrustedOotleDeployment(",
+      "api.unlockTrustedOotleDeployment(",
       "api.writeLiveAnchorConfig(",
+      "api.validateLiveAnchorOperatorConfig(",
+      "api.listWalletdAnchorAccounts(",
+      "api.buildV2PublicAnchorPayload(",
+      "api.verifyV2PublicAnchorEvidence(",
       "api.runLiveAnchorLifecycleStep(",
+      // Walletd connect/readiness surface for the anchor setup assistant
+      // (auto-fill + read-only preflight). These are safe: connect/reconnect
+      // take the raw key as a WRITE-ONLY argument that never comes back, and
+      // status/readiness return only booleans/labels/endpoints — never the
+      // bearer token (see WalletdCredentialStatusV1 / WalletdReadinessV1).
+      "api.walletdCredentialStatus(",
+      "api.connectWalletd(",
+      "api.reconnectWalletd(",
+      "api.forgetWalletd(",
+      "api.walletdReadiness(",
+      // Read-only connection diagnostic: returns only non-secret fields
+      // (endpoint, credential-presence boolean, attempted flag, classified
+      // kind, account count/name) — never the bearer token or API key.
+      "api.walletdConnectionDiagnostics(",
+      // Production transport authority PUBLIC-root setup/review. Safe: the
+      // request carries only a public-key hex, and the readiness result exposes
+      // only a key id, network, and public-key fingerprint — never a private
+      // key. Backend fails closed when unconfigured and rejects fake/test roots.
+      "api.productionTransportAuthorityStatus(",
+      "api.configureProductionTransportAuthorityRoot(",
+      "api.forgetProductionTransportAuthorityRoot(",
     ]);
     for (const call of new Set(manageApiCalls)) {
       assert.ok(allowedManage.has(call), `unexpected Manage API call: ${call}`);

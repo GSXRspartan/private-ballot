@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Tari Private Ballot",
+  "productName": "Private Ballot",
   "version": "0.1.0",
   "identifier": "com.tari.privateballot",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Tari Private Ballot",
+        "title": "Private Ballot",
         "width": 1280,
         "height": 800,
         "minWidth": 840,
@@ -33,8 +33,8 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "Tari Private Ballot desktop client (community project)",
-    "longDescription": "Community-built offline-first desktop client for organizing and verifying Tari community private ballots, with optional non-binding Ootle anchoring. Not endorsed by or affiliated with Tari Labs.",
+    "shortDescription": "Private Ballot desktop client (independent open-source project)",
+    "longDescription": "Independent open-source offline-first desktop client for organizing and verifying privacy-preserving ballots, with optional non-binding public anchoring on Tari Ootle. Not affiliated with or endorsed by Tari Labs.",
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

@@ -156,7 +156,7 @@ describe("About donation section", () => {
     assert.match(about, /Project identity/);
     assert.match(about, /Architecture/);
     const identity = readProjectFile("src/branding/identity.ts");
-    assert.match(identity, /Not endorsed by or affiliated with Tari Labs/);
+    assert.match(identity, /not affiliated with or endorsed by Tari Labs/i);
   });
 });
 

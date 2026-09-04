@@ -1,45 +1,69 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { Card, Notice } from "../components/ui";
 import { useTheme } from "../theme/ThemeProvider";
+import flowDiagramDarkUrl from "../assets/guide/private-ballot-flow-dark-updated.png";
+import flowDiagramLightUrl from "../assets/guide/private-ballot-flow-light-updated.png";
 
-import flowDiagramDark from "../assets/guide/private-ballot-flow-dark.png";
-import flowDiagramLight from "../assets/guide/private-ballot-flow-light.png";
-
-/** Alt text for the workflow overview diagram. It describes the current
- *  end-to-end workflow the diagram shows — ballot-office setup, the voter's
- *  anonymous private submission over Tor with an offline fallback, and the
- *  ballot office's reconcile/close/tally/finalize/anchor path. The same text
- *  serves both theme variants (the two PNGs are identical except for palette). */
+/** Alt text for the workflow overview diagram — plain-language summary of the
+ *  four end-to-end phases the image depicts. */
 const FLOW_DIAGRAM_ALT =
-  "Private Ballot workflow overview. The ballot office creates and freezes the election, enrolls voters' public enrollment keys, starts private Tor intake, and exports a voter transport bundle. Each voter keeps their own private credential, shares only their public enrollment key, loads the frozen election and the transport bundle, proves anonymous eligibility, chooses a response, and submits the encrypted ballot privately over Tor — or saves an encrypted ballot file for offline delivery — then receives an authenticated organizer receipt. The ballot office reconciles accepted ballots, closes voting, tallies, verifies, writes the final archive, and optionally anchors the aggregate finalized commitment to Tari Ootle.";
+  "How Private Ballot works: organizer setup, private voter flow, archive verification, and optional Tari Ootle anchoring.";
 
 /**
- * Guide — the built-in, role-based walkthrough for the Tari Private Ballot
+ * Guide — the built-in, role-based walkthrough for the Private Ballot
  * product. It has two obvious paths (Voter and Organizer / Ballot Office)
  * written in plain language, a short explanation of the voter transport
  * bundle, and a privacy and safety section.
  *
- * This screen is presentation-only: it calls no backend commands, handles no
- * secret material, and never claims a capability that is not implemented.
+ * The visual overview at the top is a theme-matched raster diagram (dark or
+ * light PNG chosen from the active theme). It is presentation-only: the Guide
+ * calls no backend commands, handles no secret material, and never claims a
+ * capability that is not implemented. The click-to-enlarge lightbox is a
+ * simple accessible modal — Escape and the Close button both dismiss it.
  */
 export function Guide() {
   const { resolved } = useTheme();
-  const flowDiagram = resolved === "dark" ? flowDiagramDark : flowDiagramLight;
+  const diagramSrc = resolved === "dark" ? flowDiagramDarkUrl : flowDiagramLightUrl;
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const closeLightbox = useCallback(() => setLightboxOpen(false), []);
+  const openLightbox = useCallback(() => setLightboxOpen(true), []);
+
   return (
     <>
       <h1 className="screen-header">Guide</h1>
       <p className="screen-lede">
-        How Tari Private Ballot is meant to be used, by role. Pick the path that matches what
+        How Private Ballot is meant to be used, by role. Pick the path that matches what
         you are doing: voting in an election, or running one as the organizer.
       </p>
 
-      <figure className="guide-flow">
-        <img
-          className="guide-flow-diagram"
-          src={flowDiagram}
-          alt={FLOW_DIAGRAM_ALT}
-          draggable={false}
-        />
+      <figure className="guide-flow" aria-label="Workflow overview">
+        <button
+          type="button"
+          className="guide-flow-trigger"
+          onClick={openLightbox}
+          aria-label="Enlarge workflow diagram"
+        >
+          <img
+            className="guide-flow-image"
+            src={diagramSrc}
+            alt={FLOW_DIAGRAM_ALT}
+            draggable={false}
+          />
+        </button>
+        <figcaption className="guide-flow-caption">
+          Click the diagram to enlarge.
+        </figcaption>
       </figure>
+      {lightboxOpen && (
+        <GuideDiagramLightbox src={diagramSrc} alt={FLOW_DIAGRAM_ALT} onClose={closeLightbox} />
+      )}
+      <Notice tone="info">
+        <strong>Individual votes are never published to Tari Ootle.</strong> The
+        independently verified offline archive is authoritative. Anchoring on Ootle is
+        optional and non-binding — it publishes only a readable public aggregate summary,
+        with detached evidence written beside the archive.
+      </Notice>
 
       <Card title="Voter">
         <ol className="guide-steps">
@@ -115,6 +139,9 @@ export function Guide() {
             be independently replayed and checked once the election is finalized.{" "}
             {/* prettier-ignore */}
             Inclusion and Ootle anchoring are later checked from the published archive, not from the receipt.
+            If the organizer chose to publish an Ootle anchor, the public aggregate result
+            on Ootle is bound to the same archive by a domain-separated digest, so an
+            observer can compare the on-chain result to the archive independently.
           </li>
         </ol>
       </Card>
@@ -194,9 +221,16 @@ export function Guide() {
             with the archive folder can run the same check.
           </li>
           <li>
-            <strong>Optionally anchor on Tari Ootle.</strong> The verified finalized{" "}
-            <em>aggregate</em> archive commitment can be anchored on Ootle as an organizer-side
-            operation. Individual voters never create an Ootle transaction.
+            <strong>Optionally anchor on Tari Ootle.</strong> Anchoring is organizer-side,
+            optional, and non-binding — the final archive stays authoritative on its own.
+            The anchor publishes a readable <em>public aggregate election result</em>
+            derived only from the verified finalized archive: schema, network, election id,
+            question, eligible/accepted/rejected counts, ordered response labels with their
+            vote counts, manifest and archive hashes, and the voter-registry and
+            ballot-option commitments. Individual ballots, voter identities, credentials,
+            enrollment keys, nullifiers, proofs, and transport metadata are NEVER published.
+            Individual voters never create an Ootle transaction. Detached evidence written
+            beside the archive lets anyone re-verify the anchor independently.
           </li>
         </ol>
       </Card>
@@ -278,9 +312,13 @@ export function Guide() {
             alone does not provide voting anonymity.
           </li>
           <li>
-            <strong>Ootle anchoring is aggregate and organizer-side.</strong> Voters never send
-            an Ootle transaction; an anchor covers the whole archive commitment, not individual
-            ballots, and the Ootle transaction itself is not a private/stealth ballot.
+            <strong>Ootle anchoring is aggregate and organizer-side.</strong> Voters never
+            send an Ootle transaction. The anchor publishes a readable{" "}
+            <em>public aggregate election result</em> — question, ordered response labels
+            and counts, participation totals, and the archive commitments — but never
+            individual ballots, voter identities, nullifiers, proofs, or transport metadata.
+            The Ootle transaction itself is not a private/stealth ballot, and archive
+            verification always happens before any anchor is prepared.
           </li>
         </ul>
         <Notice tone="info">
@@ -292,5 +330,64 @@ export function Guide() {
         </Notice>
       </Card>
     </>
+  );
+}
+
+/**
+ * Click-to-enlarge lightbox for the Guide diagram. Presentation-only: it
+ * displays the same image the Guide already renders at full viewport size,
+ * centered, with a visible Close button. Escape closes it, clicking the
+ * backdrop closes it, and focus returns to the trigger on close.
+ */
+function GuideDiagramLightbox({
+  src,
+  alt,
+  onClose,
+}: {
+  src: string;
+  alt: string;
+  onClose: () => void;
+}) {
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    closeRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="guide-lightbox-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Workflow diagram"
+      onClick={onClose}
+    >
+      <div
+        className="guide-lightbox"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="guide-lightbox-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onClose}
+            ref={closeRef}
+          >
+            Close
+          </button>
+        </div>
+        <img className="guide-lightbox-image" src={src} alt={alt} draggable={false} />
+      </div>
+    </div>
   );
 }

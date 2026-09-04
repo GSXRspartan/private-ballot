@@ -1,67 +1,157 @@
-# Tari CC Private Ballot
+# Private Ballot
 
-An offline-verifiable private-ballot protocol foundation for Tari governance,
-with an optional append-only Tari Ootle commitment anchor.
+Private Ballot is privacy-preserving, verifiable voting software with
+optional public anchoring on Tari Ootle. It is a desktop application and
+protocol workspace for running non-binding governance pilot ballots. It is
+offline-first: the finalized election archive is the authoritative
+verification artifact, and an optional Tari Ootle anchor can commit public
+aggregate evidence on Esmeralda testnet.
 
-## Current status
+Status: **v0.1.0 Alpha, Governance Pilot, Esmeralda Testnet.** Private
+Ballot is an **Independent Open-Source Project**. It is **not affiliated
+with or endorsed by Tari Labs**, and it is not production election
+software. Do not use it for binding governance, treasury, charter,
+employment, or legal decisions.
 
-Phase 2 is complete as a non-production Rust protocol foundation.
+License: **MIT OR Apache-2.0** (at the recipient's option). See
+[LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT), and
+[LICENSE-APACHE](LICENSE-APACHE). Third-party components retain their own
+licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the
+machine-readable reports under
+[docs/release/licenses/](docs/release/licenses/).
 
-The repository currently provides:
+## Privacy Model
 
-- deterministic and bounded canonical CBOR;
-- versioned registry, ballot, manifest, package, lifecycle, tally, and archive
-  models;
-- proof-verification authority boundaries and election-scoped duplicate
-  detection;
-- metadata-minimized offline replay;
-- published valid and invalid test vectors;
-- an independent Python canonical-vector verifier;
-- seven libFuzzer parser targets.
+The app separates three ideas that are easy to blur:
 
-The implementation baseline is commit `d9e46e1`.
+- Voter eligibility is proven with a Triptych-style membership proof.
+- Ballot delivery privacy depends on the chosen submission route (managed
+  Tor by default) and organizer logging discipline.
+- Final verification depends on the complete offline archive, not on
+  Ootle.
 
-## Validation status
+Individual votes are never published to Ootle. The V2 anchor path
+publishes a public aggregate digest and scalar summary only, with detached
+evidence that can be checked against the finalized archive. Voters do not
+submit Ootle transactions; optional anchoring is organizer-side and
+fee-bearing.
 
-- Windows: Rust workspace checks, Clippy, 220 tests, and the independent
-  canonical-vector verifier passed.
-- Linux x86_64: the same workspace gates passed, and seven libFuzzer targets
-  completed bounded offline smoke runs using 137 deterministic seeds.
-- macOS: intended to be supported, but no native macOS validation has run yet.
+## Workflow
 
-Platform-neutral Rust source contains no current Windows-, Unix-, or
-macOS-specific code paths. That is encouraging, not magical proof. Native
-macOS CI remains required.
+Organizers create and freeze an election, enroll voter public enrollment
+keys, open intake, close voting, verify accepted ballots, finalize the
+archive, and optionally anchor public aggregate evidence on Ootle.
 
-## Design principle
+Voters create an encrypted credential file, give the organizer only the
+public enrollment key, load the issued election package, choose a route,
+cast once, and keep their receipt and credential private.
 
-The complete offline election archive must be sufficient to verify an
-election. Ootle may record immutable commitments and lifecycle transitions,
-but it is not the only copy and is not trusted to survive testnet resets.
+## External requirements (not bundled)
 
-## Safety status
+Private Ballot is a self-contained desktop app for the parts of the
+protocol it owns, but a real pilot needs one or two external runtimes that
+the installer does **not** ship:
 
-This repository is not production election software.
+- **Tor** — required for private ballot intake (organizer) and private
+  submission (voter). Install [Tor Browser](https://www.torproject.org/download/)
+  or the [Tor Expert Bundle](https://www.torproject.org/download/tor/)
+  and point the app at its `tor.exe`. The app validates the path and
+  launches Tor as a child process; it never resolves `tor` from `PATH`
+  and never downloads Tor for you.
+- **Tari Ootle `walletd`** (v0.39.2 on Esmeralda) — required only if you
+  want to publish an optional public anchor. Voters do not need walletd
+  and do not need tTARI. The app talks to walletd on loopback at
+  `http://127.0.0.1:5100/json_rpc`.
+- **tTARI** — Esmeralda testnet TARI, only for the organizer publishing
+  an anchor, only enough to cover the transaction fee.
 
-The current proof and hash providers are deterministic, forgeable,
-non-anonymous test plumbing:
+See [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md) for a step-by-step
+setup guide for organizers, voters, and developers.
 
-- `TEST_ONLY_NOT_ANONYMOUS_NOT_FOR_BINDING_ELECTIONS`
-- `TEST_ONLY_DETERMINISTIC_HASH_NOT_CRYPTOGRAPHIC`
+## Repository Layout
 
-Do not use this repository for a binding Core Contributor, Council, treasury,
-charter, or other governance election.
+- `crates/` - Rust protocol, archive, verifier, transport, GUI-core,
+  Ootle adapter, and controlled-alpha tooling crates.
+- `gui/` - Tauri 2 desktop shell and React frontend.
+- `templates/` - Tari Ootle template source. Compiled WASM belongs in
+  release assets, not ordinary source.
+- `docs/` - architecture, runbooks, threat model notes, decisions, and
+  release audit records.
+- `test-vectors/` - public canonical valid/invalid vectors.
+- `tools/`, `scripts/`, `fuzz/` - developer/auditor tooling.
+- `third_party/tari-triptych/` - vendored Triptych implementation,
+  licensed under BSD-3-Clause.
 
-## Next phase
+## Build And Test
 
-Phase 3 begins with a reviewed anonymous-membership prototype and a
-Windows/Linux/macOS CI matrix. A harmless non-binding pilot remains blocked
-until the production-oriented proof path and cross-platform validation gates
-exist.
+Frontend checks:
 
-See:
+```powershell
+cd gui
+npx tsc --noEmit
+npm test
+```
 
-- `PHASE_STATUS.md`
-- `ROADMAP.md`
-- `docs/reviews/PHASE2_CLOSEOUT_2026-08-01.md`
-- `docs/OPEN_QUESTIONS.md`
+Focused V2 anchor lifecycle checks:
+
+```powershell
+cargo +1.97.1-x86_64-pc-windows-msvc test -p tari-cc-private-ballot-gui-core --test live_anchor_v2 --test live_anchor_v2_lifecycle
+```
+
+Windows package build (developer only — MSVC BuildTools + vcpkg required):
+
+```powershell
+cd gui
+$env:RUSTUP_TOOLCHAIN = '1.97.1-x86_64-pc-windows-msvc'
+$env:VCPKG_ROOT = 'C:\path\to\vcpkg'          # your local vcpkg checkout
+$env:VCPKG_DEFAULT_TRIPLET = 'x64-windows-static-md'
+$env:VCPKGRS_TRIPLET = 'x64-windows-static-md'
+$env:VCPKG_VISUAL_STUDIO_PATH = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
+$env:OPENSSL_DIR = "$($env:VCPKG_ROOT)\installed\x64-windows-static-md"
+npm run tauri build
+```
+
+The generated `.exe`, `.msi`, `.wasm`, and checksum files are release
+assets. They should be attached to a GitHub Release only after provenance
+and checksums are recorded.
+
+## Qualified platforms
+
+- **Windows 11 x64** — currently qualified; the scale-qualification harness
+  has passed at 100 voters and been run at additional scales during
+  release preparation (see
+  [docs/development/load-testing/](docs/development/load-testing/) and
+  `scale-qualification-results/` for recorded runs).
+- **Linux / macOS** — not currently qualified. The code is cross-platform
+  by construction (the Tauri 2 shell and every Rust crate build on Linux
+  and macOS), but a real release build and per-platform test pass have
+  not been performed for the alpha.
+
+## Verification
+
+The archive verifier and GUI evidence screens are intended to let an
+auditor replay the finalized archive, recompute the tally, inspect legacy
+V1 anchor evidence, and verify V2 public-summary evidence. Historical V1
+verification compatibility remains intentionally supported; V1 publishing
+UX is not part of the normal alpha workflow.
+
+See [docs/INDEPENDENT_VECTOR_VERIFIER.md](docs/INDEPENDENT_VECTOR_VERIFIER.md),
+[docs/CONTROLLED_ALPHA_RUNBOOK.md](docs/CONTROLLED_ALPHA_RUNBOOK.md), and
+[templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md](templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md).
+
+## Security
+
+Read [SECURITY.md](SECURITY.md) before operating a pilot. The current
+threat-model material lives mainly under [docs/transport/](docs/transport/);
+it documents organizer trust boundaries, transport assumptions, logging
+limits, archive authority, and alpha limitations.
+
+Never commit live election archives, voter credentials, wallet databases,
+wallet API keys, LocalAppData runtime state, Tor service keys, transport
+authority private keys, or Ootle evidence sidecars from a real run.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are dual-licensed
+under `MIT OR Apache-2.0` unless you explicitly state otherwise; there is
+no CLA and no DCO sign-off requirement.

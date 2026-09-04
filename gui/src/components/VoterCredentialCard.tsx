@@ -9,6 +9,7 @@ import type {
   GuiSavedVoterCredentialsV1,
   GuiVoterCredentialStatusV1,
 } from "../api/types";
+import { createCredentialIsFutureElectionOnly } from "../voterTerminalState";
 import {
   backupCredentialFlow,
   clearMemoryConfirmationText,
@@ -52,6 +53,13 @@ export interface VoterCredentialCardProps {
   busy?: boolean;
   context: "vote" | "bootstrap";
   showFrozenElectionNotice?: boolean;
+  /**
+   * Optional election lifecycle. When the loaded election is already frozen (or
+   * later), creating a NEW credential cannot make it eligible for that frozen
+   * registry, so the Create-credential action is moved under a disclosure and
+   * Unlock/Import remain primary/secondary. Omit for bootstrap contexts.
+   */
+  electionLifecycleState?: string | null;
   onCreate: (passphrase: string) => Promise<void>;
   onUnlock: (publicKeyHex: string, passphrase: string) => Promise<void>;
   onImport: (
@@ -76,6 +84,7 @@ export function VoterCredentialCard({
   busy = false,
   context,
   showFrozenElectionNotice = context === "vote",
+  electionLifecycleState = null,
   onCreate,
   onUnlock,
   onImport,
@@ -105,6 +114,7 @@ export function VoterCredentialCard({
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
 
   const loaded = !!status?.credential_loaded;
+  const createIsFutureOnly = createCredentialIsFutureElectionOnly(electionLifecycleState);
   const currentPublicKey = status?.public_governance_key_hex ?? null;
   const activeSavedCopy = !!currentPublicKey &&
     saved.some((credential) => credential.public_governance_key_hex === currentPublicKey);
@@ -349,6 +359,7 @@ export function VoterCredentialCard({
             selectedPublicKey={selectedSavedCredential?.public_governance_key_hex ?? ""}
             controlsBusy={controlsBusy}
             shellAvailable={shellAvailable}
+            createIsFutureOnly={createIsFutureOnly}
             onSelectPublicKey={setSelectedPublicKey}
             onUnlock={() => openDialog("unlock")}
             onImport={() => void openImportDialog()}
@@ -358,6 +369,7 @@ export function VoterCredentialCard({
           <NoCredential
             controlsBusy={controlsBusy}
             shellAvailable={shellAvailable}
+            createIsFutureOnly={createIsFutureOnly}
             onCreate={() => openDialog("create")}
             onImport={() => void openImportDialog()}
           />
@@ -410,14 +422,54 @@ export function VoterCredentialCard({
 function NoCredential({
   controlsBusy,
   shellAvailable,
+  createIsFutureOnly,
   onCreate,
   onImport,
 }: {
   controlsBusy: boolean;
   shellAvailable: boolean;
+  createIsFutureOnly: boolean;
   onCreate: () => void;
   onImport: () => void;
 }) {
+  if (createIsFutureOnly) {
+    // The loaded election is already frozen (or later): a NEW credential cannot
+    // be enrolled into that frozen registry, so Import is the only path that
+    // can lead to eligibility for THIS election. Creation is retained under a
+    // "for a future election" disclosure.
+    return (
+      <>
+        <p className="form-hint">{CREDENTIAL_RECOVERY_WARNING}</p>
+        <div className="action-row">
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={controlsBusy || !shellAvailable}
+            onClick={onImport}
+          >
+            Import credential
+          </button>
+        </div>
+        <details className="future-election">
+          <summary>For a future election</summary>
+          <p className="form-hint">
+            A newly created credential cannot make you eligible for this already-frozen
+            election unless its public enrollment key was enrolled before freeze.
+          </p>
+          <div className="action-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={controlsBusy || !shellAvailable}
+              onClick={onCreate}
+            >
+              Create credential
+            </button>
+          </div>
+        </details>
+      </>
+    );
+  }
   return (
     <>
       <p className="form-hint">{CREDENTIAL_RECOVERY_WARNING}</p>
@@ -448,6 +500,7 @@ function SavedCredentialUnlock({
   selectedPublicKey,
   controlsBusy,
   shellAvailable,
+  createIsFutureOnly,
   onSelectPublicKey,
   onUnlock,
   onImport,
@@ -457,6 +510,7 @@ function SavedCredentialUnlock({
   selectedPublicKey: string;
   controlsBusy: boolean;
   shellAvailable: boolean;
+  createIsFutureOnly: boolean;
   onSelectPublicKey: (publicKeyHex: string) => void;
   onUnlock: () => void;
   onImport: () => void;
@@ -522,15 +576,36 @@ function SavedCredentialUnlock({
         >
           Import credential
         </button>
-        <button
-          type="button"
-          className="btn btn-secondary"
-          disabled={controlsBusy || !shellAvailable}
-          onClick={onCreate}
-        >
-          Create credential
-        </button>
+        {!createIsFutureOnly && (
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={controlsBusy || !shellAvailable}
+            onClick={onCreate}
+          >
+            Create credential
+          </button>
+        )}
       </div>
+      {createIsFutureOnly && (
+        <details className="future-election">
+          <summary>For a future election</summary>
+          <p className="form-hint">
+            A newly created credential cannot make you eligible for this already-frozen
+            election unless its public enrollment key was enrolled before freeze.
+          </p>
+          <div className="action-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={controlsBusy || !shellAvailable}
+              onClick={onCreate}
+            >
+              Create credential
+            </button>
+          </div>
+        </details>
+      )}
     </>
   );
 }

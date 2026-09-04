@@ -5,10 +5,30 @@ Cargo.lock
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 *.log
 *.tmp
+*.temp
+*.bak
+*.orig
+*.patch
+*.dmp
+*.crash
 *.key
 *.secret
+*.pem
+*.p12
+*.pfx
+*.seed
+*.mnemonic
+*.wallet
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
+.env
+.env.*
+!.env.example
 /private-test-data/
 # Local cargo-fuzz state
 /fuzz/artifacts/
@@ -25,3 +45,32 @@ Thumbs.db
 # The detached Tauri workspace needs its lockfile tracked for reproducible
 # --locked builds (overrides the blanket Cargo.lock rule above).
 !/gui/src-tauri/Cargo.lock
+
+# Template workspaces should keep lockfiles when present; only their build
+# output is generated.
+!/templates/*/Cargo.lock
+
+# Scale qualification harness output (timestamped CSV + logs). Disposable
+# per-run measurements; never commit generated fixtures or result runs.
+/scale-qualification-results/
+
+# Ootle anchor event-template build output. Each template under templates/ is a
+# separate cargo workspace whose wasm/rlib artifacts are reproducible build
+# output and must never be committed (only the template source ships).
+/templates/*/target/
+
+# Runtime election state and local anchoring sidecars belong on the operator
+# machine or in explicit release/evidence bundles, never ordinary source.
+*.anchor-evidence.cbor
+*.anchor-config.cbor
+*.anchor-snapshot.cbor
+*.v2-anchor-lifecycle.json
+*.v2-anchor-evidence.json
+*.v2-anchor-failure.json
+
+# GitHub Release assets are produced from source and attached to releases.
+*.exe
+*.msi
+*.wasm
+*.sha256
+*.blake3

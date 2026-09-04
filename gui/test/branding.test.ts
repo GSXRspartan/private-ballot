@@ -78,14 +78,17 @@ describe("emblem assets", () => {
 });
 
 // -------------------------------------------------------------------------
-// Community project identity
+// Public product identity
 // -------------------------------------------------------------------------
 
-describe("community project identity", () => {
+describe("public product identity", () => {
   it("keeps the product name primary and the qualifier separate", () => {
-    assert.equal(APP_NAME, "Tari Private Ballot");
-    assert.equal(APP_IDENTITY_TAG, "Community Project");
-    assert.match(COMMUNITY_DISCLAIMER, /Not endorsed by or affiliated with Tari Labs/);
+    assert.equal(APP_NAME, "Private Ballot");
+    assert.equal(APP_IDENTITY_TAG, "Independent Open-Source Project");
+    assert.match(
+      COMMUNITY_DISCLAIMER,
+      /independent open-source project.*not affiliated with or endorsed by Tari Labs/i,
+    );
   });
 
   it("keeps the frontend version in step with package.json", () => {
@@ -110,14 +113,14 @@ describe("community project identity", () => {
     assert.match(readProjectFile("src/styles/global.css"), /Tari/);
   });
 
-  it("shows the Community Project subtitle in the header and About", () => {
+  it("shows the Independent Open-Source Project subtitle in the header and About", () => {
     for (const file of [
       "src/components/AppFrame.tsx",
       "src/screens/About.tsx",
     ]) {
       assert.ok(
         readProjectFile(file).includes("APP_IDENTITY_TAG"),
-        `${file} does not present the Community Project qualifier`,
+        `${file} does not present the Independent Open-Source Project qualifier`,
       );
     }
   });
@@ -136,7 +139,7 @@ describe("community project identity", () => {
 
   it("keeps the native window title free of the subtitle qualifier", () => {
     const config = JSON.parse(readProjectFile("src-tauri/tauri.conf.json"));
-    assert.equal(config.app.windows[0].title, "Tari Private Ballot");
+    assert.equal(config.app.windows[0].title, "Private Ballot");
   });
 });
 
@@ -404,8 +407,12 @@ describe("prerequisite guidance", () => {
 
 describe("plain primary wording", () => {
   it("keeps the archive anchor check understandable", () => {
+    // Current V2 anchor status is auto-hydrated and shown as "Anchored ·
+    // Verified" / neutral / recovery states. The legacy CBOR path is now
+    // under Advanced with a clearly-labelled legacy action.
     const archive = readProjectFile("src/screens/Archive.tsx");
-    assert.match(archive, /Check final anchor record/);
+    assert.match(archive, /Anchored · Verified|Ootle anchor/);
+    assert.match(archive, /Check legacy V1 anchor record/);
     assert.doesNotMatch(archive, /Final transport anchor/);
   });
 
