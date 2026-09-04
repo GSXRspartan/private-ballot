@@ -516,6 +516,6 @@ pub(crate) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(not(windows))]
-fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }

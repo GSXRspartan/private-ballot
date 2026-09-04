@@ -30,7 +30,7 @@ Private Ballot installer. Nothing else is downloaded silently.
 | --- | --- | --- | --- |
 | Private Ballot | GitHub Release (MSI, NSIS setup, or portable `.exe`) once one is published, or a source build. | Compare the release-asset `SHA256SUMS` against your own `Get-FileHash` before running the installer. | Organizer, Voter, Developer |
 | Tari Ootle `walletd` | Upstream Tari Ootle project (v0.39.2 is the currently pinned Esmeralda-compatible release). Get it from the official tari-project distribution channel. | Compare SHA-256 against the value published by upstream. | Organizer (only if publishing an anchor) |
-| Tor | [Tor Browser](https://www.torproject.org/download/) or the [Tor Expert Bundle](https://www.torproject.org/download/tor/). Either provides an unmodified `tor.exe`. | Compare SHA-256 against the value published on `torproject.org`. On Windows, also confirm the digital signature. | Organizer (private intake) and Voter (private submission). Not required for developer scale benchmarks. |
+| Tor | [Tor Browser](https://www.torproject.org/download/) or the [Tor Expert Bundle](https://www.torproject.org/download/tor/) provides an unmodified `tor.exe` on Windows and an unmodified `tor` binary on Linux/macOS. On Ubuntu Linux the Debian `tor` package (`sudo apt install tor`, executable at `/usr/bin/tor`) is also accepted. | Compare SHA-256 against the value published on `torproject.org`. On Windows, also confirm the digital signature. On Linux, verify the apt repository signature or the `torproject.org` SHA-256. | Organizer (private intake) and Voter (private submission). Not required for developer scale benchmarks. |
 | tTARI (Esmeralda testnet TARI) | The current Tari Esmeralda testnet faucet or your existing testnet balance. | n/a | Organizer, only for publishing the optional Ootle anchor. |
 | MSVC Build Tools, vcpkg, Node.js, Rust `1.97.1-x86_64-pc-windows-msvc` | Vendor sites. | Vendor-published checksums. | Developer only. |
 
@@ -48,27 +48,48 @@ until you drive **Create election** in the app.
 
 ### A2. Install Tor
 
-Private Ballot does not bundle `tor.exe`. Install Tor separately:
+Private Ballot does not bundle Tor. Install Tor separately:
+
+**Windows:**
 
 1. Download the Tor Expert Bundle (recommended for organizer machines
    because it does not launch a browser UI) or Tor Browser.
-2. Verify the download's SHA-256 and, on Windows, the digital signature.
+2. Verify the download's SHA-256 and the digital signature.
 3. Extract / install to a stable absolute path you will not delete, e.g.
    `C:\Program Files\Tor Expert Bundle\tor\tor.exe`.
 
-Private Ballot needs the absolute path to `tor.exe`. It never resolves
-`tor` from `PATH`, never scans the disk, and never downloads Tor for you.
+**Linux (Ubuntu 24.04 or newer):**
+
+1. `sudo apt install tor` provides `/usr/bin/tor` (Debian package
+   signed by the Ubuntu maintainers), OR download the Tor Expert
+   Bundle for Linux and extract to a stable absolute path you will
+   not delete.
+2. Verify apt package signature (default for `apt install`), or the
+   SHA-256 from `torproject.org` for the Expert Bundle.
+3. If installed via apt, make sure the daemon is not competing for the
+   fixed loopback data-directory Private Ballot uses. The app spawns
+   Tor as a child process with its own per-run directories; disabling
+   the system-wide `tor.service` (`sudo systemctl disable --now tor`)
+   avoids confusion, though it is not strictly required.
+
+The desktop shell needs the absolute path to the Tor executable. It
+never resolves `tor` from `PATH`, never scans the disk, and never
+downloads Tor for you. The Linux-side validator additionally enforces
+that the file is marked executable (`chmod +x` on the binary).
 
 ### A3. Configure Tor in the app
 
 Open the app, choose the ballot-office workflow, and provide the absolute
-`tor.exe` path in the Tor configuration panel. On first use the path is
-validated (must be an absolute path to a real regular file, no symlinks, no
-control characters) and stored in the app's local config; you will not be
-asked again unless the file moves. The application then launches Tor as a
-child process with:
+path to the Tor executable in the Tor configuration panel. On first use the
+path is validated (must be an absolute path to a real regular file, no
+symlinks, no control characters, and on Linux/macOS also marked executable)
+and stored in the app's local config; you will not be asked again unless
+the file moves. The application then launches Tor as a child process with:
 
-* a fresh per-run `DataDirectory` under the app's `%LOCALAPPDATA%` scratch,
+* a fresh per-run `DataDirectory` under the app's per-user scratch
+  (`%LOCALAPPDATA%\Tari Private Ballot\...` on Windows, an OS-appropriate
+  location under `$XDG_STATE_HOME/tari-private-ballot/...` on Linux, and
+  `~/Library/Application Support/Tari Private Ballot/...` on macOS),
 * a per-run ephemeral loopback SOCKS port (organizer intake uses SOCKS `0` and
   a `HiddenServicePort` mapping to a fixed virtual port 80),
 * a persistent hidden-service key directory under the app's private-tor
@@ -113,9 +134,15 @@ If you do want a public Ootle anchor:
    transaction fee.
 5. In Private Ballot, click **Connect Tari Wallet** and paste the API
    key. The key is stored in your OS credential store (Windows Credential
-   Manager / macOS Keychain). It never crosses into `gui-core`, never appears
-   in the election archive, never appears in evidence sidecars, and never
-   appears in log output. You will not be asked for it again.
+   Manager on Windows, macOS Keychain on macOS, Secret Service on Linux).
+   On Linux this requires a running Secret Service D-Bus provider such
+   as `gnome-keyring-daemon` (default in GNOME) or `kwalletmanager5`
+   (KDE); on a headless server without either, the store reports as
+   unavailable and the shell falls back to the documented
+   `WALLETD_AUTH_TOKEN` environment variable. The key never crosses into
+   `gui-core`, never appears in the election archive, never appears in
+   evidence sidecars, and never appears in log output. You will not be
+   asked for it again.
 6. Confirm the app shows the walletd account and network in the anchor
    panel. The default indexer is
    `https://ootle-indexer-a.tari.com/`; you may override this to your own
@@ -169,15 +196,34 @@ voter credential. Import each of these through the app.
 
 ### C1. Toolchain
 
-* Rust: install the pinned Windows MSVC toolchain
-  `1.97.1-x86_64-pc-windows-msvc`.
-* Node.js: any current LTS suitable for the Tauri 2 frontend toolchain.
+* Rust: install the pinned toolchain (`1.97.1-x86_64-pc-windows-msvc` on
+  Windows, `1.97.1-x86_64-unknown-linux-gnu` on Linux) — `rustup` reads
+  the pinned version from `rust-toolchain.toml` automatically.
+* Node.js: 22.6 or newer (the frontend test script uses
+  `--experimental-strip-types`, unflagged in Node 22.6+). Node 24 LTS is
+  the qualification target on both Windows and Linux; install with
+  [nvm](https://github.com/nvm-sh/nvm) on Linux.
 * Windows: MSVC BuildTools + vcpkg with triplet `x64-windows-static-md`
   and the `openssl` vcpkg port installed.
+* Linux (Ubuntu 24.04 LTS Noble): install the following apt packages
+  before running `npm run tauri build`:
+
+  ```bash
+  sudo apt update
+  sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget \
+      file libxdo-dev libssl-dev libayatana-appindicator3-dev \
+      librsvg2-dev libdbus-1-dev patchelf
+  ```
+
+  `libdbus-1-dev` is required at build time by the `sync-secret-service`
+  Linux backend of the `keyring` crate. All other packages are the
+  standard Tauri 2 Linux build closure.
 
 The build recipe is in the [README](../README.md).
 
 ### C2. Frontend and Rust tests
+
+Windows (PowerShell):
 
 ```powershell
 cd gui
@@ -188,6 +234,24 @@ npm test
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc test --workspace --features test-support
 ```
+
+Linux (bash):
+
+```bash
+cd gui
+npx tsc --noEmit
+npm test
+```
+
+```bash
+cargo +1.97.1 test --workspace --features test-support --release
+```
+
+On both platforms, `npm ci` (not `npm install`) must be used to keep the
+tracked `gui/package-lock.json` byte-identical across Windows and Linux
+build hosts. The lockfile carries every platform-specific optional
+dependency for `@tauri-apps/cli` and `@rolldown/binding` so a clean
+`npm ci` succeeds without further intervention.
 
 ### C3. Scale-qualification benchmark (no Tor)
 
@@ -216,14 +280,19 @@ Bundle or Tor Browser), then point the driver at its SOCKS port.
 
 The current installer does **not** include:
 
-* `tor.exe` — every organizer, voter, and physical-multi-machine load-test
-  host installs Tor separately.
+* Tor (`tor.exe` on Windows, `tor` on Linux/macOS) — every organizer,
+  voter, and physical-multi-machine load-test host installs Tor
+  separately.
 * `walletd` — organizers publishing anchors install walletd separately.
 * tTARI — obtain testnet TARI from the current Esmeralda faucet.
 * The Ootle indexer — the app defaults to the hosted
   `https://ootle-indexer-a.tari.com/` unless you point it elsewhere.
-* Rust, Node.js, MSVC BuildTools, vcpkg — developer prerequisites only,
+* Rust, Node.js, MSVC BuildTools, vcpkg (Windows), the Ubuntu apt
+  packages listed under C1 (Linux) — developer prerequisites only,
   never used by a normal operator.
+* On Linux, a Secret Service D-Bus provider (`gnome-keyring-daemon` or
+  KWallet). Desktop distributions ship one by default. On a headless
+  server the credential store falls back to `WALLETD_AUTH_TOKEN`.
 
 If a future release changes any of the above (for example, by adding an
 official companion Tor bundle), it must be recorded in

@@ -122,10 +122,18 @@ and checksums are recorded.
   release preparation (see
   [docs/development/load-testing/](docs/development/load-testing/) and
   `scale-qualification-results/` for recorded runs).
-- **Linux / macOS** — not currently qualified. The code is cross-platform
-  by construction (the Tauri 2 shell and every Rust crate build on Linux
-  and macOS), but a real release build and per-platform test pass have
-  not been performed for the alpha.
+- **Ubuntu Linux 24.04 LTS x64** — currently qualified for the desktop
+  shell. Full test suites (frontend 871/0, gui-core 616/0, managed-Tor
+  transport 69/0, transport-network 68/0) and the production Tauri
+  release build (`.deb`, `.rpm`, `.AppImage`) all pass; see
+  [docs/release/licenses/LINUX_NATIVE_DEPENDENCIES.md](docs/release/licenses/LINUX_NATIVE_DEPENDENCIES.md)
+  and the Linux section of [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md)
+  for install/build notes. The `managed-tor` production transport is
+  enabled by default in the Linux release.
+- **macOS** — not yet qualified. The code is cross-platform by
+  construction (the Tauri 2 shell and every Rust crate build on macOS),
+  but a real release build and per-platform test pass have not been
+  performed for the alpha. Qualification is planned.
 
 ## Verification
 

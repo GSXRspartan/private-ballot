@@ -445,7 +445,19 @@ mod tests {
         }
     }
     fn test_config() -> ManagedTorConfigV1 {
-        let base = std::env::temp_dir().join("tari-private-ballot-transport-network-test");
+        // Every invocation gets its own base directory so concurrent tests
+        // (cargo's default test harness runs test threads in parallel) never
+        // race on the same torrc/data path. Without this, two tests writing
+        // torrc.new + renaming it in write_atomic would race the rename and
+        // one would surface as PrivateTransportNetworkErrorV1::InvalidConfiguration
+        // on Linux, where fs::rename is fast and atomic and the shared path
+        // collision is not masked by slower Windows filesystem timing.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "tari-private-ballot-transport-network-test-{}-{n}",
+            std::process::id(),
+        ));
         ManagedTorConfigV1 {
             executable: base.join("tor.exe"),
             data_directory: base.join("data"),

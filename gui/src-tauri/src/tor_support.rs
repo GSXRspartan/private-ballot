@@ -67,6 +67,21 @@ pub fn validate_tor_exe(path: &Path) -> Result<(), CommandError> {
             "the tor.exe path must not contain control characters",
         ));
     }
+    // On Unix, verify the file is marked executable. Windows uses the .exe
+    // extension convention for executability; there is no equivalent bit to
+    // check. Without this, an operator on Linux could point at a plain data
+    // file and only discover the mistake at spawn time.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(CommandError::new(
+                "GUI_TOR_EXE_NOT_EXECUTABLE",
+                "FILE_IO",
+                "the tor executable is not marked executable",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -158,6 +173,32 @@ mod tests {
                 "allowlist entry must be absolute: {entry}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_non_executable_regular_file_is_rejected() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "private-ballot-tor-support-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("not-an-executable");
+        std::fs::File::create(&file)
+            .and_then(|mut f| f.write_all(b"#!/bin/false\n"))
+            .expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        let error = validate_tor_exe(&file).expect_err("must reject non-executable");
+        assert_eq!(error.code, "GUI_TOR_EXE_NOT_EXECUTABLE");
+        // Cleanup.
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
