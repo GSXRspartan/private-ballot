@@ -6,7 +6,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
@@ -23,6 +23,8 @@ use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
     TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
 };
+
+mod managed_tor;
 
 const DEFAULT_PASSPHRASE_ENV: &str = "TARI_BALLOT_LOAD_PASSPHRASE";
 const ORGANIZER_REGISTRY_FILE: &str = "voter-registry.cbor";
@@ -67,10 +69,13 @@ fn print_usage(prog: &str) {
         "  {prog} distributed-partition --credentials <dir> --out <dir> --start-index <N> --count <N>"
     );
     eprintln!(
-        "  {prog} distributed-submit --manifest <path> --registry <path> --candidates <path> --voter-public-bundle <path> --credentials <dir> --tor-socks <ip:port> --results <path> [--choice round-robin|all:<candidate-id-hex>] [--count <N>] [--start-index <N>] [--concurrency 1] [--passphrase-env <ENV>] [--state-dir <dir>]"
+        "  {prog} distributed-submit --manifest <path> --registry <path> --candidates <path> --voter-public-bundle <path> --credentials <dir> --tor-exe <absolute-tor-path>|--tor-socks <ip:port> --results <path> [--choice round-robin|all:<candidate-id-hex>] [--count <N>] [--start-index <N>] [--concurrency 1] [--passphrase-env <ENV>] [--state-dir <dir>] [--run-id <id>]"
     );
     eprintln!();
-    eprintln!("No command starts Tor, walletd, indexer, GUI, or Ootle services.");
+    eprintln!(
+        "distributed-submit accepts exactly one Tor mode: --tor-exe (the tool validates, starts, waits for SOCKS readiness, and stops an ISOLATED Tor process it owns) or the legacy --tor-socks (an already-running local SOCKS listener you manage). Supplying both is rejected."
+    );
+    eprintln!("No command starts walletd, indexer, GUI, or Ootle services.");
 }
 
 fn run_distributed_cohort(args: Vec<String>) -> Result<(), String> {
@@ -108,13 +113,25 @@ fn run_distributed_partition(args: Vec<String>) -> Result<(), String> {
 
 fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
     let parsed = ParsedArgs::new(args)?;
-    let config = LoadDriverConfig {
+    // Exactly one Tor mode, resolved fail-closed BEFORE anything else runs.
+    // Ambiguity (--tor-exe AND --tor-socks) and under-specification (neither)
+    // are both rejected; there is no silent guess and no clearnet fallback.
+    let tor_mode = managed_tor::resolve_tor_endpoint_mode_v1(
+        parsed.optional_path("--tor-exe")?.as_deref(),
+        parsed.optional_socket("--tor-socks")?,
+    )?;
+    let mut config = LoadDriverConfig {
         manifest_path: parsed.required_path("--manifest")?,
         registry_path: parsed.required_path("--registry")?,
         candidate_path: parsed.required_path("--candidates")?,
         voter_public_bundle_path: parsed.required_path("--voter-public-bundle")?,
         credentials_dir: parsed.required_path("--credentials")?,
-        tor_socks: parsed.required_socket("--tor-socks")?,
+        tor_socks: match &tor_mode {
+            managed_tor::TorEndpointModeV1::ExistingSocks { socks_addr } => *socks_addr,
+            // Managed mode replaces this placeholder with the freshly
+            // reserved loopback endpoint AFTER Tor is actually ready.
+            managed_tor::TorEndpointModeV1::Managed { .. } => SocketAddr::from(([127, 0, 0, 1], 0)),
+        },
         results_path: parsed.required_path("--results")?,
         state_dir: parsed.optional_path("--state-dir")?,
         count: parsed.optional_usize("--count")?,
@@ -141,10 +158,155 @@ fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
         )
     })?;
     validate_load_driver_config(&config)?;
-    let report = run_load_driver(&config, &passphrase)?;
-    write_json_report(&config.results_path, &report)?;
-    print_report_summary(&report);
+    match tor_mode {
+        managed_tor::TorEndpointModeV1::ExistingSocks { socks_addr } => {
+            // MODE B — existing SOCKS: the exact workflow of the prior physical
+            // 500-voter run. The operator manages the Tor process entirely.
+            config.tor_socks = socks_addr;
+            let started = SystemTime::now();
+            let report = run_load_driver(&config, &passphrase)?;
+            write_json_report(&config.results_path, &report)?;
+            write_managed_tor_run_metadata(
+                &config,
+                "existing-socks",
+                started,
+                &report,
+                socks_addr,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            print_report_summary(&report);
+        }
+        managed_tor::TorEndpointModeV1::Managed { tor_exe } => {
+            run_distributed_submit_managed(config, tor_exe, &passphrase)?;
+        }
+    }
     Ok(())
+}
+
+/// MODE A — managed Tor. Validates the operator-supplied executable, starts an
+/// ISOLATED Tor process owned by this run, waits for REAL SOCKS readiness,
+/// submits the cohort through that Tor instance, and always stops/reaps ONLY
+/// the child it launched. On success the disposable runtime is removed; on
+/// failure it is preserved (bounded stderr log) as evidence. There is no
+/// clearnet fallback: a Tor failure fails the whole run before any ballot
+/// bytes exist.
+fn run_distributed_submit_managed(
+    mut config: LoadDriverConfig,
+    tor_exe: PathBuf,
+    passphrase: &str,
+) -> Result<DistributedLoadReportV1, String> {
+    let started = SystemTime::now();
+    let start_instant = Instant::now();
+    let runtime_base = managed_tor::managed_runtime_base_for_results(&config.results_path);
+    let startup =
+        managed_tor::ManagedTorStartupConfigV1::new(tor_exe.clone(), runtime_base.clone());
+    let mut session = managed_tor::start_managed_tor_session(&startup)?;
+    config.tor_socks = session.socks_addr();
+    // Optional bounded `tor --version` evidence from the validated executable.
+    let tor_version = managed_tor::capture_tor_version_v1(&tor_exe);
+    let outcome = run_load_driver(&config, passphrase)
+        .and_then(|report| write_json_report(&config.results_path, &report).map(|()| report));
+    let finished = SystemTime::now();
+    let onion_hostname = load_voter_public_bundle_v1(&config.voter_public_bundle_path)
+        .ok()
+        .and_then(|bundle| bundle.descriptor.onion_endpoints().first().cloned());
+    let tor_executable_basename = tor_exe
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let tor_run_directory_name = session
+        .run_dir()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let socks_endpoint = session.socks_addr().to_string();
+    let run_dir = session.run_dir().to_path_buf();
+    let elapsed_ms = start_instant.elapsed().as_millis();
+    // Stop and reap ONLY the child this session launched, on every exit path.
+    session.shutdown();
+    let report = match outcome {
+        Ok(report) => report,
+        Err(error) => {
+            return Err(format!(
+                "{error}; managed Tor stopped and reaped; isolated Tor run evidence preserved: {}",
+                run_dir.display()
+            ));
+        }
+    };
+    let metadata = managed_tor::ManagedTorRunMetadataV1 {
+        metadata_type: managed_tor::MANAGED_TOR_RUN_METADATA_TYPE_V1,
+        tor_mode: "managed-tor",
+        started_utc: managed_tor::format_utc_timestamp(started),
+        finished_utc: managed_tor::format_utc_timestamp(finished),
+        socks_endpoint: socks_endpoint.clone(),
+        onion_hostname,
+        tor_executable_basename,
+        tor_version,
+        tor_run_directory_name,
+        tor_process_stopped_by_runner: Some(true),
+        elapsed_ms,
+    };
+    write_managed_tor_metadata_file(&config.results_path, &metadata)?;
+    // Success: remove the disposable runtime state. This directory is derived
+    // solely from this run's results path and holds only this run's fresh
+    // `run-*` child directory — never production Tor state.
+    let _ = fs::remove_dir_all(&runtime_base);
+    println!("Managed Tor ready endpoint: {socks_endpoint}");
+    println!(
+        "Tor executable: {}",
+        metadata
+            .tor_executable_basename
+            .as_deref()
+            .unwrap_or("unknown")
+    );
+    print_report_summary(&report);
+    Ok(report)
+}
+
+fn write_managed_tor_metadata_file(
+    results_path: &Path,
+    metadata: &managed_tor::ManagedTorRunMetadataV1,
+) -> Result<(), String> {
+    let path = managed_tor::managed_tor_metadata_path(results_path);
+    let bytes = serde_json::to_vec_pretty(metadata)
+        .map_err(|_| "could not encode managed-Tor run metadata".to_owned())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|_| "could not create managed-Tor metadata directory".to_owned())?;
+    }
+    fs::write(&path, &bytes).map_err(|_| "could not write managed-Tor metadata".to_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_managed_tor_run_metadata(
+    config: &LoadDriverConfig,
+    tor_mode: &'static str,
+    started: SystemTime,
+    report: &DistributedLoadReportV1,
+    socks_addr: SocketAddr,
+    tor_executable_basename: Option<String>,
+    tor_version: Option<String>,
+    tor_run_directory_name: Option<String>,
+    tor_process_stopped_by_runner: Option<bool>,
+) -> Result<(), String> {
+    let onion_hostname = load_voter_public_bundle_v1(&config.voter_public_bundle_path)
+        .ok()
+        .and_then(|bundle| bundle.descriptor.onion_endpoints().first().cloned());
+    let metadata = managed_tor::ManagedTorRunMetadataV1 {
+        metadata_type: managed_tor::MANAGED_TOR_RUN_METADATA_TYPE_V1,
+        tor_mode,
+        started_utc: managed_tor::format_utc_timestamp(started),
+        finished_utc: managed_tor::format_utc_timestamp(SystemTime::now()),
+        socks_endpoint: socks_addr.to_string(),
+        onion_hostname,
+        tor_executable_basename,
+        tor_version,
+        tor_run_directory_name,
+        tor_process_stopped_by_runner,
+        elapsed_ms: report.elapsed_ms,
+    };
+    write_managed_tor_metadata_file(&config.results_path, &metadata)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -775,10 +937,14 @@ impl ParsedArgs {
             .transpose()
     }
 
-    fn required_socket(&self, name: &str) -> Result<SocketAddr, String> {
-        self.required_value(name)?
-            .parse()
-            .map_err(|_| format!("{name} must be an ip:port socket address"))
+    fn optional_socket(&self, name: &str) -> Result<Option<SocketAddr>, String> {
+        self.optional_value(name)?
+            .map(|value| {
+                value
+                    .parse()
+                    .map_err(|_| format!("{name} must be an ip:port socket address"))
+            })
+            .transpose()
     }
 
     fn finish(&self) -> Result<(), String> {
@@ -793,6 +959,7 @@ impl ParsedArgs {
             "--candidates",
             "--voter-public-bundle",
             "--tor-socks",
+            "--tor-exe",
             "--results",
             "--state-dir",
             "--concurrency",

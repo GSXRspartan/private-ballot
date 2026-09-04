@@ -547,7 +547,10 @@ describe("managed-Tor hard-kill recovery", () => {
 
   it("captures tor stderr and classifies the start-failure mode", () => {
     assert.match(managedTor, /struct DiagnosticTorSpawnerV1/);
-    assert.match(managedTor, /\.stderr\(Stdio::from\(log\)\)/);
+    // The spawner delegates to the ONE shared stderr-log spawner policy in
+    // transport-network (same argument-vector spawn, stderr to a FILE, no
+    // shell) so the GUI and the distributed load driver CLI cannot diverge.
+    assert.match(managedTor, /StderrLogFileTorSpawnerV1 \{/);
     assert.match(managedTor, /fn classify_managed_tor_start_failure\(/);
     for (const label of [
       "tor-datadir-lock",
