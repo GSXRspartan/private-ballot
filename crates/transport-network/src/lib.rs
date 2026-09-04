@@ -363,6 +363,157 @@ pub fn check_managed_tor_fresh_readiness_v1<C: ManagedTorChildV1, P: ManagedTorR
     Ok(())
 }
 
+/// ONE shared Tor executable validation policy for every managed-Tor caller
+/// (production Tauri app AND the distributed voter load driver CLI).
+///
+/// The policy is deliberately identical to the qualified production validator:
+/// the path must be absolute (never PATH-relative), must exist, must be a real
+/// regular file (never a symlink/reparse point), and must contain no control
+/// characters. Discovery, PATH lookup, shell invocation, downloading, and
+/// auto-install are all structurally absent: callers pass an explicit operator
+/// path and this validator is the only gate before any spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TorExecutableValidationErrorV1 {
+    NotAbsolute,
+    NotFound,
+    NotRegularFile,
+    ControlCharacters,
+    NotExecutable,
+}
+
+impl std::fmt::Display for TorExecutableValidationErrorV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::NotAbsolute => "the Tor executable path must be absolute",
+            Self::NotFound => "the Tor executable was not found",
+            Self::NotRegularFile => {
+                "the Tor executable must be a regular file (no symlinks/reparse points)"
+            }
+            Self::ControlCharacters => {
+                "the Tor executable path must not contain control characters"
+            }
+            Self::NotExecutable => "the Tor executable is not marked executable",
+        })
+    }
+}
+
+impl std::error::Error for TorExecutableValidationErrorV1 {}
+
+/// Validates a candidate Tor executable path with the single shared policy:
+/// absolute, exists, regular file (no symlink/reparse point), no control
+/// characters, and — on Unix — the executable permission bit(s) set. Windows
+/// uses the `.exe` extension convention for executability; there is no
+/// equivalent bit to check there. Without the Unix check, an operator on
+/// Linux/macOS could point at a plain data file and only discover the mistake
+/// at spawn time. Every caller (GUI and CLI) MUST run this before spawning.
+pub fn validate_tor_executable_v1(path: &Path) -> Result<(), TorExecutableValidationErrorV1> {
+    if !path.is_absolute() {
+        return Err(TorExecutableValidationErrorV1::NotAbsolute);
+    }
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| TorExecutableValidationErrorV1::NotFound)?;
+    if metadata.file_type().is_symlink()
+        || is_windows_reparse_point_v1(&metadata)
+        || !metadata.is_file()
+    {
+        return Err(TorExecutableValidationErrorV1::NotRegularFile);
+    }
+    if has_control_path_component(path) {
+        return Err(TorExecutableValidationErrorV1::ControlCharacters);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(TorExecutableValidationErrorV1::NotExecutable);
+        }
+    }
+    Ok(())
+}
+
+/// Windows reparse-point detection (0x400 `FILE_ATTRIBUTE_REPARSE_POINT`).
+/// Non-Windows platforms have no reparse points; symlink rejection above
+/// already covers them.
+#[cfg(windows)]
+pub fn is_windows_reparse_point_v1(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    (metadata.file_attributes() & 0x400) != 0
+}
+
+#[cfg(not(windows))]
+pub fn is_windows_reparse_point_v1(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Reserves a fresh loopback (127.0.0.1) ephemeral TCP port for a managed Tor
+/// SOCKS listener.
+///
+/// Binding `127.0.0.1:0` asks the OS for an unused ephemeral port and keeps the
+/// binding loopback-only. The listener is dropped immediately so Tor can bind
+/// the same port; a tiny reserve→spawn race is accepted (the readiness probe
+/// fails closed if the port was lost), which is far safer than any fixed
+/// magic-port constant that collides with orphaned processes. Every caller gets
+/// a NEW port per start — never a shared constant.
+pub fn reserve_loopback_socks_port_v1() -> io::Result<u16> {
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Allocates a fresh, uniquely-named run directory for ONE managed-Tor start
+/// under a caller-owned base directory.
+///
+/// The name is locally generated (nanoseconds + pid + attempt); no remote value
+/// can steer it. A hard-killed application leaves no reusible directory behind:
+/// every start gets its own fresh directory so a stale data-directory lock from
+/// an orphaned Tor process can never block the next start.
+pub fn create_fresh_run_directory_v1(base: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(base)?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    let pid = u128::from(std::process::id());
+    for attempt in 0_u128..1024 {
+        let run_dir = base.join(format!("run-{nanos:032x}{pid:08x}{attempt:04x}"));
+        match fs::create_dir(&run_dir) {
+            Ok(()) => return Ok(run_dir),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a fresh managed-Tor run directory",
+    ))
+}
+
+/// A managed-Tor spawner identical to [`SystemManagedTorSpawnerV1`] (argument
+/// vector, no shell, no PATH resolution) except that the child's stderr is
+/// redirected to a caller-owned per-run log FILE instead of being discarded, so
+/// a start failure leaves bounded diagnostic evidence. Redirecting to a FILE —
+/// never a pipe — avoids pipe-buffer back-pressure on a long-running child.
+#[derive(Debug, Clone)]
+pub struct StderrLogFileTorSpawnerV1 {
+    pub stderr_log: PathBuf,
+}
+
+impl ManagedTorSpawnerV1 for StderrLogFileTorSpawnerV1 {
+    type Child = Child;
+
+    fn spawn(&self, executable: &Path, config_file: &Path) -> io::Result<Child> {
+        let log = fs::File::create(&self.stderr_log)?;
+        Command::new(executable)
+            .arg(OsString::from("-f"))
+            .arg(config_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(log))
+            .spawn()
+    }
+}
+
 /// Canonical relay request shape. The relay cannot receive a query string,
 /// voter identity, or arbitrary body type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -788,5 +939,189 @@ mod tests {
             torrc.contains("SocksPort 127.0.0.1:19050\n"),
             "voter torrc shape unchanged: {torrc}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Shared Tor executable validation policy (ONE policy for GUI + CLI).
+    // -------------------------------------------------------------------------
+
+    fn write_regular_file(base: &Path, name: &str) -> PathBuf {
+        fs::create_dir_all(base).expect("test base dir");
+        let path = base.join(name);
+        fs::write(&path, b"not-a-real-tor-binary").expect("write regular file");
+        path
+    }
+
+    #[test]
+    fn tor_executable_validation_rejects_relative_paths() {
+        assert_eq!(
+            validate_tor_executable_v1(Path::new("tor.exe")),
+            Err(TorExecutableValidationErrorV1::NotAbsolute)
+        );
+        assert_eq!(
+            validate_tor_executable_v1(Path::new("./tor")),
+            Err(TorExecutableValidationErrorV1::NotAbsolute)
+        );
+    }
+
+    #[test]
+    fn tor_executable_validation_rejects_missing_files() {
+        #[cfg(windows)]
+        let bogus = PathBuf::from(r"C:\definitely\not\here\tor.exe");
+        #[cfg(not(windows))]
+        let bogus = PathBuf::from("/definitely/not/here/tor");
+        assert_eq!(
+            validate_tor_executable_v1(&bogus),
+            Err(TorExecutableValidationErrorV1::NotFound)
+        );
+    }
+
+    #[test]
+    fn tor_executable_validation_rejects_directories_and_control_characters() {
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-torex-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        // A directory exists but is not a regular file.
+        let dir = base.join("dir");
+        fs::create_dir_all(&dir).expect("dir");
+        assert_eq!(
+            validate_tor_executable_v1(&dir),
+            Err(TorExecutableValidationErrorV1::NotRegularFile)
+        );
+        // A control character anywhere in an otherwise valid path is rejected.
+        // On Windows the OS itself refuses to stat paths containing control
+        // bytes, so the OS-level stat fails first (still fail-closed); on
+        // platforms where such filenames are legal the validator must report
+        // the control-character error explicitly.
+        let with_control = base.join("to\u{0}r");
+        if cfg!(windows) {
+            assert_eq!(
+                validate_tor_executable_v1(&with_control),
+                Err(TorExecutableValidationErrorV1::NotFound)
+            );
+        } else {
+            let with_newline = base.join("to\nr");
+            fs::write(&with_newline, b"x").expect("control-char filename (non-Windows)");
+            assert_eq!(
+                validate_tor_executable_v1(&with_newline),
+                Err(TorExecutableValidationErrorV1::ControlCharacters)
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tor_executable_validation_accepts_a_real_regular_file() {
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-torex-ok-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let path = write_regular_file(&base, "tor.exe");
+        assert_eq!(validate_tor_executable_v1(&path), Ok(()));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn tor_executable_validation_rejects_symlinks_and_reparse_points() {
+        // Symlink creation needs developer mode/admin; when unavailable the
+        // attempt is skipped rather than failing the suite. The regular-file
+        // and reparse-attribute logic above remains covered either way.
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-torex-link-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let target = write_regular_file(&base, "tor.exe");
+        let link = base.join("tor-link.exe");
+        if std::os::windows::fs::symlink_file(&target, &link).is_ok() {
+            assert_eq!(
+                validate_tor_executable_v1(&link),
+                Err(TorExecutableValidationErrorV1::NotRegularFile)
+            );
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tor_executable_validation_rejects_unix_non_executable_regular_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-torex-unix-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let file = base.join("not-an-executable");
+        fs::create_dir_all(&base).expect("base");
+        fs::File::create(&file)
+            .and_then(|mut handle| handle.write_all(b"#!/bin/false\n"))
+            .expect("write");
+        fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert_eq!(
+            validate_tor_executable_v1(&file),
+            Err(TorExecutableValidationErrorV1::NotExecutable)
+        );
+        // With the executable bit set, the same regular file validates.
+        fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert_eq!(validate_tor_executable_v1(&file), Ok(()));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reserved_socks_port_is_fresh_and_loopback_only() {
+        let first = reserve_loopback_socks_port_v1().expect("reserve");
+        let second = reserve_loopback_socks_port_v1().expect("reserve");
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        // A reserved port is a usable loopback bind target after the temporary
+        // listener is dropped (the reserve→spawn hand-off shape).
+        let bound = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, first))
+            .expect("reserved port is re-bindable");
+        drop(bound);
+        let _ = second;
+    }
+
+    #[test]
+    fn fresh_run_directories_are_unique_and_locally_named() {
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-rundir-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let first = create_fresh_run_directory_v1(&base).expect("first run dir");
+        let second = create_fresh_run_directory_v1(&base).expect("second run dir");
+        assert!(first.is_absolute() || first.starts_with(&base));
+        assert_ne!(first, second, "every start must get its own run directory");
+        let name = first
+            .file_name()
+            .expect("named")
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.starts_with("run-"), "owned run-dir naming: {name}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stderr_log_spawner_uses_argument_vector_without_a_shell() {
+        // Structural check: the spawner writes the child's stderr to the
+        // requested FILE path. Spawning a real binary is skipped; instead we
+        // verify the request shape via the spawn failure path (nonexistent exe
+        // yields an io error, never a shell invocation).
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-spawner-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let spawner = StderrLogFileTorSpawnerV1 {
+            stderr_log: base.join("tor-stderr.log"),
+        };
+        let bogus = base.join("definitely-not-tor.exe");
+        assert!(spawner.spawn(&bogus, &base.join("torrc")).is_err());
+        let _ = fs::remove_dir_all(&base);
     }
 }

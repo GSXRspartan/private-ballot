@@ -20,9 +20,9 @@
 //! call `configure_managed_tor` with a valid runtime configuration, then
 //! `start_managed_tor`, before any carrier can be built.
 
-use std::net::{SocketAddr, TcpListener};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -56,33 +56,19 @@ const MANIFEST_HASH_HEX_LEN: usize = 64;
 /// the readiness probe still reached the ORPHAN on the fixed port and reported
 /// "ready" for a child that was already dead (the stale-READY contradiction).
 ///
-/// Binding `127.0.0.1:0` asks the OS for an unused ephemeral port and keeps the
-/// binding loopback-only (never a routable interface). The listener is dropped
-/// immediately so Tor can bind the same port; a tiny reserve→spawn race is
-/// accepted (the readiness probe fails closed if the port was lost), which is far
-/// safer than a fixed magic constant that deterministically collides with an
-/// orphan. This is NOT a global constant swapped for another global constant:
-/// every start reserves a new port.
+/// The policy lives in the shared `transport-network` crate
+/// ([`tari_cc_private_ballot_transport_network::reserve_loopback_socks_port_v1`])
+/// so the GUI and the distributed load driver CLI reserve ports identically;
+/// this wrapper only maps the error onto the GUI error type. Every start
+/// reserves a NEW port — never a shared constant.
 fn reserve_loopback_socks_port() -> Result<u16, CommandError> {
-    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
+    tari_cc_private_ballot_transport_network::reserve_loopback_socks_port_v1().map_err(|_| {
         CommandError::new(
             "GUI_TOR_SOCKS_PORT_UNAVAILABLE",
             "UNAVAILABLE",
             "no loopback SOCKS port could be reserved for the managed Tor connection",
         )
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|_| {
-            CommandError::new(
-                "GUI_TOR_SOCKS_PORT_UNAVAILABLE",
-                "UNAVAILABLE",
-                "the reserved loopback SOCKS port could not be read",
-            )
-        })?
-        .port();
-    drop(listener);
-    Ok(port)
+    })
 }
 
 /// Allocates a fresh, app-owned run directory for ONE managed-Tor start under
@@ -99,27 +85,12 @@ fn reserve_loopback_socks_port() -> Result<u16, CommandError> {
 /// blocker behind the post-hard-kill `GUI_TOR_START_FAILED`.
 ///
 /// The directory name is app-generated (nanoseconds + pid + attempt); no remote
-/// value can steer it.
+/// value can steer it. The allocation policy lives in the shared
+/// `transport-network` crate so the GUI and the load driver CLI behave
+/// identically; this wrapper only maps the error onto the GUI error type.
 pub(crate) fn fresh_run_directory(base: &Path) -> Result<PathBuf, CommandError> {
-    std::fs::create_dir_all(base).map_err(|_| CommandError::app_data_unavailable())?;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    let pid = u128::from(std::process::id());
-    for attempt in 0_u128..1024 {
-        let run_dir = base.join(format!("run-{nanos:032x}{pid:08x}{attempt:04x}"));
-        match std::fs::create_dir(&run_dir) {
-            Ok(()) => return Ok(run_dir),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(_) => return Err(CommandError::app_data_unavailable()),
-        }
-    }
-    Err(CommandError::new(
-        "GUI_TOR_RUN_DIR_COLLISION",
-        "UNAVAILABLE",
-        "could not allocate a fresh managed-Tor run directory",
-    ))
+    tari_cc_private_ballot_transport_network::create_fresh_run_directory_v1(base)
+        .map_err(|_| CommandError::app_data_unavailable())
 }
 
 /// Best-effort, ownership-scoped cleanup of prior managed-Tor run directories.
@@ -254,14 +225,13 @@ impl ManagedTorSpawnerV1 for DiagnosticTorSpawnerV1 {
     type Child = Child;
 
     fn spawn(&self, executable: &Path, config_file: &Path) -> std::io::Result<Child> {
-        let log = std::fs::File::create(&self.stderr_log)?;
-        Command::new(executable)
-            .arg("-f")
-            .arg(config_file)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(log))
-            .spawn()
+        // The spawn policy (argument vector, no shell, no PATH resolution,
+        // stderr redirected to a FILE) is the shared reviewed implementation;
+        // the GUI wrapper keeps its diagnostic name and logging semantics.
+        tari_cc_private_ballot_transport_network::StderrLogFileTorSpawnerV1 {
+            stderr_log: self.stderr_log.clone(),
+        }
+        .spawn(executable, config_file)
     }
 }
 

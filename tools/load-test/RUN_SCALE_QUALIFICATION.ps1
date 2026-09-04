@@ -10,6 +10,14 @@
     safety checks, runs the harness in --release for one scale, and appends one
     timestamped CSV row under scale-qualification-results\.
 
+    *** SCOPE BOUNDARY (do not confuse with the distributed voter driver) ***
+    This harness is OFFLINE and IN-PROCESS: it is a crypto + I/O scale
+    benchmark with NO Tor and NO physical networking. The physical
+    distributed voter load driver lives at
+    tools\load-test\distributed\RUN_DISTRIBUTED_VOTER_LOAD.ps1 and uses
+    managed Tor (or a manually supplied SOCKS listener) on real hosts.
+    The two systems are separate; never merge their semantics.
+
     It NEVER touches real user election workspaces (the harness uses per-run OS
     temp scratch), NEVER publishes a live Ootle transaction (anchor preparation
     is offline only), and NEVER uses production credentials.

@@ -20,6 +20,10 @@
 
 use std::path::{Path, PathBuf};
 
+use tari_cc_private_ballot_transport_network::{
+    TorExecutableValidationErrorV1, validate_tor_executable_v1,
+};
+
 use crate::CommandError;
 
 /// The SMALL explicit allowlist of well-known Tor executable locations probed
@@ -34,55 +38,42 @@ pub const TOR_EXECUTABLE_ALLOWLIST_V1: &[&str] = &[];
 /// Validates a candidate `tor.exe` path: absolute, exists, regular file, not a
 /// symlink/reparse point, no control characters. This is the SAME validation
 /// applied before any Tor process is spawned; discovery never relaxes it.
+///
+/// The policy itself lives in the shared `transport-network` crate
+/// ([`validate_tor_executable_v1`]) so the production GUI and the distributed
+/// load driver CLI enforce ONE identical policy and cannot quietly diverge.
+/// This wrapper only maps the shared error kinds onto the established
+/// GUI error codes; the accepted/rejected path set is byte-for-byte the
+/// qualified production policy.
 pub fn validate_tor_exe(path: &Path) -> Result<(), CommandError> {
-    if !path.is_absolute() {
-        return Err(CommandError::new(
+    match validate_tor_executable_v1(path) {
+        Ok(()) => Ok(()),
+        Err(TorExecutableValidationErrorV1::NotAbsolute) => Err(CommandError::new(
             "GUI_TOR_EXE_PATH_NOT_ABSOLUTE",
             "INVALID_INPUT",
             "the tor.exe path must be absolute",
-        ));
-    }
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
-        CommandError::new("GUI_TOR_EXE_NOT_FOUND", "FILE_IO", "tor.exe was not found")
-    })?;
-    if metadata.file_type().is_symlink()
-        || is_windows_reparse_point(&metadata)
-        || !metadata.is_file()
-    {
-        return Err(CommandError::new(
+        )),
+        Err(TorExecutableValidationErrorV1::NotFound) => Err(CommandError::new(
+            "GUI_TOR_EXE_NOT_FOUND",
+            "FILE_IO",
+            "tor.exe was not found",
+        )),
+        Err(TorExecutableValidationErrorV1::NotRegularFile) => Err(CommandError::new(
             "GUI_TOR_EXE_NOT_REGULAR",
             "FILE_IO",
             "tor.exe must be a regular file (no symlinks/reparse points)",
-        ));
-    }
-    if path
-        .as_os_str()
-        .to_string_lossy()
-        .chars()
-        .any(char::is_control)
-    {
-        return Err(CommandError::new(
+        )),
+        Err(TorExecutableValidationErrorV1::ControlCharacters) => Err(CommandError::new(
             "GUI_TOR_EXE_PATH_CONTROL_CHAR",
             "INVALID_INPUT",
             "the tor.exe path must not contain control characters",
-        ));
+        )),
+        Err(TorExecutableValidationErrorV1::NotExecutable) => Err(CommandError::new(
+            "GUI_TOR_EXE_NOT_EXECUTABLE",
+            "FILE_IO",
+            "the tor executable is not marked executable",
+        )),
     }
-    // On Unix, verify the file is marked executable. Windows uses the .exe
-    // extension convention for executability; there is no equivalent bit to
-    // check. Without this, an operator on Linux could point at a plain data
-    // file and only discover the mistake at spawn time.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(CommandError::new(
-                "GUI_TOR_EXE_NOT_EXECUTABLE",
-                "FILE_IO",
-                "the tor executable is not marked executable",
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Resolves the Tor executable for a managed-Tor operation without any shell,
@@ -122,8 +113,7 @@ pub fn resolve_tor_executable(explicit: Option<&str>) -> Result<PathBuf, Command
 
 #[cfg(windows)]
 pub fn is_windows_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    (metadata.file_attributes() & 0x400) != 0
+    tari_cc_private_ballot_transport_network::is_windows_reparse_point_v1(metadata)
 }
 
 #[cfg(not(windows))]

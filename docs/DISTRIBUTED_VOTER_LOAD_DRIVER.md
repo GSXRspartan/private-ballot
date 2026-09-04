@@ -8,10 +8,24 @@ organizer intake path.
 **Transport:** the driver submits each ballot through
 `TorSocksPrivateReleaseCarrierV1`, the same private-transport carrier the
 GUI uses for voter submissions. That carrier requires a **local Tor SOCKS
-listener** on each voter host; the driver does **not** start Tor for you.
-Install Tor separately on every voter host (Tor Browser or Tor Expert
-Bundle — see [OPERATOR_SETUP.md](OPERATOR_SETUP.md)) and pass its SOCKS
-address in `--tor-socks`.
+listener** on each voter host. The driver supports two mutually exclusive
+ways to get one:
+
+* **Managed Tor (`--tor-exe <absolute path to tor.exe>`)** — the CLI validates
+  the executable with the SAME shared policy as the production managed-Tor
+  feature, reserves a fresh loopback SOCKS port, starts an ISOLATED Tor
+  process (its own DataDirectory; no onion service; no control port), waits
+  for REAL SOCKS5 readiness, submits the cohort through it, and then
+  stops/reaps ONLY the child it launched. Tor is NOT bundled, downloaded, or
+  auto-installed; the operator supplies the executable path. If Tor fails,
+  the run fails — there is no clearnet fallback.
+* **Existing SOCKS (`--tor-socks <ip:port>`)** — the operator runs Tor
+  themselves (the original physical 500-voter workflow) and passes the
+  listener address, typically `127.0.0.1:9050`.
+
+Supplying both is rejected as ambiguous. See
+[tools/load-test/distributed/README.md](../tools/load-test/distributed/README.md)
+for the per-host PowerShell runner that wraps this.
 
 The `RUN_SCALE_QUALIFICATION.ps1` harness under `tools/load-test/` is a
 different benchmark. It is an in-process integration test at a chosen
@@ -40,14 +54,42 @@ cargo run -p tari-cc-private-ballot-cli -- distributed-partition --credentials C
 
 ## Submit From A Voter Host
 
-Every voter host must have `tor.exe` installed and a Tor SOCKS listener
-running locally before the submit call. Confirm the SOCKS port is
-listening (default `127.0.0.1:9050` for Tor Expert Bundle, `127.0.0.1:9150`
-for Tor Browser) before you run the CLI. The driver never spawns Tor.
+### Managed Tor (recommended)
+
+Every voter host needs an installed `tor.exe` whose absolute path you supply
+to `--tor-exe`. The driver starts, waits for, and stops an isolated Tor
+process on its own; you do NOT need to open Tor first, and no fixed SOCKS
+port (9050) is assumed.
 
 The organizer must already be running the existing private intake service
 (the GUI's ballot-office flow, or the `private-ballot-tor-intake`
 binary) and must have shared the voter public transport bundle.
+
+```powershell
+$env:TARI_BALLOT_LOAD_PASSPHRASE = "test-only passphrase"
+cargo run -p tari-cc-private-ballot-cli -- distributed-submit `
+    --manifest C:\election\election-manifest.cbor `
+    --registry C:\election\voter-registry.cbor `
+    --candidates C:\election\candidate-set.cbor `
+    --voter-public-bundle C:\transport\voter-public-bundle.cbor `
+    --credentials C:\computer-b-voters `
+    --tor-exe C:\Tor\tor.exe `
+    --results C:\runs\computer-b-5.json `
+    --choice round-robin `
+    --concurrency 1
+```
+
+Or use the convenience wrapper
+(`tools\load-test\distributed\RUN_DISTRIBUTED_VOTER_LOAD.ps1`) shown in the
+[runner README](../tools/load-test/distributed/README.md) for desktop/VPS
+examples.
+
+### Existing SOCKS (legacy, backward compatible)
+
+Every voter host can alternatively have a Tor SOCKS listener already running
+before the submit call. Confirm the SOCKS port is listening (default
+`127.0.0.1:9050` for Tor Expert Bundle, `127.0.0.1:9150` for Tor Browser)
+before you run the CLI; the driver never spawns Tor in this mode.
 
 ```powershell
 $env:TARI_BALLOT_LOAD_PASSPHRASE = "test-only passphrase"
@@ -69,8 +111,17 @@ results path.
 For 128 + 128, use `--count 128 --start-index 1` on Computer B and
 `--count 128 --start-index 129` on the VPS, or partition first into
 separate directories. The 250 + 250 configuration used for the
-"500-voter" physical run partitions the cohort the same way and points
-each host's `--tor-socks` at that host's own local Tor SOCKS listener.
+"500-voter" physical run partitions the same way; in managed-Tor mode each
+host runs its OWN independent Tor process (the driver reserves an ephemeral
+loopback SOCKS port per host — never a shared 9050), and in existing-SOCKS
+mode each host's `--tor-socks` points at that host's own local Tor SOCKS
+listener.
+
+Each submit also writes a non-secret
+`<results>.managed-tor-metadata.json` next to the results file (Tor mode,
+UTC start/end, SOCKS endpoint, organizer onion hostname, Tor executable
+basename, bounded `tor --version`, and process stop status). No secrets,
+onion private keys, voter credentials, or full operator paths are recorded.
 
 ## Interpret Results
 
