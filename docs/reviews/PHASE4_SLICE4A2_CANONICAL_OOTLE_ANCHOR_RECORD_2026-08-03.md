@@ -1,6 +1,6 @@
 # Phase 4 Slice 4A2 — Canonical Ootle Anchor Record and Test Vectors
 
-**Repository:** `C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot`
+**Repository:** `C:path	o	ari-private-ballot`
 **Branch:** `phase4/ootle-testnet-anchor-prototype`
 **Starting HEAD:** `114f96a9c24c226578db896519c1d2b17268acb1` (clean working tree at start)
 **Toolchain:** `rustc 1.97.1 (8bab26f4f 2026-07-14)`
@@ -134,7 +134,7 @@ The 224-byte maximum is ~0.68% of the `EmitLog` budget.
 **Locally confirmed Ootle `EmitLog` and receipt references** (read from the
 Slice 4A1 source checkout, *not* a dependency of this crate):
 
-- Source checkout: `C:\Users\pdark\.cargo\git\checkouts\tari-ootle-fb4571cb31b11274\92023e0` (workspace `0.37.0`, commit `92023e0`).
+- Source checkout: `<local cargo git checkout of tari-ootle @ 92023e0>` (workspace `0.37.0`, commit `92023e0`).
 - `Instruction::EmitLog { level, message: MaxString<{ ENGINE_LIMITS.max_log_size_bytes }> }` — `crates/transaction/src/v1/instruction.rs:74-81`.
 - `max_log_size_bytes: 32 * 1024` — `crates/engine_types/src/limits.rs:110`.
 - Engine execution of `EmitLog` — `crates/engine/src/transaction/processor.rs:375-378`.

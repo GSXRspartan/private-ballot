@@ -1,0 +1,52 @@
+{
+  "@fontsource/poppins@5.3.0": {
+    "licenses": "OFL-1.1",
+    "repository": "https://github.com/fontsource/font-files",
+    "publisher": "Google Inc.",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@fontsource\\poppins",
+    "licenseFile": "node_modules\\@fontsource\\poppins\\LICENSE"
+  },
+  "@tauri-apps/api@2.11.1": {
+    "licenses": "Apache-2.0 OR MIT",
+    "repository": "https://github.com/tauri-apps/tauri",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\api",
+    "licenseFile": "node_modules\\@tauri-apps\\api\\README.md"
+  },
+  "@tauri-apps/plugin-dialog@2.7.1": {
+    "licenses": "MIT OR Apache-2.0",
+    "repository": "https://github.com/tauri-apps/plugins-workspace",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\plugin-dialog",
+    "licenseFile": "node_modules\\@tauri-apps\\plugin-dialog\\LICENSE.spdx"
+  },
+  "react-dom@19.2.7": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\react-dom",
+    "licenseFile": "node_modules\\react-dom\\LICENSE"
+  },
+  "react@19.2.7": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\react",
+    "licenseFile": "node_modules\\react\\LICENSE"
+  },
+  "scheduler@0.27.0": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\scheduler",
+    "licenseFile": "node_modules\\scheduler\\LICENSE"
+  },
+  "tari-private-ballot@0.1.0": {
+    "licenses": "UNLICENSED",
+    "private": true,
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui"
+  },
+  "uqr@0.1.3": {
+    "licenses": "MIT",
+    "repository": "https://github.com/unjs/uqr",
+    "publisher": "Anthony Fu",
+    "email": "anthonyfu117@hotmail.com",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\uqr",
+    "licenseFile": "node_modules\\uqr\\LICENSE"
+  }
+}

@@ -1,0 +1,198 @@
+{
+  "@fontsource/poppins@5.3.0": {
+    "licenses": "OFL-1.1",
+    "repository": "https://github.com/fontsource/font-files",
+    "publisher": "Google Inc.",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@fontsource\\poppins",
+    "licenseFile": "node_modules\\@fontsource\\poppins\\LICENSE"
+  },
+  "@oxc-project/types@0.142.0": {
+    "licenses": "MIT",
+    "repository": "https://github.com/oxc-project/oxc",
+    "publisher": "Boshen and oxc contributors",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@oxc-project\\types",
+    "licenseFile": "node_modules\\@oxc-project\\types\\LICENSE"
+  },
+  "@rolldown/binding-win32-x64-msvc@1.2.1": {
+    "licenses": "MIT",
+    "repository": "https://github.com/rolldown/rolldown",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@rolldown\\binding-win32-x64-msvc",
+    "licenseFile": "node_modules\\@rolldown\\binding-win32-x64-msvc\\README.md"
+  },
+  "@rolldown/pluginutils@1.0.1": {
+    "licenses": "MIT",
+    "repository": "https://github.com/rolldown/plugins",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@rolldown\\pluginutils",
+    "licenseFile": "node_modules\\@rolldown\\pluginutils\\LICENSE"
+  },
+  "@tauri-apps/api@2.11.1": {
+    "licenses": "Apache-2.0 OR MIT",
+    "repository": "https://github.com/tauri-apps/tauri",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\api",
+    "licenseFile": "node_modules\\@tauri-apps\\api\\README.md"
+  },
+  "@tauri-apps/cli-win32-x64-msvc@2.11.4": {
+    "licenses": "Apache-2.0 OR MIT",
+    "repository": "https://github.com/tauri-apps/tauri",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\cli-win32-x64-msvc",
+    "licenseFile": "node_modules\\@tauri-apps\\cli-win32-x64-msvc\\README.md"
+  },
+  "@tauri-apps/cli@2.11.4": {
+    "licenses": "Apache-2.0 OR MIT",
+    "repository": "https://github.com/tauri-apps/tauri",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\cli",
+    "licenseFile": "node_modules\\@tauri-apps\\cli\\README.md"
+  },
+  "@tauri-apps/plugin-dialog@2.7.1": {
+    "licenses": "MIT OR Apache-2.0",
+    "repository": "https://github.com/tauri-apps/plugins-workspace",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@tauri-apps\\plugin-dialog",
+    "licenseFile": "node_modules\\@tauri-apps\\plugin-dialog\\LICENSE.spdx"
+  },
+  "@types/react-dom@19.2.3": {
+    "licenses": "MIT",
+    "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@types\\react-dom",
+    "licenseFile": "node_modules\\@types\\react-dom\\LICENSE"
+  },
+  "@types/react@19.2.17": {
+    "licenses": "MIT",
+    "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@types\\react",
+    "licenseFile": "node_modules\\@types\\react\\LICENSE"
+  },
+  "@vitejs/plugin-react@6.0.3": {
+    "licenses": "MIT",
+    "repository": "https://github.com/vitejs/vite-plugin-react",
+    "publisher": "Evan You",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\@vitejs\\plugin-react",
+    "licenseFile": "node_modules\\@vitejs\\plugin-react\\LICENSE"
+  },
+  "csstype@3.2.3": {
+    "licenses": "MIT",
+    "repository": "https://github.com/frenic/csstype",
+    "publisher": "Fredrik Nicol",
+    "email": "fredrik.nicol@gmail.com",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\csstype",
+    "licenseFile": "node_modules\\csstype\\LICENSE"
+  },
+  "detect-libc@2.1.2": {
+    "licenses": "Apache-2.0",
+    "repository": "https://github.com/lovell/detect-libc",
+    "publisher": "Lovell Fuller",
+    "email": "npm@lovell.info",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\detect-libc",
+    "licenseFile": "node_modules\\detect-libc\\LICENSE"
+  },
+  "fdir@6.5.0": {
+    "licenses": "MIT",
+    "repository": "https://github.com/thecodrr/fdir",
+    "publisher": "thecodrr",
+    "email": "thecodrr@protonmail.com",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\fdir",
+    "licenseFile": "node_modules\\fdir\\LICENSE"
+  },
+  "lightningcss@1.33.0": {
+    "licenses": "MPL-2.0",
+    "repository": "https://github.com/parcel-bundler/lightningcss",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\lightningcss",
+    "licenseFile": "node_modules\\lightningcss\\LICENSE"
+  },
+  "nanoid@3.3.16": {
+    "licenses": "MIT",
+    "repository": "https://github.com/ai/nanoid",
+    "publisher": "Andrey Sitnik",
+    "email": "andrey@sitnik.ru",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\nanoid",
+    "licenseFile": "node_modules\\nanoid\\LICENSE"
+  },
+  "picocolors@1.1.1": {
+    "licenses": "ISC",
+    "repository": "https://github.com/alexeyraspopov/picocolors",
+    "publisher": "Alexey Raspopov",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\picocolors",
+    "licenseFile": "node_modules\\picocolors\\LICENSE"
+  },
+  "picomatch@4.0.5": {
+    "licenses": "MIT",
+    "repository": "https://github.com/micromatch/picomatch",
+    "publisher": "Jon Schlinkert",
+    "url": "https://github.com/jonschlinkert",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\picomatch",
+    "licenseFile": "node_modules\\picomatch\\LICENSE"
+  },
+  "postcss@8.5.25": {
+    "licenses": "MIT",
+    "repository": "https://github.com/postcss/postcss",
+    "publisher": "Andrey Sitnik",
+    "email": "andrey@sitnik.es",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\postcss",
+    "licenseFile": "node_modules\\postcss\\LICENSE"
+  },
+  "react-dom@19.2.7": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\react-dom",
+    "licenseFile": "node_modules\\react-dom\\LICENSE"
+  },
+  "react@19.2.7": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\react",
+    "licenseFile": "node_modules\\react\\LICENSE"
+  },
+  "rolldown@1.2.1": {
+    "licenses": "MIT",
+    "repository": "https://github.com/rolldown/rolldown",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\rolldown",
+    "licenseFile": "node_modules\\rolldown\\LICENSE"
+  },
+  "scheduler@0.27.0": {
+    "licenses": "MIT",
+    "repository": "https://github.com/facebook/react",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\scheduler",
+    "licenseFile": "node_modules\\scheduler\\LICENSE"
+  },
+  "source-map-js@1.2.1": {
+    "licenses": "BSD-3-Clause",
+    "repository": "https://github.com/7rulnik/source-map-js",
+    "publisher": "Valentin 7rulnik Semirulnik",
+    "email": "v7rulnik@gmail.com",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\source-map-js",
+    "licenseFile": "node_modules\\source-map-js\\LICENSE"
+  },
+  "tari-private-ballot@0.1.0": {
+    "licenses": "UNLICENSED",
+    "private": true,
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui"
+  },
+  "tinyglobby@0.2.17": {
+    "licenses": "MIT",
+    "repository": "https://github.com/SuperchupuDev/tinyglobby",
+    "publisher": "Superchupu",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\tinyglobby",
+    "licenseFile": "node_modules\\tinyglobby\\LICENSE"
+  },
+  "typescript@6.0.3": {
+    "licenses": "Apache-2.0",
+    "repository": "https://github.com/microsoft/TypeScript",
+    "publisher": "Microsoft Corp.",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\typescript",
+    "licenseFile": "node_modules\\typescript\\LICENSE.txt"
+  },
+  "uqr@0.1.3": {
+    "licenses": "MIT",
+    "repository": "https://github.com/unjs/uqr",
+    "publisher": "Anthony Fu",
+    "email": "anthonyfu117@hotmail.com",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\uqr",
+    "licenseFile": "node_modules\\uqr\\LICENSE"
+  },
+  "vite@8.2.0": {
+    "licenses": "MIT",
+    "repository": "https://github.com/vitejs/vite",
+    "publisher": "Evan You",
+    "path": "C:\\Users\\pdark\\Documents\\Codex\\2026-08-27\\tari-ballot-organizer-anchor-deployment-gui\\gui\\node_modules\\vite",
+    "licenseFile": "node_modules\\vite\\LICENSE.md"
+  }
+}

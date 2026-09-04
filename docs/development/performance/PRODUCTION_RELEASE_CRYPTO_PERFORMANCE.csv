@@ -1,0 +1,36 @@
+metric,registry_size,ring_cap,workers,batch,profile,value_us,speedup,label,notes
+verify_individual,50,64,1,1,release_default,6336,33.10,MEASURED_RELEASE,"AVX2 runtime-active; release speedup vs 4A debug 209667us"
+verify_individual,100,128,1,1,release_default,10458,32.38,MEASURED_RELEASE,"vs debug 338618us"
+verify_individual,500,512,1,1,release_default,47012,21.46,MEASURED_RELEASE,"vs debug 1008834us"
+verify_individual,1000,1024,1,1,release_default,81042,21.66,MEASURED_RELEASE,"vs debug 1755170us"
+verify_individual,2048,2048,1,1,release_default,155706,21.93,MEASURED_RELEASE,"vs debug 3413879us"
+verify_individual,4096,4096,1,1,release_default,222515,26.74,MEASURED_RELEASE,"vs debug 5950870us"
+verify_batch4_per_proof,50,64,1,4,release_default,2591,2.45,MEASURED_RELEASE,"amortization vs individual release"
+verify_batch4_per_proof,100,128,1,4,release_default,3469,3.01,MEASURED_RELEASE,
+verify_batch4_per_proof,500,512,1,4,release_default,14168,3.32,MEASURED_RELEASE,
+verify_batch4_per_proof,1000,1024,1,4,release_default,25254,3.21,MEASURED_RELEASE,
+verify_batch4_per_proof,2048,2048,1,4,release_default,44963,3.46,MEASURED_RELEASE,
+verify_batch4_per_proof,4096,4096,1,4,release_default,87049,2.56,MEASURED_RELEASE,"amort regresses at 4096: APU cache/bandwidth"
+verify_batch16_per_proof,50,64,1,16,release_default,1556,4.07,MEASURED_RELEASE,
+verify_batch16_per_proof,100,128,1,16,release_default,1917,5.46,MEASURED_RELEASE,
+verify_batch16_per_proof,500,512,1,16,release_default,6052,7.77,MEASURED_RELEASE,
+verify_batch16_per_proof,1000,1024,1,16,release_default,9914,8.17,MEASURED_RELEASE,
+verify_batch16_per_proof,2048,2048,1,16,release_default,16937,9.19,MEASURED_RELEASE,"batch amortization peaks near N=2048"
+verify_batch16_per_proof,4096,4096,1,16,release_default,32215,6.91,MEASURED_RELEASE,"regresses vs 2048 (cache)"
+multicore_serial,3,4,1,1,release_default,645463,1.00,MEASURED_RELEASE,"from_durable_snapshot; 512 pkg; 3-voter ring"
+multicore_parallel,3,4,1,16,release_default,650990,0.99,MEASURED_RELEASE,"worker=1 == serial gate preserved"
+multicore_parallel,3,4,2,16,release_default,209808,3.08,MEASURED_RELEASE,
+multicore_parallel,3,4,3,16,release_default,161219,4.00,MEASURED_RELEASE,"production budget max(1,cores-1)=3"
+multicore_parallel,3,4,4,16,release_default,129710,4.98,MEASURED_RELEASE,"forced w4; +0.2x only; Amdahl-capped at tiny ring"
+estimate_4096_serial_individual,4096,4096,1,1,release_default,911383040,1.00,DERIVED,"4096 x 222515us; cold reconstruction worst case ~15.2min"
+estimate_4096_batch16_single,4096,4096,1,16,release_default,131952640,6.91,DERIVED,"4096 x 32215us; ~2.2min"
+estimate_4096_batch16_3workers,4096,4096,3,16,release_default,60000000,15.19,PROJECTED,"~45-90s; batch16 CPU-work / 1.5-3x realized 3-worker on APU bandwidth; ring-4096 re-measure recommended"
+estimate_4096_batch16_3workers_modern,4096,4096,3,16,release_default,20000000,45.00,PROJECTED,"~10-30s typical modern desktop (256-bit AVX2, larger cache, more cores)"
+ram_crypto_4096,4096,4096,3,16,release_default,0,0,DERIVED,"crypto peak <=~6MB (context 655KB/worker + batches); not binding"
+ram_durable_4096,4096,4096,0,0,release_default,0,0,PROJECTED,"~12.31GiB retained full-snapshot workspace (durable format); outstanding V2 concern"
+lto_cgu1_verify_50,50,64,1,1,release_lto_thin_cgu1,5989,-0.055,MEASURED_RELEASE,"ThinLTO+cgu1; -5.5% vs baseline"
+lto_cgu1_verify_100,100,128,1,1,release_lto_thin_cgu1,9475,-0.094,MEASURED_RELEASE,"-9.4%"
+lto_cgu1_verify_500,500,512,1,1,release_lto_thin_cgu1,43468,-0.075,MEASURED_RELEASE,"-7.5%"
+lto_cgu1_verify_1000,1000,1024,1,1,release_lto_thin_cgu1,55944,-0.310,MEASURED_RELEASE,"-31% (noise)"
+lto_cgu1_verify_2048,2048,2048,1,1,release_lto_thin_cgu1,153726,-0.013,MEASURED_RELEASE,"-1.3%"
+lto_cgu1_verify_4096,4096,4096,1,1,release_lto_thin_cgu1,299977,0.349,MEASURED_RELEASE,"+34.9% WORSE; inconsistent -> noise; NOT adopted, reverted"

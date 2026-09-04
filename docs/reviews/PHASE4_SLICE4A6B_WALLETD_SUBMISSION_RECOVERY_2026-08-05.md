@@ -9,7 +9,7 @@ Mode: implement, validate, and stage (no commit)
 - Starting HEAD: `2cc1d6077c1114bee94bda0993899223426683d1`
 - Repository clean before beginning: yes (`git status --porcelain` empty).
 - Toolchain: Rust 1.97.1, MSVC host `stable-x86_64-pc-windows-msvc` (`rustc 1.97.1 (8bab26f4f 2026-07-14)`), used for all Ootle-dependent build/test/clippy commands. All Cargo commands run `--locked --offline`.
-- Pinned Ootle checkout inspected: `C:\Users\pdark\.cargo\git\checkouts\tari-ootle-fb4571cb31b11274\92023e0`, HEAD `92023e0b7c2fabf7df2f8ee23a2cc252d3c34f9f`.
+- Pinned Ootle checkout inspected: `<local cargo git checkout of tari-ootle @ 92023e0>`, HEAD `92023e0b7c2fabf7df2f8ee23a2cc252d3c34f9f`.
 
 ## 2. Files changed
 

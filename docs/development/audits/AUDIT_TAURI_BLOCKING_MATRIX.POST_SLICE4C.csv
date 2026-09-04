@@ -1,0 +1,85 @@
+command,classification,post_slice4c_execution,reason_or_scope
+shell_info,TRIVIAL / SAFE SYNC,event thread,constant process metadata only
+load_election,MIXED,blocking pool,existing durable reads and reconstruction
+load_election_folder,MIXED,blocking pool,existing folder traversal and reconstruction
+unload_election,TRIVIAL / SAFE SYNC,event thread,in-memory state release only
+election_summary,TRIVIAL / SAFE SYNC,event thread,bounded in-memory summary
+active_election_authority,TRIVIAL / SAFE SYNC,event thread,in-memory authority projection
+list_election_workspaces,BLOCKING IO,blocking pool,directory listing and durable metadata reads
+active_workspace_ids,TRIVIAL / SAFE SYNC,event thread,in-memory identifiers only
+resume_election_workspace,MIXED,blocking pool,durable reads and verified-session-cache reconstruction
+delete_election_workspace,BLOCKING IO,blocking pool,workspace filesystem mutation
+open_voting,BLOCKING IO,blocking pool,durable workspace lifecycle write
+close_voting,BLOCKING IO,blocking pool,existing durable workspace lifecycle write
+mark_verified,BLOCKING IO,blocking pool,existing durable workspace lifecycle write
+finalize_election,BLOCKING IO,blocking pool,existing durable workspace lifecycle write
+intake_ballot_package,CRYPTO,blocking pool,package read plus validation/Triptych and workspace write
+private_intake_inbox_path,BLOCKING IO,blocking pool,authority check and inbox directory creation
+sync_private_intake,MIXED,blocking pool,directory traversal/hash/validation/Triptych/workspace write
+current_tally,TRIVIAL / SAFE SYNC,event thread,bounded in-memory tally projection
+participation_summary,TRIVIAL / SAFE SYNC,event thread,bounded in-memory participation projection
+write_archive,BLOCKING IO,blocking pool,archive filesystem write
+write_finalized_archive,MIXED,blocking pool,archive read/write and transport-binding finalization
+verify_archive,MIXED,blocking pool,archive directory reads/CBOR/hash verification
+verify_transport_archive_anchor,MIXED,blocking pool,archive validation and anchor evidence inspection
+write_live_anchor_config_from_verified_archive,BLOCKING IO,blocking pool,archive/config reads and writes
+trusted_ootle_deployment_status,BLOCKING IO,blocking pool,reads configured deployment state
+inspect_template_wasm,CPU HEAVY,blocking pool,selected-file read and hash/inspection
+lock_trusted_ootle_deployment,BLOCKING IO,blocking pool,persistent deployment lock write
+unlock_trusted_ootle_deployment,BLOCKING IO,blocking pool,persistent deployment lock mutation
+inspect_anchor_config,BLOCKING IO,blocking pool,configuration file read/decode
+inspect_anchor_snapshot,BLOCKING IO,blocking pool,snapshot file read/decode
+inspect_anchor_evidence,BLOCKING IO,blocking pool,evidence file read/decode
+run_live_anchor_lifecycle_step,MIXED,blocking pool,existing network/process/filesystem boundary
+walletd_credential_status,TRIVIAL / SAFE SYNC,event thread,in-memory credential status
+connect_walletd,MIXED,blocking pool,existing managed walletd connection work
+reconnect_walletd,MIXED,blocking pool,existing managed walletd reconnection work
+walletd_readiness,MIXED,blocking pool,existing managed walletd probe
+forget_walletd,TRIVIAL / SAFE SYNC,event thread,in-memory managed connection reset
+get_or_create_election_draft,TRIVIAL / SAFE SYNC,event thread,in-memory draft initialization
+start_election_draft,TRIVIAL / SAFE SYNC,event thread,in-memory draft initialization
+discard_election_draft,TRIVIAL / SAFE SYNC,event thread,in-memory draft removal
+set_draft_basics,BLOCKING IO,blocking pool,durable draft workspace write
+set_draft_rules,BLOCKING IO,blocking pool,durable draft workspace write
+set_draft_voters,BLOCKING IO,blocking pool,durable draft workspace write
+set_draft_options,BLOCKING IO,blocking pool,durable draft workspace write
+set_draft_presentation,BLOCKING IO,blocking pool,durable draft workspace write
+import_registry_to_draft,MIXED,blocking pool,registry file read/decode and durable draft write
+preview_draft,TRIVIAL / SAFE SYNC,event thread,bounded in-memory draft projection
+freeze_election,MIXED,blocking pool,artifact validation and durable workspace creation
+export_election_artifacts,BLOCKING IO,blocking pool,artifact writes after short snapshot lock
+set_draft_governance_source_revision,BLOCKING IO,blocking pool,durable draft workspace write
+set_draft_governance_document,BLOCKING IO,blocking pool,document read/hash and durable draft write
+clear_draft_governance_document,BLOCKING IO,blocking pool,durable draft workspace write
+use_governance_document_digest_as_revision,BLOCKING IO,blocking pool,document hash and durable draft write
+compute_governance_document_digest,CPU HEAVY,blocking pool,selected-file read and BLAKE3 hash
+match_governance_document,CPU HEAVY,blocking pool,optional selected-file read and BLAKE3 hash
+voter_confirmation,CPU HEAVY,blocking pool,optional selected-file read/hash before projection
+list_saved_voter_credentials,BLOCKING IO,blocking pool,credential directory traversal/read
+create_durable_voter_credential,CPU HEAVY,blocking pool,existing Argon2id and durable credential write
+unlock_saved_voter_credential,CPU HEAVY,blocking pool,existing credential read and Argon2id work
+import_voter_credential,CPU HEAVY,blocking pool,existing credential read/validation/Argon2id work
+backup_voter_credential,CPU HEAVY,blocking pool,existing credential read/decrypt/write work
+clear_voter_credential_from_memory,TRIVIAL / SAFE SYNC,event thread,in-memory secret removal
+delete_saved_voter_credential,BLOCKING IO,blocking pool,credential filesystem deletion
+voter_governance_credential_status,TRIVIAL / SAFE SYNC,event thread,in-memory status projection
+generate_voter_governance_credential,TRIVIAL / SAFE SYNC,event thread,bounded in-memory key generation
+generate_pending_voter_governance_credential,TRIVIAL / SAFE SYNC,event thread,bounded in-memory key generation
+reset_voter_governance_credential,TRIVIAL / SAFE SYNC,event thread,in-memory credential reset
+reset_pending_voter_governance_credential,TRIVIAL / SAFE SYNC,event thread,in-memory credential reset
+voter_workflow_status,TRIVIAL / SAFE SYNC,event thread,in-memory workflow projection
+voter_ballot_selection_status,TRIVIAL / SAFE SYNC,event thread,in-memory selection projection
+set_voter_ballot_selection,TRIVIAL / SAFE SYNC,event thread,in-memory selection mutation
+clear_voter_ballot_selection,TRIVIAL / SAFE SYNC,event thread,in-memory selection mutation
+change_my_ballot_choice,TRIVIAL / SAFE SYNC,event thread,in-memory selection mutation
+prepare_voter_ballot,CRYPTO,blocking pool,existing proof construction and credential cryptography
+export_prepared_voter_ballot,MIXED,blocking pool,cast-lock/no-overwrite file transaction; locks intentionally span atomic boundary
+private_transport_availability,TRIVIAL / SAFE SYNC,event thread,in-memory route availability projection
+submit_prepared_voter_ballot_privately,MIXED,blocking pool,managed transport/network submission boundary
+reset_voter_workflow,TRIVIAL / SAFE SYNC,event thread,in-memory workflow reset
+write_archive_with_governance_document,MIXED,blocking pool,governance file read plus archive write
+organizer_tor_status,TRIVIAL / SAFE SYNC,async nonblocking,existing status projection
+start_private_intake,MIXED,blocking pool,existing transport provisioning/process work
+stop_private_intake,MIXED,blocking pool,existing transport shutdown work
+export_voter_transport_bundle,BLOCKING IO,blocking pool,source/destination validation and file copy
+

@@ -1,0 +1,32 @@
+Private Ballot is dual-licensed under either of
+
+  * MIT License ([LICENSE-MIT](LICENSE-MIT))
+  * Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+
+at your option.
+
+The SPDX expression for project-owned code is:
+
+    MIT OR Apache-2.0
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this project by you, as defined in the Apache-2.0
+license, shall be dual-licensed as above, without any additional terms or
+conditions. See CONTRIBUTING.md for details.
+
+Third-party components incorporated into or shipped alongside this project
+retain their own licenses. See THIRD_PARTY_NOTICES.md for a summary and
+docs/release/licenses/ for the generated transitive reports.
+
+Notable third-party inclusions:
+
+  * `third_party/tari-triptych/` is vendored source from the Tari Project,
+    licensed under BSD-3-Clause. Its LICENSE file must be preserved.
+  * CSS color tokens in `gui/src/styles/tokens.css` are derived from the
+    tari-project/tari-ootle theme, licensed under BSD-3-Clause.
+  * The Poppins font (via `@fontsource/poppins`) is licensed under the
+    SIL Open Font License 1.1.
+
+This project uses the "Tari" name only to describe the project's purpose
+and origin. The Tari Project's trademarks are the property of their
+respective owners, and this license does not grant any trademark rights.

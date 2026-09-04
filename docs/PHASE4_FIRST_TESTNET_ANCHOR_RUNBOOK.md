@@ -11,7 +11,7 @@ All paths must be absolute. Never paste walletd secrets into command history.
 
 ## Prerequisites
 
-- Repository: `C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot`
+- Repository: `C:path	o	ari-private-ballot`
 - Branch: `phase5/gui-core-foundation`
 - Baseline tag: `single-pc-smoke-pass-2026-08-11`
 - Rust: `stable-x86_64-pc-windows-msvc`
@@ -38,15 +38,15 @@ All paths must be absolute. Never paste walletd secrets into command history.
 ## Build
 
 ```powershell
-git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot rev-parse --abbrev-ref HEAD
-git -C C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot status --porcelain
+git -C C:path	o	ari-private-ballot rev-parse --abbrev-ref HEAD
+git -C C:path	o	ari-private-ballot status --porcelain
 cargo +stable-x86_64-pc-windows-msvc build --release --locked --offline --package tari-cc-private-ballot-ootle-anchor-app
 ```
 
 Do not add `--features offline-test-raw-hashes` to the release build.
 
 ```powershell
-$exe = "C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot\target\release\tari-cc-private-ballot-anchor.exe"
+$exe = "C:path	o	ari-private-ballot\target\release\tari-cc-private-ballot-anchor.exe"
 Get-FileHash -LiteralPath $exe -Algorithm SHA256
 ```
 

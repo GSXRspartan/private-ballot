@@ -1,0 +1,11 @@
+registry_size,proof_count,measurement,verifier_setup_us,proof_verify_us,sequential_total_us,reusable_constant_work_us,estimated_parallelizable_fraction,memory_bytes,measured_or_projected,notes
+50,1,per_ballot,8622,209667,218289,8622,0.9605,10240,MEASURED_DEBUG,"debug/unoptimized; construct=context build (decompress 3601us of it); batch4_per_proof=79671us (2.63x amortization)"
+100,1,per_ballot,12952,338618,351570,12952,0.9632,20480,MEASURED_DEBUG,"batch4_per_proof=127279us (2.66x); decompress=7706us"
+500,1,per_ballot,50280,1008834,1059114,50280,0.9525,81920,MEASURED_DEBUG,"batch4_per_proof=426853us (2.36x); decompress=39035us"
+1000,1,per_ballot,98035,1755170,1853205,98035,0.9471,163840,MEASURED_DEBUG,"batch4_per_proof=482317us (3.64x); decompress=75728us"
+2048,1,per_ballot,191858,3413879,3605737,191858,0.9468,327680,MEASURED_DEBUG,"batch4_per_proof=850275us (4.01x); decompress=235195us"
+4096,1,per_ballot,379266,5950870,6330136,379266,0.9401,655360,MEASURED_DEBUG,"batch4_per_proof=1537722us (3.87x); decompress=324099us; reusable context ~6% of per-ballot cost"
+4096,4096,election_sequential_current,379266,5950870,25938237056,379266,0.9401,655360,PROJECTED_DEBUG,"naive: rebuild context every verify; 4096 x per_ballot_current_us; debug"
+4096,4096,election_sequential_reused_context,0,5950870,24382764320,379266,0.9401,655360,PROJECTED_DEBUG,"build context once (379266us); then 4096 x verify_us; saves ~6%"
+4096,4096,election_batched_size4_single_core,0,1537722,6298549632,379266,0.9401,655360,PROJECTED_DEBUG,"reused context + vendored verify_batch(4); 4096 x batch_per_proof_us; ~3.9x over reused-sequential"
+4096,4096,election_batched_size4_three_workers,0,1537722,2099516544,379266,0.9401,1966080,PROJECTED_DEBUG,"batched(4) across 3 bounded workers (4 logical CPUs minus GUI); shared read-only context; ~12x over naive; DEBUG - release re-measurement required before any target"

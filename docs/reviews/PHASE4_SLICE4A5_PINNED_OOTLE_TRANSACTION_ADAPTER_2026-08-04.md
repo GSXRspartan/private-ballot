@@ -50,8 +50,8 @@ established.
 | Commit subject | `fix(mempool): withhold invalid transactions from gossip propagation (#2362)` |
 | Commit date | 2026-07-20 |
 | Ootle workspace version | v0.37.0 |
-| Local checkout | `C:\Users\pdark\.cargo\git\checkouts\tari-ootle-fb4571cb31b11274\92023e0` |
-| Local git db | `C:\Users\pdark\.cargo\git\db\tari-ootle-fb4571cb31b11274` |
+| Local checkout | `<local cargo git checkout of tari-ootle @ 92023e0>` |
+| Local git db | `<local cargo git db for tari-ootle>` |
 
 Offline resolution was verified before any implementation: `cargo metadata
 --offline` resolved `rev = "92023e0"` to the full commit and pulled all Ootle

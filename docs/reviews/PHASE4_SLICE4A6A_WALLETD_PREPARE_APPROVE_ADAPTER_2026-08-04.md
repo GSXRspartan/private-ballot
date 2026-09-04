@@ -63,7 +63,7 @@ Slice 4A5 semantics changed.**
 - **Source:** git `https://github.com/tari-project/tari-ootle`, **rev `92023e0`**
   (full: `92023e0b7c2fabf7df2f8ee23a2cc252d3c34f9f`) — the exact revision used by Slice 4A5.
 - **Local checkout inspected:**
-  `C:\Users\pdark\.cargo\git\checkouts\tari-ootle-fb4571cb31b11274\92023e0`
+  `<local cargo git checkout of tari-ootle @ 92023e0>`
   (`git rev-parse HEAD` = `92023e0b7c2fabf7df2f8ee23a2cc252d3c34f9f`).
 
 Confirmed method signatures (`clients/wallet_daemon_client/src/lib.rs`), all `async fn` on
