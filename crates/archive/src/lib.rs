@@ -8,10 +8,18 @@
 //! high-resolution timestamps.
 
 mod file_entry;
+pub mod instrumentation;
 mod manifest;
 mod replay;
 mod transport_binding;
+mod verification_memo;
 mod verifier;
+
+pub use instrumentation::{
+    ArchiveVerificationCountersSnapshotV1, archive_verification_snapshot,
+    reset_archive_verification_counters,
+};
+pub use verification_memo::{ARCHIVE_VERIFICATION_MEMO_CAPACITY_V1, ArchiveVerificationMemoV1};
 
 pub use file_entry::{
     ArchiveFileCatalogV1, ArchiveFileDigestV1, ArchiveFileEntryV1, ArchivePathV1,

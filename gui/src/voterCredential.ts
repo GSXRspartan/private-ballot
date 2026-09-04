@@ -4,7 +4,7 @@ export const WALLET_SEED_WARNING =
   "Your voter credential is your private voting identity. It is not a Tari wallet seed. Never enter a wallet seed phrase here.";
 
 export const CREDENTIAL_RECOVERY_WARNING =
-  "Use a passphrase you can remember. Tari Private Ballot cannot recover it.";
+  "Use a passphrase you can remember. Private Ballot cannot recover it.";
 
 export const PASSPHRASE_MISMATCH_MESSAGE =
   "The passphrase confirmation must match exactly.";

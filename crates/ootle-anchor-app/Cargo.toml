@@ -3,6 +3,7 @@ name = "tari-cc-private-ballot-ootle-anchor-app"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
@@ -16,7 +17,12 @@ tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../ootle-anchor
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 tari-cc-private-ballot-archive = { path = "../archive" }
 
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+# `net` compiles Tokio's I/O driver: reqwest (the real walletd/indexer HTTP
+# transport) cannot open a socket unless the runtime is built with the I/O
+# driver enabled. Without it every live RPC fails at the reactor before any
+# connection is attempted, which the readiness probe misreports as
+# "walletd unreachable". `time` bounds each request via `tokio::time::timeout`.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "net"] }
 
 [features]
 default = []

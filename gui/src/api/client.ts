@@ -15,15 +15,25 @@ import type {
   ActiveWorkspaceIdsV1,
   GuiAnchorConfigInspectionV1,
   GuiAnchorEvidenceInspectionV1,
+  GuiV2AnchorEvidenceFileV1,
   GuiAnchorSnapshotInspectionV1,
+  GuiAnchorDeploymentCapabilitiesV1,
   GuiArchiveVerificationV1,
   GuiArchiveWriteResultV1,
   GuiBallotPresentationType,
   GuiBallotIntakeResultV1,
   GuiLiveAnchorConfigRequestV1,
   GuiLiveAnchorConfigResultV1,
+  GuiLiveAnchorPreflightResultV1,
+  GuiLiveAnchorV2RequestV1,
+  GuiLiveAnchorV2ResultV1,
+  GuiV2AnchorPublishPreparationV1,
+  GuiV2LiveAnchorStepRequestV1,
+  GuiV2LiveAnchorStepResultV1,
   GuiLiveAnchorStepRequestV1,
   GuiLiveAnchorStepResultV1,
+  ProductionTransportAuthorityConfigureRequestV1,
+  ProductionTransportAuthorityReadinessV1,
   GuiPrivateIntakeSyncSummaryV1,
   GuiCommandError,
   GuiElectionCreationResultV1,
@@ -49,18 +59,24 @@ import type {
   GuiTransportAnchorVerificationV1,
   GuiTrustedOotleDeploymentLockRequestV1,
   GuiTrustedOotleDeploymentStatusV1,
+  GuiTrustedOotleDeploymentLockRequestV2,
+  GuiTrustedOotleDeploymentStatusV2,
   GuiTrustedOotleTemplateWasmInspectionV1,
   GuiVoterCredentialBackupResultV1,
   GuiVoterCredentialStatusV1,
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
-  ManagedTorTestStatusV1,
+  ManagedTorStatusV1,
   OrganizerIntakeStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
   VoterBundleExportResultV1,
   VoterTorStatusV1,
+  WalletdCredentialStatusV1,
+  WalletdReadinessV1,
+  GuiWalletdAnchorAccountsV1,
+  WalletdConnectionDiagnosticsV1,
 } from "./types";
 
 export class BackendError extends Error {
@@ -175,11 +191,16 @@ export const api = {
   writeFinalizedArchive: (
     targetDir: string,
     governanceDocumentPath: string | null,
+    requireTransportBinding: boolean,
   ) =>
     call<GuiArchiveWriteResultV1>("write_finalized_archive", {
       targetDir,
       governanceDocumentPath,
+      requireTransportBinding,
     }),
+
+  anchorDeploymentCapabilities: () =>
+    call<GuiAnchorDeploymentCapabilitiesV1>("anchor_deployment_capabilities"),
 
   verifyArchive: (directory: string) =>
     call<GuiArchiveVerificationV1>("verify_archive", { directory }),
@@ -198,6 +219,13 @@ export const api = {
   inspectAnchorEvidence: (path: string) =>
     call<GuiAnchorEvidenceInspectionV1>("inspect_anchor_evidence", { path }),
 
+  /** Read + schema-validate a V2 public-anchor evidence JSON file. Read-only;
+   *  no network. Returns the parsed public binding data verbatim; callers
+   *  must still run `verifyV2PublicAnchorEvidence` before displaying any
+   *  "verified" claim. */
+  readV2PublicAnchorEvidenceFile: (path: string) =>
+    call<GuiV2AnchorEvidenceFileV1>("read_v2_public_anchor_evidence_file", { path }),
+
   trustedOotleDeploymentStatus: () =>
     call<GuiTrustedOotleDeploymentStatusV1>("trusted_ootle_deployment_status"),
 
@@ -214,13 +242,114 @@ export const api = {
       confirm: true,
     }),
 
+  trustedOotleDeploymentV2Status: () =>
+    call<GuiTrustedOotleDeploymentStatusV2>("trusted_ootle_deployment_v2_status"),
+
+  lockTrustedOotleDeploymentV2: (request: GuiTrustedOotleDeploymentLockRequestV2) =>
+    call<GuiTrustedOotleDeploymentStatusV2>("lock_trusted_ootle_deployment_v2", { request }),
+
+  unlockTrustedOotleDeploymentV2: () =>
+    call<GuiTrustedOotleDeploymentStatusV2>("unlock_trusted_ootle_deployment_v2", {
+      confirm: true,
+    }),
+
   writeLiveAnchorConfig: (request: GuiLiveAnchorConfigRequestV1) =>
     call<GuiLiveAnchorConfigResultV1>("write_live_anchor_config_from_verified_archive", {
       request,
     }),
 
+  validateLiveAnchorOperatorConfig: (request: GuiLiveAnchorConfigRequestV1) =>
+    call<GuiLiveAnchorPreflightResultV1>("validate_live_anchor_operator_config", {
+      request,
+    }),
+
+  buildV2PublicAnchorPayload: (request: GuiLiveAnchorV2RequestV1) =>
+    call<GuiLiveAnchorV2ResultV1>("build_v2_public_anchor_payload", { request }),
+
+  verifyV2PublicAnchorEvidence: (
+    archiveDirectory: string,
+    payloadHex: string,
+    expectedDigestHex: string,
+  ) =>
+    call<GuiLiveAnchorV2ResultV1>("verify_v2_public_anchor_evidence", {
+      archiveDirectory,
+      payloadHex,
+      expectedDigestHex,
+    }),
+
+  prepareV2AnchorPublish: (
+    archiveDirectory: string,
+    payloadHex: string,
+    expectedDigestHex: string,
+  ) =>
+    call<GuiV2AnchorPublishPreparationV1>("prepare_v2_anchor_publish", {
+      request: {
+        archive_directory: archiveDirectory,
+        payload_hex: payloadHex,
+        expected_digest_hex: expectedDigestHex,
+      },
+    }),
+
+  runV2LiveAnchorLifecycleStep: (request: GuiV2LiveAnchorStepRequestV1) =>
+    call<GuiV2LiveAnchorStepResultV1>("run_v2_live_anchor_lifecycle_step", { request }),
+
+  /** Read-only hydration of the persisted V2 anchor lifecycle for the given
+   *  finalized archive directory. Never contacts walletd or the indexer. */
+  inspectV2LiveAnchorState: (archiveDirectory: string) =>
+    call<import("./types").GuiV2LiveAnchorHydratedStateV1>(
+      "inspect_v2_live_anchor_state",
+      { archiveDirectory },
+    ),
+
+  /** Advance a persisted V2 lifecycle that already carries a submitted
+   *  transaction by re-polling the indexer only. NEVER contacts walletd, so no
+   *  new wallet request can be created and no duplicate transaction can be
+   *  produced. */
+  recoverV2LiveAnchor: (archiveDirectory: string, indexerEndpoint: string) =>
+    call<GuiV2LiveAnchorStepResultV1>("recover_v2_live_anchor", {
+      archiveDirectory,
+      indexerEndpoint,
+    }),
+
   runLiveAnchorLifecycleStep: (request: GuiLiveAnchorStepRequestV1) =>
     call<GuiLiveAnchorStepResultV1>("run_live_anchor_lifecycle_step", { request }),
+
+  // Production transport authority PUBLIC root (operator setup/review). Only
+  // public material crosses this boundary: the request carries a public-key
+  // hex, and the readiness result exposes only a key id, network, and a public
+  // key fingerprint — never a private key.
+  productionTransportAuthorityStatus: () =>
+    call<ProductionTransportAuthorityReadinessV1>("production_transport_authority_status"),
+  configureProductionTransportAuthorityRoot: (
+    request: ProductionTransportAuthorityConfigureRequestV1,
+  ) =>
+    call<ProductionTransportAuthorityReadinessV1>(
+      "configure_production_transport_authority_root",
+      { request },
+    ),
+  forgetProductionTransportAuthorityRoot: (confirm: boolean) =>
+    call<ProductionTransportAuthorityReadinessV1>(
+      "forget_production_transport_authority_root",
+      { confirm },
+    ),
+
+  // Walletd credential (Connect Tari Wallet / Reconnect / Forget). The raw
+  // key is a write-only argument on connect/reconnect; it never comes back.
+  walletdCredentialStatus: () =>
+    call<WalletdCredentialStatusV1>("walletd_credential_status"),
+  connectWalletd: (key: string) =>
+    call<WalletdCredentialStatusV1>("connect_walletd", { key }),
+  reconnectWalletd: (key: string) =>
+    call<WalletdCredentialStatusV1>("reconnect_walletd", { key }),
+  forgetWalletd: () => call<WalletdCredentialStatusV1>("forget_walletd"),
+  walletdReadiness: () => call<WalletdReadinessV1>("walletd_readiness"),
+
+  listWalletdAnchorAccounts: () =>
+    call<GuiWalletdAnchorAccountsV1>("list_walletd_anchor_accounts"),
+
+  // Read-only, secret-free connection diagnostic mirroring the auto-fill probe.
+  walletdConnectionDiagnostics: () =>
+    call<WalletdConnectionDiagnosticsV1>("walletd_connection_diagnostics"),
 
   // Organizer election creation (Slice 5A6).
   getOrCreateElectionDraft: () =>
@@ -337,18 +466,18 @@ export const api = {
       { route },
     ),
   resetVoterWorkflow: () => call<GuiVoterWorkflowStatusV1>("reset_voter_workflow"),
-  // managed-tor-test commands (no-ops/fail-closed when the feature is absent).
-  configureManagedTorTest: (
+  // managed-tor commands (no-ops/fail-closed when the feature is absent).
+  configureManagedTor: (
     torExePath: string,
     voterTorDataDir: string,
     voterPublicBundlePath: string,
   ) =>
-    call<ManagedTorTestStatusV1>("configure_managed_tor_test", {
+    call<ManagedTorStatusV1>("configure_managed_tor", {
       input: { tor_exe_path: torExePath, voter_tor_data_dir: voterTorDataDir, voter_public_bundle_path: voterPublicBundlePath },
     }),
-  startManagedTor: () => call<ManagedTorTestStatusV1>("start_managed_tor"),
-  stopManagedTor: () => call<ManagedTorTestStatusV1>("stop_managed_tor"),
-  managedTorTestStatus: () => call<ManagedTorTestStatusV1>("managed_tor_test_status"),
+  startManagedTor: () => call<ManagedTorStatusV1>("start_managed_tor"),
+  stopManagedTor: () => call<ManagedTorStatusV1>("stop_managed_tor"),
+  managedTorStatus: () => call<ManagedTorStatusV1>("managed_tor_status"),
   // Read-only voter Tor availability (allowlist or remembered/selected path).
   voterTorStatus: (torExePath?: string) =>
     call<VoterTorStatusV1>("voter_tor_status", {
@@ -356,7 +485,7 @@ export const api = {
     }),
   retryPrivateSubmission: () =>
     call<GuiPrivateReleaseResultV1>("retry_private_submission"),
-  // Organizer near-one-click private intake (managed-tor-test). torExePath is an
+  // Organizer near-one-click private intake (managed-tor). torExePath is an
   // optional remembered/selected convenience path; the backend re-validates it
   // and falls back to the reviewed allowlist. All of the crowded operator
   // details (torrc, ports, onion, fingerprint, inbox path) stay backend-owned.

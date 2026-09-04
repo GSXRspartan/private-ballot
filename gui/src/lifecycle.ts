@@ -48,6 +48,108 @@ export function canWriteFinalArchive(state: string | null | undefined): boolean 
   return state === "FINALIZED";
 }
 
+export interface AnchorDeploymentLockPrerequisites {
+  canAct: boolean;
+  busy: boolean;
+  templateAddress: string | null | undefined;
+  selectedWasmPath: string | null | undefined;
+  wasmInspectionPresent: boolean;
+}
+
+export function anchorDeploymentLockBlockers(
+  input: AnchorDeploymentLockPrerequisites,
+): string[] {
+  const blockers: string[] = [];
+  if (!input.canAct) blockers.push("Load an organizer election in the desktop app");
+  if (input.busy) blockers.push("Another anchor operation is running");
+  if (!input.templateAddress?.trim()) blockers.push("Template address is missing");
+  if (!input.selectedWasmPath?.trim()) blockers.push("Published template WASM has not been selected");
+  if (input.selectedWasmPath?.trim() && !input.wasmInspectionPresent) {
+    blockers.push("Selected WASM has not been inspected");
+  }
+  return blockers;
+}
+
+export interface AnchorPreparePrerequisites {
+  canAct: boolean;
+  busy: boolean;
+  archiveResultPresent: boolean;
+  trustedDeploymentPresent: boolean;
+  signerMode: AnchorSignerMode;
+  managedAnchorWalletSupported: boolean;
+  walletdEndpoint: string | null | undefined;
+  indexerEndpoint: string | null | undefined;
+  accountReference: string | null | undefined;
+  feeComponent: string | null | undefined;
+  declaredSealPublicKey: string | null | undefined;
+  dedicatedOrganizerWalletAttested: boolean;
+  acceptedBallotFloor: number;
+  maxEpochDelta: number;
+  maxFee: number;
+}
+
+export type AnchorSignerMode = "managed-anchor-wallet" | "external-walletd";
+
+export function anchorPrepareBlockers(
+  input: AnchorPreparePrerequisites,
+): string[] {
+  const blockers: string[] = [];
+  if (!input.canAct) blockers.push("Load an organizer election in the desktop app");
+  if (!input.archiveResultPresent) blockers.push("Final archive has not been written and verified");
+  if (!input.trustedDeploymentPresent) blockers.push("Ootle deployment is not locked");
+
+  if (input.signerMode === "managed-anchor-wallet") {
+    if (!input.managedAnchorWalletSupported) {
+      blockers.push("Managed anchor wallet is not available in this build; use Advanced external walletd");
+    }
+  } else {
+    if (!input.walletdEndpoint?.trim()) blockers.push("Walletd endpoint is missing");
+    if (!input.indexerEndpoint?.trim()) blockers.push("Indexer endpoint is missing");
+    if (!input.accountReference?.trim()) blockers.push("Fee account is missing");
+    if (!input.feeComponent?.trim()) blockers.push("Fee component address is missing");
+    if (!input.declaredSealPublicKey?.trim()) {
+      blockers.push("Declared seal public key is missing");
+    }
+    if (!input.dedicatedOrganizerWalletAttested) {
+      blockers.push("Dedicated organizer wallet acknowledgement required");
+    }
+  }
+
+  if (!Number.isFinite(input.acceptedBallotFloor) || input.acceptedBallotFloor < 2) {
+    blockers.push("Accepted ballot floor must be at least 2");
+  }
+  if (!Number.isFinite(input.maxEpochDelta) || input.maxEpochDelta < 1) {
+    blockers.push("Max epoch delta must be at least 1");
+  }
+  if (!Number.isFinite(input.maxFee) || input.maxFee < 1) {
+    blockers.push("Max fee must be at least 1");
+  }
+  if (input.busy) blockers.push("Another anchor operation is running");
+  return blockers;
+}
+
+export interface AnchorPublishPrerequisites {
+  canAct: boolean;
+  busy: boolean;
+  archiveResultPresent: boolean;
+  anchorConfigPresent: boolean;
+  walletdBearerTokenUnavailable?: boolean;
+}
+
+export function anchorPublishBlockers(
+  input: AnchorPublishPrerequisites,
+): string[] {
+  const blockers: string[] = [];
+  if (!input.canAct) blockers.push("Load an organizer election in the desktop app");
+  if (!input.archiveResultPresent) blockers.push("Final archive has not been written and verified");
+  if (!input.anchorConfigPresent) blockers.push("Anchor configuration has not been prepared");
+  if (input.walletdBearerTokenUnavailable) {
+    blockers.push("Walletd bearer token requested but unavailable");
+  }
+  if (input.busy) blockers.push("Another anchor operation is running");
+  return blockers;
+}
+
 /** Returns true while results are sealed (DRAFT, FROZEN, OPEN, or unknown). */
 export function resultsAreSealed(state: string | null | undefined): boolean {
   return !canShowTally(state);
@@ -321,7 +423,23 @@ export interface OrganizerNextStep {
 export function nextOrganizerStep(input: {
   lifecycle: string | null | undefined;
   tallyComputed: boolean;
-  archiveWritten: boolean;
+  /**
+   * True when a verified final archive exists for the current election
+   * (transport-bound, hash-matched, and independently verified by the
+   * archive verifier). Callers pass `archiveReadyForAnchor` here.
+   */
+  archiveVerified: boolean;
+  /**
+   * True when a Tari Ootle anchor has been submitted for this archive but its
+   * receipt has not yet reached the terminal verified state. Pass false if
+   * there is no submitted anchor at all.
+   */
+  anchorSubmittedButUnverified?: boolean;
+  /**
+   * True when a Tari Ootle anchor receipt for this archive has been
+   * independently verified (terminal RECEIPT_VERIFIED state).
+   */
+  anchorVerified?: boolean;
 }): OrganizerNextStep {
   switch (input.lifecycle) {
     case "FROZEN":
@@ -350,15 +468,31 @@ export function nextOrganizerStep(input: {
         body: "Finalize the election when the verification is complete. Finalizing is permanent.",
       };
     case "FINALIZED":
-      return input.archiveWritten
-        ? {
-            title: "Final archive written",
-            body: "Verify the final archive independently on the Archive screen before publishing it.",
-          }
-        : {
-            title: "Election finalized",
-            body: "Write the final archive below, then verify it independently on the Archive screen.",
-          };
+      // The verified final archive is authoritative; a Tari Ootle anchor is
+      // optional public integrity evidence. State priority (from most complete
+      // to least) determines what to suggest next.
+      if (input.archiveVerified && input.anchorVerified === true) {
+        return {
+          title: "Election complete",
+          body: "The verified final archive is authoritative. The optional Tari Ootle anchor has been published and its receipt verified.",
+        };
+      }
+      if (input.archiveVerified && input.anchorSubmittedButUnverified === true) {
+        return {
+          title: "Verify existing anchor",
+          body: "An anchor transaction already exists for this archive. Verify its receipt on the Anchor screen.",
+        };
+      }
+      if (input.archiveVerified) {
+        return {
+          title: "Election record verified",
+          body: "The independently verified final archive is complete and authoritative. Optionally publish a public integrity anchor to Tari Ootle — anchoring is optional and non-binding.",
+        };
+      }
+      return {
+        title: "Verify final archive",
+        body: "Open Archive and independently verify the final record. The final archive is the authoritative election record.",
+      };
     case "DRAFT":
       return {
         title: "Election draft",

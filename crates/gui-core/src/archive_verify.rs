@@ -4,7 +4,7 @@ use std::path::Path;
 
 use tari_cc_private_ballot_archive::{
     ArchiveDirectoryFileCheckV1, ArchiveDirectoryVerificationV1, ArchiveGovernancePinFactV1,
-    ArchiveLeadingResultV1, ArchiveTallySummaryV1, ArchiveVerifierError,
+    ArchiveLeadingResultV1, ArchiveTallySummaryV1, ArchiveVerificationMemoV1, ArchiveVerifierError,
 };
 
 use crate::error::{GuiCoreError, GuiErrorCategory};
@@ -65,6 +65,20 @@ pub struct GuiArchiveVerificationV1 {
     pub election_manifest_schema_version: Option<u16>,
     /// Verified V2 proposal question, derived only from canonical manifest bytes.
     pub proposal_question: Option<String>,
+    /// Election id bytes, lowercase hex, from the decoded manifest.
+    pub election_id_hex: Option<String>,
+    /// Stable ballot-kind identifier from the decoded manifest.
+    pub ballot_kind_id: Option<String>,
+    /// Stable ballot-confidentiality identifier from the decoded manifest.
+    pub ballot_confidentiality_id: Option<String>,
+    /// Proof-suite identifier from the decoded manifest.
+    pub proof_suite_id: Option<String>,
+    /// Registry commitment, lowercase hex, from the decoded manifest.
+    pub registry_commitment_hex: Option<String>,
+    /// Candidate/option-set commitment, lowercase hex, from the decoded manifest.
+    pub option_set_commitment_hex: Option<String>,
+    /// Eligible voter count from the frozen registry snapshot.
+    pub eligible_voter_count: Option<u64>,
     /// Distinct application-level governance source pin match fact.
     pub governance_source_matches_pin: GuiGovernanceArchivePinFactV1,
     /// Whether this archive includes the optional transport binding artifact.
@@ -89,6 +103,23 @@ pub fn verify_archive_directory_v1(dir: &Path) -> Result<GuiArchiveVerificationV
     Ok(map_verification(result))
 }
 
+/// Verifies one complete offline archive directory, reusing a same-process
+/// memoized result for an unchanged archive (Slice 4D).
+///
+/// The memo re-establishes the current on-disk archive identity and re-digests
+/// every catalog file on every call; only the repeated authoritative historical
+/// proof replay is skipped on a hit. The mapped output is byte-identical to
+/// [`verify_archive_directory_v1`].
+pub fn verify_archive_directory_with_memo_v1(
+    memo: &ArchiveVerificationMemoV1,
+    dir: &Path,
+) -> Result<GuiArchiveVerificationV1, GuiCoreError> {
+    let result = memo.verify(dir).map_err(map_archive_verifier_error)?;
+    Ok(map_verification(ArchiveDirectoryVerificationV1::clone(
+        &result,
+    )))
+}
+
 fn map_verification(result: ArchiveDirectoryVerificationV1) -> GuiArchiveVerificationV1 {
     GuiArchiveVerificationV1 {
         verified: result.verified,
@@ -108,6 +139,13 @@ fn map_verification(result: ArchiveDirectoryVerificationV1) -> GuiArchiveVerific
         election_manifest_hash_hex: result.election_manifest_hash_hex,
         election_manifest_schema_version: result.election_manifest_schema_version,
         proposal_question: result.proposal_question,
+        election_id_hex: result.election_id_hex,
+        ballot_kind_id: result.ballot_kind_id,
+        ballot_confidentiality_id: result.ballot_confidentiality_id,
+        proof_suite_id: result.proof_suite_id,
+        registry_commitment_hex: result.registry_commitment_hex,
+        option_set_commitment_hex: result.option_set_commitment_hex,
+        eligible_voter_count: result.eligible_voter_count,
         governance_source_matches_pin: map_governance_pin(result.governance_source_matches_pin),
         transport_binding_present: result.transport_binding_present,
         transport_binding_verified: result.transport_binding_verified,
@@ -173,7 +211,7 @@ fn map_tally(tally: ArchiveTallySummaryV1) -> GuiTallySummaryV1 {
     }
 }
 
-fn map_archive_verifier_error(error: ArchiveVerifierError) -> GuiCoreError {
+pub(crate) fn map_archive_verifier_error(error: ArchiveVerifierError) -> GuiCoreError {
     match error {
         ArchiveVerifierError::FileNotFound => GuiCoreError::file_not_found("archive-directory"),
         ArchiveVerifierError::IoFailure => GuiCoreError::io_failure("archive-directory"),

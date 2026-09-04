@@ -27,7 +27,8 @@ use tari_cc_private_ballot_registry::RegistrySnapshot;
 use tari_cc_private_ballot_verifier::{
     BallotAcceptanceLedger, VerifiedApprovalBallotV1,
     build_tari_triptych_verifier_from_registry_v1, ingest_approval_ballot_package_v1,
-    reconstruct_approval_proof_statement, verify_approval_proof,
+    reconstruct_approval_proof_statement, verify_approval_ballot_packages_batch_v1,
+    verify_approval_proof,
 };
 
 const RISTRETTO_BASEPOINT_BYTES: [u8; RISTRETTO_COMPRESSED_POINT_BYTES] = [
@@ -69,6 +70,87 @@ fn real_triptych_ballot_verifies_through_the_application_boundary() {
     );
     assert_eq!(ledger.len(), 1);
     assert_eq!(ledger.accepted_ballots()[0].payload(), &payload);
+}
+
+#[test]
+fn batch_verification_matches_individual_ingestion_outcomes() {
+    let fixture = fixture(b"integration-batch-parity");
+    let provider = TestOnlyDeterministicHasher;
+    let Ok(verifier) = build_tari_triptych_verifier_from_registry_v1(&fixture.registry, &provider)
+    else {
+        panic!("registry-bound Triptych verifier must be constructible");
+    };
+
+    let payload_a = payload(&fixture.candidates, b"candidate-a");
+    let payload_b = payload(&fixture.candidates, b"candidate-b");
+    let valid_a = encode(&package_for_payload(&fixture, &payload_a));
+    let valid_b = encode(&package_for_payload(&fixture, &payload_b));
+
+    // Appended bytes: fails canonical decode (before any crypto).
+    let mut trailing = valid_a.clone();
+    trailing.push(0x5a);
+
+    // A valid proof declared against the wrong payload: parses, but the proof
+    // does not authenticate the reconstructed statement (crypto-invalid).
+    let first_package = package_for_payload(&fixture, &payload_a);
+    let Ok(changed_payload_package) = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: first_package.manifest_hash(),
+        proof_suite_id: first_package.proof_suite_id().to_owned(),
+        proof: first_package.proof().to_vec(),
+        payload: payload_b.clone(),
+    }) else {
+        panic!("changed-payload package must be structurally valid");
+    };
+    let changed_payload = encode(&changed_payload_package);
+
+    let packages = [
+        valid_a.as_slice(),
+        trailing.as_slice(),
+        valid_b.as_slice(),
+        changed_payload.as_slice(),
+    ];
+
+    let batch = verify_approval_ballot_packages_batch_v1(
+        &packages,
+        &fixture.manifest,
+        &fixture.candidates,
+        &provider,
+        &verifier,
+    );
+    assert_eq!(batch.len(), packages.len());
+
+    // Reference: each package driven individually through the unchanged
+    // ingestion path into a FRESH open ledger. Ok/rejection-code must match the
+    // batch result exactly. A bad neighbour never suppresses a valid ballot.
+    for (index, package_bytes) in packages.iter().enumerate() {
+        let lifecycle = open_lifecycle(&fixture.manifest);
+        let mut ledger = BallotAcceptanceLedger::new();
+        let individual = ingest_approval_ballot_package_v1(
+            package_bytes,
+            &fixture.manifest,
+            &fixture.candidates,
+            &lifecycle,
+            &mut ledger,
+            &provider,
+            &verifier,
+        );
+
+        match (&batch[index], &individual) {
+            (Ok(_), Ok(())) => {}
+            (Err(batched), Err(single)) => assert_eq!(
+                batched.code(),
+                single.code(),
+                "batch and individual rejection codes must match for package {index}",
+            ),
+            _ => panic!("batch and individual ingestion disagreed for package {index}"),
+        }
+    }
+
+    assert!(batch[0].is_ok(), "first valid package must batch-verify");
+    assert!(batch[2].is_ok(), "second valid package must batch-verify");
+    assert!(batch[1].is_err(), "malformed package must be rejected");
+    assert!(batch[3].is_err(), "crypto-invalid package must be rejected");
 }
 
 #[test]
@@ -706,6 +788,14 @@ fn package_for_payload(fixture: &Fixture, payload: &ApprovalBallotPayload) -> Ba
     };
 
     package
+}
+
+fn encode(package: &BallotPackageV1) -> Vec<u8> {
+    let Ok(bytes) = package.to_canonical_cbor() else {
+        panic!("real Triptych package must encode canonically");
+    };
+
+    bytes
 }
 
 fn round_trip_package(fixture: &Fixture, package: BallotPackageV1) -> BallotPackageV1 {

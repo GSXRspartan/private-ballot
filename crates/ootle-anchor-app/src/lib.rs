@@ -39,6 +39,7 @@ pub mod policy;
 pub mod poll_gate;
 pub mod publish_lock;
 pub mod report;
+pub mod signer_backend;
 pub mod snapshot_store;
 pub mod terminal_index;
 pub mod verify_evidence;
@@ -64,6 +65,10 @@ pub use policy::{
     OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1, WALLETD_AUTH_TOKEN_ENV_VAR_V1,
 };
 pub use report::MachineReportCode;
+pub use signer_backend::{
+    AnchorSignerBackendV1, EXTERNAL_WALLETD_BACKEND_V1, MANAGED_ANCHOR_WALLET_BACKEND_V1,
+    MANAGED_ANCHOR_WALLET_BLOCKER_V1, MANAGED_ANCHOR_WALLET_ENABLED_V1,
+};
 pub use snapshot_store::{
     MAX_SNAPSHOT_FILE_BYTES, SNAPSHOT_DOMAIN_LABEL_V1, SNAPSHOT_FRAME_PREFIX_V1,
     SNAPSHOT_HASH_ALGORITHM_ID_V1, SNAPSHOT_RECORD_TYPE_ID_V1, SnapshotFileError, read_snapshot,

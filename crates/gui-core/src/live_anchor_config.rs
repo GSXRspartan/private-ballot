@@ -6,27 +6,24 @@
 
 use std::path::{Path, PathBuf};
 
-use tari_cc_private_ballot_anchor::{OotleAnchorRecordV1, OotleNetworkIdV1};
+use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
 use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1, ANCHOR_TEMPLATE_MODULE_V1,
-    AnchorAccountReference, AnchorMaxFeeV1, AnchorTemplateBindingV1,
+    AnchorTemplateBindingV1,
 };
-use tari_cc_private_ballot_archive::ArchiveHashV1;
+use tari_cc_private_ballot_archive::{ArchiveHashV1, ArchiveVerificationMemoV1};
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorConfigInputProvenanceV1, AnchorLiveApprovalFactsV1,
-    MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES, SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
-    path_guard::path_is_within_archive,
+    SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED, path_guard::path_is_within_archive,
 };
-use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerEndpoint, NetworkAdapterConfig, OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1, WalletdEndpoint,
-};
-use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
-    WalletdFeeComponentRef, WalletdSealSignerRef,
-};
+use tari_cc_private_ballot_ootle_anchor_network_adapters::NetworkAdapterConfig;
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider, ManifestHash};
 
-use crate::archive_verify::verify_archive_directory_v1;
+use crate::archive_verify::{
+    GuiArchiveVerificationV1, verify_archive_directory_v1, verify_archive_directory_with_memo_v1,
+};
 use crate::error::{GuiCoreError, GuiErrorCategory};
+use crate::live_anchor_preflight::GuiFieldRejectionV1;
 
 /// Public operator inputs for archive-derived live anchor config generation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -136,15 +133,57 @@ pub struct GuiLiveAnchorConfigResultV1 {
 pub fn write_live_anchor_config_from_verified_archive_v1(
     request: &GuiLiveAnchorConfigRequestV1,
 ) -> Result<GuiLiveAnchorConfigResultV1, GuiCoreError> {
+    prevalidate_live_anchor_config_request(request)?;
+    let verification = verify_archive_directory_v1(Path::new(&request.archive_directory))?;
+    write_live_anchor_config_from_verification_v1(&verification, request)
+}
+
+/// Generates a live anchor config, reusing a same-process memoized archive
+/// verification for an unchanged archive (Slice 4D).
+///
+/// Every gate, derived value, and error is identical to
+/// [`write_live_anchor_config_from_verified_archive_v1`]; only repeated archive
+/// proof replay is avoided on a memo hit.
+///
+/// # Errors
+///
+/// See [`write_live_anchor_config_from_verified_archive_v1`].
+pub fn write_live_anchor_config_from_verified_archive_with_memo_v1(
+    memo: &ArchiveVerificationMemoV1,
+    request: &GuiLiveAnchorConfigRequestV1,
+) -> Result<GuiLiveAnchorConfigResultV1, GuiCoreError> {
+    prevalidate_live_anchor_config_request(request)?;
+    let verification =
+        verify_archive_directory_with_memo_v1(memo, Path::new(&request.archive_directory))?;
+    write_live_anchor_config_from_verification_v1(&verification, request)
+}
+
+fn prevalidate_live_anchor_config_request(
+    request: &GuiLiveAnchorConfigRequestV1,
+) -> Result<(), GuiCoreError> {
     if request.required_accepted_ballot_floor == 0 {
         return Err(GuiCoreError::live_anchor_floor_required());
+    }
+    if request.max_epoch_delta == 0 {
+        return Err(GuiCoreError::live_anchor_field_invalid(
+            "GUI_LIVE_ANCHOR_MAX_EPOCH_DELTA_INVALID",
+            "the max epoch delta must be at least one",
+        ));
     }
     if !request.dedicated_organizer_wallet_attested {
         return Err(GuiCoreError::live_anchor_dedicated_wallet_required());
     }
-    validate_declared_seal_public_key(&request.declared_seal_public_key)?;
+    crate::live_anchor_preflight::validate_declared_seal_public_key(
+        &request.declared_seal_public_key,
+    )
+    .map(|_| ())
+    .map_err(GuiFieldRejectionV1::into_gui_error)
+}
 
-    let verification = verify_archive_directory_v1(Path::new(&request.archive_directory))?;
+fn write_live_anchor_config_from_verification_v1(
+    verification: &GuiArchiveVerificationV1,
+    request: &GuiLiveAnchorConfigRequestV1,
+) -> Result<GuiLiveAnchorConfigResultV1, GuiCoreError> {
     if !verification.verified {
         return Err(GuiCoreError::live_anchor_archive_not_verified());
     }
@@ -200,37 +239,49 @@ pub fn write_live_anchor_config_from_verified_archive_v1(
         return Err(GuiCoreError::live_anchor_config_output_exists());
     }
 
-    let network = OotleNetworkIdV1::new(request.network.clone())
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    let walletd_endpoint = WalletdEndpoint::parse(&request.walletd_endpoint)
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    let indexer_endpoint = IndexerEndpoint::parse(&request.indexer_endpoint)
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    // HIGH-3 endpoint policy: for the organizer-local standalone/testnet
-    // architecture, both endpoints must be loopback so the walletd bearer token
-    // and every anchor request can only ever reach this machine.
-    if !walletd_endpoint.is_loopback() || !indexer_endpoint.is_loopback() {
-        return Err(GuiCoreError::live_anchor_endpoint_not_loopback());
-    }
+    // Every operator field is parsed through the shared field validators so a
+    // failure surfaces the SAME specific machine code the read-only preflight
+    // reports (see `crate::live_anchor_preflight`), never the historical generic
+    // `GUI_LIVE_ANCHOR_OPERATOR_CONFIG_INVALID` funnel.
+    use crate::live_anchor_preflight as preflight;
+    let network = preflight::validate_network(&request.network)
+        .map_err(GuiFieldRejectionV1::into_gui_error)?;
+    // HIGH-3 endpoint policy: walletd stays loopback-only because it may carry
+    // bearer authentication and signing state. The indexer may be loopback for
+    // advanced/local use or the explicitly trusted hosted HTTPS Esmeralda
+    // endpoint for the normal application path.
+    let walletd_endpoint = preflight::validate_walletd_endpoint(&request.walletd_endpoint)
+        .map_err(GuiFieldRejectionV1::into_gui_error)?;
+    let indexer_endpoint =
+        preflight::validate_indexer_endpoint_typed(&request.indexer_endpoint, &network)
+            .map_err(GuiFieldRejectionV1::into_gui_error)?;
+    let template_digest =
+        preflight::validate_template_artifact_digest_bytes(&request.template_artifact_digest_hex)
+            .map_err(GuiFieldRejectionV1::into_gui_error)?;
     let template_binding = AnchorTemplateBindingV1::new(
         request.template_address.clone(),
         ANCHOR_TEMPLATE_MODULE_V1.to_owned(),
         ANCHOR_EVENT_FUNCTION_V1.to_owned(),
         fixed_anchor_template_event_topic_v1(),
-        parse_lower_hash(&request.template_artifact_digest_hex)?,
+        template_digest,
     )
-    .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    let account_reference = AnchorAccountReference::new(request.account_reference.clone())
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    let fee_component = WalletdFeeComponentRef::parse(&request.fee_component)
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    let seal_signer = parse_seal_signer(&request.seal_signer_kind, &request.seal_signer_id)?;
-    let max_fee = AnchorMaxFeeV1::from_units(request.max_fee);
+    .map_err(|_| {
+        GuiCoreError::live_anchor_field_invalid(
+            "GUI_LIVE_ANCHOR_TEMPLATE_ADDRESS_INVALID",
+            "the event-template address does not form a valid deployment binding",
+        )
+    })?;
+    let account_reference = preflight::validate_account_reference(&request.account_reference)
+        .map_err(GuiFieldRejectionV1::into_gui_error)?;
+    let fee_component = preflight::validate_fee_component(&request.fee_component)
+        .map_err(GuiFieldRejectionV1::into_gui_error)?;
+    let seal_signer =
+        preflight::validate_seal_signer(&request.seal_signer_kind, &request.seal_signer_id)
+            .map_err(GuiFieldRejectionV1::into_gui_error)?;
     // MEDIUM-3 fee policy: zero is rejected, and an over-large budget is capped
     // by the shared policy ceiling (also enforced in NetworkAdapterConfig::new).
-    if max_fee.value() == 0 || max_fee.value() > OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 {
-        return Err(GuiCoreError::live_anchor_max_fee_out_of_policy());
-    }
+    let max_fee = preflight::validate_max_fee(request.max_fee)
+        .map_err(GuiFieldRejectionV1::into_gui_error)?;
 
     let network_adapter = NetworkAdapterConfig::new(
         network.clone(),
@@ -338,44 +389,12 @@ pub fn fixed_anchor_template_event_topic_v1() -> String {
     format!("{ANCHOR_TEMPLATE_MODULE_V1}.{ANCHOR_EVENT_TOPIC_SUFFIX_V1}")
 }
 
-fn parse_seal_signer(kind: &str, id: &str) -> Result<WalletdSealSignerRef, GuiCoreError> {
-    let index: u64 = id
-        .parse()
-        .map_err(|_| GuiCoreError::live_anchor_operator_config_invalid())?;
-    match kind {
-        "account" => Ok(WalletdSealSignerRef::AccountKey { index }),
-        "transaction" => Ok(WalletdSealSignerRef::TransactionKey { index }),
-        "imported" => Ok(WalletdSealSignerRef::ImportedKey {
-            local_key_id: index,
-        }),
-        _ => Err(GuiCoreError::live_anchor_operator_config_invalid()),
-    }
-}
-
 fn parse_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
     if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(GuiCoreError::live_anchor_archive_not_verified());
     }
     let mut bytes = [0_u8; 32];
     for (index, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        bytes[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
-    }
-    Ok(bytes)
-}
-
-/// Parses the deployment artifact identity without accepting a second textual
-/// representation. Unlike historical archive hashes, this operator-supplied
-/// runtime identity is required to be canonical lowercase hex.
-fn parse_lower_hash(hex: &str) -> Result<[u8; 32], GuiCoreError> {
-    if hex.len() != 64
-        || !hex
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        return Err(GuiCoreError::live_anchor_operator_config_invalid());
-    }
-    let mut bytes = [0_u8; 32];
-    for (index, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
         bytes[index] = (hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?;
     }
     Ok(bytes)
@@ -388,17 +407,6 @@ fn hex_nibble(byte: u8) -> Result<u8, GuiCoreError> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(GuiCoreError::live_anchor_archive_not_verified()),
     }
-}
-
-fn validate_declared_seal_public_key(value: &str) -> Result<(), GuiCoreError> {
-    let trimmed = value.trim();
-    if trimmed.is_empty()
-        || trimmed.len() > MAX_DECLARED_SEAL_PUBLIC_KEY_BYTES
-        || trimmed.bytes().any(|byte| byte.is_ascii_whitespace())
-    {
-        return Err(GuiCoreError::live_anchor_operator_config_invalid());
-    }
-    Ok(())
 }
 
 fn validate_paths(

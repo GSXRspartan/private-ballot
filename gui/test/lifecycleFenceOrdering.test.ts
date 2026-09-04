@@ -34,9 +34,9 @@ function sliceFn(source: string, name: string): string {
 
 describe("intake-fence publication ordering", () => {
   it("close_voting fences BEFORE the durable commit (fail closed)", () => {
-    const body = sliceFn(shellLib, "close_voting");
-    const fenceAt = body.indexOf("fence_close_before_commit(&app, &state)?");
-    const commitAt = body.indexOf("mutate_session_transactionally(&app, &state");
+    const body = sliceFn(shellLib, "close_voting_blocking");
+    const fenceAt = body.indexOf("fence_close_before_commit(app, state)?");
+    const commitAt = body.indexOf("mutate_session_transactionally(app, state");
     assert.ok(fenceAt >= 0, "close_voting must call the pre-commit fence helper");
     assert.ok(commitAt >= 0, "close_voting must still commit through the transaction boundary");
     assert.ok(
@@ -47,7 +47,10 @@ describe("intake-fence publication ordering", () => {
 
   it("open_voting publishes OPEN only AFTER its durable commit (never fail open)", () => {
     const body = sliceFn(shellLib, "open_voting");
-    const commitAt = body.indexOf("mutate_session_transactionally(&app, &state");
+    // open_voting now commits via `mutate_session_transactionally(&app, state.inner(), ..)`
+    // (the AppState is passed through `state.inner()`); the ordering guarantee
+    // asserted below — publish strictly after commit — is unchanged.
+    const commitAt = body.indexOf("mutate_session_transactionally(&app, state.inner()");
     const publishAt = body.indexOf("publish_lifecycle_to_intake(");
     assert.ok(commitAt >= 0, "open_voting commits through the transaction boundary");
     assert.ok(publishAt >= 0, "open_voting publishes OPEN to the intake fence");

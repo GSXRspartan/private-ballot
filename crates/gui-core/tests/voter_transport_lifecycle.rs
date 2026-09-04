@@ -13,7 +13,7 @@
 //! 1. "Configuring the bundle" = building a pinned root set from the bundle's
 //!    office key and accepting its signed descriptor for THIS election
 //!    (`verify_and_accept_descriptor` — the exact primitive the shell's
-//!    `configure_managed_tor_test` uses).
+//!    `configure_managed_tor` uses).
 //! 2. Configuration must NOT advance lifecycle knowledge or session state,
 //!    must reject a bundle bound to another election/manifest, must reject a
 //!    competing signer reusing the pinned key id, and must detect

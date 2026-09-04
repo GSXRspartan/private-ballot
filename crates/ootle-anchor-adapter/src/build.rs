@@ -56,21 +56,37 @@ impl OotleWalletdAnchorPreparationV1 {
     }
 
     #[must_use]
-    pub const fn network(&self) -> &OotleNetworkIdV1 { &self.network }
+    pub const fn network(&self) -> &OotleNetworkIdV1 {
+        &self.network
+    }
     #[must_use]
-    pub const fn fee_account(&self) -> &AnchorAccountReference { &self.fee_account }
+    pub const fn fee_account(&self) -> &AnchorAccountReference {
+        &self.fee_account
+    }
     #[must_use]
-    pub const fn max_fee(&self) -> AnchorMaxFeeV1 { self.max_fee }
+    pub const fn max_fee(&self) -> AnchorMaxFeeV1 {
+        self.max_fee
+    }
     #[must_use]
-    pub const fn client_reference(&self) -> Option<&AnchorClientReferenceV1> { self.client_reference.as_ref() }
+    pub const fn client_reference(&self) -> Option<&AnchorClientReferenceV1> {
+        self.client_reference.as_ref()
+    }
     #[must_use]
-    pub const fn anchor_digest(&self) -> OotleAnchorRecordHashV1 { self.anchor_digest }
+    pub const fn anchor_digest(&self) -> OotleAnchorRecordHashV1 {
+        self.anchor_digest
+    }
     #[must_use]
-    pub const fn event_payload(&self) -> AnchorEventPayloadV2 { self.event_payload }
+    pub const fn event_payload(&self) -> AnchorEventPayloadV2 {
+        self.event_payload
+    }
     #[must_use]
-    pub const fn template_binding(&self) -> &AnchorTemplateBindingV1 { &self.template_binding }
+    pub const fn template_binding(&self) -> &AnchorTemplateBindingV1 {
+        &self.template_binding
+    }
     #[must_use]
-    pub const fn epoch_binding(&self) -> AnchorEpochBindingV1 { self.epoch_binding }
+    pub const fn epoch_binding(&self) -> AnchorEpochBindingV1 {
+        self.epoch_binding
+    }
 }
 
 /// The frozen unsigned transaction and its project-owned inspection evidence.
@@ -83,11 +99,17 @@ pub struct OotleAnchorBuildResultV1 {
 
 impl OotleAnchorBuildResultV1 {
     #[must_use]
-    pub const fn unsigned_transaction(&self) -> &UnsignedTransaction { &self.unsigned_transaction }
+    pub const fn unsigned_transaction(&self) -> &UnsignedTransaction {
+        &self.unsigned_transaction
+    }
     #[must_use]
-    pub const fn evidence(&self) -> &OotleUnsignedAnchorTransactionEvidenceV1 { &self.evidence }
+    pub const fn evidence(&self) -> &OotleUnsignedAnchorTransactionEvidenceV1 {
+        &self.evidence
+    }
     #[must_use]
-    pub const fn walletd_preparation(&self) -> &OotleWalletdAnchorPreparationV1 { &self.walletd_preparation }
+    pub const fn walletd_preparation(&self) -> &OotleWalletdAnchorPreparationV1 {
+        &self.walletd_preparation
+    }
 
     /// Replaces the still-input-free construction transaction with walletd's
     /// `detect_transaction_inputs` result after strict reinspection. The
@@ -169,10 +191,8 @@ pub fn build_unsigned_anchor_transaction(
     request: &OotleAnchorTransactionBuildRequestV1,
 ) -> Result<OotleAnchorBuildResultV1, OotleAnchorAdapterError> {
     let expectation = expectation_for(request)?;
-    let instruction = build_anchor_call_function(
-        expectation.template_binding(),
-        expectation.event_payload(),
-    )?;
+    let instruction =
+        build_anchor_call_function(expectation.template_binding(), expectation.event_payload())?;
     let unsigned_transaction = TransactionBuilder::new(
         expectation.ootle_network(),
         Epoch::from(expectation.epoch_binding().max_epoch()),
@@ -194,10 +214,8 @@ pub fn build_fee_bearing_anchor_transaction(
     fee_component: ComponentAddress,
 ) -> Result<OotleAnchorBuildResultV1, OotleAnchorAdapterError> {
     let expectation = expectation_for(request)?;
-    let instruction = build_anchor_call_function(
-        expectation.template_binding(),
-        expectation.event_payload(),
-    )?;
+    let instruction =
+        build_anchor_call_function(expectation.template_binding(), expectation.event_payload())?;
     let unsigned_transaction = TransactionBuilder::new(
         expectation.ootle_network(),
         Epoch::from(expectation.epoch_binding().max_epoch()),

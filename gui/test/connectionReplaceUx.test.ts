@@ -9,7 +9,7 @@
 // Fix (frontend/application-state only): when a connection is configured, the
 // private connection is stopped, and the ballot is NOT durably locked, offer
 // "Change ballot-office connection", which re-opens the EXISTING configure/
-// verify flow. It reuses the existing `configure_managed_tor_test` command, so
+// verify flow. It reuses the existing `configure_managed_tor` command, so
 // the election-binding check still fails closed on a mismatch, and it never
 // touches the prepared ballot / response / proof / nullifier / election state.
 //
@@ -24,7 +24,7 @@ function readProjectFile(path: string): string {
 }
 
 const vote = readProjectFile("src/screens/Vote.tsx");
-const managedTor = readProjectFile("src-tauri/src/managed_tor_test.rs");
+const managedTor = readProjectFile("src-tauri/src/managed_tor.rs");
 
 // -------------------------------------------------------------------------
 // The trapped state now has a visible, correctly-gated recovery action.
@@ -62,7 +62,7 @@ describe("replace ballot-office connection (frontend)", () => {
   it("reuses the EXISTING configure/verify path — no second validation", () => {
     // Reconnect goes through the same one-click connect (configure + start), which
     // re-runs the backend bundle verification; there is no parallel validator.
-    assert.match(vote, /await api\.configureManagedTorTest\(/);
+    assert.match(vote, /await api\.configureManagedTor\(/);
     assert.doesNotMatch(vote, /verify_and_accept_descriptor|descriptor\.verify/);
   });
 
@@ -90,7 +90,7 @@ describe("replace ballot-office connection (frontend)", () => {
 
 describe("replace ballot-office connection (backend invariants)", () => {
   function configureBody(): string {
-    const start = managedTor.indexOf("pub fn configure_managed_tor_test");
+    const start = managedTor.indexOf("pub fn configure_managed_tor");
     assert.ok(start >= 0, "configure command present");
     // End of the function = the first standalone closing brace at the start
     // of a line. Line-ending agnostic: matches LF and CRLF checkouts alike.
@@ -108,7 +108,7 @@ describe("replace ballot-office connection (backend invariants)", () => {
 
   it("never touches the voter session (prepared ballot / selection / proof preserved)", () => {
     const body = configureBody();
-    // Configure only rebuilds the transport (managed_tor_test) state; it must not
+    // Configure only rebuilds the transport (managed_tor) state; it must not
     // read or mutate the voter session, the prepared ballot, or the selection.
     assert.doesNotMatch(body, /state\.voter|prepared_ballot|discard_prepared|set_selection|prepare_ballot|invalidate_prepared|generate_credential|reset_credential/);
     assert.match(body, /\*managed = Some\(managed_state\)/);

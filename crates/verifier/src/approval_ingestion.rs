@@ -1,12 +1,94 @@
 //! Manifest-bound approval-package ingestion for normal application use.
 
 use tari_cc_private_ballot_ballot::{
-    BallotPackageEnvelopeV1, CandidateSet, ElectionLifecycleV1, ElectionManifestModel,
+    ApprovalBallotPayload, BallotPackageEnvelopeV1, CandidateSet, ElectionLifecycleV1,
+    ElectionManifestModel,
 };
-use tari_cc_private_ballot_crypto::ProofVerifierV1;
-use tari_cc_private_ballot_protocol::{HashProvider, ProtocolError, ValidationCode};
+use tari_cc_private_ballot_crypto::{ProofBatchInputV1, ProofVerifierV1};
+use tari_cc_private_ballot_protocol::{
+    HashProvider, ProofStatementV1, ProtocolError, ValidationCode,
+};
 
-use crate::{BallotAcceptanceLedger, ProductionProofSuitePolicyV1, verify_approval_proof};
+use crate::proof_verification::{bind_verified_statement, reconstruct_verification_statement};
+use crate::{BallotAcceptanceLedger, ProductionProofSuitePolicyV1, VerifiedApprovalBallotV1};
+
+/// One approval-ballot package that passed every non-cryptographic binding and
+/// decode check and is ready for proof verification.
+///
+/// It carries the reconstructed statement, the exact decoded payload, and the
+/// canonical proof bytes. Splitting this out lets the historical-replay path
+/// verify many packages' proofs together (a shared multiscalar batch) while the
+/// cheaper per-package decoding stays per package — with results applied to the
+/// authoritative ledger separately and in canonical order.
+#[derive(Debug, Clone)]
+pub struct PreparedApprovalBallotV1 {
+    statement: ProofStatementV1,
+    payload: ApprovalBallotPayload,
+    proof_bytes: Vec<u8>,
+}
+
+impl PreparedApprovalBallotV1 {
+    /// Returns the reconstructed statement this package's proof must authenticate.
+    #[must_use]
+    pub const fn statement(&self) -> &ProofStatementV1 {
+        &self.statement
+    }
+
+    /// Returns the canonical proof bytes.
+    #[must_use]
+    pub fn proof_bytes(&self) -> &[u8] {
+        &self.proof_bytes
+    }
+}
+
+/// Runs every non-cryptographic check for one package: transport decode,
+/// manifest binding, proof-suite policy, authoritative candidate commitment,
+/// payload decode under the manifest's approval limits, and statement
+/// reconstruction. It performs no cryptographic multiscalar work and mutates
+/// nothing, so it is safe to run concurrently for independent packages.
+///
+/// The check order is identical to [`ingest_approval_ballot_package_v1`], so the
+/// error a package produces here is exactly the error it would produce there.
+pub fn prepare_approval_ballot_package_v1<M, H, V>(
+    package_bytes: &[u8],
+    manifest: &M,
+    candidates: &CandidateSet,
+    hash_provider: &H,
+    proof_verifier: &V,
+) -> Result<PreparedApprovalBallotV1, ProtocolError>
+where
+    M: ElectionManifestModel,
+    H: HashProvider,
+    V: ProofVerifierV1,
+{
+    let envelope = BallotPackageEnvelopeV1::from_canonical_cbor(package_bytes)?;
+    let manifest_hash = manifest.canonical_hash(hash_provider)?;
+
+    envelope.validate_manifest_binding(manifest_hash, manifest.proof_suite_id())?;
+    ProductionProofSuitePolicyV1::new().validate(manifest.proof_suite_id())?;
+
+    if candidates.canonical_commitment(hash_provider)? != manifest.candidate_set_commitment() {
+        return Err(ProtocolError::new(
+            ValidationCode::CandidateSetCommitmentMismatch,
+            "authoritative candidate set does not match the election manifest",
+        ));
+    }
+
+    let package = envelope.into_ballot_package(candidates, manifest.approval_limits())?;
+    let statement = reconstruct_verification_statement(
+        manifest,
+        package.payload(),
+        package.proof(),
+        hash_provider,
+        proof_verifier,
+    )?;
+
+    Ok(PreparedApprovalBallotV1 {
+        statement,
+        payload: package.payload().clone(),
+        proof_bytes: package.proof().to_vec(),
+    })
+}
 
 /// Decodes, binds, verifies, and accepts one canonical approval-ballot package.
 ///
@@ -28,29 +110,96 @@ where
     H: HashProvider,
     V: ProofVerifierV1,
 {
-    let envelope = BallotPackageEnvelopeV1::from_canonical_cbor(package_bytes)?;
-    let manifest_hash = manifest.canonical_hash(hash_provider)?;
-
-    envelope.validate_manifest_binding(manifest_hash, manifest.proof_suite_id())?;
-    ProductionProofSuitePolicyV1::new().validate(manifest.proof_suite_id())?;
-
-    if candidates.canonical_commitment(hash_provider)? != manifest.candidate_set_commitment() {
-        return Err(ProtocolError::new(
-            ValidationCode::CandidateSetCommitmentMismatch,
-            "authoritative candidate set does not match the election manifest",
-        ));
-    }
-
-    let package = envelope.into_ballot_package(candidates, manifest.approval_limits())?;
-    let verified = verify_approval_proof(
+    let prepared = prepare_approval_ballot_package_v1(
+        package_bytes,
         manifest,
-        package.payload(),
-        package.proof(),
+        candidates,
         hash_provider,
         proof_verifier,
     )?;
 
-    ledger.accept_verified(lifecycle, verified)
+    let verified = proof_verifier.verify(prepared.statement(), prepared.proof_bytes())?;
+    let ballot = bind_verified_statement(&prepared.statement, &prepared.payload, verified)?;
+
+    ledger.accept_verified(lifecycle, ballot)
+}
+
+/// Verifies the proofs of many canonical approval-ballot packages together and
+/// returns one result per package, in package order.
+///
+/// Each package is prepared independently (decode, binding, payload); the
+/// successfully-prepared proofs are then verified as one homogeneous batch via
+/// [`ProofVerifierV1::verify_batch_v1`], which is guaranteed equivalent to
+/// verifying each proof individually. The result for package `i` is exactly what
+/// [`ingest_approval_ballot_package_v1`] would compute for it up to (but not
+/// including) ledger acceptance:
+///
+/// * `Err(_)` if it fails any decode/binding/statement check or its proof is
+///   cryptographically invalid;
+/// * `Ok(VerifiedApprovalBallotV1)` if its proof authenticates its statement.
+///
+/// This function is pure over `(packages, manifest, candidates, proof_verifier)`
+/// and touches no ledger, so callers apply nullifier/first-valid/transcript/tally
+/// semantics themselves, sequentially and in canonical package order.
+pub fn verify_approval_ballot_packages_batch_v1<M, H, V>(
+    packages: &[&[u8]],
+    manifest: &M,
+    candidates: &CandidateSet,
+    hash_provider: &H,
+    proof_verifier: &V,
+) -> Vec<Result<VerifiedApprovalBallotV1, ProtocolError>>
+where
+    M: ElectionManifestModel,
+    H: HashProvider,
+    V: ProofVerifierV1,
+{
+    let prepared: Vec<Result<PreparedApprovalBallotV1, ProtocolError>> = packages
+        .iter()
+        .map(|package_bytes| {
+            prepare_approval_ballot_package_v1(
+                package_bytes,
+                manifest,
+                candidates,
+                hash_provider,
+                proof_verifier,
+            )
+        })
+        .collect();
+
+    // Verify only the successfully-prepared proofs, preserving their order so
+    // the results zip back onto the prepared list below.
+    let crypto_results = {
+        let batch_inputs: Vec<ProofBatchInputV1<'_>> = prepared
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .map(|item| ProofBatchInputV1 {
+                statement: item.statement(),
+                proof_bytes: item.proof_bytes(),
+            })
+            .collect();
+        proof_verifier.verify_batch_v1(&batch_inputs)
+    };
+
+    let mut crypto_results = crypto_results.into_iter();
+    prepared
+        .into_iter()
+        .map(|item| match item {
+            Ok(prepared) => {
+                let verified = crypto_results.next().ok_or_else(missing_batch_result)?;
+                let verified = verified?;
+                bind_verified_statement(&prepared.statement, &prepared.payload, verified)
+            }
+            Err(error) => Err(error),
+        })
+        .collect()
+}
+
+fn missing_batch_result() -> ProtocolError {
+    // Unreachable: exactly one crypto result is produced per prepared-ok item.
+    ProtocolError::new(
+        ValidationCode::InvalidData,
+        "batch verification did not return a result for a prepared ballot",
+    )
 }
 
 #[cfg(test)]

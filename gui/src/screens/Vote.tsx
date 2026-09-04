@@ -19,7 +19,7 @@ import {
   ballotOfficeConnectionVisible,
   isRecoverableTransportError,
   isTransientPrivateReleaseResult,
-  managedTorTestCardVisible,
+  managedTorCardVisible,
   privateSubmissionStageLabel,
   privateSubmissionStatus,
 } from "../privateSubmission";
@@ -36,7 +36,7 @@ import type {
   GuiVoterElectionConfirmationV1,
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
-  ManagedTorTestStatusV1,
+  ManagedTorStatusV1,
   VoterTorStatusV1,
 } from "../api/types";
 import { selectionInstructionText } from "../ballot/ballotTypes";
@@ -75,6 +75,11 @@ import { BallotSaveDialogError, requestAndExportPreparedBallot } from "../voterE
 import { useAppState } from "../state/AppState";
 import { RequestGenerationGate } from "../requestGeneration";
 import { reviewStageReached, voteStageReached, voterStages } from "../voterProgress";
+import {
+  isVoterReadOnlyLifecycle,
+  votingClosedBanner,
+} from "../voterTerminalState";
+import type { NavSection } from "../components/AppFrame";
 import {
   BackendErrorNotice,
   Card,
@@ -200,7 +205,7 @@ const prepareInFlightStore = (() => {
   };
 })();
 
-export function Vote() {
+export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => void } = {}) {
   const { election, shellAvailable, loadElection, loadElectionFolder, refreshElection } =
     useAppState();
   const [loadManifestPath, setLoadManifestPath] = useState("");
@@ -244,7 +249,7 @@ export function Vote() {
   const [transport, setTransport] = useState<GuiPrivateTransportAvailabilityV1 | null>(null);
   const [privateRoute, setPrivateRoute] = useState<GuiPrivateRouteV1>("ManagedTor");
   const [privateResult, setPrivateResult] = useState<GuiPrivateReleaseResultV1 | GuiPrivateSubmissionResultV1 | null>(null);
-  const [managedTorStatus, setManagedTorStatus] = useState<ManagedTorTestStatusV1 | null>(null);
+  const [managedTorStatus, setManagedTorStatus] = useState<ManagedTorStatusV1 | null>(null);
   // Read-only voter Tor availability (auto-detected from the reviewed allowlist
   // or a remembered/selected path). Drives the "Tor installed: Found" line and
   // the one-click Connect flow; never starts Tor by itself.
@@ -1065,7 +1070,7 @@ export function Vote() {
       // Tor child having exited flips the connection banner out of "ready" (and
       // reveals Reconnect) instead of leaving a stale "Private connection ready"
       // contradicting "the managed Tor process has exited".
-      setManagedTorStatus(await api.managedTorTestStatus());
+      setManagedTorStatus(await api.managedTorStatus());
     } catch (err) {
       // Reached only if a post-loop refresh throws; keep it next to the controls.
       setPrivateError(commandErrorFromUnknown(err));
@@ -1088,7 +1093,7 @@ export function Vote() {
   async function refreshManagedTorStatus() {
     if (!shellAvailable) return;
     try {
-      setManagedTorStatus(await api.managedTorTestStatus());
+      setManagedTorStatus(await api.managedTorStatus());
     } catch {
       // The command may fail closed when the feature is absent; ignore.
     }
@@ -1101,7 +1106,7 @@ export function Vote() {
     try {
       // An empty data directory means "auto" — the backend derives an app-owned,
       // election-scoped directory the voter never has to choose.
-      const status = await api.configureManagedTorTest(torExePath, torDataDir, voterBundlePath);
+      const status = await api.configureManagedTor(torExePath, torDataDir, voterBundlePath);
       // Remember only the NON-SECRET paths for the next run/navigation.
       rememberManagedTorConfig({
         torExePath,
@@ -1138,7 +1143,7 @@ export function Vote() {
     setPrivateError(null);
     try {
       // "" data dir → backend auto-derives the app-owned election-scoped dir.
-      await api.configureManagedTorTest(torExePath, "", voterBundlePath);
+      await api.configureManagedTor(torExePath, "", voterBundlePath);
       rememberManagedTorConfig({
         torExePath,
         torDataDir: "",
@@ -1351,49 +1356,77 @@ export function Vote() {
         and submit privately or save a ballot file for the organizer.
       </p>
 
+      {(() => {
+        const closed = votingClosedBanner(election?.lifecycle_state);
+        if (!closed) return null;
+        return (
+          <div
+            className="notice notice-info voting-closed-banner"
+            role="status"
+            aria-live="polite"
+          >
+            <h2 className="voting-closed-banner-title">{closed.title}</h2>
+            <p className="card-body">{closed.body}</p>
+            {closed.offersFinalRecord && (
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => onNavigate?.("archive")}
+                  disabled={!onNavigate}
+                >
+                  Verify final record on Archive
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       <details className="voter-guide">
         <summary className="voter-guide-summary">How voting works</summary>
         <ol className="voter-guide-steps">
           <li>
-            <strong>Load the election.</strong> Select the election package folder you received
-            from the organizer (or the three files individually). The app checks that the files
-            belong together and have not been altered.
+            <strong>Create or load your private voter credential.</strong> Your voter credential
+            is your private voting identity, not a Tari wallet seed. Keep the encrypted
+            credential file and its passphrase private.
           </li>
           <li>
-            <strong>Review the election.</strong> Confirm what is being voted on, the
-            governance source, and the available choices before continuing.
+            <strong>Share only your public enrollment key with the organizer, before freeze.</strong>{" "}
+            The public enrollment key — never your credential — is what the ballot office enrolls
+            on the eligible voter list.
           </li>
           <li>
-            <strong>Prove you are eligible privately.</strong> Your voter credential lets the
-            app prove that you belong to the approved voter list without revealing which
-            eligible voter you are. The organizer only ever received your public enrollment key.
+            <strong>Load the election package.</strong> Select the frozen election folder the
+            organizer sent you (or the three files individually). The app checks that its
+            canonical files belong together and have not been altered.
           </li>
           <li>
-            <strong>Configure the ballot-office connection.</strong> Select the connection file
-            the organizer gave you (the voter transport bundle). It tells this app which ballot
-            office is authoritative for this election; every signed statement from the office is
-            verified against it. Do this before checking whether voting has opened.
+            <strong>Configure the ballot-office connection and check status.</strong> Select the
+            connection file (voter transport bundle) that identifies this election&rsquo;s ballot
+            office. Every signed status statement — including whether voting is OPEN — is verified
+            against this pinned authority.
           </li>
           <li>
-            <strong>Learn when voting opens.</strong> The frozen election file itself cannot say
-            when voting opens — only the ballot office can, and there are two equivalent ways to
-            learn it: check through your private connection, or import a signed election-status
-            file from the office. Both are verified against the pinned office; responses become
-            choosable only after a verified OPEN.
+            <strong>Prove you are eligible anonymously.</strong> A linkable ring-signature
+            proof shows you control one credential in the frozen eligible set, without
+            revealing which eligible voter you are.
           </li>
           <li>
-            <strong>Choose your vote.</strong> Your ballot is tied to this specific election,
-            so it cannot be reused for a different election.
+            <strong>Create and submit your anonymous ballot.</strong> Your ballot and proof are
+            bound to this election. Normal private-online submission goes through Tor, reusing
+            the connection above. The offline encrypted ballot file is a fallback for manual
+            delivery.
           </li>
           <li>
-            <strong>Create your anonymous proof and submit.</strong> Create the anonymous
-            eligibility proof, then submit through the private connection (Tor) or save the
-            encrypted ballot file and transfer it separately.
+            <strong>Receive an authenticated organizer receipt.</strong> The receipt confirms the
+            organizer authenticated the exact ballot you submitted. By itself it is not proof of
+            final archive inclusion or Ootle anchoring.
           </li>
           <li>
-            <strong>Check its status.</strong> An accepted receipt means the organizer
-            authenticated your exact ballot — it is not yet final archive inclusion or Ootle
-            anchoring. Those are checked later from the published archive and organizer evidence.
+            <strong>Verify the final record later.</strong> Once the election is finalized,
+            anyone with the archive folder can independently replay verification and check any
+            optional Ootle anchor from the published evidence.
           </li>
         </ol>
         <DetailsSection summary="Technical details">
@@ -1435,6 +1468,7 @@ export function Vote() {
         busy={busy}
         context="vote"
         showFrozenElectionNotice={!!election}
+        electionLifecycleState={election?.lifecycle_state ?? null}
         onCreate={onCreateCredential}
         onUnlock={onUnlockCredential}
         onImport={onImportCredential}
@@ -2120,27 +2154,51 @@ export function Vote() {
           </Card>
 
           <Card title="Review election">
-            <label className="radio-option">
-              <input
-                type="checkbox"
-                checked={confirmed}
-                onChange={(e) => setConfirmed(e.target.checked)}
-              />
-              I have reviewed the election details above and confirmed what I am voting on.
-            </label>
-            <div className="action-row">
-              <button
-                type="button"
-                className="btn btn-primary"
-                disabled={!confirmed || !confirmationContinueAvailable(confirmation) || busy}
-                onClick={() => void onEnterCredentialStage()}
-              >
-                Continue
-              </button>
-            </div>
-            <p className="form-hint">
-              Continuing does not create a proof, cast a vote, or send anything anywhere.
-            </p>
+            {isVoterReadOnlyLifecycle(election?.lifecycle_state) ? (
+              <>
+                <p className="card-body">
+                  This election is {election?.lifecycle_state === "FINALIZED" ? "finalized" : "closed"}.
+                  Its details above are read-only — no ballot can be created, changed, or
+                  submitted here.
+                </p>
+                {election?.lifecycle_state === "FINALIZED" && (
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate?.("archive")}
+                      disabled={!onNavigate}
+                    >
+                      Verify final record on Archive
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <label className="radio-option">
+                  <input
+                    type="checkbox"
+                    checked={confirmed}
+                    onChange={(e) => setConfirmed(e.target.checked)}
+                  />
+                  I have reviewed the election details above and confirmed what I am voting on.
+                </label>
+                <div className="action-row">
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={!confirmed || !confirmationContinueAvailable(confirmation) || busy}
+                    onClick={() => void onEnterCredentialStage()}
+                  >
+                    Continue
+                  </button>
+                </div>
+                <p className="form-hint">
+                  Continuing does not create a proof, cast a vote, or send anything anywhere.
+                </p>
+              </>
+            )}
           </Card>
           </>
           ) : null}
@@ -2766,16 +2824,16 @@ export function Vote() {
                   </>
                   )}
 
-                  {/* managed-tor-test: private submission controls. Rendered ONLY
+                  {/* managed-tor: private submission controls. Rendered ONLY
                       when the controlled-test feature is actually present in this
-                      build (a production build without `managed-tor-test` never
+                      build (a production build without `managed-tor` never
                       shows this card — the backend refuses those commands and the
                       status command is absent, so managedTorFeaturePresent stays
                       false). When present, it is shown whenever a ballot is Ready
                       to submit OR the durable cast state is CAST_PENDING/CAST, so
                       the recovery/status route survives a restart even though the
                       transient prepared-ballot state is gone (Issue 2). */}
-                  {managedTorTestCardVisible({
+                  {managedTorCardVisible({
                     featurePresent: managedTorFeaturePresent,
                     preparedReady: workflow?.prepared_ballot.state === "Ready",
                     castState,

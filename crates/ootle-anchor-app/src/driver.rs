@@ -44,8 +44,7 @@ use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     AnchorReceiptCoordinator, AnchorReceiptQueryV1, VerifiedIndexerAnchorV1,
 };
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
-    WalletdAnchorAdapterError, WalletdAnchorSnapshotV1,
-    WalletdSubmissionStateV1,
+    WalletdAnchorAdapterError, WalletdAnchorSnapshotV1, WalletdSubmissionStateV1,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, ManifestHash};
 
@@ -348,7 +347,17 @@ impl VerifiedRuntimeArchiveFactsV1 {
         Self::from_verification_and_config(&verification, config)
     }
 
-    fn from_verification_and_config(
+    /// Builds runtime facts from an ALREADY-VERIFIED archive result and checks
+    /// every live approval fact against `config`.
+    ///
+    /// This performs the identical finality/binding/privacy/count checks as
+    /// [`Self::from_archive_and_config`] but does no filesystem I/O or proof
+    /// replay: the caller supplies a verification result it obtained through the
+    /// process-local archive-verification memo, which re-established the current
+    /// on-disk identity and full catalog before returning it. The result must
+    /// have `verified && finalized && archive_hash_consistent &&
+    /// transport_binding_verified`; anything else fails closed here.
+    pub fn from_verification_and_config(
         verification: &ArchiveDirectoryVerificationV1,
         config: &AnchorAppConfig,
     ) -> Result<Self, DriverError> {
@@ -622,6 +631,36 @@ where
     ) -> Result<Self, DriverError> {
         let runtime_archive =
             VerifiedRuntimeArchiveFactsV1::from_archive_and_config(archive_dir, &config)?;
+        let mut driver = Self::restore(config, walletd_adapter, indexer_adapter)?;
+        driver.terminal_index_root = Some(default_terminal_index_root()?);
+        driver.runtime_archive = Some(runtime_archive);
+        driver.archive_dir = Some(archive_dir.to_path_buf());
+        Ok(driver)
+    }
+
+    /// Restores a live driver from an ALREADY-VERIFIED archive result.
+    ///
+    /// Identical to [`Self::restore_live`] except the runtime archive facts are
+    /// derived from `verification` (obtained through the process-local
+    /// archive-verification memo, which re-established the current on-disk
+    /// identity and full catalog) instead of re-running the full archive
+    /// verification and proof replay. `archive_dir` is still recorded so
+    /// later self-referential/containment checks are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DriverError`] if the verification result does not satisfy every
+    /// finality/binding/privacy/count gate, or on snapshot/terminal-index
+    /// failure.
+    pub fn restore_live_with_verification(
+        config: AnchorAppConfig,
+        walletd_adapter: WalletdAnchorNetworkAdapter<W>,
+        indexer_adapter: IndexerReceiptNetworkAdapter<I>,
+        archive_dir: &Path,
+        verification: &ArchiveDirectoryVerificationV1,
+    ) -> Result<Self, DriverError> {
+        let runtime_archive =
+            VerifiedRuntimeArchiveFactsV1::from_verification_and_config(verification, &config)?;
         let mut driver = Self::restore(config, walletd_adapter, indexer_adapter)?;
         driver.terminal_index_root = Some(default_terminal_index_root()?);
         driver.runtime_archive = Some(runtime_archive);
@@ -951,11 +990,17 @@ where
         Ok(())
     }
 
-    /// HIGH-3 endpoint policy: both endpoints must be loopback for live
-    /// publication (the walletd endpoint carries the optional bearer token).
+    /// HIGH-3 endpoint policy: walletd must be loopback for live publication
+    /// (it may carry the optional bearer token). The indexer may be loopback or
+    /// the explicitly trusted hosted HTTPS endpoint for the configured network.
     fn require_loopback_endpoints(&self) -> Result<(), DriverError> {
         let adapter = self.config.network_adapter();
-        if !adapter.walletd_endpoint().is_loopback() || !adapter.indexer_endpoint().is_loopback() {
+        if !adapter.walletd_endpoint().is_loopback()
+            || !tari_cc_private_ballot_ootle_anchor_network_adapters::indexer_endpoint_allowed_for_network_v1(
+                adapter.network(),
+                adapter.indexer_endpoint(),
+            )
+        {
             return Err(DriverError::NonLoopbackEndpoint);
         }
         Ok(())
@@ -1255,14 +1300,21 @@ where
             template,
             epoch,
         );
-        let fee_component = self.config.network_adapter().fee_component().component_address();
-        let initial_build = tari_cc_private_ballot_ootle_anchor_adapter::build_fee_bearing_anchor_transaction(
-            &build_request,
-            fee_component,
-        )
-        .map_err(|error| DriverError::Lifecycle(LifecycleError::Walletd(
-            WalletdAnchorAdapterError::UnsafeUnsignedTransaction(error),
-        )))?;
+        let fee_component = self
+            .config
+            .network_adapter()
+            .fee_component()
+            .component_address();
+        let initial_build =
+            tari_cc_private_ballot_ootle_anchor_adapter::build_fee_bearing_anchor_transaction(
+                &build_request,
+                fee_component,
+            )
+            .map_err(|error| {
+                DriverError::Lifecycle(LifecycleError::Walletd(
+                    WalletdAnchorAdapterError::UnsafeUnsignedTransaction(error),
+                ))
+            })?;
         // v0.39.2 walletd must resolve the dependency closure before CREATE.
         // Reinspection of this response is inside the network adapter and
         // rejects any mutation beyond inputs before the durable intent exists.

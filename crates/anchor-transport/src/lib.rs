@@ -38,11 +38,14 @@ pub use errors::{
     AnchorReceiptVerificationError, AnchorRequestLookupError, AnchorSubmissionError,
 };
 pub use event::{
-    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
-    ANCHOR_TEMPLATE_MODULE_V1, AnchorEpochBindingV1, AnchorEventBindingError, AnchorEventPayloadV2,
-    AnchorEventProofV2, AnchorTemplateBindingV1, DEFAULT_ANCHOR_MAX_EPOCH_DELTA_V1,
-    MAX_ANCHOR_EVENT_METADATA_BYTES_V2, MAX_ANCHOR_EVENT_METADATA_FIELDS_V2,
-    OOTLE_MAX_EPOCH_WINDOW_V1,
+    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_DIGEST_KEY_V2, ANCHOR_EVENT_ELECTION_ID_KEY_V2,
+    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_NETWORK_KEY_V2,
+    ANCHOR_EVENT_PUBLIC_SUMMARY_KEY_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V2,
+    ANCHOR_TEMPLATE_MODULE_V1, ANCHOR_TEMPLATE_MODULE_V2, ANCHOR_TEMPLATE_RECEIPT_TOPIC_PREFIX_V2,
+    AnchorEpochBindingV1, AnchorEventBindingError, AnchorEventPayloadV2, AnchorEventPayloadV3,
+    AnchorEventProofV2, AnchorTemplateBindingV1, AnchorTemplateBindingV2,
+    DEFAULT_ANCHOR_MAX_EPOCH_DELTA_V1, MAX_ANCHOR_EVENT_METADATA_BYTES_V2,
+    MAX_ANCHOR_EVENT_METADATA_FIELDS_V2, OOTLE_MAX_EPOCH_WINDOW_V1,
 };
 pub use fake::{DeterministicAnchorFake, FakeFinality};
 pub use identifiers::{
@@ -64,7 +67,8 @@ pub use traits::{
     AnchorTransactionSubmitter,
 };
 pub use verification::{
-    VerifiedAnchorEvidenceV1, verify_anchor_receipt, verify_query_outcome, verify_v39_event_receipt,
+    VerifiedAnchorEvidenceV1, VerifiedAnchorEvidenceV2, verify_anchor_receipt,
+    verify_query_outcome, verify_v2_event_receipt, verify_v39_event_receipt,
 };
 
 /// Re-exported bounded network identifier, reused unchanged from the anchor

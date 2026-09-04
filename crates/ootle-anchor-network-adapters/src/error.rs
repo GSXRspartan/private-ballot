@@ -34,6 +34,9 @@ pub enum TransportErrorCategory {
     ServiceUnavailable,
     /// The executor could not block on the async call.
     ExecutorUnavailable,
+    /// Walletd rejected execution because the paid fee was below the required
+    /// fee. The bounded numeric details are carried separately.
+    InsufficientFeesPaid,
     /// A bounded, uncategorized transport failure.
     Unknown,
 }
@@ -52,6 +55,7 @@ impl TransportErrorCategory {
             Self::NotFound => "TRANSPORT_NOT_FOUND",
             Self::ServiceUnavailable => "TRANSPORT_SERVICE_UNAVAILABLE",
             Self::ExecutorUnavailable => "TRANSPORT_EXECUTOR_UNAVAILABLE",
+            Self::InsufficientFeesPaid => "TRANSPORT_INSUFFICIENT_FEES_PAID",
             Self::Unknown => "TRANSPORT_UNKNOWN",
         }
     }
@@ -72,6 +76,8 @@ impl fmt::Display for TransportErrorCategory {
 pub struct TransportError {
     category: TransportErrorCategory,
     http_status: Option<u16>,
+    paid_fee: Option<u64>,
+    required_fee: Option<u64>,
 }
 
 impl TransportError {
@@ -81,6 +87,8 @@ impl TransportError {
         Self {
             category,
             http_status: None,
+            paid_fee: None,
+            required_fee: None,
         }
     }
 
@@ -90,6 +98,19 @@ impl TransportError {
         Self {
             category,
             http_status: Some(http_status),
+            paid_fee: None,
+            required_fee: None,
+        }
+    }
+
+    /// Creates a bounded insufficient-fees error.
+    #[must_use]
+    pub const fn insufficient_fees_paid(paid_fee: u64, required_fee: u64) -> Self {
+        Self {
+            category: TransportErrorCategory::InsufficientFeesPaid,
+            http_status: None,
+            paid_fee: Some(paid_fee),
+            required_fee: Some(required_fee),
         }
     }
 
@@ -103,6 +124,15 @@ impl TransportError {
     #[must_use]
     pub const fn http_status(&self) -> Option<u16> {
         self.http_status
+    }
+
+    /// Returns `(paid, required)` for an insufficient-fees rejection.
+    #[must_use]
+    pub const fn insufficient_fee_details(&self) -> Option<(u64, u64)> {
+        match (self.paid_fee, self.required_fee) {
+            (Some(paid), Some(required)) => Some((paid, required)),
+            _ => None,
+        }
     }
 
     /// Returns the stable machine-readable code string.
@@ -140,7 +170,10 @@ impl TransportError {
             WalletDaemonClientError::Unauthorized { .. } => {
                 Self::from_category(TransportErrorCategory::AuthenticationFailure)
             }
-            WalletDaemonClientError::RequestFailedWithStatus { code, .. } => {
+            WalletDaemonClientError::RequestFailedWithStatus { code, message } => {
+                if let Some((paid, required)) = parse_insufficient_fees_paid(message) {
+                    return Self::insufficient_fees_paid(paid, required);
+                }
                 let status = u16::try_from(*code).unwrap_or(0);
                 match status {
                     401 => Self::from_category(TransportErrorCategory::AuthenticationFailure),
@@ -149,8 +182,13 @@ impl TransportError {
                     _ => Self::with_status(TransportErrorCategory::HttpStatusError, status),
                 }
             }
-            WalletDaemonClientError::InvalidResponse { .. }
-            | WalletDaemonClientError::DeserializeResponse { .. } => {
+            WalletDaemonClientError::InvalidResponse { message } => {
+                if let Some((paid, required)) = parse_insufficient_fees_paid(message) {
+                    return Self::insufficient_fees_paid(paid, required);
+                }
+                Self::from_category(TransportErrorCategory::MalformedResponse)
+            }
+            WalletDaemonClientError::DeserializeResponse { .. } => {
                 Self::from_category(TransportErrorCategory::MalformedResponse)
             }
             WalletDaemonClientError::SerializeRequest { .. } => {
@@ -214,6 +252,18 @@ impl TransportError {
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.http_status {
+            _ if self.category == TransportErrorCategory::InsufficientFeesPaid => {
+                match self.insufficient_fee_details() {
+                    Some((paid, required)) => write!(
+                        f,
+                        "{}: paid={} required={}",
+                        self.category.as_str(),
+                        paid,
+                        required
+                    ),
+                    None => f.write_str(self.category.as_str()),
+                }
+            }
             Some(status) => write!(f, "{}: HTTP {}", self.category.as_str(), status),
             None => f.write_str(self.category.as_str()),
         }
@@ -221,3 +271,16 @@ impl fmt::Display for TransportError {
 }
 
 impl std::error::Error for TransportError {}
+
+fn parse_insufficient_fees_paid(message: &str) -> Option<(u64, u64)> {
+    if !message.contains("InsufficientFeesPaid") && !message.contains("Insufficient fees paid") {
+        return None;
+    }
+    let mut numbers = message
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok());
+    let paid = numbers.next()?;
+    let required = numbers.next()?;
+    Some((paid, required))
+}

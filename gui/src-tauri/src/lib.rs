@@ -1,4 +1,4 @@
-//! Tauri 2 desktop shell for Tari Private Ballot (Phase 5, Slice 5A3).
+//! Tauri 2 desktop shell for Private Ballot (Phase 5, Slice 5A3).
 //!
 //! This crate is a thin typed-command boundary over
 //! `tari-cc-private-ballot-gui-core`, exactly as staged by ADR-0007: the GUI
@@ -14,9 +14,10 @@
 //! signing material.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AppliedElectionStatusV1, ElectionLifecycleStateV1, ElectionStatusKnowledgeV1,
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
@@ -25,59 +26,92 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionDraftPreviewV1, GuiElectionDraftV1, GuiElectionExportResultV1, GuiElectionSessionV1,
     GuiElectionSummaryV1, GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1,
     GuiGovernanceDocumentDigestV1, GuiGovernanceDocumentStatusV1, GuiLiveAnchorConfigRequestV1,
-    GuiLiveAnchorConfigResultV1, GuiLiveAnchorStepRequestV1, GuiLiveAnchorStepResultV1,
+    GuiLiveAnchorConfigResultV1, GuiLiveAnchorPreflightResultV1, GuiLiveAnchorStepRequestV1,
+    GuiLiveAnchorStepResultV1, GuiLiveAnchorV2RequestV1, GuiLiveAnchorV2ResultV1,
+    GuiV2LiveAnchorHydratedStateV1, GuiV2LiveAnchorStepRequestV1, GuiV2LiveAnchorStepResultV1,
+    GuiV2AnchorPublishPreparationRequestV1, GuiV2AnchorPublishPreparationV1,
     GuiParticipationSummaryV1, GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1,
     GuiPrivateIntakeSyncSummaryV1, GuiSavedVoterCredentialDeleteResultV1,
     GuiSavedVoterCredentialsV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
-    GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentStatusV1,
+    GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
+    GuiTrustedOotleDeploymentStatusV1, GuiTrustedOotleDeploymentStatusV2,
     GuiTrustedOotleTemplateWasmInspectionV1, GuiVoterCastLockStateV1,
     GuiVoterCredentialBackupResultV1, GuiVoterCredentialOriginV1, GuiVoterCredentialStatusV1,
     GuiVoterElectionBindingV1, GuiVoterElectionConfirmationV1, GuiVoterSelectionStatusV1,
     GuiVoterSessionV1, GuiVoterWorkflowStatusV1, LoadedElectionWorkspaceV1,
     TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
-    VoterGovernanceCredentialV1, backup_voter_credential_to_path_v1,
-    copy_validated_voter_credential_to_default_v1, create_draft_workspace_id_v1,
-    delete_election_workspace_v1, delete_saved_voter_credential_v1, enforce_publish_privacy_floor,
-    ensure_election_workspaces_directory_v1, ensure_private_intake_inbox_directory_v1,
-    ensure_voter_cast_locks_directory_v1, ensure_voter_credentials_directory_v1,
-    ensure_voter_election_status_directory_v1, file_summary_for_public_key,
-    import_voter_credential_from_path_v1, ingest_private_intake_inbox_into_session_v1,
-    inspect_anchor_config_v1, inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1,
-    inspect_template_wasm_v1, list_election_workspaces_v1, list_saved_voter_credentials_v1,
+    VerifiedElectionSessionCacheV1, VoterGovernanceCredentialV1,
+    backup_voter_credential_to_path_v1, copy_validated_voter_credential_to_default_v1,
+    create_draft_workspace_id_v1, delete_election_workspace_v1, delete_saved_voter_credential_v1,
+    enforce_publish_privacy_floor, ensure_election_workspaces_directory_v1,
+    ensure_private_intake_inbox_directory_v1, ensure_voter_cast_locks_directory_v1,
+    ensure_voter_credentials_directory_v1, ensure_voter_election_status_directory_v1,
+    file_summary_for_public_key, import_voter_credential_from_path_v1,
+    ingest_private_intake_inbox_into_session_v1, inspect_anchor_config_v1,
+    inspect_anchor_evidence_v1, inspect_anchor_snapshot_v1, inspect_template_wasm_v1,
+    list_election_workspaces_v1, list_saved_voter_credentials_v1,
     load_persisted_election_status_v1, load_trusted_ootle_deployment_v1,
-    lock_trusted_ootle_deployment_v1, mark_draft_workspace_superseded_v1,
+    load_trusted_ootle_deployment_v2, lock_trusted_ootle_deployment_v1,
+    lock_trusted_ootle_deployment_v2 as lock_trusted_ootle_deployment_v2_core,
+    mark_draft_workspace_superseded_v1,
+    ProductionTransportAuthorityConfigureRequestV1, ProductionTransportAuthorityReadinessV1,
+    configure_production_transport_authority_root_v1,
+    forget_production_transport_authority_root_v1, production_transport_authority_readiness_v1,
     mark_workspace_organizer_authority_v1, parse_decision, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
-    resolve_and_recover_private_transport_cast_lock_state_v1, resume_election_workspace_v1,
-    run_step_with_transports, trusted_ootle_deployment_to_live_anchor_request_v1,
-    unlock_saved_voter_credential_v1, unlock_trusted_ootle_deployment_v1, validate_workspace_id_v1,
-    verify_and_apply_election_status_statement_v1, verify_archive_directory_v1,
-    verify_transport_archive_anchor_v1, voter_cast_locks_directory_v1,
-    voter_credentials_directory_v1, walletd_auth_env_var_name, workspace_id_for_session_v1,
-    write_archive_directory_v1, write_draft_workspace_revision_v1, write_election_artifacts_v1,
-    write_finalized_archive_v1_with_governance_document,
-    write_live_anchor_config_from_verified_archive_v1, write_new_durable_voter_credential_v1,
-    write_session_workspace_revision_v1,
+    resolve_and_recover_private_transport_cast_lock_state_v1,
+    ArchiveVerificationMemoV1, advance_verified_session_after_commit_v1,
+    resume_election_workspace_with_verified_session_cache_v1,
+    GuiV2AnchorEvidenceFileV1, inspect_v2_live_anchor_state as inspect_v2_live_anchor_state_core,
+    read_v2_public_anchor_evidence_file as read_v2_public_anchor_evidence_file_core,
+    run_step_with_transports_memoized, run_v2_live_anchor_recovery_step_with_indexer,
+    run_v2_live_anchor_step_with_transports,
+    trusted_ootle_deployment_to_live_anchor_request_v1,
+    trusted_ootle_deployment_to_live_anchor_v2_request_v1,
+    trusted_ootle_deployment_v2_binding,
+    validate_live_anchor_operator_config_with_memo_v1,
+    build_v2_public_payload_from_verified_archive_with_memo_v1,
+    prepare_v2_anchor_publish_from_verified_evidence_v1,
+    verify_v2_public_payload_against_archive_v1,
+    unlock_saved_voter_credential_v1, unlock_trusted_ootle_deployment_v1,
+    unlock_trusted_ootle_deployment_v2 as unlock_trusted_ootle_deployment_v2_core,
+    validate_workspace_id_v1,
+    verify_and_apply_election_status_statement_v1, verify_archive_directory_with_memo_v1,
+    verify_transport_archive_anchor_with_memo_v1, voter_cast_locks_directory_v1,
+    voter_credentials_directory_v1, workspace_has_organizer_authority_v1,
+    workspace_id_for_session_v1, write_archive_directory_v1, write_draft_workspace_revision_v1,
+    write_election_artifacts_v1, write_finalized_archive_v1_with_governance_document,
+    write_finalized_archive_v1_with_governance_document_and_transport_binding,
+    write_finalized_archive_v1_with_transport_binding,
+    write_live_anchor_config_from_verified_archive_with_memo_v1,
+    write_new_durable_voter_credential_v1, write_session_workspace_revision_v1,
 };
 use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
+use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
-    IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
-    WalletdAnchorNetworkAdapter, WalletdAuthSecret,
+    IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
+    WalletdEndpoint,
+    WalletdAnchorNetworkAdapter, WalletdAuthSecret, indexer_endpoint_allowed_for_network_v1,
 };
 use tari_cc_private_ballot_transport_gateway::PrivateSubmissionCoordinatorV1;
 use tari_cc_private_ballot_transport_network::VoterPrivateRouteV1;
 use tauri::{AppHandle, Manager};
 use zeroize::Zeroizing;
 
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
 mod election_status_commands;
-#[cfg(feature = "managed-tor-test")]
-mod managed_tor_test;
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
+mod managed_tor;
+#[cfg(feature = "managed-tor")]
 mod organizer_tor_intake;
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
 mod tor_support;
+
+mod walletd_credential_store;
+
+mod walletd_accounts;
+mod walletd_probe;
 
 /// Serializable command error: a bounded copy of the gui-core error model.
 ///
@@ -105,7 +139,7 @@ impl CommandError {
     /// Attaches a short, bounded diagnostic context label (no path or secret).
     /// Used so a friendly user-facing error can still carry a machine-readable
     /// hint that diagnostics and tests can distinguish.
-    #[cfg_attr(not(feature = "managed-tor-test"), allow(dead_code))]
+    #[cfg_attr(not(feature = "managed-tor"), allow(dead_code))]
     fn with_context(mut self, context: String) -> Self {
         self.context = Some(context);
         self
@@ -159,7 +193,7 @@ impl CommandError {
         )
     }
 
-    #[cfg(not(feature = "managed-tor-test"))]
+    #[cfg(not(feature = "managed-tor"))]
     fn private_transport_unavailable() -> Self {
         Self::new(
             "GUI_PRIVATE_TRANSPORT_UNAVAILABLE",
@@ -344,13 +378,13 @@ impl PendingVoterCredentialV1 {
 /// MUST follow this single order:
 ///
 /// ```text
-/// session -> voter -> pending_voter_credential -> managed_tor_test
+/// session -> voter -> pending_voter_credential -> managed_tor
 /// ```
 ///
 /// with `draft`, `session_workspace_id`, `draft_workspace_id`, `transport`,
 /// and `organizer_intake` used only as single (leaf) locks. Two historical
-/// violations formed a stable ABBA cycle (`managed_tor_test -> session` in
-/// `running_transport_endpoint` versus `session -> managed_tor_test` in
+/// violations formed a stable ABBA cycle (`managed_tor -> session` in
+/// `running_transport_endpoint` versus `session -> managed_tor` in
 /// `apply_election_status_bytes_blocking`) that deadlocked two blocking-pool
 /// workers at zero CPU and then parked every later voter command — including
 /// ballot preparation — at its first lock acquisition forever. Both edges are
@@ -375,9 +409,19 @@ struct AppState {
     /// previous worker died mid-operation and performs fail-closed recovery —
     /// backend-authoritative, with no frontend timeout involved.
     preparation_slot: Mutex<()>,
-    #[cfg(feature = "managed-tor-test")]
-    managed_tor_test: Mutex<Option<managed_tor_test::ManagedTorTestState>>,
-    #[cfg(feature = "managed-tor-test")]
+    /// Memory-only immutable sessions reconstructed through full durable replay.
+    /// This lock is never held during proof verification; it is deliberately a
+    /// leaf state object outside the AppState lock-order graph.
+    verified_session_cache: Arc<VerifiedElectionSessionCacheV1>,
+    /// Slice 4D: process-local, memory-only, bounded memo of full archive
+    /// verifications. It re-establishes the current on-disk archive identity and
+    /// full catalog on every request and only skips repeated historical proof
+    /// replay for an unchanged archive. Like the verified-session cache, its lock
+    /// is never held during archive proof replay.
+    archive_verification_memo: Arc<ArchiveVerificationMemoV1>,
+    #[cfg(feature = "managed-tor")]
+    managed_tor: Mutex<Option<managed_tor::ManagedTorState>>,
+    #[cfg(feature = "managed-tor")]
     organizer_intake: Mutex<Option<organizer_tor_intake::OrganizerIntakeState>>,
 }
 
@@ -392,9 +436,11 @@ impl Default for AppState {
             pending_voter_credential: Mutex::new(None),
             transport: Mutex::new(PrivateSubmissionCoordinatorV1::production_unprovisioned()),
             preparation_slot: Mutex::new(()),
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test: Mutex::new(None),
-            #[cfg(feature = "managed-tor-test")]
+            verified_session_cache: Arc::new(VerifiedElectionSessionCacheV1::default()),
+            archive_verification_memo: Arc::new(ArchiveVerificationMemoV1::default()),
+            #[cfg(feature = "managed-tor")]
+            managed_tor: Mutex::new(None),
+            #[cfg(feature = "managed-tor")]
             organizer_intake: Mutex::new(None),
         }
     }
@@ -426,7 +472,7 @@ struct GuiPrivateTransportAvailabilityV1 {
     message: &'static str,
 }
 
-#[cfg(not(feature = "managed-tor-test"))]
+#[cfg(not(feature = "managed-tor"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct GuiPrivateSubmissionResultV1 {
     route: &'static str,
@@ -872,6 +918,22 @@ impl AppState {
         Ok(())
     }
 
+    fn verified_session_cache(&self) -> Arc<VerifiedElectionSessionCacheV1> {
+        Arc::clone(&self.verified_session_cache)
+    }
+
+    fn archive_verification_memo(&self) -> Arc<ArchiveVerificationMemoV1> {
+        Arc::clone(&self.archive_verification_memo)
+    }
+
+    fn invalidate_verified_session_cache(&self, workspace_id: &str) {
+        // A revision-identity mismatch is the fail-closed backstop if a cache
+        // mutex were ever unavailable. This eager removal releases memory and
+        // makes successful local mutations observable in diagnostics.
+        self.verified_session_cache
+            .invalidate_workspace(workspace_id);
+    }
+
     fn clear_session_workspace_id(&self) -> Result<(), CommandError> {
         let mut guard = self
             .session_workspace_id
@@ -909,6 +971,10 @@ fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
 fn workspaces_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
     let app_data_root = app_data_root(app)?;
     Ok(ensure_election_workspaces_directory_v1(&app_data_root)?)
+}
+
+fn election_status_directory_from_app_data(app_data_root: &Path) -> Result<PathBuf, CommandError> {
+    Ok(ensure_voter_election_status_directory_v1(app_data_root)?)
 }
 
 fn active_or_new_draft_workspace_id(
@@ -1005,7 +1071,21 @@ fn mutate_session_transactionally<T>(
     let summary = next.summary();
     let lifecycle_state = next.lifecycle_state_v1();
     let workspace_id = active_or_session_derived_workspace_id(state, &next)?;
-    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+    let new_revision = write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+    // Slice 4E: advance the verified-session cache to the newly committed head
+    // instead of invalidating it. The advance re-reads and confirms the new
+    // committed durable identity before installing the already-verified
+    // post-mutation session, so an immediate resume of this head is a cache hit
+    // with zero historical replay. Any identity drift falls back to plain
+    // invalidation (cold reconstruction). Errors here never fail the mutation —
+    // the durable commit already succeeded — they only forgo the optimization.
+    let _ = advance_verified_session_after_commit_v1(
+        &workspaces_dir,
+        &workspace_id,
+        new_revision,
+        &next,
+        state.verified_session_cache().as_ref(),
+    );
     state.replace_active_session(next)?;
     Ok((result, summary, lifecycle_state))
 }
@@ -1030,14 +1110,14 @@ fn cast_locks_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
     Ok(cast_locks_dir)
 }
 
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
 fn configured_managed_tor_descriptor(
     state: &AppState,
 ) -> Result<Option<TransportDescriptorV1>, CommandError> {
-    managed_tor_test::configured_transport_descriptor(state)
+    managed_tor::configured_transport_descriptor(state)
 }
 
-#[cfg(not(feature = "managed-tor-test"))]
+#[cfg(not(feature = "managed-tor"))]
 fn configured_managed_tor_descriptor(
     _state: &AppState,
 ) -> Result<Option<TransportDescriptorV1>, CommandError> {
@@ -1119,7 +1199,7 @@ struct ShellInfoV1 {
 #[tauri::command]
 fn shell_info() -> ShellInfoV1 {
     ShellInfoV1 {
-        application: "Tari Private Ballot",
+        application: "Private Ballot",
         shell_version: env!("CARGO_PKG_VERSION"),
         gui_core_boundary: "gui-core typed commands (in process, no server)",
         binding_notice: "This release is intended for governance pilots. Binding governance use requires the applicable review and authorization process.",
@@ -1130,20 +1210,22 @@ fn shell_info() -> ShellInfoV1 {
 /// set) from exact paths, validates every cross-binding through gui-core, and
 /// opens a fresh organizer session in the frozen lifecycle state.
 #[tauri::command]
-fn load_election(
+async fn load_election(
     manifest_path: String,
     registry_path: String,
     option_set_path: String,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
-    load_election_from_paths(
-        Path::new(&manifest_path),
-        Path::new(&registry_path),
-        Path::new(&option_set_path),
-        &app,
-        &state,
+    let app_data_root = app_data_root(&app)?;
+    let session = load_election_from_paths_blocking(
+        PathBuf::from(manifest_path),
+        PathBuf::from(registry_path),
+        PathBuf::from(option_set_path),
+        app_data_root,
     )
+    .await?;
+    install_imported_election_session(session, &state)
 }
 
 /// Canonical filenames the app writes when exporting an election's public
@@ -1158,12 +1240,12 @@ const ELECTION_FOLDER_CANDIDATE_SET_FILE: &str = "candidate-set.cbor";
 /// if the chosen path is not a directory or is missing any of the three files;
 /// the canonical decode + same-election binding checks then run unchanged.
 #[tauri::command]
-fn load_election_folder(
+async fn load_election_folder(
     folder_path: String,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
-    let folder = Path::new(&folder_path);
+    let folder = PathBuf::from(folder_path);
     if !folder.is_dir() {
         return Err(CommandError::new(
             "GUI_ELECTION_FOLDER_NOT_A_DIRECTORY",
@@ -1181,7 +1263,10 @@ fn load_election_folder(
             "the election folder must contain election-manifest.cbor, voter-registry.cbor, and candidate-set.cbor",
         ));
     }
-    load_election_from_paths(&manifest, &registry, &option_set, &app, &state)
+    let app_data_root = app_data_root(&app)?;
+    let session =
+        load_election_from_paths_blocking(manifest, registry, option_set, app_data_root).await?;
+    install_imported_election_session(session, &state)
 }
 
 /// Re-applies a persisted, previously accepted election-status record (if
@@ -1193,14 +1278,18 @@ fn reapply_persisted_election_status(
     app: &AppHandle,
     session: &mut GuiElectionSessionV1,
 ) -> Result<Option<AppliedElectionStatusV1>, CommandError> {
-    let app_data_root = app
-        .path()
-        .app_data_dir()
-        .map_err(|_| CommandError::app_data_unavailable())?;
-    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root)?;
+    let app_data_root = app_data_root(app)?;
+    let status_dir = election_status_directory_from_app_data(&app_data_root)?;
+    reapply_persisted_election_status_from_dir(&status_dir, session)
+}
+
+fn reapply_persisted_election_status_from_dir(
+    status_dir: &Path,
+    session: &mut GuiElectionSessionV1,
+) -> Result<Option<AppliedElectionStatusV1>, CommandError> {
     let manifest_hex = session.artifacts().summary().manifest_hash_hex.clone();
     let Some(record) = load_persisted_election_status_v1(
-        &status_dir,
+        status_dir,
         &manifest_hex,
         session.artifacts().manifest().election_id().as_bytes(),
         session.artifacts().manifest_hash(),
@@ -1232,16 +1321,39 @@ fn reapply_persisted_election_status(
 /// organizer ownership), and it does not claim the session-workspace slot, so
 /// nothing an imported session does can ever write into `election-*` durable
 /// organizer storage.
-fn load_election_from_paths(
+async fn load_election_from_paths_blocking(
+    manifest_path: PathBuf,
+    registry_path: PathBuf,
+    option_set_path: PathBuf,
+    app_data_root: PathBuf,
+) -> Result<GuiElectionSessionV1, CommandError> {
+    run_blocking_command(move || {
+        let status_dir = election_status_directory_from_app_data(&app_data_root)?;
+        let mut session = reconstruct_election_session_from_paths(
+            &manifest_path,
+            &registry_path,
+            &option_set_path,
+        )?;
+        reapply_persisted_election_status_from_dir(&status_dir, &mut session)?;
+        Ok(session)
+    })
+    .await
+}
+
+fn reconstruct_election_session_from_paths(
     manifest_path: &Path,
     registry_path: &Path,
     option_set_path: &Path,
-    app: &AppHandle,
-    state: &AppState,
-) -> Result<GuiElectionSummaryV1, CommandError> {
+) -> Result<GuiElectionSessionV1, CommandError> {
     let artifacts =
         GuiElectionArtifactsV1::from_paths(manifest_path, registry_path, option_set_path)?;
-    let mut session = GuiElectionSessionV1::new(artifacts)?;
+    Ok(GuiElectionSessionV1::new(artifacts)?)
+}
+
+fn install_imported_election_session(
+    session: GuiElectionSessionV1,
+    state: &AppState,
+) -> Result<GuiElectionSummaryV1, CommandError> {
     // Preserve a same-process credential across an explicit reload. Its
     // eligibility is recomputed only after the new canonical registry loads.
     let carried_credential = state
@@ -1265,11 +1377,6 @@ fn load_election_from_paths(
             session.artifacts(),
         )?;
     }
-    // Restore authenticated lifecycle knowledge for this election (offline,
-    // from the previously accepted status record). Voter lifecycle evidence
-    // always flows through signed statements verified against the pinned
-    // ballot-office anchor; the local mutable view advances forward only.
-    reapply_persisted_election_status(app, &mut session)?;
     let summary = session.summary();
     {
         let mut guard = state
@@ -1363,13 +1470,18 @@ fn active_election_authority(
 }
 
 /// Lists resumable local election workspaces from the backend-controlled
-/// app-data directory. The frontend receives public summaries only.
+/// app-data directory. The frontend receives public display summaries only
+/// (no verified session is constructed — see `summarize_workspace`).
+///
+/// Discovery reads and decodes every committed revision file, which is
+/// filesystem-bound work; it runs on the blocking thread pool so the Tauri
+/// event thread stays responsive.
 #[tauri::command]
-fn list_election_workspaces(
+async fn list_election_workspaces(
     app: AppHandle,
 ) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, CommandError> {
     let workspaces_dir = workspaces_directory(&app)?;
-    Ok(list_election_workspaces_v1(&workspaces_dir)?)
+    run_blocking_command(move || Ok(list_election_workspaces_v1(&workspaces_dir)?)).await
 }
 
 /// The backend-issued ids of the workspaces this session currently has active:
@@ -1408,13 +1520,43 @@ fn active_workspace_ids(
 
 /// Resumes one local election workspace by backend-issued id.
 #[tauri::command]
-fn resume_election_workspace(
+async fn resume_election_workspace(
     workspace_id: String,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiElectionWorkspaceResumeResultV1, CommandError> {
-    let workspaces_dir = workspaces_directory(&app)?;
-    let loaded = resume_election_workspace_v1(&workspaces_dir, &workspace_id)?;
+    let app_data_root = app_data_root(&app)?;
+    let blocking_workspace_id = workspace_id.clone();
+    let verified_session_cache = state.verified_session_cache();
+    let loaded = run_blocking_command(move || {
+        let workspaces_dir = ensure_election_workspaces_directory_v1(&app_data_root)?;
+        let status_dir = election_status_directory_from_app_data(&app_data_root)?;
+        let loaded = resume_election_workspace_with_verified_session_cache_v1(
+            &workspaces_dir,
+            &blocking_workspace_id,
+            verified_session_cache.as_ref(),
+        )?;
+        match loaded {
+            LoadedElectionWorkspaceV1::Session {
+                mut workspace,
+                mut session,
+            } => {
+                // Restore authenticated lifecycle knowledge before installing
+                // so a failed status replay leaves AppState unchanged.
+                reapply_persisted_election_status_from_dir(&status_dir, &mut session)?;
+                // Organizer authority is an intentionally uncached sidecar
+                // capability. Re-read it after the cached C-state is obtained
+                // so a sidecar change cannot inherit a prior cache hit.
+                workspace.organizer_workspace =
+                    workspace_has_organizer_authority_v1(&workspaces_dir, &blocking_workspace_id);
+                Ok(LoadedElectionWorkspaceV1::Session { workspace, session })
+            }
+            LoadedElectionWorkspaceV1::Draft { workspace, draft } => {
+                Ok(LoadedElectionWorkspaceV1::Draft { workspace, draft })
+            }
+        }
+    })
+    .await?;
     match loaded {
         LoadedElectionWorkspaceV1::Draft { workspace, draft } => {
             let preview = draft.preview();
@@ -1434,13 +1576,7 @@ fn resume_election_workspace(
                 organizer_workspace: true,
             })
         }
-        LoadedElectionWorkspaceV1::Session {
-            workspace,
-            mut session,
-        } => {
-            // Restore authenticated lifecycle knowledge before installing so
-            // the resumed session reflects the last accepted status evidence.
-            reapply_persisted_election_status(&app, &mut session)?;
+        LoadedElectionWorkspaceV1::Session { workspace, session } => {
             let election = session.summary();
             // ROLE RESTORATION IS FAIL-CLOSED: organizer authority returns only
             // with a valid durable organizer-authority provenance marker. A
@@ -1472,36 +1608,46 @@ fn resume_election_workspace(
 /// canonical election files and finalized archives stored elsewhere are never
 /// touched. The workspace currently loaded in this session cannot be deleted.
 #[tauri::command]
-fn delete_election_workspace(
+async fn delete_election_workspace(
     workspace_id: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, CommandError> {
     // Refuse to delete the workspace this session currently has loaded (session
     // or draft) so a cleanup never pulls durable state out from under the
-    // active election.
-    let active_session = state
-        .session_workspace_id
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?
-        .clone();
-    let active_draft = state
-        .draft_workspace_id
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?
-        .clone();
-    if active_session.as_deref() == Some(workspace_id.as_str())
-        || active_draft.as_deref() == Some(workspace_id.as_str())
+    // active election. These are cheap in-memory lock reads, resolved on the
+    // async thread before the filesystem work is dispatched.
     {
-        return Err(CommandError::new(
-            "GUI_WORKSPACE_DELETE_ACTIVE",
-            "INVALID_INPUT",
-            "close or switch away from this election before deleting its local workspace",
-        ));
+        let state = app.state::<AppState>();
+        let active_session = state
+            .session_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?
+            .clone();
+        let active_draft = state
+            .draft_workspace_id
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?
+            .clone();
+        if active_session.as_deref() == Some(workspace_id.as_str())
+            || active_draft.as_deref() == Some(workspace_id.as_str())
+        {
+            return Err(CommandError::new(
+                "GUI_WORKSPACE_DELETE_ACTIVE",
+                "INVALID_INPUT",
+                "close or switch away from this election before deleting its local workspace",
+            ));
+        }
     }
     let workspaces_dir = workspaces_directory(&app)?;
-    delete_election_workspace_v1(&workspaces_dir, &workspace_id)?;
-    Ok(list_election_workspaces_v1(&workspaces_dir)?)
+    let verified_session_cache = app.state::<AppState>().verified_session_cache();
+    // The recursive removal and the follow-up discovery pass are filesystem
+    // work; run them off the Tauri event thread.
+    run_blocking_command(move || {
+        delete_election_workspace_v1(&workspaces_dir, &workspace_id)?;
+        verified_session_cache.invalidate_workspace(&workspace_id);
+        Ok(list_election_workspaces_v1(&workspaces_dir)?)
+    })
+    .await
 }
 
 /// Opens the frozen election for ballot intake (lifecycle delegation).
@@ -1509,23 +1655,24 @@ fn delete_election_workspace(
 /// ORGANIZER-AUTHORITATIVE: rejected up front for any session that was not
 /// established by an organizer flow, before any mutation or workspace write.
 #[tauri::command]
-fn open_voting(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<GuiElectionSummaryV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let (_result, summary, _lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
-            session.open()?;
-            Ok(())
-        })?;
-    publish_lifecycle_to_intake(
-        &app,
-        &state,
-        &summary.manifest_hash_hex,
-        ElectionLifecycleStateV1::Open,
-    );
-    Ok(summary)
+async fn open_voting(app: AppHandle) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let (_result, summary, _lifecycle_state) =
+            mutate_session_transactionally(&app, state.inner(), |session| {
+                session.open()?;
+                Ok(())
+            })?;
+        publish_lifecycle_to_intake(
+            &app,
+            state.inner(),
+            &summary.manifest_hash_hex,
+            ElectionLifecycleStateV1::Open,
+        );
+        Ok(summary)
+    })
+    .await
 }
 
 /// Closes ballot acceptance permanently (lifecycle delegation).
@@ -1541,22 +1688,30 @@ fn open_voting(
 /// because an early OPEN publication would admit ballots before the election
 /// truly opened.
 #[tauri::command]
-fn close_voting(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
+async fn close_voting(app: AppHandle) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        close_voting_blocking(&app, state.inner())
+    })
+    .await
+}
+
+fn close_voting_blocking(
+    app: &AppHandle,
+    state: &AppState,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
     // Authority is checked BEFORE the intake fence: an unauthorized close must
     // never publish a signed-truth fence transition for an election this shell
     // does not organize.
     state.ensure_organizer_authority()?;
-    #[cfg(feature = "managed-tor-test")]
-    fence_close_before_commit(&app, &state)?;
+    #[cfg(feature = "managed-tor")]
+    fence_close_before_commit(app, state)?;
     let (_result, summary, lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
+        mutate_session_transactionally(app, state, |session| {
             session.close()?;
             Ok(())
         })?;
-    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    invalidate_voter_for_lifecycle(state, lifecycle_state)?;
     Ok(summary)
 }
 
@@ -1564,11 +1719,8 @@ fn close_voting(
 /// commit. Fires only when the active session is currently OPEN (mirroring
 /// what `close()` is about to do), so an illegal click on a FROZEN/CLOSED
 /// session never makes signed status answers lie about authoritative truth.
-#[cfg(feature = "managed-tor-test")]
-fn fence_close_before_commit(
-    app: &AppHandle,
-    state: &tauri::State<'_, AppState>,
-) -> Result<(), CommandError> {
+#[cfg(feature = "managed-tor")]
+fn fence_close_before_commit(app: &AppHandle, state: &AppState) -> Result<(), CommandError> {
     let manifest_hash_hex = {
         let guard = state
             .session
@@ -1593,20 +1745,28 @@ fn fence_close_before_commit(
 
 /// Records completion of public verification (lifecycle delegation).
 #[tauri::command]
-fn mark_verified(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
+async fn mark_verified(app: AppHandle) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mark_verified_blocking(&app, state.inner())
+    })
+    .await
+}
+
+fn mark_verified_blocking(
+    app: &AppHandle,
+    state: &AppState,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
     state.ensure_organizer_authority()?;
     let (_result, summary, lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
+        mutate_session_transactionally(app, state, |session| {
             session.mark_verified()?;
             Ok(())
         })?;
-    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    invalidate_voter_for_lifecycle(state, lifecycle_state)?;
     publish_lifecycle_to_intake(
-        &app,
-        &state,
+        app,
+        state,
         &summary.manifest_hash_hex,
         ElectionLifecycleStateV1::Verified,
     );
@@ -1616,20 +1776,28 @@ fn mark_verified(
 /// Finalizes the verified result and archive commitments (lifecycle
 /// delegation).
 #[tauri::command]
-fn finalize_election(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
+async fn finalize_election(app: AppHandle) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        finalize_election_blocking(&app, state.inner())
+    })
+    .await
+}
+
+fn finalize_election_blocking(
+    app: &AppHandle,
+    state: &AppState,
 ) -> Result<GuiElectionSummaryV1, CommandError> {
     state.ensure_organizer_authority()?;
     let (_result, summary, lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
+        mutate_session_transactionally(app, state, |session| {
             session.finalize()?;
             Ok(())
         })?;
-    invalidate_voter_for_lifecycle(&state, lifecycle_state)?;
+    invalidate_voter_for_lifecycle(state, lifecycle_state)?;
     publish_lifecycle_to_intake(
-        &app,
-        &state,
+        app,
+        state,
         &summary.manifest_hash_hex,
         ElectionLifecycleStateV1::Finalized,
     );
@@ -1643,10 +1811,10 @@ fn finalize_election(
 /// ballots immediately and status queries answer from organizer authority —
 /// never from a self-opened worker session. Best-effort by design: without a
 /// running intake there is nothing to fence.
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
 fn publish_lifecycle_to_intake(
     app: &AppHandle,
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     manifest_hash_hex: &str,
     new_state: ElectionLifecycleStateV1,
 ) {
@@ -1681,17 +1849,17 @@ fn publish_lifecycle_to_intake(
 }
 
 /// Without managed-Tor intake support there is no collector to fence.
-#[cfg(not(feature = "managed-tor-test"))]
+#[cfg(not(feature = "managed-tor"))]
 fn publish_lifecycle_to_intake(
     _app: &AppHandle,
-    _state: &tauri::State<'_, AppState>,
+    _state: &AppState,
     _manifest_hash_hex: &str,
     _new_state: ElectionLifecycleStateV1,
 ) {
 }
 
 fn invalidate_voter_for_lifecycle(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     lifecycle_state: ElectionLifecycleStateV1,
 ) -> Result<(), CommandError> {
     let mut voter_guard = state
@@ -1711,18 +1879,21 @@ fn invalidate_voter_for_lifecycle(
 /// ORGANIZER-AUTHORITATIVE: only the ballot office may admit ballots into its
 /// authoritative ledger. Rejected before any file read or session mutation.
 #[tauri::command]
-fn intake_ballot_package(
+async fn intake_ballot_package(
     package_path: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiBallotIntakeResultV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let package_bytes = read_ballot_package_file_bounded_v1(Path::new(&package_path))?;
-    let (result, _summary, _lifecycle_state) =
-        mutate_session_transactionally(&app, &state, |session| {
-            Ok(session.intake_ballot_package_bytes(&package_bytes)?)
-        })?;
-    Ok(result)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let package_bytes = read_ballot_package_file_bounded_v1(Path::new(&package_path))?;
+        let (result, _summary, _lifecycle_state) =
+            mutate_session_transactionally(&app, state.inner(), |session| {
+                Ok(session.intake_ballot_package_bytes(&package_bytes)?)
+            })?;
+        Ok(result)
+    })
+    .await
 }
 
 /// Resolves the app-owned, election-scoped durable private-intake inbox
@@ -1751,22 +1922,23 @@ fn private_intake_inbox_dir(
 ///
 /// ORGANIZER-AUTHORITATIVE: the intake inbox is ballot-office infrastructure.
 #[tauri::command]
-fn private_intake_inbox_path(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<String, CommandError> {
-    state.ensure_organizer_authority()?;
-    let inbox_dir = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref().map(|active| &active.session) else {
-            return Err(CommandError::no_session());
+async fn private_intake_inbox_path(app: AppHandle) -> Result<String, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let inbox_dir = {
+            let guard = state
+                .session
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            let Some(session) = guard.as_ref().map(|active| &active.session) else {
+                return Err(CommandError::no_session());
+            };
+            private_intake_inbox_dir(&app, session)?
         };
-        private_intake_inbox_dir(&app, session)?
-    };
-    Ok(inbox_dir.to_string_lossy().into_owned())
+        Ok(inbox_dir.to_string_lossy().into_owned())
+    })
+    .await
 }
 
 /// Ingests every accepted ballot the controlled Tor intake process handed off
@@ -1789,61 +1961,75 @@ fn private_intake_inbox_path(
 /// before the inbox directory is even resolved, so an unauthorized call can
 /// never create inbox storage or a workspace revision.
 #[tauri::command]
-fn sync_private_intake(
+async fn sync_private_intake(
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiPrivateIntakeSyncSummaryV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let inbox_dir = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let Some(session) = guard.as_ref().map(|active| &active.session) else {
-            return Err(CommandError::no_session());
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let inbox_dir = {
+            let guard = state
+                .session
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            let Some(session) = guard.as_ref().map(|active| &active.session) else {
+                return Err(CommandError::no_session());
+            };
+            private_intake_inbox_dir(&app, session)?
         };
-        private_intake_inbox_dir(&app, session)?
-    };
 
-    // Ingest into a transactional CLONE first. This is the ONE authoritative
-    // reconciliation boundary and it is safe to call unconditionally — on every
-    // election load/restart and on every auto-sync tick — because a durable
-    // workspace revision is written ONLY when a package is NEWLY accepted.
-    //
-    // Restart reconciliation: the durable inbox package survives independently of
-    // the process-local Tor intake worker counter (which restarts at 0), so a
-    // reconciliation pass rediscovers a previously-accepted package even when no
-    // NEW network acceptance has occurred since launch and promotes it into the
-    // authoritative organizer workspace.
-    //
-    // No-churn: an empty inbox, or one holding only exact duplicates / rejected
-    // packages, changes nothing (`newly_accepted == 0`), so no revision is
-    // written and the active session is left untouched — repeated syncs never
-    // churn workspace revisions.
-    let workspaces_dir = workspaces_directory(&app)?;
-    let mut next = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        // Snapshot authority recheck (same unit as the cloned session): the
-        // gate verdict and the reconciled session can never diverge under a
-        // concurrent election switch.
-        let Some(active) = guard.as_ref() else {
-            return Err(CommandError::no_session());
+        // Ingest into a transactional CLONE first. This is the ONE authoritative
+        // reconciliation boundary and it is safe to call unconditionally — on every
+        // election load/restart and on every auto-sync tick — because a durable
+        // workspace revision is written ONLY when a package is NEWLY accepted.
+        //
+        // Restart reconciliation: the durable inbox package survives independently of
+        // the process-local Tor intake worker counter (which restarts at 0), so a
+        // reconciliation pass rediscovers a previously-accepted package even when no
+        // NEW network acceptance has occurred since launch and promotes it into the
+        // authoritative organizer workspace.
+        //
+        // No-churn: an empty inbox, or one holding only exact duplicates / rejected
+        // packages, changes nothing (`newly_accepted == 0`), so no revision is
+        // written and the active session is left untouched — repeated syncs never
+        // churn workspace revisions.
+        let workspaces_dir = workspaces_directory(&app)?;
+        let mut next = {
+            let guard = state
+                .session
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            // Snapshot authority recheck (same unit as the cloned session): the
+            // gate verdict and the reconciled session can never diverge under a
+            // concurrent election switch.
+            let Some(active) = guard.as_ref() else {
+                return Err(CommandError::no_session());
+            };
+            if active.authority != SessionAuthorityV1::Organizer {
+                return Err(CommandError::organizer_authority_required());
+            }
+            active.session.transactional_clone()
         };
-        if active.authority != SessionAuthorityV1::Organizer {
-            return Err(CommandError::organizer_authority_required());
+        let summary = ingest_private_intake_inbox_into_session_v1(&inbox_dir, &mut next)?;
+        if summary.newly_accepted > 0 {
+            let workspace_id = active_or_session_derived_workspace_id(state.inner(), &next)?;
+            let new_revision =
+                write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
+            // Slice 4E: advance to the newly committed head (private-intake
+            // reconciliation is the same verify-then-commit mutation shape),
+            // falling back to invalidation on any identity drift.
+            let _ = advance_verified_session_after_commit_v1(
+                &workspaces_dir,
+                &workspace_id,
+                new_revision,
+                &next,
+                state.verified_session_cache().as_ref(),
+            );
+            state.replace_active_session(next)?;
         }
-        active.session.transactional_clone()
-    };
-    let summary = ingest_private_intake_inbox_into_session_v1(&inbox_dir, &mut next)?;
-    if summary.newly_accepted > 0 {
-        let workspace_id = active_or_session_derived_workspace_id(&state, &next)?;
-        write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &next)?;
-        state.replace_active_session(next)?;
-    }
-    Ok(summary)
+        Ok(summary)
+    })
+    .await
 }
 
 /// Computes the deterministic tally over the currently accepted ballots.
@@ -1875,12 +2061,75 @@ fn participation_summary(
 /// authoritative session (accepted ballots, transcript). Verifying an existing
 /// archive is `verify_archive` and stays ungated.
 #[tauri::command]
-fn write_archive(
+async fn write_archive(
     target_dir: String,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    state.with_session(|session| Ok(write_archive_directory_v1(session, Path::new(&target_dir))?))
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let session = state.with_session(|session| Ok(session.transactional_clone()))?;
+        Ok(write_archive_directory_v1(
+            &session,
+            Path::new(&target_dir),
+        )?)
+    })
+    .await
+}
+
+/// Whether this build has ANY transport-binding provenance source capable of
+/// producing an anchor-eligible (transport-bound) finalized archive.
+///
+/// Only the controlled-test managed-Tor organizer intake harness provides one
+/// today: it self-generates a per-election `test-root` transport authority,
+/// signs the descriptor, and derives the binding from the running collector's
+/// live accepted-transport history. The production transport authority root is
+/// deliberately `ProductionNotProvisioned` (fails closed), so a standard
+/// Release build has NO way to produce a transport binding at all. The frontend
+/// reads this so it can explain live-anchor readiness instead of offering an
+/// action that would inevitably fail closed.
+pub(crate) const TRANSPORT_BINDING_PROVENANCE_AVAILABLE: bool =
+    cfg!(feature = "managed-tor");
+
+/// The anchor-deployment capabilities of THIS build. Organizer-safe: no path,
+/// key, election, or transport secret. Read before offering an anchor workflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct GuiAnchorDeploymentCapabilitiesV1 {
+    /// True when this build can produce a transport-bound (anchor-eligible)
+    /// finalized archive. When false, live anchoring is unavailable and the GUI
+    /// must present that as a capability/readiness limitation, never as an
+    /// archive-integrity failure.
+    transport_binding_provenance_available: bool,
+}
+
+/// Fail-closed decision for the finalized-archive command: when the caller
+/// requires an anchor-eligible archive but no authoritative finalized transport
+/// binding is available, refuse BEFORE any archive file is written, with a
+/// precise, stable, non-integrity capability error. Extracted as a pure
+/// function so the fail-closed invariant is unit-testable without a Tauri
+/// runtime.
+fn require_finalized_transport_binding(
+    require_transport_binding: bool,
+    transport_binding_present: bool,
+) -> Result<(), CommandError> {
+    if require_transport_binding && !transport_binding_present {
+        return Err(CommandError::new(
+            "GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED",
+            "UNAVAILABLE",
+            "no authoritative finalized transport binding is available for this election in this build, so an anchor-eligible archive was not written; the existing election record is unchanged",
+        ));
+    }
+    Ok(())
+}
+
+/// Reports the anchor-deployment capabilities of this build. Read-only; touches
+/// no election, transport, or filesystem state.
+#[tauri::command]
+async fn anchor_deployment_capabilities()
+-> Result<GuiAnchorDeploymentCapabilitiesV1, CommandError> {
+    Ok(GuiAnchorDeploymentCapabilitiesV1 {
+        transport_binding_provenance_available: TRANSPORT_BINDING_PROVENANCE_AVAILABLE,
+    })
 }
 
 /// Writes a genuine finalized archive for the active session.
@@ -1889,14 +2138,35 @@ fn write_archive(
 /// that has not reached FINALIZED and emits the finalized archive manifest.
 /// ORGANIZER-AUTHORITATIVE: the finalized archive is the ballot office's
 /// published record and is written only from its own session.
+///
+/// FAIL-CLOSED BINDING GATE: when `require_transport_binding` is set (the anchor
+/// workflow's default), the command refuses BEFORE writing anything if it cannot
+/// obtain an authoritative finalized transport binding, returning
+/// `GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED`. This prevents the historical
+/// failure mode where a standard Release build wrote a valid-but-unbound archive
+/// and then reported it as an `ARCHIVE_INTEGRITY` failure. The binding source is
+/// never fabricated and no verification gate is relaxed.
 #[tauri::command]
-fn write_finalized_archive(
+async fn write_finalized_archive(
     target_dir: String,
     governance_document_path: Option<String>,
-    state: tauri::State<'_, AppState>,
+    require_transport_binding: bool,
+    app: AppHandle,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    state.with_session(|session| {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let (session, transport_binding) = state.with_session(|session| {
+            let transport_binding =
+                finalized_transport_binding_for_active_intake(state.inner(), session)?;
+            Ok((session.transactional_clone(), transport_binding))
+        })?;
+        // Refuse before any filesystem write when an anchor-eligible archive was
+        // requested but no authoritative binding exists in this build/workflow.
+        require_finalized_transport_binding(
+            require_transport_binding,
+            transport_binding.is_some(),
+        )?;
         let doc_bytes = governance_document_path
             .map(|path| {
                 let bytes = std::fs::read(Path::new(&path))
@@ -1904,33 +2174,101 @@ fn write_finalized_archive(
                 Ok::<Vec<u8>, CommandError>(bytes)
             })
             .transpose()?;
-        Ok(write_finalized_archive_v1_with_governance_document(
-            session,
-            Path::new(&target_dir),
-            doc_bytes.as_deref(),
-        )?)
+        match (doc_bytes.as_deref(), transport_binding.as_ref()) {
+            (None, Some(binding)) => Ok(write_finalized_archive_v1_with_transport_binding(
+                &session,
+                Path::new(&target_dir),
+                binding,
+            )?),
+            (Some(bytes), Some(binding)) => Ok(
+                write_finalized_archive_v1_with_governance_document_and_transport_binding(
+                    &session,
+                    Path::new(&target_dir),
+                    Some(bytes),
+                    binding,
+                )?,
+            ),
+            _ => Ok(write_finalized_archive_v1_with_governance_document(
+                &session,
+                Path::new(&target_dir),
+                doc_bytes.as_deref(),
+            )?),
+        }
     })
+    .await
 }
 
 /// Runs the full offline archive replay verifier over one archive directory.
 /// The archive is authoritative; no organizer state is consulted.
 #[tauri::command]
-fn verify_archive(directory: String) -> Result<GuiArchiveVerificationV1, CommandError> {
-    Ok(verify_archive_directory_v1(Path::new(&directory))?)
+async fn verify_archive(
+    directory: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiArchiveVerificationV1, CommandError> {
+    let memo = state.archive_verification_memo();
+    run_blocking_command(move || {
+        Ok(verify_archive_directory_with_memo_v1(
+            memo.as_ref(),
+            Path::new(&directory),
+        )?)
+    })
+    .await
 }
 
 /// Verifies the public transport-binding → completed archive → existing Phase
 /// 4 evidence chain. This is inspection only: no walletd/indexer access,
 /// signing, fee payment, ballot package, or transport secret crosses Tauri.
 #[tauri::command]
-fn verify_transport_archive_anchor(
+async fn verify_transport_archive_anchor(
     archive_directory: String,
     anchor_evidence_path: String,
+    state: tauri::State<'_, AppState>,
 ) -> Result<GuiTransportAnchorVerificationV1, CommandError> {
-    Ok(verify_transport_archive_anchor_v1(
-        Path::new(&archive_directory),
-        Path::new(&anchor_evidence_path),
-    )?)
+    let memo = state.archive_verification_memo();
+    run_blocking_command(move || {
+        Ok(verify_transport_archive_anchor_with_memo_v1(
+            memo.as_ref(),
+            Path::new(&archive_directory),
+            Path::new(&anchor_evidence_path),
+        )?)
+    })
+    .await
+}
+
+fn finalized_transport_binding_for_active_intake(
+    state: &AppState,
+    session: &GuiElectionSessionV1,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        let manifest_hash_hex = session.summary().manifest_hash_hex;
+        let managed = state
+            .organizer_intake
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(intake) = managed.as_ref() else {
+            return Ok(None);
+        };
+        if !intake.is_bound_to_manifest(&manifest_hash_hex) {
+            return Ok(None);
+        }
+        let binding = intake.finalize_transport_archive_binding()?;
+        if binding.is_none() && intake.accepted_unique_count() > 0 {
+            return Err(CommandError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_UNAVAILABLE",
+                "ARCHIVE_INTEGRITY",
+                "the active private transport history could not produce a finalized archive binding",
+            ));
+        }
+        return Ok(binding);
+    }
+
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = state;
+        let _ = session;
+        Ok(None)
+    }
 }
 
 /// Generates a standalone anchor-app config from a verified finalized archive.
@@ -1950,15 +2288,298 @@ async fn write_live_anchor_config_from_verified_archive(
 ) -> Result<GuiLiveAnchorConfigResultV1, CommandError> {
     state.ensure_organizer_authority()?;
     let app_data_root = app_data_root(&app)?;
+    let memo = state.archive_verification_memo();
     run_blocking_command(move || {
         let status = load_trusted_ootle_deployment_v1(&app_data_root)?;
         let deployment = status
             .deployment
             .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
         request = trusted_ootle_deployment_to_live_anchor_request_v1(request, &deployment)?;
-        Ok(write_live_anchor_config_from_verified_archive_v1(&request)?)
+        Ok(write_live_anchor_config_from_verified_archive_with_memo_v1(
+            memo.as_ref(),
+            &request,
+        )?)
     })
     .await
+}
+
+/// Read-only, field-specific preflight of the live anchor operator config.
+///
+/// This performs NO durable write, creates NO transaction, spends NO fees, and
+/// contacts NO wallet: it validates every public operator field, verifies the
+/// archive preconditions, and checks the output sidecar paths, returning a
+/// structured per-field result. The frontend uses it to disable Prepare until
+/// every field is green and to point the operator at the exact invalid field
+/// instead of a generic error. The locked deployment identity is applied first,
+/// exactly as the real Prepare path applies it.
+///
+/// ORGANIZER-AUTHORITATIVE: only the ballot office's authoritative session may
+/// preflight a publish config. Archive verification is CPU-bound, so it runs on
+/// the blocking thread pool.
+#[tauri::command]
+async fn validate_live_anchor_operator_config(
+    mut request: GuiLiveAnchorConfigRequestV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiLiveAnchorPreflightResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    let memo = state.archive_verification_memo();
+    run_blocking_command(move || {
+        // Apply the locked deployment identity when present, so preflight
+        // validates the exact values Prepare will use. A missing deployment is
+        // reported by the dedicated status command, not here, so preflight can
+        // still validate operator-entered fields before the lock exists.
+        if let Some(deployment) = load_trusted_ootle_deployment_v1(&app_data_root)?.deployment {
+            request = trusted_ootle_deployment_to_live_anchor_request_v1(request, &deployment)?;
+        }
+        Ok(validate_live_anchor_operator_config_with_memo_v1(
+            memo.as_ref(),
+            &request,
+        ))
+    })
+    .await
+}
+
+/// Builds the V2 richer public anchor payload from a verified finalized archive.
+///
+/// Read-only and derived solely from the independently verified archive; it
+/// writes nothing, contacts no wallet, and spends no fees. Returns the compact
+/// V2 digest (for on-chain publication), the full canonical payload bytes as hex
+/// (for detached evidence), and every public field for the review screen. The
+/// privacy guard runs inside the builder.
+///
+/// ORGANIZER-AUTHORITATIVE.
+#[tauri::command]
+async fn build_v2_public_anchor_payload(
+    mut request: GuiLiveAnchorV2RequestV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiLiveAnchorV2ResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    let memo = state.archive_verification_memo();
+    run_blocking_command(move || {
+        let deployment = load_trusted_ootle_deployment_v2(&app_data_root)?
+            .deployment
+            .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
+        request = trusted_ootle_deployment_to_live_anchor_v2_request_v1(request, &deployment)?;
+        Ok(build_v2_public_payload_from_verified_archive_with_memo_v1(
+            memo.as_ref(),
+            &request,
+        )?)
+    })
+    .await
+}
+
+/// Reads and schema-validates one V2 public-anchor evidence JSON file
+/// (`*.v2-anchor-evidence.json`). READ-ONLY; never contacts walletd, never
+/// contacts the indexer, and never writes any file. The parsed record carries
+/// only public binding data (network, template binding, anchor digest,
+/// transaction id, canonical payload bytes) — the same fields the anchor
+/// template publishes on-chain. Callers must still invoke
+/// `verify_v2_public_anchor_evidence` to prove archive/digest cryptographic
+/// binding before displaying any "verified" claim.
+#[tauri::command]
+async fn read_v2_public_anchor_evidence_file(
+    path: String,
+) -> Result<GuiV2AnchorEvidenceFileV1, CommandError> {
+    run_blocking_command(move || {
+        Ok(read_v2_public_anchor_evidence_file_core(Path::new(&path))?)
+    })
+    .await
+}
+
+/// Verifies a detached V2 public payload against an archive and expected digest.
+///
+/// Read-only offline verifier: decodes the payload hex, confirms it hashes to
+/// `expected_digest_hex` (the on-chain/receipt value), independently rebuilds it
+/// from the archive replay, requires an exact match, and runs the privacy guard.
+///
+/// ORGANIZER-AUTHORITATIVE.
+#[tauri::command]
+async fn verify_v2_public_anchor_evidence(
+    archive_directory: String,
+    payload_hex: String,
+    expected_digest_hex: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiLiveAnchorV2ResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    run_blocking_command(move || {
+        let payload = decode_hex_bytes_v1(&payload_hex)?;
+        Ok(verify_v2_public_payload_against_archive_v1(
+            Path::new(&archive_directory),
+            &payload,
+            &expected_digest_hex,
+        )?)
+    })
+    .await
+}
+
+/// Constructs the exact six-argument V2 CallFunction only after detached
+/// evidence is replayed against the archive and bound to the separate V2 lock.
+/// This is offline preparation; it does not contact walletd or publish.
+#[tauri::command]
+async fn prepare_v2_anchor_publish(
+    request: GuiV2AnchorPublishPreparationRequestV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiV2AnchorPublishPreparationV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    run_blocking_command(move || {
+        let deployment = load_trusted_ootle_deployment_v2(&app_data_root)?
+            .deployment
+            .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
+        let binding = trusted_ootle_deployment_v2_binding(&deployment)?;
+        Ok(prepare_v2_anchor_publish_from_verified_evidence_v1(&request, &binding)?)
+    })
+    .await
+}
+
+/// Performs one manually-gated V2 walletd lifecycle transition. This command
+/// never reads a V1 deployment lock or V1 receipt verifier.
+#[tauri::command]
+async fn run_v2_live_anchor_lifecycle_step(
+    request: GuiV2LiveAnchorStepRequestV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiV2LiveAnchorStepResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    run_blocking_command(move || {
+        let deployment = load_trusted_ootle_deployment_v2(&app_data_root)?
+            .deployment
+            .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
+        let binding = trusted_ootle_deployment_v2_binding(&deployment)?;
+        let network = OotleNetworkIdV1::new(deployment.network.clone()).map_err(|_| {
+            GuiCoreError::trusted_ootle_deployment_invalid()
+        })?;
+        let walletd_endpoint = WalletdEndpoint::parse(&request.walletd_endpoint)
+            .map_err(|_| GuiCoreError::anchor_publish_endpoint_not_loopback())?;
+        let indexer_endpoint = IndexerEndpoint::parse(&request.indexer_endpoint)
+            .map_err(|_| GuiCoreError::anchor_publish_endpoint_not_loopback())?;
+        if !walletd_endpoint.is_loopback()
+            || !indexer_endpoint_allowed_for_network_v1(&network, &indexer_endpoint)
+        {
+            return Err(GuiCoreError::anchor_publish_endpoint_not_loopback().into());
+        }
+        let auth = if request.use_walletd_auth {
+            match walletd_credential_store::load() {
+                Ok(Some(token)) => Some(WalletdAuthSecret::new(token.as_str().to_owned()).map_err(|_| {
+                    GuiCoreError::anchor_publish_auth_token_invalid()
+                })?),
+                Ok(None) => None,
+                Err(_) => return Err(GuiCoreError::anchor_publish_auth_env_name_invalid().into()),
+            }
+        } else {
+            None
+        };
+        let executor = TokioBlockingExecutor::new_current_thread().map_err(|_| {
+            CommandError::new("GUI_ANCHOR_V2_EXECUTOR_FAILED", "UNAVAILABLE", "the V2 network executor could not be constructed")
+        })?;
+        let walletd_transport = RealWalletdTransport::new(
+            &walletd_endpoint, auth.as_ref(), Some(std::time::Duration::from_secs(30)), executor.clone(),
+        ).map_err(|_| CommandError::new("GUI_ANCHOR_V2_TRANSPORT_UNAVAILABLE", "UNAVAILABLE", "a V2 walletd transport could not be constructed"))?;
+        let indexer_transport = RealIndexerTransport::new(
+            &indexer_endpoint, Some(std::time::Duration::from_secs(30)), executor,
+        ).map_err(|_| CommandError::new("GUI_ANCHOR_V2_TRANSPORT_UNAVAILABLE", "UNAVAILABLE", "a V2 indexer transport could not be constructed"))?;
+        Ok(run_v2_live_anchor_step_with_transports(
+            &request,
+            &binding,
+            &mut WalletdAnchorNetworkAdapter::new(walletd_transport, network),
+            &mut IndexerReceiptNetworkAdapter::new(indexer_transport),
+        )?)
+    }).await
+}
+
+/// Read-only hydration of the persisted V2 anchor lifecycle for the given
+/// finalized archive directory. Never contacts walletd, never contacts the
+/// indexer, and never writes any sidecar. Used by the organizer UI on load so a
+/// previously submitted (but unverified) transaction is recovered instead of
+/// falling back to a fresh Build/Prepare/Submit flow.
+#[tauri::command]
+async fn inspect_v2_live_anchor_state(
+    archive_directory: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiV2LiveAnchorHydratedStateV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    run_blocking_command(move || {
+        Ok(inspect_v2_live_anchor_state_core(Path::new(&archive_directory))?)
+    })
+    .await
+}
+
+/// Advance a persisted V2 lifecycle carrying an already-submitted transaction
+/// by re-polling the indexer only. Walletd is never contacted on this path, so
+/// no wallet approval request can be created, no approval or submit can occur,
+/// and no duplicate on-chain transaction can be produced. The existing
+/// payload_hex and transaction id are used verbatim; only the indexer receipt
+/// is re-fetched and re-verified against the currently locked V2 deployment.
+#[tauri::command]
+async fn recover_v2_live_anchor(
+    archive_directory: String,
+    indexer_endpoint: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiV2LiveAnchorStepResultV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    let app_data_root = app_data_root(&app)?;
+    run_blocking_command(move || {
+        let deployment = load_trusted_ootle_deployment_v2(&app_data_root)?
+            .deployment
+            .ok_or_else(GuiCoreError::trusted_ootle_deployment_required)?;
+        let binding = trusted_ootle_deployment_v2_binding(&deployment)?;
+        let network = OotleNetworkIdV1::new(deployment.network.clone())
+            .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
+        let indexer_endpoint = IndexerEndpoint::parse(&indexer_endpoint)
+            .map_err(|_| GuiCoreError::anchor_publish_endpoint_not_loopback())?;
+        if !indexer_endpoint_allowed_for_network_v1(&network, &indexer_endpoint) {
+            return Err(GuiCoreError::anchor_publish_endpoint_not_loopback().into());
+        }
+        let executor = TokioBlockingExecutor::new_current_thread().map_err(|_| {
+            CommandError::new(
+                "GUI_ANCHOR_V2_EXECUTOR_FAILED",
+                "UNAVAILABLE",
+                "the V2 network executor could not be constructed",
+            )
+        })?;
+        let indexer_transport =
+            RealIndexerTransport::new(&indexer_endpoint, Some(std::time::Duration::from_secs(30)), executor)
+                .map_err(|_| {
+                    CommandError::new(
+                        "GUI_ANCHOR_V2_TRANSPORT_UNAVAILABLE",
+                        "UNAVAILABLE",
+                        "a V2 indexer transport could not be constructed",
+                    )
+                })?;
+        Ok(run_v2_live_anchor_recovery_step_with_indexer(
+            Path::new(&archive_directory),
+            &binding,
+            &mut IndexerReceiptNetworkAdapter::new(indexer_transport),
+        )?)
+    })
+    .await
+}
+
+/// Decodes a lowercase/uppercase hex string into bytes for V2 evidence input.
+fn decode_hex_bytes_v1(hex: &str) -> Result<Vec<u8>, GuiCoreError> {
+    if hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(GuiCoreError::new(
+            "GUI_ANCHOR_V2_EVIDENCE_HEX_INVALID",
+            tari_cc_private_ballot_gui_core::GuiErrorCategory::InvalidInput,
+            Some("anchor-v2-payload"),
+            "the V2 evidence payload is not valid hex",
+        ));
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let bytes = hex.as_bytes();
+    for chunk in bytes.chunks_exact(2) {
+        let hi = (chunk[0] as char).to_digit(16).unwrap_or(0) as u8;
+        let lo = (chunk[1] as char).to_digit(16).unwrap_or(0) as u8;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
 }
 
 /// Returns the organizer's locked public Ootle anchor deployment, if present.
@@ -1966,66 +2587,191 @@ async fn write_live_anchor_config_from_verified_archive(
 /// ORGANIZER-AUTHORITATIVE: imported voter sessions cannot read or mutate this
 /// ballot-office deployment setting.
 #[tauri::command]
-fn trusted_ootle_deployment_status(
+async fn trusted_ootle_deployment_status(
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let app_data_root = app_data_root(&app)?;
-    Ok(load_trusted_ootle_deployment_v1(&app_data_root)?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        Ok(load_trusted_ootle_deployment_v1(&app_data_root)?)
+    })
+    .await
 }
 
 /// Inspects a selected local published-template WASM without uploading,
 /// executing, copying, or persisting its path.
 #[tauri::command]
-fn inspect_template_wasm(
+async fn inspect_template_wasm(
     path: String,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<GuiTrustedOotleTemplateWasmInspectionV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    Ok(inspect_template_wasm_v1(Path::new(&path))?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        Ok(inspect_template_wasm_v1(Path::new(&path))?)
+    })
+    .await
 }
 
 /// Locks the organizer's public Ootle anchor deployment for future V4 configs.
 #[tauri::command]
-fn lock_trusted_ootle_deployment(
+async fn lock_trusted_ootle_deployment(
     request: GuiTrustedOotleDeploymentLockRequestV1,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let app_data_root = app_data_root(&app)?;
-    Ok(lock_trusted_ootle_deployment_v1(&app_data_root, &request)?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        Ok(lock_trusted_ootle_deployment_v1(&app_data_root, &request)?)
+    })
+    .await
 }
 
 /// Explicitly clears the organizer's locked public Ootle anchor deployment.
 #[tauri::command]
-fn unlock_trusted_ootle_deployment(
+async fn unlock_trusted_ootle_deployment(
     confirm: bool,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiTrustedOotleDeploymentStatusV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let app_data_root = app_data_root(&app)?;
-    Ok(unlock_trusted_ootle_deployment_v1(&app_data_root, confirm)?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        Ok(unlock_trusted_ootle_deployment_v1(&app_data_root, confirm)?)
+    })
+    .await
+}
+
+/// Returns only the separately locked V2 deployment. V1 deployment state is
+/// deliberately not read or used here.
+#[tauri::command]
+async fn trusted_ootle_deployment_v2_status(
+    app: AppHandle,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        Ok(load_trusted_ootle_deployment_v2(&app_data_root(&app)?)?)
+    })
+    .await
+}
+
+/// Locks the V2 identity after the operator has confirmed the manually
+/// published template address and BLAKE3 artifact digest.
+#[tauri::command]
+async fn lock_trusted_ootle_deployment_v2(
+    request: GuiTrustedOotleDeploymentLockRequestV2,
+    app: AppHandle,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        Ok(lock_trusted_ootle_deployment_v2_core(&app_data_root(&app)?, &request)?)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn unlock_trusted_ootle_deployment_v2(
+    confirm: bool,
+    app: AppHandle,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        Ok(unlock_trusted_ootle_deployment_v2_core(&app_data_root(&app)?, confirm)?)
+    })
+    .await
+}
+
+/// Reports the configured production transport authority PUBLIC root (read-only).
+///
+/// Organizer-safe: returns only public identity (key id, network, public-key
+/// fingerprint) plus a readiness kind. Never returns or requests private key
+/// material. `managed_tor_build` is this build's own feature state, so a
+/// release build states plainly that fake/test roots are not in use.
+#[tauri::command]
+async fn production_transport_authority_status(
+    app: AppHandle,
+) -> Result<ProductionTransportAuthorityReadinessV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        Ok(production_transport_authority_readiness_v1(
+            &app_data_root,
+            TRANSPORT_BINDING_PROVENANCE_AVAILABLE,
+        ))
+    })
+    .await
+}
+
+/// Configures the operator-supplied production transport authority PUBLIC root.
+///
+/// Takes only public material (network, key id, public-key hex). Fails closed
+/// with a field-specific error on any malformed field, and refuses to silently
+/// replace an existing root (the current root must be explicitly forgotten
+/// first). No private key is accepted or stored.
+#[tauri::command]
+async fn configure_production_transport_authority_root(
+    request: ProductionTransportAuthorityConfigureRequestV1,
+    app: AppHandle,
+) -> Result<ProductionTransportAuthorityReadinessV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        configure_production_transport_authority_root_v1(&app_data_root, &request)?;
+        Ok(production_transport_authority_readiness_v1(
+            &app_data_root,
+            TRANSPORT_BINDING_PROVENANCE_AVAILABLE,
+        ))
+    })
+    .await
+}
+
+/// Explicitly forgets the configured production transport authority PUBLIC root
+/// (the confirmation gate that must precede replacing it).
+#[tauri::command]
+async fn forget_production_transport_authority_root(
+    confirm: bool,
+    app: AppHandle,
+) -> Result<ProductionTransportAuthorityReadinessV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_root = app_data_root(&app)?;
+        forget_production_transport_authority_root_v1(&app_data_root, confirm)?;
+        Ok(production_transport_authority_readiness_v1(
+            &app_data_root,
+            TRANSPORT_BINDING_PROVENANCE_AVAILABLE,
+        ))
+    })
+    .await
 }
 
 /// Inspects one canonical anchor application config (read-only, no network).
 #[tauri::command]
-fn inspect_anchor_config(path: String) -> Result<GuiAnchorConfigInspectionV1, CommandError> {
-    Ok(inspect_anchor_config_v1(Path::new(&path))?)
+async fn inspect_anchor_config(path: String) -> Result<GuiAnchorConfigInspectionV1, CommandError> {
+    run_blocking_command(move || Ok(inspect_anchor_config_v1(Path::new(&path))?)).await
 }
 
 /// Inspects one durable anchor lifecycle snapshot (read-only, no network).
 #[tauri::command]
-fn inspect_anchor_snapshot(path: String) -> Result<GuiAnchorSnapshotInspectionV1, CommandError> {
-    Ok(inspect_anchor_snapshot_v1(Path::new(&path))?)
+async fn inspect_anchor_snapshot(
+    path: String,
+) -> Result<GuiAnchorSnapshotInspectionV1, CommandError> {
+    run_blocking_command(move || Ok(inspect_anchor_snapshot_v1(Path::new(&path))?)).await
 }
 
 /// Inspects one canonical anchor evidence record (read-only, no network).
 #[tauri::command]
-fn inspect_anchor_evidence(path: String) -> Result<GuiAnchorEvidenceInspectionV1, CommandError> {
-    Ok(inspect_anchor_evidence_v1(Path::new(&path))?)
+async fn inspect_anchor_evidence(
+    path: String,
+) -> Result<GuiAnchorEvidenceInspectionV1, CommandError> {
+    run_blocking_command(move || Ok(inspect_anchor_evidence_v1(Path::new(&path))?)).await
 }
 
 /// Performs at most one bounded live Ootle anchor lifecycle step.
@@ -2042,6 +2788,7 @@ async fn run_live_anchor_lifecycle_step(
     state: tauri::State<'_, AppState>,
 ) -> Result<GuiLiveAnchorStepResultV1, CommandError> {
     state.ensure_organizer_authority()?;
+    let memo = state.archive_verification_memo();
     run_blocking_command(move || {
         let decision = parse_decision(&request.decision)?;
         let config = AnchorAppConfig::from_canonical_file(Path::new(&request.config_path))
@@ -2054,28 +2801,39 @@ async fn run_live_anchor_lifecycle_step(
             })?;
         enforce_publish_privacy_floor(&config)?;
 
-        // HIGH-3 endpoint policy: refuse a non-loopback walletd/indexer endpoint
+        // HIGH-3 endpoint policy: refuse a non-loopback walletd endpoint
         // BEFORE reading any secret, so the bearer token is never even loaded
-        // for an attacker-chosen remote host. The shared driver re-checks this
-        // before any transport call as defense in depth.
+        // for an attacker-chosen remote host. The indexer may be loopback or
+        // the explicitly trusted hosted HTTPS endpoint for the configured
+        // network. The shared driver re-checks this before any transport call
+        // as defense in depth.
         if !config.network_adapter().walletd_endpoint().is_loopback()
-            || !config.network_adapter().indexer_endpoint().is_loopback()
+            || !indexer_endpoint_allowed_for_network_v1(
+                config.network_adapter().network(),
+                config.network_adapter().indexer_endpoint(),
+            )
         {
             return Err(GuiCoreError::anchor_publish_endpoint_not_loopback().into());
         }
 
-        // HIGH-3 secret boundary: the optional walletd bearer token is read ONLY
-        // from the single backend-owned environment variable. The frontend can
-        // never choose an arbitrary variable name (a confused-deputy
-        // exfiltration risk) — it only signals whether to attach the token via
-        // `use_walletd_auth`. The token never enters the config, snapshots,
-        // evidence, logs, or error strings.
+        // HIGH-3 secret boundary: the walletd bearer token is resolved by the
+        // shell layer only. The normal product path is the OS-backed secure
+        // credential store (Windows Credential Manager / macOS Keychain /
+        // Secret Service), populated once by the user through
+        // `connect_walletd`. The `WALLETD_AUTH_TOKEN` environment variable
+        // remains as a dev/CI-only fallback and is consulted only if the OS
+        // store has no credential. The frontend never sees the raw key, never
+        // supplies a variable name, and only signals whether to attach a
+        // credential at all via `use_walletd_auth`. The token never enters
+        // the config, snapshots, evidence, logs, or error strings.
         let auth = if request.use_walletd_auth {
-            match std::env::var(walletd_auth_env_var_name()) {
-                Ok(token) => Some(WalletdAuthSecret::new(token).map_err(|_| {
-                    CommandError::from(GuiCoreError::anchor_publish_auth_token_invalid())
-                })?),
-                Err(std::env::VarError::NotPresent) => None,
+            match walletd_credential_store::load() {
+                Ok(Some(token)) => Some(
+                    WalletdAuthSecret::new(token.as_str().to_owned()).map_err(|_| {
+                        CommandError::from(GuiCoreError::anchor_publish_auth_token_invalid())
+                    })?,
+                ),
+                Ok(None) => None,
                 Err(_) => {
                     return Err(GuiCoreError::anchor_publish_auth_env_name_invalid().into());
                 }
@@ -2134,7 +2892,8 @@ async fn run_live_anchor_lifecycle_step(
             )
         })?;
 
-        Ok(run_step_with_transports(
+        Ok(run_step_with_transports_memoized(
+            memo.as_ref(),
             config,
             Path::new(&request.archive_directory),
             decision,
@@ -2144,6 +2903,136 @@ async fn run_live_anchor_lifecycle_step(
         )?)
     })
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Walletd credential commands: Connect / Reconnect / Forget / Status.
+//
+// The raw walletd API key never crosses the frontend/backend boundary as a
+// return value. `connect_walletd` and `reconnect_walletd` take the key as a
+// zeroizing string argument; `walletd_credential_status` returns presence
+// metadata only. Credential retrieval for the live anchor step happens in
+// `run_live_anchor_lifecycle_step` above, which reads the OS store first and
+// falls back to the WALLETD_AUTH_TOKEN env var for dev/CI only.
+// ---------------------------------------------------------------------------
+
+/// Public presence/metadata for the walletd credential (frontend view).
+#[tauri::command]
+fn walletd_credential_status()
+-> Result<walletd_credential_store::WalletdCredentialStatusV1, CommandError> {
+    Ok(walletd_credential_store::status())
+}
+
+/// Store or replace the walletd API key in OS-backed secure storage.
+///
+/// This is invoked by the Connect Tari Wallet and Reconnect Tari Wallet
+/// screens. The key argument is consumed and its heap allocation zeroized
+/// on drop. On success the frontend receives only the updated status; the
+/// raw key is never returned.
+///
+/// Both `connect` and `reconnect` map to the same action — replacing any
+/// prior credential with the newly-supplied one. Named differently only so
+/// the frontend can pick the human-readable label.
+#[tauri::command]
+async fn connect_walletd(
+    key: String,
+) -> Result<walletd_credential_store::WalletdCredentialStatusV1, CommandError> {
+    let key = Zeroizing::new(key);
+    run_blocking_command(move || {
+        walletd_credential_store::store(key.as_str()).map_err(walletd_error_to_command)?;
+        Ok(walletd_credential_store::status())
+    })
+    .await
+}
+
+/// Alias for `connect_walletd` — semantically the "I have a new key, replace
+/// the old one" action. The Rust action is identical.
+#[tauri::command]
+async fn reconnect_walletd(
+    key: String,
+) -> Result<walletd_credential_store::WalletdCredentialStatusV1, CommandError> {
+    connect_walletd(key).await
+}
+
+/// Runs one bounded walletd readiness probe. Off-thread; safe to call from
+/// the frontend on mount, after Connect / Reconnect / Forget, and after a
+/// publish attempt. Returns the bounded readiness kind — never raw errors.
+#[tauri::command]
+async fn walletd_readiness() -> Result<walletd_probe::WalletdReadinessV1, CommandError> {
+    run_blocking_command(|| Ok(walletd_probe::probe_blocking())).await
+}
+
+/// Lists the connected wallet's public accounts for the anchor setup assistant.
+///
+/// ORGANIZER-AUTHORITATIVE. Read-only: it lists accounts to auto-fill the fee
+/// component, owner public key, and key index so the operator does not hand-type
+/// brittle fields. No secret, bearer token, or private key is returned; it never
+/// creates a transaction or spends fees.
+#[tauri::command]
+async fn list_walletd_anchor_accounts(
+    state: tauri::State<'_, AppState>,
+) -> Result<walletd_accounts::GuiWalletdAnchorAccountsV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    run_blocking_command(|| Ok(walletd_accounts::probe_accounts_blocking())).await
+}
+
+/// Read-only walletd connection diagnostic. Runs the same bounded account-list
+/// probe as auto-fill and returns only NON-SECRET fields (endpoint, whether a
+/// credential is saved, whether the call was attempted, the classified result,
+/// and — on success — account count and the selected account's public name and
+/// component). No token, API key, or private key is ever returned.
+#[tauri::command]
+async fn walletd_connection_diagnostics(
+    state: tauri::State<'_, AppState>,
+) -> Result<walletd_accounts::WalletdConnectionDiagnosticsV1, CommandError> {
+    state.ensure_organizer_authority()?;
+    // The credential presence is a non-secret boolean read on the caller thread;
+    // the token value itself is never loaded here.
+    let has_saved_credential = {
+        let status = walletd_credential_store::status();
+        status.stored || status.env_fallback_present
+    };
+    run_blocking_command(move || {
+        Ok(walletd_accounts::diagnose_connection_blocking(
+            has_saved_credential,
+        ))
+    })
+    .await
+}
+
+/// Remove the walletd API key from OS-backed secure storage. Idempotent:
+/// forgetting a credential that is not present is a success.
+#[tauri::command]
+async fn forget_walletd()
+-> Result<walletd_credential_store::WalletdCredentialStatusV1, CommandError> {
+    run_blocking_command(move || {
+        walletd_credential_store::forget().map_err(walletd_error_to_command)?;
+        Ok(walletd_credential_store::status())
+    })
+    .await
+}
+
+fn walletd_error_to_command(
+    err: walletd_credential_store::WalletdCredentialStoreError,
+) -> CommandError {
+    use walletd_credential_store::WalletdCredentialStoreError as E;
+    match err {
+        E::Unavailable => CommandError::new(
+            "GUI_WALLETD_CREDENTIAL_STORE_UNAVAILABLE",
+            "UNAVAILABLE",
+            "no os-backed credential store is available on this host",
+        ),
+        E::InvalidKey => CommandError::new(
+            "GUI_WALLETD_CREDENTIAL_INVALID",
+            "INVALID_INPUT",
+            "the supplied walletd api key is not a valid tari walletd key",
+        ),
+        E::StoreFailure => CommandError::new(
+            "GUI_WALLETD_CREDENTIAL_STORE_FAILURE",
+            "UNAVAILABLE",
+            "the os credential store rejected the request",
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2261,96 +3150,111 @@ fn preserve_credential_and_clear_session(
 
 /// Sets the election basics (identifier text + governance source revision).
 #[tauri::command]
-fn set_draft_basics(
+async fn set_draft_basics(
     election_id_text: String,
     proposal_question: String,
     governance_source_revision: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.set_basics(
-            election_id_text,
-            proposal_question,
-            governance_source_revision,
-        )?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.set_basics(
+                election_id_text,
+                proposal_question,
+                governance_source_revision,
+            )?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Sets the voting rules (minimum/maximum approvals, abstention policy).
 #[tauri::command]
-fn set_draft_rules(
+async fn set_draft_rules(
     approval_min: usize,
     approval_max: usize,
     allow_abstention: bool,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.set_rules(approval_min, approval_max, allow_abstention)?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.set_rules(approval_min, approval_max, allow_abstention)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Replaces the eligible-voter list from hex governance public keys.
 #[tauri::command]
-fn set_draft_voters(
+async fn set_draft_voters(
     public_key_hexs: Vec<String>,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.set_voters(public_key_hexs)?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.set_voters(public_key_hexs)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Replaces the ballot option list from `(machine_id_text, display_name)` pairs.
 #[tauri::command]
-fn set_draft_options(
+async fn set_draft_options(
     options: Vec<DraftOptionInput>,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        let parsed: Vec<(String, String)> = options
-            .into_iter()
-            .map(|o| (o.machine_id_text, o.display_name))
-            .collect();
-        draft.set_options(parsed)?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            let parsed: Vec<(String, String)> = options
+                .into_iter()
+                .map(|o| (o.machine_id_text, o.display_name))
+                .collect();
+            draft.set_options(parsed)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Sets the application-local ballot presentation type (non-canonical).
 #[tauri::command]
-fn set_draft_presentation(
-    presentation: String,
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        let parsed = GuiBallotPresentationType::from_identifier(&presentation)?;
-        draft.set_presentation(parsed)?;
-        Ok(())
+async fn set_draft_presentation(presentation: String, app: AppHandle) -> Result<(), CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            let parsed = GuiBallotPresentationType::from_identifier(&presentation)?;
+            draft.set_presentation(parsed)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Imports an existing canonical registry CBOR file into the draft, replacing
 /// the current voter list with its public keys.
 #[tauri::command]
-fn import_registry_to_draft(
+async fn import_registry_to_draft(
     registry_path: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    let bytes = std::fs::read(Path::new(&registry_path))
-        .map_err(|_| CommandError::package_read_failed())?;
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.import_registry_bytes(&bytes)?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let bytes = std::fs::read(Path::new(&registry_path))
+            .map_err(|_| CommandError::package_read_failed())?;
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.import_registry_bytes(&bytes)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Returns a pre-freeze review of the current draft.
@@ -2365,74 +3269,82 @@ fn preview_draft(
 /// creation result. After this, the draft is immutable and the session is
 /// active in the `FROZEN` lifecycle state.
 #[tauri::command]
-fn freeze_election(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<GuiElectionCreationResultV1, CommandError> {
-    let workspaces_dir = workspaces_directory(&app)?;
-    let mut draft = {
-        let guard = state
-            .draft
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let Some(draft) = guard.as_ref() else {
-            return Err(CommandError::no_draft());
+async fn freeze_election(app: AppHandle) -> Result<GuiElectionCreationResultV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let workspaces_dir = workspaces_directory(&app)?;
+        let mut draft = {
+            let guard = state
+                .draft
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            let Some(draft) = guard.as_ref() else {
+                return Err(CommandError::no_draft());
+            };
+            draft.replayed_clone()?
         };
-        draft.replayed_clone()?
-    };
-    // Read the originating draft workspace id before any mutation so it can be
-    // retired only after the frozen session is durably committed.
-    let originating_draft_workspace_id = state
-        .draft_workspace_id
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?
-        .clone();
-    let (result, session) = draft.freeze()?;
-    let workspace_id = workspace_id_for_session_v1(&session);
-    write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
-    // ORGANIZER-AUTHORITY PROVENANCE: freezing is THE act that establishes
-    // ballot-office ownership of this election in this shell. Record it
-    // durably (strictly after the workspace commit, crash-safe by ordering)
-    // so only THIS workspace ever resumes as an organizer workspace. A failure
-    // here fails the whole freeze rather than silently creating a workspace
-    // that would later resume without authority.
-    mark_workspace_organizer_authority_v1(&workspaces_dir, &workspace_id)?;
-    // The authoritative session workspace is now durably committed. Retiring
-    // the originating draft from resume discovery is best-effort and MUST NOT
-    // fail the freeze: the successor already exists, and a failed marker only
-    // means the (harmless, non-rollback-capable) stale draft may reappear until
-    // the next successful freeze/list. Crash-safe by construction: the marker
-    // is written strictly after the successor commit.
-    if let Some(draft_workspace_id) = originating_draft_workspace_id {
-        let _ =
-            mark_draft_workspace_superseded_v1(&workspaces_dir, &draft_workspace_id, &workspace_id);
-    }
-    {
-        let mut guard = state
-            .draft
+        // Read the originating draft workspace id before any mutation so it can be
+        // retired only after the frozen session is durably committed.
+        let originating_draft_workspace_id = state
+            .draft_workspace_id
             .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        *guard = Some(draft);
-    }
-    state.install_frozen_session(session, SessionAuthorityV1::Organizer)?;
-    state.set_session_workspace_id(workspace_id)?;
-    state.clear_draft_workspace_id()?;
-    Ok(result)
+            .map_err(|_| CommandError::state_poisoned())?
+            .clone();
+        let (result, session) = draft.freeze()?;
+        let workspace_id = workspace_id_for_session_v1(&session);
+        write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+        state.invalidate_verified_session_cache(&workspace_id);
+        // ORGANIZER-AUTHORITY PROVENANCE: freezing is THE act that establishes
+        // ballot-office ownership of this election in this shell. Record it
+        // durably (strictly after the workspace commit, crash-safe by ordering)
+        // so only THIS workspace ever resumes as an organizer workspace. A failure
+        // here fails the whole freeze rather than silently creating a workspace
+        // that would later resume without authority.
+        mark_workspace_organizer_authority_v1(&workspaces_dir, &workspace_id)?;
+        // The authoritative session workspace is now durably committed. Retiring
+        // the originating draft from resume discovery is best-effort and MUST NOT
+        // fail the freeze: the successor already exists, and a failed marker only
+        // means the (harmless, non-rollback-capable) stale draft may reappear until
+        // the next successful freeze/list. Crash-safe by construction: the marker
+        // is written strictly after the successor commit.
+        if let Some(draft_workspace_id) = originating_draft_workspace_id {
+            let _ = mark_draft_workspace_superseded_v1(
+                &workspaces_dir,
+                &draft_workspace_id,
+                &workspace_id,
+            );
+        }
+        {
+            let mut guard = state
+                .draft
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            *guard = Some(draft);
+        }
+        state.install_frozen_session(session, SessionAuthorityV1::Organizer)?;
+        state.set_session_workspace_id(workspace_id)?;
+        state.clear_draft_workspace_id()?;
+        Ok(result)
+    })
+    .await
 }
 
 /// Exports the three canonical election artifacts from the loaded frozen
 /// session into `target_dir`, never overwriting existing files.
 #[tauri::command]
-fn export_election_artifacts(
+async fn export_election_artifacts(
     target_dir: String,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<GuiElectionExportResultV1, CommandError> {
-    state.with_session(|session| {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let artifacts = state.with_session(|session| Ok(session.artifacts().clone()))?;
         Ok(write_election_artifacts_v1(
-            session.artifacts(),
+            &artifacts,
             Path::new(&target_dir),
         )?)
     })
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -2447,65 +3359,76 @@ fn export_election_artifacts(
 /// Sets only the governance source revision, leaving the election identifier
 /// intact. Used after a governance document digest is computed.
 #[tauri::command]
-fn set_draft_governance_source_revision(
+async fn set_draft_governance_source_revision(
     governance_source_revision: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.set_governance_source_revision(governance_source_revision)?;
-        Ok(())
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.set_governance_source_revision(governance_source_revision)?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Selects a governance document from a local path, reading, size-checking,
 /// and digesting the exact raw bytes in Rust. Symlinks, directories, and
 /// oversized files are rejected.
 #[tauri::command]
-fn set_draft_governance_document(
+async fn set_draft_governance_document(
     path: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiGovernanceDocumentDigestV1, CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        Ok(draft.set_governance_document(Path::new(&path))?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            Ok(draft.set_governance_document(Path::new(&path))?)
+        })
     })
+    .await
 }
 
 /// Clears any selected governance document.
 #[tauri::command]
-fn clear_draft_governance_document(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.clear_governance_document()?;
-        Ok(())
+async fn clear_draft_governance_document(app: AppHandle) -> Result<(), CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.clear_governance_document()?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Pins the currently selected governance document by content digest, setting
 /// `governance_source_revision` to `blake3:<digest>`. Requires that a document
 /// has been selected.
 #[tauri::command]
-fn use_governance_document_digest_as_revision(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<(), CommandError> {
-    mutate_draft_transactionally(&app, &state, |draft| {
-        draft.use_governance_document_digest_as_revision()?;
-        Ok(())
+async fn use_governance_document_digest_as_revision(app: AppHandle) -> Result<(), CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        mutate_draft_transactionally(&app, state.inner(), |draft| {
+            draft.use_governance_document_digest_as_revision()?;
+            Ok(())
+        })
     })
+    .await
 }
 
 /// Computes the governance document digest from a local path (read-only; no
 /// draft mutation). Used by the voter to inspect a locally selected governance
 /// document without affecting an organizer draft.
 #[tauri::command]
-fn compute_governance_document_digest(
+async fn compute_governance_document_digest(
     path: String,
 ) -> Result<GuiGovernanceDocumentDigestV1, CommandError> {
-    Ok(tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path))?)
+    run_blocking_command(move || {
+        Ok(tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path))?)
+    })
+    .await
 }
 
 /// Matches a governance document digest against a bound
@@ -2514,30 +3437,11 @@ fn compute_governance_document_digest(
 /// revision is validated against no document. Pure besides the optional read:
 /// no network.
 #[tauri::command]
-fn match_governance_document(
+async fn match_governance_document(
     governance_source_revision: String,
     governance_document_path: Option<String>,
 ) -> Result<GuiGovernanceDocumentStatusV1, CommandError> {
-    let digest = governance_document_path
-        .map(|path| {
-            tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(&path))
-        })
-        .transpose()?;
-    Ok(tari_cc_private_ballot_gui_core::match_governance_document(
-        &governance_source_revision,
-        digest.as_ref(),
-    ))
-}
-
-/// Builds the voter confirmation view model from the active session and an
-/// optional governance document digest (computed from a locally selected
-/// document). Read-only: no credential handling, no proof generation.
-#[tauri::command]
-fn voter_confirmation(
-    governance_document_path: Option<String>,
-    state: tauri::State<'_, AppState>,
-) -> Result<GuiVoterElectionConfirmationV1, CommandError> {
-    state.with_session(|session| {
+    run_blocking_command(move || {
         let digest = governance_document_path
             .map(|path| {
                 tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(
@@ -2545,23 +3449,54 @@ fn voter_confirmation(
                 ))
             })
             .transpose()?;
-        Ok(
-            tari_cc_private_ballot_gui_core::build_voter_election_confirmation(
-                session.artifacts(),
-                digest.as_ref(),
-            ),
-        )
+        Ok(tari_cc_private_ballot_gui_core::match_governance_document(
+            &governance_source_revision,
+            digest.as_ref(),
+        ))
     })
+    .await
+}
+
+/// Builds the voter confirmation view model from the active session and an
+/// optional governance document digest (computed from a locally selected
+/// document). Read-only: no credential handling, no proof generation.
+#[tauri::command]
+async fn voter_confirmation(
+    governance_document_path: Option<String>,
+    app: AppHandle,
+) -> Result<GuiVoterElectionConfirmationV1, CommandError> {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let digest = governance_document_path
+            .map(|path| {
+                tari_cc_private_ballot_gui_core::compute_governance_document_digest(Path::new(
+                    &path,
+                ))
+            })
+            .transpose()?;
+        state.with_session(|session| {
+            Ok(
+                tari_cc_private_ballot_gui_core::build_voter_election_confirmation(
+                    session.artifacts(),
+                    digest.as_ref(),
+                ),
+            )
+        })
+    })
+    .await
 }
 
 /// Lists valid encrypted credentials from the backend-controlled local store.
 /// Only public metadata is returned.
 #[tauri::command]
-fn list_saved_voter_credentials(
+async fn list_saved_voter_credentials(
     app: AppHandle,
 ) -> Result<GuiSavedVoterCredentialsV1, CommandError> {
-    let credentials_dir = credentials_directory(&app)?;
-    Ok(list_saved_voter_credentials_v1(&credentials_dir)?)
+    run_blocking_command(move || {
+        let credentials_dir = credentials_directory(&app)?;
+        Ok(list_saved_voter_credentials_v1(&credentials_dir)?)
+    })
+    .await
 }
 
 /// Generates a new voter governance credential, persists the encrypted V1
@@ -2677,24 +3612,28 @@ fn clear_voter_credential_from_memory(
 /// Deletes only the backend-derived local encrypted credential file for a
 /// validated public governance key. No in-memory credential is cleared.
 #[tauri::command]
-fn delete_saved_voter_credential(
+async fn delete_saved_voter_credential(
     public_key_hex: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiSavedVoterCredentialDeleteResultV1, CommandError> {
-    let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
-    let public_key_hex =
-        file_summary_for_public_key(&public_key, true, true).public_governance_key_hex;
-    let credentials_dir = credentials_directory(&app)?;
-    let result = delete_saved_voter_credential_v1(&credentials_dir, &public_key)?;
-    if result.deleted && state.active_public_key_hex()?.as_deref() == Some(public_key_hex.as_str())
-    {
-        let _ = state.update_loaded_origin_if_same(
-            &public_key_hex,
-            GuiVoterCredentialOriginV1::MemoryOnly,
-        )?;
-    }
-    Ok(result)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let public_key = parse_public_governance_key_hex_v1(&public_key_hex)?;
+        let public_key_hex =
+            file_summary_for_public_key(&public_key, true, true).public_governance_key_hex;
+        let credentials_dir = credentials_directory(&app)?;
+        let result = delete_saved_voter_credential_v1(&credentials_dir, &public_key)?;
+        if result.deleted
+            && state.active_public_key_hex()?.as_deref() == Some(public_key_hex.as_str())
+        {
+            let _ = state.update_loaded_origin_if_same(
+                &public_key_hex,
+                GuiVoterCredentialOriginV1::MemoryOnly,
+            )?;
+        }
+        Ok(result)
+    })
+    .await
 }
 
 /// Returns only safe public metadata about the active Rust-side voter
@@ -3005,7 +3944,7 @@ fn change_my_ballot_choice(
 /// ASYNC thread BEFORE `spawn_blocking`, never on the blocking worker thread.
 /// This keeps `app.path()` off the blocking pool and ensures no AppState lock
 /// is held across the Tauri path resolver. The blocking worker only acquires
-/// `preparation_slot` → (brief `managed_tor_test`) → (brief `session`) →
+/// `preparation_slot` → (brief `managed_tor`) → (brief `session`) →
 /// `voter`, with `apply_voter_cast_lock_at` using the pre-resolved directory.
 #[tauri::command]
 async fn prepare_voter_ballot(
@@ -3068,39 +4007,42 @@ fn prepare_voter_ballot_in_state(
 /// performs the no-overwrite write, full read-back verification, and the
 /// crash-safe cast-lock journal. This is the irreversible local cast boundary.
 #[tauri::command]
-fn export_prepared_voter_ballot(
+async fn export_prepared_voter_ballot(
     package_path: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiPreparedBallotExportV1, CommandError> {
-    let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
     let cast_locks_dir = cast_locks_directory(&app)?;
-    let session_guard = state
-        .session
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
-        return Err(CommandError::no_session());
-    };
-    let mut voter_guard = state
-        .voter
-        .lock()
-        .map_err(|_| CommandError::state_poisoned())?;
-    let Some(voter) = voter_guard.as_mut() else {
-        return Err(CommandError::no_voter_session());
-    };
-    apply_voter_cast_lock_at(
-        &cast_locks_dir,
-        session.artifacts(),
-        voter,
-        transport_descriptor.as_ref(),
-    )?;
-    Ok(voter.export_and_cast_prepared_ballot(
-        session.artifacts(),
-        session.lifecycle_state_v1(),
-        Path::new(&package_path),
-        &cast_locks_dir,
-    )?)
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        let transport_descriptor = configured_managed_tor_descriptor(state.inner())?;
+        let session_guard = state
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
+            return Err(CommandError::no_session());
+        };
+        let mut voter_guard = state
+            .voter
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(voter) = voter_guard.as_mut() else {
+            return Err(CommandError::no_voter_session());
+        };
+        apply_voter_cast_lock_at(
+            &cast_locks_dir,
+            session.artifacts(),
+            voter,
+            transport_descriptor.as_ref(),
+        )?;
+        Ok(voter.export_and_cast_prepared_ballot(
+            session.artifacts(),
+            session.lifecycle_state_v1(),
+            Path::new(&package_path),
+            &cast_locks_dir,
+        )?)
+    })
+    .await
 }
 
 /// Returns the safe route availability projection. Production deliberately
@@ -3121,9 +4063,9 @@ fn private_transport_availability(
         offline_export_available: true,
         development_transport: online,
         message: if online {
-            "TEST / DEVELOPMENT TRANSPORT is configured."
+            "A private transport is configured on the legacy coordinator path. The managed-Tor path is driven separately."
         } else {
-            "Production private transport is unavailable until a transport authority root is provisioned. Offline export remains available."
+            "Private online transport is unavailable until a transport authority root is provisioned. Offline export remains available."
         },
     })
 }
@@ -3140,7 +4082,7 @@ fn private_transport_availability(
 /// `GuiVoterSessionV1::release_prepared_ballot_via_private_transport` plus the
 /// real Tor carrier. Offline export remains the separate, deliberate file
 /// command; the offline branch here only reports availability.
-#[cfg(not(feature = "managed-tor-test"))]
+#[cfg(not(feature = "managed-tor"))]
 fn resolve_private_submission_command_v1(
     route: VoterPrivateRouteV1,
 ) -> Result<GuiPrivateSubmissionResultV1, CommandError> {
@@ -3163,7 +4105,7 @@ fn resolve_private_submission_command_v1(
 /// command. Online routes fail closed until the managed-Tor carrier is wired
 /// through the shared release boundary (see
 /// [`resolve_private_submission_command_v1`]).
-#[cfg(not(feature = "managed-tor-test"))]
+#[cfg(not(feature = "managed-tor"))]
 #[tauri::command]
 fn submit_prepared_voter_ballot_privately(
     route: GuiPrivateRouteV1,
@@ -3172,13 +4114,13 @@ fn submit_prepared_voter_ballot_privately(
     resolve_private_submission_command_v1(route.into())
 }
 
-/// WITH `managed-tor-test`: rewires private submission through the shared
+/// WITH `managed-tor`: rewires private submission through the shared
 /// durable release boundary
 /// (`GuiVoterSessionV1::release_prepared_ballot_via_private_transport`) using
 /// `TorSocksPrivateReleaseCarrierV1` and the SAME verified descriptor. No
 /// legacy coordinator.submit path may return; no PENDING logic is duplicated in
 /// Tauri.
-#[cfg(feature = "managed-tor-test")]
+#[cfg(feature = "managed-tor")]
 #[tauri::command]
 async fn submit_prepared_voter_ballot_privately(
     route: GuiPrivateRouteV1,
@@ -3199,7 +4141,7 @@ async fn submit_prepared_voter_ballot_privately(
     // authenticated organizer receipt is awaited.
     run_blocking_command(move || {
         let state = app.state::<AppState>();
-        managed_tor_test::submit_prepared_voter_ballot_privately_via_managed_tor(
+        managed_tor::submit_prepared_voter_ballot_privately_via_managed_tor(
             &app,
             state.inner(),
         )
@@ -3237,13 +4179,15 @@ fn reset_voter_workflow(
 ///
 /// ORGANIZER-AUTHORITATIVE (same boundary as `write_archive`).
 #[tauri::command]
-fn write_archive_with_governance_document(
+async fn write_archive_with_governance_document(
     target_dir: String,
     governance_document_path: Option<String>,
-    state: tauri::State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<GuiArchiveWriteResultV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    state.with_session(|session| {
+    run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let session = state.with_session(|session| Ok(session.transactional_clone()))?;
         let doc_bytes = governance_document_path
             .map(|path| {
                 let bytes = std::fs::read(Path::new(&path))
@@ -3252,11 +4196,12 @@ fn write_archive_with_governance_document(
             })
             .transpose()?;
         Ok(tari_cc_private_ballot_gui_core::archive_writer::write_archive_directory_v1_with_governance_document(
-            session,
+            &session,
             Path::new(&target_dir),
             doc_bytes.as_deref(),
         )?)
     })
+    .await
 }
 
 /// One ballot option input from the frontend.
@@ -3292,12 +4237,76 @@ mod tests {
             .expect("valid presentation");
     }
 
+    // TRANSPORT-BINDING RELEASE GATE: the finalized-archive command must refuse,
+    // BEFORE writing any file, to emit an archive the anchor workflow requires but
+    // cannot bind. These prove the pure fail-closed decision directly.
+    #[test]
+    fn finalized_archive_binding_required_fails_closed_without_binding() {
+        let decision = require_finalized_transport_binding(true, false);
+        let error = decision.expect_err("must fail closed when a binding is required but absent");
+        assert_eq!(error.code, "GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED");
+        // NOT an integrity failure: the election record is valid, merely unbound.
+        assert_eq!(error.category, "UNAVAILABLE");
+        assert_ne!(error.category, "ARCHIVE_INTEGRITY");
+    }
+
+    #[test]
+    fn finalized_archive_binding_present_is_written() {
+        // A required, present binding proceeds; an unbound archive is only ever
+        // written when the caller explicitly does NOT require anchor eligibility.
+        assert!(require_finalized_transport_binding(true, true).is_ok());
+        assert!(require_finalized_transport_binding(false, false).is_ok());
+        assert!(require_finalized_transport_binding(false, true).is_ok());
+    }
+
+    #[test]
+    fn transport_binding_provenance_absent_in_standard_release() {
+        // A standard Release build (default = []) ships NO transport-binding
+        // provenance: the production authority root is ProductionNotProvisioned
+        // and the only binding source is the controlled-test managed-Tor harness.
+        assert_eq!(
+            TRANSPORT_BINDING_PROVENANCE_AVAILABLE,
+            cfg!(feature = "managed-tor"),
+        );
+        #[cfg(not(feature = "managed-tor"))]
+        assert!(!TRANSPORT_BINDING_PROVENANCE_AVAILABLE);
+    }
+
+    #[test]
+    fn finalized_archive_command_requires_binding_flag_and_registration() {
+        let source = shell_source();
+        // The fail-closed gate runs before the archive writers are reached.
+        let body = source
+            .split("async fn write_finalized_archive(")
+            .nth(1)
+            .and_then(|tail| tail.split("\nasync fn ").next())
+            .expect("write_finalized_archive body");
+        let gate = body
+            .find("require_finalized_transport_binding(")
+            .expect("fail-closed gate is invoked");
+        let first_writer = body
+            .find("write_finalized_archive_v1")
+            .expect("an archive writer is invoked");
+        assert!(
+            gate < first_writer,
+            "the binding fail-closed gate must run before any archive is written",
+        );
+        assert!(
+            body.contains("require_transport_binding: bool"),
+            "the command must take an explicit require_transport_binding flag",
+        );
+        assert!(
+            source.contains("anchor_deployment_capabilities,"),
+            "the capability command must be registered in the invoke handler",
+        );
+    }
+
     // SECURITY (Blocker C): the registered private-submission command must never
     // reach the legacy coordinator/carrier path. Its whole decision is a pure
     // function of the route that takes no AppState, coordinator, or carrier, so a
     // real carrier can never become active by merely provisioning AppState. It
     // fails closed for online routes and only reports availability for offline.
-    #[cfg(not(feature = "managed-tor-test"))]
+    #[cfg(not(feature = "managed-tor"))]
     #[test]
     fn private_submission_command_never_seals_or_sends_online_routes() {
         assert_eq!(
@@ -3928,6 +4937,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn election_load_and_resume_commands_use_blocking_reconstruction_boundary() {
+        let source = shell_source();
+        let signatures = command_signatures(&source);
+        for command in [
+            "load_election",
+            "load_election_folder",
+            "resume_election_workspace",
+        ] {
+            let signature = signatures
+                .iter()
+                .find_map(|(name, signature)| (name == command).then_some(signature))
+                .expect("command signature exists");
+            assert!(
+                signature.trim_start().starts_with("async fn "),
+                "{command} must be async so expensive reconstruction can await spawn_blocking",
+            );
+        }
+
+        let load_helper = source
+            .split("async fn load_election_from_paths_blocking(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn reconstruct_election_session_from_paths(")
+                    .next()
+            })
+            .expect("load blocking helper body");
+        assert!(load_helper.contains("run_blocking_command(move ||"));
+        assert!(load_helper.contains("reconstruct_election_session_from_paths("));
+        assert!(load_helper.contains("reapply_persisted_election_status_from_dir("));
+
+        let resume = source
+            .split("async fn resume_election_workspace(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("/// Deletes one local election workspace")
+                    .next()
+            })
+            .expect("resume command body");
+        let boundary = resume
+            .find("run_blocking_command(move ||")
+            .expect("resume uses blocking boundary");
+        let durable_replay = resume
+            .find("resume_election_workspace_with_verified_session_cache_v1(")
+            .expect("resume uses the verified-session cache boundary");
+        let install = resume
+            .find("state.install_frozen_session(")
+            .expect("resume installs after reconstruction");
+        assert!(
+            boundary < durable_replay,
+            "durable workspace replay must run inside the blocking boundary",
+        );
+        assert!(
+            durable_replay < install,
+            "AppState install must happen only after replay succeeds",
+        );
+    }
+
+    #[test]
+    fn slice4c_material_commands_cross_the_blocking_boundary() {
+        let source = shell_source();
+        let signatures = command_signatures(&source);
+        // These commands either decode/verify ballot material, walk/read/write
+        // durable workspace state, or hash unbounded user-selected files. Keep
+        // the Tauri command handler async and its substantive work on the
+        // shared blocking pool.
+        for command in [
+            "open_voting",
+            "intake_ballot_package",
+            "private_intake_inbox_path",
+            "sync_private_intake",
+            "trusted_ootle_deployment_status",
+            "inspect_template_wasm",
+            "lock_trusted_ootle_deployment",
+            "unlock_trusted_ootle_deployment",
+            "inspect_anchor_config",
+            "inspect_anchor_snapshot",
+            "inspect_anchor_evidence",
+            "freeze_election",
+            "export_election_artifacts",
+            "compute_governance_document_digest",
+            "match_governance_document",
+            "voter_confirmation",
+            "list_saved_voter_credentials",
+            "delete_saved_voter_credential",
+            "export_prepared_voter_ballot",
+            "write_archive_with_governance_document",
+        ] {
+            let signature = signatures
+                .iter()
+                .find_map(|(name, signature)| (name == command).then_some(signature))
+                .expect("command signature exists");
+            assert!(
+                signature.trim_start().starts_with("async fn "),
+                "{command} must be async",
+            );
+            let body = source
+                .split(&format!("async fn {command}("))
+                .nth(1)
+                .and_then(|tail| tail.split("\n#[tauri::command]").next())
+                .expect("command body exists");
+            assert!(
+                body.contains("run_blocking_command(move ||"),
+                "{command} must move material work off the Tauri event thread",
+            );
+        }
+
+        let organizer_intake_source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/organizer_tor_intake.rs"
+        ))
+        .expect("organizer intake source");
+        let transport_export = organizer_intake_source
+            .split("pub async fn export_voter_transport_bundle(")
+            .nth(1)
+            .expect("transport export command exists");
+        assert!(
+            transport_export.contains("crate::run_blocking_command(move ||"),
+            "transport bundle export must move file reads/writes off the Tauri event thread",
+        );
+    }
+
     fn shell_source() -> String {
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
             .expect("shell source")
@@ -4025,9 +5156,9 @@ mod tests {
     // clicking "Create anonymous eligibility proof" parked the invocation
     // forever with ZERO CPU while the window stayed responsive. Root cause:
     // an ABBA lock cycle between two blocking-pool workers —
-    //   apply_election_status_bytes_blocking:  session -> managed_tor_test
-    //   running_transport_endpoint:            managed_tor_test -> session
-    // — after which state.session and state.managed_tor_test were locked
+    //   apply_election_status_bytes_blocking:  session -> managed_tor
+    //   running_transport_endpoint:            managed_tor -> session
+    // — after which state.session and state.managed_tor were locked
     // forever and every later voter command parked at its first acquisition.
     //
     // These tests pin the repaired shell contract: preparation runs through
@@ -4093,7 +5224,7 @@ mod tests {
             .expect("select");
     }
 
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     /// Configures a verified voter transport bundle for the ACTIVE election,
     /// as Computer B had done before OPEN. Signs a descriptor with a test
     /// office root; no Tor process and no network is touched.
@@ -4146,11 +5277,11 @@ mod tests {
             OFFICE_ROOT_KEY_ID.to_owned(),
             *signing_key.verifying_key().as_bytes(),
         );
-        let managed = managed_tor_test::test_configured_state(descriptor, roots, root_anchor);
-        *state.managed_tor_test.lock().expect("managed lock") = Some(managed);
+        let managed = managed_tor::test_configured_state(descriptor, roots, root_anchor);
+        *state.managed_tor.lock().expect("managed lock") = Some(managed);
     }
 
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     /// Signs an authenticated OPEN status statement as the organizer office
     /// would, bound to the active election, at the given generation.
     fn signed_open_status(state: &AppState, generation: u64) -> Vec<u8> {
@@ -4234,7 +5365,7 @@ mod tests {
     /// B. Same state WITH a configured managed-Tor descriptor: preparation
     /// still returns Ready, and the endpoint resolver binds it to THIS
     /// election without holding both locks.
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     #[test]
     fn shell_prepare_returns_ready_with_configured_managed_tor() {
         let (state, _public_key) = imported_voter_open_state();
@@ -4242,7 +5373,7 @@ mod tests {
         select_substitute_option(&state);
 
         // Repaired resolver: completes against this state and binds correctly.
-        let endpoint = managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
+        let endpoint = managed_tor::running_transport_endpoint(&state).expect("endpoint read");
         assert!(
             endpoint.is_some(),
             "descriptor must bind to active election"
@@ -4256,7 +5387,7 @@ mod tests {
     /// C. Realistic concurrent managed-Tor STATUS polling while preparation
     /// runs must never deadlock: the poller takes only short managed-state
     /// locks and every round of both sides completes well inside the budget.
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     #[test]
     fn concurrent_status_polling_and_preparation_never_deadlock() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -4275,7 +5406,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut rounds = 0_u32;
                 while !stop.load(Ordering::SeqCst) && rounds < 200 {
-                    managed_tor_test::managed_tor_test_status_blocking(&state)
+                    managed_tor::managed_tor_status_blocking(&state)
                         .expect("status read");
                     rounds += 1;
                 }
@@ -4310,7 +5441,7 @@ mod tests {
     /// snapshot), and real preparations — under a completion budget. Against
     /// e851308 this schedule could form the ABBA cycle and hang; after the
     /// repair neither edge nests, so all workers always finish.
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     #[test]
     fn concurrent_status_import_fetch_and_preparation_never_deadlock() {
         use std::sync::Arc;
@@ -4346,7 +5477,7 @@ mod tests {
             let state = Arc::clone(&state);
             std::thread::spawn(move || {
                 for _ in 0..250 {
-                    managed_tor_test::running_transport_endpoint(&state).expect("endpoint read");
+                    managed_tor::running_transport_endpoint(&state).expect("endpoint read");
                     std::thread::yield_now();
                 }
             })
@@ -4496,9 +5627,9 @@ mod tests {
     /// regression: `voter_workflow_status` (which holds `voter` + `session`
     /// across the bounded `apply_voter_cast_lock_at` file read) polling
     /// concurrently with `prepare_voter_ballot_in_state` (which needs
-    /// `preparation_slot` → `managed_tor_test` → `session` → `voter`), both
+    /// `preparation_slot` → `managed_tor` → `session` → `voter`), both
     /// using a REAL cast-locks directory so the file read is genuine
-    /// filesystem work. Tests C and D modelled `managed_tor_test_status` and
+    /// filesystem work. Tests C and D modelled `managed_tor_status` and
     /// `apply_election_status_bytes` polling but NEVER `voter_workflow_status`
     /// — the one sync command the frontend polls on every mount and after
     /// every selection/credential action. This test pins that the fixed
@@ -4543,7 +5674,7 @@ mod tests {
             })
         };
         // The prepare worker: acquires `preparation_slot` → (brief
-        // `managed_tor_test`) → (brief `session`) → `voter` → real filesystem
+        // `managed_tor`) → (brief `session`) → `voter` → real filesystem
         // (`apply_voter_cast_lock_at`) → real Triptych proof. If the poller
         // deadlocks it (or holds `voter` indefinitely across `app.path()`), this
         // worker never finishes.
@@ -4638,14 +5769,36 @@ pub fn run() {
             participation_summary,
             write_archive,
             write_finalized_archive,
+            anchor_deployment_capabilities,
             verify_archive,
             verify_transport_archive_anchor,
             trusted_ootle_deployment_status,
             inspect_template_wasm,
             lock_trusted_ootle_deployment,
             unlock_trusted_ootle_deployment,
+            trusted_ootle_deployment_v2_status,
+            lock_trusted_ootle_deployment_v2,
+            unlock_trusted_ootle_deployment_v2,
+            production_transport_authority_status,
+            configure_production_transport_authority_root,
+            forget_production_transport_authority_root,
             write_live_anchor_config_from_verified_archive,
+            validate_live_anchor_operator_config,
+            build_v2_public_anchor_payload,
+            verify_v2_public_anchor_evidence,
+            read_v2_public_anchor_evidence_file,
+            prepare_v2_anchor_publish,
+            run_v2_live_anchor_lifecycle_step,
+            inspect_v2_live_anchor_state,
+            recover_v2_live_anchor,
             run_live_anchor_lifecycle_step,
+            walletd_credential_status,
+            connect_walletd,
+            reconnect_walletd,
+            forget_walletd,
+            walletd_readiness,
+            list_walletd_anchor_accounts,
+            walletd_connection_diagnostics,
             inspect_anchor_config,
             inspect_anchor_snapshot,
             inspect_anchor_evidence,
@@ -4691,47 +5844,47 @@ pub fn run() {
             submit_prepared_voter_ballot_privately,
             reset_voter_workflow,
             write_archive_with_governance_document,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::configure_managed_tor_test,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::start_managed_tor,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::stop_managed_tor,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::managed_tor_test_status,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::voter_tor_status,
-            #[cfg(feature = "managed-tor-test")]
-            managed_tor_test::retry_private_submission,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
+            managed_tor::configure_managed_tor,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::start_managed_tor,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::stop_managed_tor,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::managed_tor_status,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::voter_tor_status,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::retry_private_submission,
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::organizer_tor_status,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::start_private_intake,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::stop_private_intake,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::export_voter_transport_bundle,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             election_status_commands::export_election_status_artifact,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             election_status_commands::import_election_status_artifact,
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             election_status_commands::fetch_election_status_private,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building the Tari Private Ballot shell")
+        .expect("error while building the Private Ballot shell")
         .run(|_app_handle, _event| {
             // On graceful teardown, reap the owned voter/organizer Tor children so
             // a normal window close never leaves an orphaned tor.exe holding a
             // loopback port or data-directory lock into the next launch. Only the
             // children THIS application launched are touched.
-            #[cfg(feature = "managed-tor-test")]
+            #[cfg(feature = "managed-tor")]
             if matches!(
                 _event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 let state = _app_handle.state::<AppState>();
-                managed_tor_test::shutdown_managed_tor_on_exit(state.inner());
+                managed_tor::shutdown_managed_tor_on_exit(state.inner());
                 organizer_tor_intake::shutdown_intake_on_exit(state.inner());
             }
         });

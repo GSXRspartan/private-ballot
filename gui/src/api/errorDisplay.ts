@@ -180,12 +180,34 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
       context: error.context,
     };
   }
+  if (error.code === "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID") {
+    return {
+      title: "Deployment lock needs attention",
+      message: error.message,
+      nextStep:
+        "Reload the deployment state. If this persists, use the deployment reset control; it only clears the saved deployment lock record.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
+  if (error.code === "GUI_TRUSTED_OOTLE_DEPLOYMENT_LOCKED") {
+    return {
+      title: "Deployment is already locked",
+      message: error.message,
+      nextStep:
+        "Reload the deployment state. To replace it, use Unlock / replace first.",
+      code: error.code,
+      category: error.category,
+      context: error.context,
+    };
+  }
   if (error.code === "GUI_CREDENTIAL_CONTAINER_FRAMING") {
     return {
       title: "Credential file is not supported",
       message:
         "The voter credential file is not a supported V1 credential container.",
-      nextStep: "Choose a .tcbcred file created by this version of Tari Private Ballot.",
+      nextStep: "Choose a .tcbcred file created by this version of Private Ballot.",
       code: error.code,
       category: error.category,
       context: error.context,
@@ -205,7 +227,7 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
     return {
       title: "This location can't be used for ballot export",
       message:
-        "This location does not support the safe ballot finalization required by Tari Private Ballot.",
+        "This location does not support the safe ballot finalization required by Private Ballot.",
       nextStep:
         "Choose another location, such as a local folder on your computer's main drive where you have permission to save files.",
       code: error.code,
@@ -217,7 +239,7 @@ export function describeError(error: GuiCommandError): ErrorDisplay {
     return {
       title: "Ballot export location could not be verified",
       message:
-        "Tari Private Ballot could not verify the chosen location supports safe ballot finalization.",
+        "Private Ballot could not verify the chosen location supports safe ballot finalization.",
       nextStep:
         "Choose another location, such as a local folder on your computer's main drive, then try again.",
       code: error.code,

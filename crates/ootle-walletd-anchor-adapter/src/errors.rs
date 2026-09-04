@@ -79,6 +79,9 @@ pub enum WalletdAnchorAdapterError {
     /// The recovered or observed transaction id conflicts with the one already
     /// bound to this request.
     ConflictingTransactionId,
+    /// Walletd rejected the transaction because the fee instruction paid less
+    /// than consensus required.
+    InsufficientFeesPaid { paid: u64, required: u64 },
     /// The observed request status could not be read for recovery.
     StatusUnavailable,
     /// A caller attempted to supply a transaction id for a fresh submission; a
@@ -120,6 +123,7 @@ impl WalletdAnchorAdapterError {
             Self::AlreadySubmitted => "WALLETD_ALREADY_SUBMITTED",
             Self::SubmissionStateUnknown => "WALLETD_SUBMISSION_STATE_UNKNOWN",
             Self::ConflictingTransactionId => "WALLETD_CONFLICTING_TRANSACTION_ID",
+            Self::InsufficientFeesPaid { .. } => "WALLETD_INSUFFICIENT_FEES_PAID",
             Self::StatusUnavailable => "WALLETD_STATUS_UNAVAILABLE",
             Self::CallerSuppliedTransactionId => "WALLETD_CALLER_SUPPLIED_TRANSACTION_ID",
         }
@@ -134,6 +138,15 @@ impl fmt::Display for WalletdAnchorAdapterError {
             }
             Self::UnsupportedWalletdApi { detail } => {
                 write!(formatter, "{}: {detail}", self.as_str())
+            }
+            Self::InsufficientFeesPaid { paid, required } => {
+                write!(
+                    formatter,
+                    "{}: paid={} required={}",
+                    self.as_str(),
+                    paid,
+                    required
+                )
             }
             other => formatter.write_str(other.as_str()),
         }

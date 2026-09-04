@@ -6,13 +6,17 @@
 use std::path::Path;
 
 use tari_cc_private_ballot_anchor::OotleAnchorRecordV1;
-use tari_cc_private_ballot_archive::{ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveManifestV1};
+use tari_cc_private_ballot_archive::{
+    ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveManifestV1, ArchiveVerificationMemoV1,
+};
 use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorEvidenceRecordV1, evidence::MAX_EVIDENCE_FILE_BYTES,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
-use crate::archive_verify::verify_archive_directory_v1;
+use crate::archive_verify::{
+    GuiArchiveVerificationV1, verify_archive_directory_v1, verify_archive_directory_with_memo_v1,
+};
 use crate::error::{GuiCoreError, GuiErrorCategory};
 
 /// Safe public conclusion for the full transport/archive/anchor chain.
@@ -39,6 +43,28 @@ pub fn verify_transport_archive_anchor_v1(
     evidence_path: &Path,
 ) -> Result<GuiTransportAnchorVerificationV1, GuiCoreError> {
     let archive = verify_archive_directory_v1(archive_dir)?;
+    finish_transport_archive_anchor(archive, archive_dir, evidence_path)
+}
+
+/// Verifies a public final transport anchor chain, reusing a same-process
+/// memoized archive verification for an unchanged archive (Slice 4D).
+///
+/// Output is identical to [`verify_transport_archive_anchor_v1`]; only repeated
+/// archive proof replay is avoided on a memo hit.
+pub fn verify_transport_archive_anchor_with_memo_v1(
+    memo: &ArchiveVerificationMemoV1,
+    archive_dir: &Path,
+    evidence_path: &Path,
+) -> Result<GuiTransportAnchorVerificationV1, GuiCoreError> {
+    let archive = verify_archive_directory_with_memo_v1(memo, archive_dir)?;
+    finish_transport_archive_anchor(archive, archive_dir, evidence_path)
+}
+
+fn finish_transport_archive_anchor(
+    archive: GuiArchiveVerificationV1,
+    archive_dir: &Path,
+    evidence_path: &Path,
+) -> Result<GuiTransportAnchorVerificationV1, GuiCoreError> {
     let mut result = GuiTransportAnchorVerificationV1 {
         state: "INCLUDED",
         transport_binding_verified: archive.transport_binding_verified,

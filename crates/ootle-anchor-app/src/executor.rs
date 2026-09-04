@@ -7,8 +7,10 @@
 //! to *both* the walletd and the indexer transport, so
 //! [`TokioBlockingExecutor`] is [`Clone`]: cloning shares the single owned
 //! runtime through an [`Arc`](std::sync::Arc). No second async runtime is
-//! created; no background task is started; no `rt-multi-thread`, `time`, or
-//! `net` feature is required from Tokio.
+//! created and no background task is started. The current-thread runtime is
+//! built with the Tokio `time` and `net`/I/O drivers (no `rt-multi-thread`):
+//! the I/O driver is what lets `reqwest` reach walletd and the indexer, and the
+//! time driver bounds each request.
 
 use std::sync::Arc;
 
@@ -70,9 +72,10 @@ impl TokioBlockingExecutor {
 
     /// Constructs a fresh current-thread Tokio runtime and wraps it.
     ///
-    /// This is the construction path used by the application binary. It
-    /// enables only the `rt` feature of Tokio: no multi-thread worker, no
-    /// `time` driver, no `net` driver.
+    /// This is the construction path used by the application binary. It builds
+    /// a current-thread runtime with the I/O and time drivers enabled (no
+    /// multi-thread worker). The I/O driver is required for real HTTP I/O to
+    /// walletd/indexer; the time driver bounds each request.
     ///
     /// # Errors
     ///
@@ -82,10 +85,14 @@ impl TokioBlockingExecutor {
     /// the binary panic-free.
     pub fn new_current_thread() -> Result<Self, TokioRuntimeBuildError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
-            // The time driver is required so `block_on_bounded` can enforce the
-            // configured per-request timeout via `tokio::time::timeout`. Only
-            // the `rt` and `time` Tokio features are enabled: still no
-            // multi-thread worker and no `net` driver.
+            // The I/O driver is required so `reqwest` can open sockets to
+            // walletd and the indexer: without it, every real HTTP request fails
+            // at the reactor before a connection is attempted, which the
+            // readiness probe would misreport as "walletd unreachable". The time
+            // driver is required so `block_on_bounded` can enforce the configured
+            // per-request timeout via `tokio::time::timeout`. Still a
+            // single-threaded, current-thread runtime — no multi-thread worker.
+            .enable_io()
             .enable_time()
             .build()
             .map_err(|_| TokioRuntimeBuildError::Build)?;
@@ -139,6 +146,30 @@ mod tests {
         let outcome = executor().block_on_bounded(async { 9_u32 }, None);
         assert_eq!(outcome, Ok(9));
     }
+
+    // Regression guard for the walletd-connection bug: the runtime MUST have the
+    // Tokio I/O driver enabled, or `reqwest` cannot open a socket to walletd and
+    // every live RPC fails at the reactor (misreported as "walletd
+    // unreachable"). Binding a real `TcpListener` requires that driver; without
+    // `enable_io()` this call panics/errors and the test fails. This is the
+    // cheapest observable proxy for "the runtime can do network I/O at all".
+    #[test]
+    fn runtime_has_the_io_driver_enabled() {
+        let bound = executor().block_on_bounded(
+            async {
+                tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .map(|listener| listener.local_addr().is_ok())
+                    .unwrap_or(false)
+            },
+            Some(Duration::from_secs(5)),
+        );
+        assert_eq!(
+            bound,
+            Ok(true),
+            "current-thread runtime must have the I/O driver enabled for reqwest"
+        );
+    }
 }
 
 impl BlockingExecutor for TokioBlockingExecutor {
@@ -146,14 +177,14 @@ impl BlockingExecutor for TokioBlockingExecutor {
     where
         F: core::future::Future<Output = T>,
     {
-        // Reject nested runtime entry without panicking. If the calling
-        // thread is already inside an active Tokio runtime context, driving a
-        // second `Runtime::block_on` would panic inside Tokio; instead
-        // surface the bounded `AlreadyInsideAsyncRuntime` error.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(BlockingExecutorError::AlreadyInsideAsyncRuntime);
-        }
-        Ok(self.runtime.block_on(future))
+        // `spawn_blocking` workers can still have a current Tokio handle, so
+        // `Handle::try_current()` is too broad here. Drive the owned runtime
+        // and convert Tokio's true nested-entry panic into the bounded executor
+        // error instead.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.runtime.block_on(future)
+        }))
+        .map_err(|_| BlockingExecutorError::AlreadyInsideAsyncRuntime)
     }
 
     fn block_on_bounded<F, T>(
@@ -164,22 +195,22 @@ impl BlockingExecutor for TokioBlockingExecutor {
     where
         F: core::future::Future<Output = T>,
     {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(BlockingExecutorError::AlreadyInsideAsyncRuntime);
-        }
         match timeout {
-            None => Ok(self.runtime.block_on(future)),
-            Some(deadline) => self.runtime.block_on(async move {
-                // The time driver (enabled in `new_current_thread`) bounds the
-                // wait. An elapsed deadline surfaces as `Elapsed`, which the
-                // real transport maps to a transport timeout (state unknown →
-                // recover, never a blind resubmit) — it never silently drops
-                // the request result.
-                match tokio::time::timeout(deadline, future).await {
-                    Ok(output) => Ok(output),
-                    Err(_elapsed) => Err(BlockingExecutorError::Elapsed),
-                }
-            }),
+            None => self.block_on(future),
+            Some(deadline) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.runtime.block_on(async move {
+                    // The time driver (enabled in `new_current_thread`) bounds the
+                    // wait. An elapsed deadline surfaces as `Elapsed`, which the
+                    // real transport maps to a transport timeout (state unknown →
+                    // recover, never a blind resubmit) — it never silently drops
+                    // the request result.
+                    match tokio::time::timeout(deadline, future).await {
+                        Ok(output) => Ok(output),
+                        Err(_elapsed) => Err(BlockingExecutorError::Elapsed),
+                    }
+                })
+            }))
+            .map_err(|_| BlockingExecutorError::AlreadyInsideAsyncRuntime)?,
         }
     }
 }

@@ -10,8 +10,8 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest, AnchorReceiptV1, AnchorTemplateBindingV1,
+    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1,
+    AnchorMaxFeeV1, AnchorPreparationRequest, AnchorReceiptV1, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1;
 use tari_cc_private_ballot_ootle_anchor_lifecycle_orchestrator::{

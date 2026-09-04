@@ -37,7 +37,7 @@
  * data directory is scoped to it. `electionManifestHashHex` records which
  * election those two belong to so they are never silently carried forward as
  * trusted configuration for a DIFFERENT election. */
-export interface ManagedTorTestConfigMemory {
+export interface ManagedTorConfigMemory {
   torExePath: string;
   torDataDir: string;
   voterBundlePath: string;
@@ -46,14 +46,14 @@ export interface ManagedTorTestConfigMemory {
   electionManifestHashHex: string;
 }
 
-const EMPTY: ManagedTorTestConfigMemory = {
+const EMPTY: ManagedTorConfigMemory = {
   torExePath: "",
   torDataDir: "",
   voterBundlePath: "",
   electionManifestHashHex: "",
 };
 
-const STORAGE_KEY = "tari-private-ballot.managed-tor-test-config";
+const STORAGE_KEY = "tari-private-ballot.managed-tor-config";
 
 /** Coerces one stored field into a bounded non-secret string. */
 function field(raw: Record<string, unknown>, key: string): string {
@@ -64,7 +64,7 @@ function field(raw: Record<string, unknown>, key: string): string {
 
 /** Sanitizes an untrusted parsed object into a config memory record. Only the
  *  three known string fields survive. */
-export function sanitizeManagedTorConfig(raw: unknown): ManagedTorTestConfigMemory {
+export function sanitizeManagedTorConfig(raw: unknown): ManagedTorConfigMemory {
   if (raw === null || typeof raw !== "object") return { ...EMPTY };
   const record = raw as Record<string, unknown>;
   return {
@@ -95,7 +95,7 @@ function storage(): Storage | null {
  * values without an election match (e.g. to pre-fill only the global tor.exe). */
 export function recallManagedTorConfig(
   currentManifestHashHex?: string,
-): ManagedTorTestConfigMemory {
+): ManagedTorConfigMemory {
   const store = storage();
   if (!store) return { ...EMPTY };
   try {
@@ -125,7 +125,7 @@ export function recallManagedTorConfig(
 /** Remembers the three non-secret controlled-test configuration paths. Empty
  *  fields are stored as empty strings (they clear a previously remembered
  *  value). */
-export function rememberManagedTorConfig(config: ManagedTorTestConfigMemory): void {
+export function rememberManagedTorConfig(config: ManagedTorConfigMemory): void {
   const store = storage();
   if (!store) return;
   try {

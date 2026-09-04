@@ -284,6 +284,65 @@ impl GuiCoreError {
         )
     }
 
+    /// Builds a bounded error from a specific live-anchor field rejection.
+    ///
+    /// This preserves the field-specific machine code and message produced by
+    /// the shared operator-field validators (see `live_anchor_preflight`),
+    /// replacing the generic `GUI_LIVE_ANCHOR_OPERATOR_CONFIG_INVALID` funnel so
+    /// the operator sees exactly which field failed. Both arguments are
+    /// `&'static` so no secret or path can be embedded.
+    #[must_use]
+    pub const fn live_anchor_field_invalid(code: &'static str, message: &'static str) -> Self {
+        Self::new(
+            code,
+            GuiErrorCategory::InvalidInput,
+            Some("live-anchor-config"),
+            message,
+        )
+    }
+
+    /// No production transport authority public root has been configured, so a
+    /// default/release build has nothing to verify production transport against.
+    /// This is the fail-closed unconfigured state (never a fake-root fallback).
+    #[must_use]
+    pub const fn production_transport_authority_not_provisioned() -> Self {
+        Self::new(
+            "GUI_PRODUCTION_TRANSPORT_AUTHORITY_NOT_PROVISIONED",
+            GuiErrorCategory::InvalidInput,
+            Some("production-transport-authority"),
+            "no production transport authority public root is configured; load the operator-supplied public root before production transport can be verified",
+        )
+    }
+
+    /// A configured production transport authority public root field is invalid.
+    /// The static `code`/`message` name the specific bad field (key id, public
+    /// key encoding, reserved id, network, or root mismatch).
+    #[must_use]
+    pub const fn production_transport_authority_config_invalid(
+        code: &'static str,
+        message: &'static str,
+    ) -> Self {
+        Self::new(
+            code,
+            GuiErrorCategory::InvalidInput,
+            Some("production-transport-authority"),
+            message,
+        )
+    }
+
+    /// A production transport authority public root is already configured and
+    /// must be explicitly forgotten before a different one can replace it (root
+    /// replacement is never silent).
+    #[must_use]
+    pub const fn production_transport_authority_already_configured() -> Self {
+        Self::new(
+            "GUI_PRODUCTION_TRANSPORT_AUTHORITY_ALREADY_CONFIGURED",
+            GuiErrorCategory::InvalidLifecycleTransition,
+            Some("production-transport-authority"),
+            "a production transport authority public root is already configured; forget it explicitly before configuring a different one",
+        )
+    }
+
     /// The trusted Ootle deployment record is invalid, unsupported, or corrupt.
     #[must_use]
     pub const fn trusted_ootle_deployment_invalid() -> Self {
@@ -351,14 +410,14 @@ impl GuiCoreError {
         )
     }
 
-    /// A walletd/indexer endpoint is not a loopback host (HIGH-3).
+    /// A walletd/indexer endpoint violates the live anchor endpoint policy (HIGH-3).
     #[must_use]
     pub const fn live_anchor_endpoint_not_loopback() -> Self {
         Self::new(
             "GUI_LIVE_ANCHOR_ENDPOINT_NOT_LOOPBACK",
             GuiErrorCategory::InvalidInput,
             Some("live-anchor-config"),
-            "the walletd and indexer endpoints must be organizer-local loopback addresses",
+            "the walletd endpoint must be organizer-local loopback, and the indexer endpoint must be loopback or the trusted hosted Esmeralda indexer",
         )
     }
 
@@ -473,15 +532,15 @@ impl GuiCoreError {
         )
     }
 
-    /// A walletd/indexer endpoint is not loopback (HIGH-3), rejected before any
-    /// network action or secret transmission.
+    /// A walletd/indexer endpoint violates the live anchor endpoint policy
+    /// (HIGH-3), rejected before any network action or secret transmission.
     #[must_use]
     pub const fn anchor_publish_endpoint_not_loopback() -> Self {
         Self::new(
             "ANCHOR_PUBLISH_ENDPOINT_NOT_LOOPBACK",
             GuiErrorCategory::InvalidInput,
             Some("anchor-publish"),
-            "publishing requires organizer-local loopback walletd and indexer endpoints",
+            "publishing requires organizer-local loopback walletd and a loopback or trusted hosted Esmeralda indexer endpoint",
         )
     }
 

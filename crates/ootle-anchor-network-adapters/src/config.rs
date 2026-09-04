@@ -16,7 +16,7 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
 };
 
 use crate::auth::WalletdAuthSecret;
-use crate::endpoint::{IndexerEndpoint, WalletdEndpoint};
+use crate::endpoint::{IndexerEndpoint, TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, WalletdEndpoint};
 
 /// Hard policy ceiling for the anchor transaction's maximum fee, in the
 /// ledger's smallest unit.
@@ -40,6 +40,27 @@ pub const OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1: u64 = 1;
 /// Maximum accepted request timeout, in seconds (ten minutes). Bounds an
 /// over-large value so a single request can never park a worker indefinitely.
 pub const OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1: u64 = 600;
+
+/// Returns the normal trusted hosted indexer endpoint for a supported network.
+#[must_use]
+pub fn default_indexer_endpoint_for_network_v1(network: &OotleNetworkIdV1) -> Option<&'static str> {
+    match network.as_str() {
+        "esmeralda" => Some(TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1),
+        _ => None,
+    }
+}
+
+/// Returns whether an indexer endpoint is allowed for live anchoring on the
+/// selected network. Loopback endpoints are retained for advanced/local-indexer
+/// use; remote endpoints must be explicitly trusted HTTPS endpoints.
+#[must_use]
+pub fn indexer_endpoint_allowed_for_network_v1(
+    network: &OotleNetworkIdV1,
+    endpoint: &IndexerEndpoint,
+) -> bool {
+    endpoint.is_loopback()
+        || (network.as_str() == "esmeralda" && endpoint.is_trusted_esmeralda_remote())
+}
 
 /// Rejection categories for application configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +240,7 @@ mod tests {
     }
 
     fn valid_indexer_endpoint() -> IndexerEndpoint {
-        IndexerEndpoint::parse("http://127.0.0.1:12500")
+        IndexerEndpoint::parse(TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1)
             .unwrap_or_else(|e| panic!("test indexer endpoint must be valid: {e:?}"))
     }
 
@@ -376,5 +397,46 @@ mod tests {
                 .unwrap_or_else(|| panic!("expected error")),
             NetworkAdapterConfigError::InvalidRequestTimeout
         );
+    }
+
+    #[test]
+    fn esmeralda_default_indexer_is_trusted_remote_https() {
+        let network = valid_network();
+        let default = default_indexer_endpoint_for_network_v1(&network)
+            .unwrap_or_else(|| panic!("esmeralda default indexer must exist"));
+        assert_eq!(default, TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1);
+        let endpoint = IndexerEndpoint::parse(default).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(indexer_endpoint_allowed_for_network_v1(&network, &endpoint));
+        assert!(!endpoint.is_loopback());
+        assert_eq!(endpoint.scheme(), "https");
+    }
+
+    #[test]
+    fn loopback_indexer_remains_allowed_for_advanced_use() {
+        let network = valid_network();
+        let endpoint =
+            IndexerEndpoint::parse("http://127.0.0.1:12500").unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(indexer_endpoint_allowed_for_network_v1(&network, &endpoint));
+    }
+
+    #[test]
+    fn arbitrary_remote_http_indexer_is_rejected_by_policy() {
+        let network = valid_network();
+        let endpoint =
+            IndexerEndpoint::parse("http://192.0.2.1:12500").unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!endpoint.is_loopback());
+        assert!(!indexer_endpoint_allowed_for_network_v1(
+            &network, &endpoint
+        ));
+    }
+
+    #[test]
+    fn arbitrary_remote_https_indexer_is_rejected_by_policy() {
+        let network = valid_network();
+        let endpoint = IndexerEndpoint::parse("https://indexer.example.com/")
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!indexer_endpoint_allowed_for_network_v1(
+            &network, &endpoint
+        ));
     }
 }

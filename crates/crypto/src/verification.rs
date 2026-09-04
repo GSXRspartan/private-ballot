@@ -10,6 +10,20 @@ mod private {
 
 pub(crate) use private::Sealed;
 
+/// One `(statement, proof_bytes)` pair to verify inside a homogeneous batch.
+///
+/// This carries only already-reconstructed, verifier-owned statement bytes and
+/// the canonical proof envelope bytes — no third-party cryptographic type — so
+/// it is safe to expose across crate boundaries. The batch entry point returns
+/// exactly one result per input, in input order.
+#[derive(Debug, Clone, Copy)]
+pub struct ProofBatchInputV1<'a> {
+    /// The complete reconstructed proof statement for this ballot.
+    pub statement: &'a ProofStatementV1,
+    /// The canonical proof envelope bytes for this ballot.
+    pub proof_bytes: &'a [u8],
+}
+
 /// A proof-suite implementation authorized by the crypto crate.
 ///
 /// The private sealing trait prevents external crates from implementing
@@ -24,6 +38,26 @@ pub trait ProofVerifierV1: Sealed {
         statement: &ProofStatementV1,
         proof_bytes: &[u8],
     ) -> Result<VerifiedProofV1, ProtocolError>;
+
+    /// Verifies a batch of independent `(statement, proof_bytes)` pairs and
+    /// returns one result per input, in input order.
+    ///
+    /// The default implementation is exactly equivalent to calling
+    /// [`verify`](Self::verify) on each input individually, so any override
+    /// MUST preserve identical per-input accept/reject semantics — it may only
+    /// change how the work is scheduled (e.g. shared multiscalar amortization),
+    /// never which proofs are accepted. Cryptographic proof validity is
+    /// order-independent; callers apply election semantics (nullifier ledger,
+    /// transcript, tally) separately and in canonical order.
+    fn verify_batch_v1(
+        &self,
+        inputs: &[ProofBatchInputV1<'_>],
+    ) -> Vec<Result<VerifiedProofV1, ProtocolError>> {
+        inputs
+            .iter()
+            .map(|input| self.verify(input.statement, input.proof_bytes))
+            .collect()
+    }
 }
 
 /// Nullifier or key image authenticated by successful proof verification.

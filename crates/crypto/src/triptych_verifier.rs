@@ -12,12 +12,14 @@ use merlin::Transcript;
 use tari_cc_private_ballot_protocol::{
     ProofStatementV1, ProtocolError, RegistryCommitment, ValidationCode,
 };
+use triptych::{TriptychProof, TriptychStatement, proof::ProofError};
 
 use crate::{
-    ProofVerifierV1, RISTRETTO_COMPRESSED_POINT_BYTES, TariTriptychProofEnvelopeV1,
-    VerifiedNullifier, VerifiedProofV1,
+    ProofBatchInputV1, ProofVerifierV1, RISTRETTO_COMPRESSED_POINT_BYTES,
+    TariTriptychProofEnvelopeV1, VerifiedNullifier, VerifiedProofV1,
     triptych_prototype::{
-        build_triptych_statement_v1, parse_canonical_triptych_proof_v1,
+        TriptychElectionContextV1, build_triptych_election_context_v1, build_triptych_statement_v1,
+        finish_triptych_statement_v1, parse_canonical_triptych_proof_v1,
         validate_triptych_registry_keys_v1,
     },
     verification::Sealed,
@@ -84,6 +86,9 @@ impl ProofVerifierV1 for TariTriptychPrototypeVerifierV1 {
         statement: &ProofStatementV1,
         proof_bytes: &[u8],
     ) -> Result<VerifiedProofV1, ProtocolError> {
+        // Observational only: count adapter invocations so a test can prove a
+        // path performs zero verification. Records no proof/ring/nullifier data.
+        crate::instrumentation::record_verify_invocation();
         if statement.proof_suite_id() != TARI_TRIPTYCH_PROOF_SUITE_ID_V1 {
             return Err(invalid_data(
                 "Triptych prototype verifier received a different proof suite",
@@ -118,6 +123,241 @@ impl ProofVerifierV1 for TariTriptychPrototypeVerifierV1 {
 
         Ok(VerifiedProofV1::new(statement.clone(), nullifier))
     }
+
+    /// Verifies a homogeneous election batch, reusing one immutable election
+    /// context and amortizing the ring multiscalar multiplication across proofs.
+    ///
+    /// # Security-critical equivalence
+    ///
+    /// The result for each input is guaranteed identical to calling
+    /// [`verify`](Self::verify) on that input alone:
+    ///
+    /// * Every per-input structural check ([`proof_suite_id`], registry
+    ///   commitment, envelope/proof canonical parsing, statement/transcript
+    ///   construction) runs per input, exactly as in `verify`, and a failure
+    ///   marks only that input — it never enters the shared batch.
+    /// * The successfully-prepared inputs are verified by the vendored
+    ///   `TriptychProof::verify_batch`, whose accept condition is identical to
+    ///   individual verification (single `verify` is itself a batch of one). On
+    ///   batch failure, `verify_batch_with_full_blame` re-runs individual
+    ///   verification per proof and returns the exact set of invalid indexes, so
+    ///   one invalid proof can never suppress an unrelated valid ballot.
+    ///
+    /// Cryptographic validity is order-independent; nullifier/ledger/tally
+    /// semantics are applied by the caller separately and in canonical order.
+    fn verify_batch_v1(
+        &self,
+        inputs: &[ProofBatchInputV1<'_>],
+    ) -> Vec<Result<VerifiedProofV1, ProtocolError>> {
+        let mut results: Vec<Option<Result<VerifiedProofV1, ProtocolError>>> =
+            (0..inputs.len()).map(|_| None).collect();
+        let mut prepared: Vec<PreparedBatchItem> = Vec::new();
+
+        // The immutable election context is built once for the first input and
+        // reused for every subsequent input whose election identity matches.
+        let mut context: Option<(ElectionContextKey, TriptychElectionContextV1)> = None;
+
+        for (index, input) in inputs.iter().enumerate() {
+            crate::instrumentation::record_verify_invocation();
+
+            match self.prepare_batch_item(input.statement, input.proof_bytes, &mut context) {
+                Ok(item) => prepared.push(PreparedBatchItem {
+                    input_index: index,
+                    proof_statement: input.statement.clone(),
+                    ..item
+                }),
+                Err(error) => results[index] = Some(Err(error)),
+            }
+        }
+
+        self.run_prepared_batch(prepared, &mut results);
+
+        results
+            .into_iter()
+            .map(|result| result.unwrap_or_else(|| Err(internal_batch_error())))
+            .collect()
+    }
+}
+
+/// Election identity that selects whether a prebuilt context can be reused. All
+/// ballots in one frozen election share these values, so the context is built
+/// at most once per election batch.
+#[derive(PartialEq, Eq)]
+struct ElectionContextKey {
+    protocol_version: u16,
+    proof_suite_id: String,
+    election_scope: Vec<u8>,
+}
+
+/// One batch input that passed every per-ballot structural check and is ready
+/// for the shared multiscalar verification.
+struct PreparedBatchItem {
+    input_index: usize,
+    proof_statement: ProofStatementV1,
+    triptych_statement: TriptychStatement,
+    proof: TriptychProof,
+    transcript: Transcript,
+    linking_tag: [u8; RISTRETTO_COMPRESSED_POINT_BYTES],
+}
+
+impl TariTriptychPrototypeVerifierV1 {
+    /// Runs every per-ballot structural check from [`verify`](Self::verify)
+    /// except the final multiscalar multiplication, reusing (or building) the
+    /// shared election context. A returned `Err` is exactly the error `verify`
+    /// would return at the same stage.
+    fn prepare_batch_item(
+        &self,
+        statement: &ProofStatementV1,
+        proof_bytes: &[u8],
+        context: &mut Option<(ElectionContextKey, TriptychElectionContextV1)>,
+    ) -> Result<PreparedBatchItem, ProtocolError> {
+        if statement.proof_suite_id() != TARI_TRIPTYCH_PROOF_SUITE_ID_V1 {
+            return Err(invalid_data(
+                "Triptych prototype verifier received a different proof suite",
+            ));
+        }
+        if statement.registry_commitment() != self.registry_commitment {
+            return Err(invalid_data(
+                "Triptych verifier registry commitment does not match the proof statement",
+            ));
+        }
+
+        let envelope = TariTriptychProofEnvelopeV1::from_bytes(proof_bytes)?;
+        let election_scope = statement.election_scope();
+
+        let key = ElectionContextKey {
+            protocol_version: statement.protocol_version(),
+            proof_suite_id: statement.proof_suite_id().to_owned(),
+            election_scope: election_scope.as_bytes().to_vec(),
+        };
+        let needs_build = !matches!(context, Some((existing, _)) if *existing == key);
+        if needs_build {
+            let built = build_triptych_election_context_v1(
+                statement.protocol_version(),
+                statement.proof_suite_id(),
+                election_scope.as_bytes(),
+                &self.registry_keys,
+            )?;
+            crate::instrumentation::record_verifier_context_build();
+            *context = Some((key, built));
+        } else {
+            crate::instrumentation::record_verifier_context_reuse();
+        }
+        let Some((_, election_context)) = context.as_ref() else {
+            // Unreachable: the branch above either reused an existing context or
+            // built and stored one (returning early on build failure). Fail
+            // closed rather than assume.
+            return Err(malformed_proof(
+                "Triptych election context was not constructed for the batch",
+            ));
+        };
+
+        let triptych_statement =
+            finish_triptych_statement_v1(election_context, *envelope.linking_tag_bytes())?;
+        let proof = parse_canonical_triptych_proof_v1(envelope.triptych_proof_bytes())?;
+        let transcript = triptych_transcript_v1(statement)?;
+
+        Ok(PreparedBatchItem {
+            input_index: 0,
+            proof_statement: statement.clone(),
+            triptych_statement,
+            proof,
+            transcript,
+            linking_tag: *envelope.linking_tag_bytes(),
+        })
+    }
+
+    /// Verifies the prepared items as one shared batch and writes each result
+    /// back into `results` at its original input index.
+    fn run_prepared_batch(
+        &self,
+        prepared: Vec<PreparedBatchItem>,
+        results: &mut [Option<Result<VerifiedProofV1, ProtocolError>>],
+    ) {
+        if prepared.is_empty() {
+            return;
+        }
+
+        crate::instrumentation::record_historical_crypto_batch();
+        crate::instrumentation::add_historical_crypto_proofs(prepared.len() as u64);
+
+        let statements: Vec<TriptychStatement> = prepared
+            .iter()
+            .map(|item| item.triptych_statement.clone())
+            .collect();
+        let proofs: Vec<TriptychProof> = prepared.iter().map(|item| item.proof.clone()).collect();
+        let mut transcripts: Vec<Transcript> = prepared
+            .iter()
+            .map(|item| item.transcript.clone())
+            .collect();
+
+        let batch_start = std::time::Instant::now();
+        let valid_flags = match TriptychProof::verify_batch(&statements, &proofs, &mut transcripts)
+        {
+            Ok(()) => vec![true; prepared.len()],
+            Err(_) => self.blame_prepared_batch(&statements, &proofs, &prepared),
+        };
+        crate::instrumentation::add_batch_verify_micros(
+            u64::try_from(batch_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+
+        for (item, valid) in prepared.into_iter().zip(valid_flags) {
+            let result = if valid {
+                match VerifiedNullifier::new(item.linking_tag.to_vec()) {
+                    Ok(nullifier) => Ok(VerifiedProofV1::new(item.proof_statement, nullifier)),
+                    Err(error) => Err(error),
+                }
+            } else {
+                Err(malformed_proof("Triptych proof verification failed"))
+            };
+            if let Some(slot) = results.get_mut(item.input_index) {
+                *slot = Some(result);
+            }
+        }
+    }
+
+    /// On batch failure, re-derives exact per-proof validity with the vendored
+    /// full-blame path so a single invalid proof rejects only itself.
+    fn blame_prepared_batch(
+        &self,
+        statements: &[TriptychStatement],
+        proofs: &[TriptychProof],
+        prepared: &[PreparedBatchItem],
+    ) -> Vec<bool> {
+        crate::instrumentation::record_historical_crypto_batch_fallback();
+        crate::instrumentation::add_historical_crypto_individual_fallback_verifies(
+            prepared.len() as u64
+        );
+
+        let mut blame_transcripts: Vec<Transcript> = prepared
+            .iter()
+            .map(|item| item.transcript.clone())
+            .collect();
+
+        match TriptychProof::verify_batch_with_full_blame(
+            statements,
+            proofs,
+            &mut blame_transcripts,
+        ) {
+            // The full batch actually verified on the blame retry: every proof
+            // is valid. (Deterministic weights make this agree with the first
+            // attempt; treating it as all-valid is the correct direction.)
+            Ok(()) => vec![true; prepared.len()],
+            Err(ProofError::FailedBatchVerificationWithFullBlame { indexes }) => {
+                let mut flags = vec![true; prepared.len()];
+                for index in indexes {
+                    if let Some(flag) = flags.get_mut(index) {
+                        *flag = false;
+                    }
+                }
+                flags
+            }
+            // Any other error (e.g. a parameter mismatch that cannot occur for a
+            // context-shared batch) fails closed: reject every member rather
+            // than accept an unverified proof.
+            Err(_) => vec![false; prepared.len()],
+        }
+    }
 }
 
 pub(crate) fn triptych_transcript_v1(
@@ -137,6 +377,15 @@ fn invalid_data(message: &'static str) -> ProtocolError {
 
 fn malformed_proof(message: &'static str) -> ProtocolError {
     ProtocolError::new(ValidationCode::MalformedProof, message)
+}
+
+fn internal_batch_error() -> ProtocolError {
+    // Unreachable: every batch input is assigned a result before this fallback
+    // is consulted. Fail closed if that invariant is ever broken.
+    ProtocolError::new(
+        ValidationCode::InvalidData,
+        "Triptych batch verification did not produce a result for an input",
+    )
 }
 
 #[cfg(test)]
@@ -567,6 +816,123 @@ mod tests {
             cross_registry_result,
             Err(ProofError::InvalidParameter { .. })
         ));
+    }
+
+    /// Serializes the three `verify_batch_v1` tests so the process-global batch
+    /// counters read by the reuse test are never perturbed by a sibling batch
+    /// call running in parallel.
+    static BATCH_COUNTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn verify_batch_v1_matches_individual_verify_for_every_input() {
+        let _guard = BATCH_COUNTER_LOCK.lock().expect("batch counter lock");
+        let fixtures = [
+            valid_fixture(4),
+            valid_fixture(5),
+            valid_fixture(6),
+            valid_fixture(7),
+        ];
+        // All fixtures share one registry, so they use one common verifier.
+        let verifier = &fixtures[0].verifier;
+
+        // A corrupted proof (appended byte) fails canonical parsing per input.
+        let mut corrupted = fixtures[2].envelope.clone();
+        corrupted.push(0xAB);
+        // A structurally valid proof paired with the WRONG statement fails the
+        // multiscalar check, not parsing — this is the "invalid inside a batch"
+        // case that must not suppress the valid neighbours.
+        let cross = fixtures[3].envelope.clone();
+
+        let inputs = vec![
+            ProofBatchInputV1 {
+                statement: &fixtures[0].statement,
+                proof_bytes: &fixtures[0].envelope,
+            },
+            ProofBatchInputV1 {
+                statement: &fixtures[1].statement,
+                proof_bytes: &corrupted,
+            },
+            ProofBatchInputV1 {
+                statement: &fixtures[2].statement,
+                proof_bytes: &fixtures[2].envelope,
+            },
+            ProofBatchInputV1 {
+                // fixtures[3]'s proof against fixtures[0]'s statement: parses,
+                // but is cryptographically invalid for this statement.
+                statement: &fixtures[0].statement,
+                proof_bytes: &cross,
+            },
+        ];
+
+        let batch = verifier.verify_batch_v1(&inputs);
+        assert_eq!(batch.len(), inputs.len());
+
+        for (index, input) in inputs.iter().enumerate() {
+            let individual = verifier.verify(input.statement, input.proof_bytes);
+            match (&batch[index], &individual) {
+                (Ok(batched), Ok(single)) => assert_eq!(
+                    batched, single,
+                    "batched result must equal individual verify for input {index}",
+                ),
+                (Err(batched), Err(single)) => assert_eq!(
+                    batched.code(),
+                    single.code(),
+                    "batched rejection code must equal individual verify for input {index}",
+                ),
+                _ => panic!(
+                    "batch and individual verification disagreed on acceptance for input {index}",
+                ),
+            }
+        }
+
+        // The first and third inputs are valid; a bad neighbour did not suppress
+        // them.
+        assert!(batch[0].is_ok());
+        assert!(batch[2].is_ok());
+        assert!(batch[1].is_err());
+        assert!(batch[3].is_err());
+    }
+
+    #[test]
+    fn verify_batch_v1_builds_one_election_context_and_reuses_it() {
+        let _guard = BATCH_COUNTER_LOCK.lock().expect("batch counter lock");
+        let fixtures = [valid_fixture(4), valid_fixture(5), valid_fixture(6)];
+        let verifier = &fixtures[0].verifier;
+        let inputs: Vec<ProofBatchInputV1<'_>> = fixtures
+            .iter()
+            .map(|fixture| ProofBatchInputV1 {
+                statement: &fixture.statement,
+                proof_bytes: &fixture.envelope,
+            })
+            .collect();
+
+        crate::reset_verify_invocation_count();
+        let batch = verifier.verify_batch_v1(&inputs);
+        let counters = crate::batch_verification_snapshot();
+
+        assert!(batch.iter().all(std::result::Result::is_ok));
+        assert_eq!(
+            counters.verifier_context_build_count, 1,
+            "one immutable election context is built for a same-election batch",
+        );
+        assert_eq!(
+            counters.verifier_context_reuse_count, 2,
+            "the remaining inputs reuse the prebuilt context",
+        );
+        assert_eq!(counters.historical_crypto_batches, 1);
+        assert_eq!(counters.historical_crypto_proofs, 3);
+        assert_eq!(
+            counters.historical_crypto_batch_fallbacks, 0,
+            "an all-valid batch never falls back to per-proof blame",
+        );
+    }
+
+    #[test]
+    fn verify_batch_v1_of_an_empty_slice_is_empty() {
+        let _guard = BATCH_COUNTER_LOCK.lock().expect("batch counter lock");
+        let fixture = valid_fixture(4);
+        let results = fixture.verifier.verify_batch_v1(&[]);
+        assert!(results.is_empty());
     }
 
     struct BatchComponents {

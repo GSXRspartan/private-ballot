@@ -72,7 +72,10 @@ fn create_intent_v1_path(snapshot_path: &Path) -> PathBuf {
 /// Returns whether a pre-create intent exists. An unreadable path is an error
 /// so callers can fail closed rather than assuming a create is safe to retry.
 pub fn exists(snapshot_path: &Path) -> Result<bool, CreateIntentFileError> {
-    for path in [create_intent_path(snapshot_path), create_intent_v1_path(snapshot_path)] {
+    for path in [
+        create_intent_path(snapshot_path),
+        create_intent_v1_path(snapshot_path),
+    ] {
         match std::fs::symlink_metadata(path) {
             Ok(_) => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -119,7 +122,10 @@ pub fn write_atomic(
 
 /// Removes the intent only after the prepared lifecycle snapshot is durable.
 pub fn clear(snapshot_path: &Path) -> Result<(), CreateIntentFileError> {
-    for path in [create_intent_path(snapshot_path), create_intent_v1_path(snapshot_path)] {
+    for path in [
+        create_intent_path(snapshot_path),
+        create_intent_v1_path(snapshot_path),
+    ] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

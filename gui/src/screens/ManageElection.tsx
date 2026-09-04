@@ -7,7 +7,6 @@ import {
   pickElectionArtifact,
   pickElectionStatusExportPath,
   pickGovernanceDocument,
-  pickTemplateWasm,
   pickTorExecutable,
 } from "../api/dialog";
 import {
@@ -17,15 +16,30 @@ import {
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
-  GuiLiveAnchorConfigResultV1,
-  GuiLiveAnchorStepResultV1,
   GuiTallySummaryV1,
-  GuiTrustedOotleDeploymentStatusV1,
-  GuiTrustedOotleTemplateWasmInspectionV1,
+  GuiTrustedOotleDeploymentStatusV2,
+  GuiWalletdAnchorAccountV1,
   OrganizerIntakeStatusV1,
+  ProductionTransportAuthorityReadinessV1,
+  WalletdConnectionDiagnosticsV1,
+  WalletdCredentialStatusV1,
+  WalletdReadinessV1,
 } from "../api/types";
+import {
+  anchorFormStorageKey,
+  applyConnectedWallet,
+  clearAnchorFormState,
+  defaultAnchorFormState,
+  loadAnchorFormState,
+  saveAnchorFormState,
+  walletAccountsErrorMessage,
+  walletActionStatusForKind,
+  type AnchorFormState,
+  type KeyValueStore,
+} from "../anchor/anchorForm";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
+import { boundArchiveResult } from "../archive/archiveBinding";
 import {
   canShowTally,
   canWriteFinalArchive,
@@ -41,7 +55,7 @@ import {
   participationVisibilityLabel,
   sealedParticipationText,
 } from "../lifecycle";
-import type { OrganizerControlKey } from "../lifecycle";
+import type { AnchorSignerMode, OrganizerControlKey } from "../lifecycle";
 import { useAppState } from "../state/AppState";
 import {
   BackendErrorNotice,
@@ -66,6 +80,14 @@ function basename(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+const DEFAULT_ANCHOR_SIGNER_MODE: AnchorSignerMode = "external-walletd";
+// The normal organizer publishing surface is V2 (public aggregate summary). The
+// legacy V1 aggregate-digest publishing UX has been retired from the normal
+// flow; V1 verification of historical anchors remains supported via the Anchor
+// inspection screen and the CLI. This constant keeps the persisted form state
+// well-typed without exposing a UI selector.
+const ANCHOR_VERSION: "v2" = "v2";
+
 /**
  * Manage Election (organizer): Load Election via native file pickers, then walk
  * the append-only lifecycle. Loading validates canonical encodings, recomputes
@@ -88,6 +110,8 @@ export function ManageElection() {
     recordAction,
     dismissError,
     selectedArtifactPaths,
+    archiveView,
+    updateArchiveView,
   } = useAppState();
 
   const [folderBusy, setFolderBusy] = useState(false);
@@ -122,31 +146,33 @@ export function ManageElection() {
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
-  const [confirmUnlockDeployment, setConfirmUnlockDeployment] = useState(false);
+  const [confirmUnlockDeploymentV2, setConfirmUnlockDeploymentV2] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
-  // Organizer-side Ootle aggregate anchor publish state.
-  const [anchorConfigResult, setAnchorConfigResult] =
-    useState<GuiLiveAnchorConfigResultV1 | null>(null);
-  const [anchorStepResult, setAnchorStepResult] =
-    useState<GuiLiveAnchorStepResultV1 | null>(null);
-  const [anchorBusy, setAnchorBusy] = useState(false);
   const [deploymentBusy, setDeploymentBusy] = useState(false);
-  const [trustedDeploymentStatus, setTrustedDeploymentStatus] =
-    useState<GuiTrustedOotleDeploymentStatusV1 | null>(null);
+  const [trustedDeploymentV2Status, setTrustedDeploymentV2Status] =
+    useState<GuiTrustedOotleDeploymentStatusV2 | null>(null);
+  const [trustedDeploymentV2StatusError, setTrustedDeploymentV2StatusError] =
+    useState<GuiCommandError | null>(null);
+  // Build-static anchor-deployment capability. When transport-binding provenance
+  // is unavailable, this build cannot produce an anchor-eligible archive at all,
+  // so the finalized-archive/anchor workflow is presented as unavailable rather
+  // than offering an action that would fail closed. `null` = not yet loaded.
+  const [transportBindingProvenanceAvailable, setTransportBindingProvenanceAvailable] =
+    useState<boolean | null>(null);
+  const [anchorSignerMode, setAnchorSignerMode] =
+    useState<AnchorSignerMode>(DEFAULT_ANCHOR_SIGNER_MODE);
   const [anchorNetwork, setAnchorNetwork] = useState("esmeralda");
   const [anchorWalletdEndpoint, setAnchorWalletdEndpoint] = useState(
-    "http://127.0.0.1:12009",
+    "http://127.0.0.1:5100",
   );
   const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
-    "http://127.0.0.1:12500",
+    "https://ootle-indexer-a.tari.com/",
   );
-  // Per-network published event-template deployment. The operator supplies only
-  // the network/address and selects the published WASM; Rust computes the
-  // artifact digest from the local bytes before lock/persistence.
-  const [anchorTemplateAddress, setAnchorTemplateAddress] = useState("");
-  const [anchorTemplateWasmPath, setAnchorTemplateWasmPath] = useState("");
-  const [anchorTemplateWasmInspection, setAnchorTemplateWasmInspection] =
-    useState<GuiTrustedOotleTemplateWasmInspectionV1 | null>(null);
+  // Per-network published V2 event-template deployment. The operator supplies
+  // only the address and (optionally) an artifact digest override; the backend
+  // enforces the pinned reviewed WASM digest.
+  const [anchorV2TemplateAddress, setAnchorV2TemplateAddress] = useState("");
+  const [anchorV2ArtifactDigest, setAnchorV2ArtifactDigest] = useState("");
   const [anchorMaxEpochDelta, setAnchorMaxEpochDelta] = useState(12);
   const [anchorAccountRef, setAnchorAccountRef] = useState("organizer-fee-account");
   const [anchorFeeComponent, setAnchorFeeComponent] = useState("");
@@ -156,9 +182,136 @@ export function ManageElection() {
   const [anchorMaxFee, setAnchorMaxFee] = useState(1000);
   const [anchorFloor, setAnchorFloor] = useState(2);
   const [anchorDedicatedWallet, setAnchorDedicatedWallet] = useState(false);
-  // The frontend only chooses whether to attach the token; the backend reads
-  // the single fixed WALLETD_AUTH_TOKEN variable and never an arbitrary name.
+  const anchorVersion = ANCHOR_VERSION;
+  const [anchorV2Result, setAnchorV2Result] =
+    useState<import("../api/types").GuiLiveAnchorV2ResultV1 | null>(null);
+  const [anchorV2Preparation, setAnchorV2Preparation] =
+    useState<import("../api/types").GuiV2AnchorPublishPreparationV1 | null>(null);
+  const [anchorV2StepResult, setAnchorV2StepResult] =
+    useState<import("../api/types").GuiV2LiveAnchorStepResultV1 | null>(null);
+  const [anchorV2PublishConfirmed, setAnchorV2PublishConfirmed] = useState(false);
+  const [anchorV2Busy, setAnchorV2Busy] = useState(false);
+  // Hydrated view of the persisted V2 lifecycle for `selectedFinalArchive`.
+  // Populated by a read-only inspect on load; drives the "Existing V2 anchor
+  // found" recovery panel and suppresses fresh Build/Prepare/Submit controls
+  // whenever an on-chain transaction has already been submitted.
+  const [anchorV2Hydrated, setAnchorV2Hydrated] =
+    useState<import("../api/types").GuiV2LiveAnchorHydratedStateV1 | null>(null);
+  const [anchorV2HydratedBusy, setAnchorV2HydratedBusy] = useState(false);
+  const [anchorV2RecoveryBusy, setAnchorV2RecoveryBusy] = useState(false);
+  // Connected-wallet account auto-fill (Task C).
+  const [walletAccounts, setWalletAccounts] = useState<GuiWalletdAnchorAccountV1[] | null>(null);
+  const [walletAccountsBusy, setWalletAccountsBusy] = useState(false);
+  // Visible, secret-free status line for the "Use connected wallet" action, so a
+  // click always shows a state transition (never a silent no-op). Cleared when a
+  // new action starts. Never contains a token or API key.
+  const [walletActionStatus, setWalletActionStatus] = useState<string | null>(null);
+  // Read-only, secret-free connection diagnostic (no token/API key). Populated
+  // on demand by the "Diagnose connection" control so an operator whose wallet
+  // will not go Ready can see exactly where the flow stops: reachability,
+  // credential presence, whether accounts.list was attempted, and the result.
+  const [walletDiag, setWalletDiag] =
+    useState<WalletdConnectionDiagnosticsV1 | null>(null);
+  const [walletDiagBusy, setWalletDiagBusy] = useState(false);
+  const onDiagnoseWalletConnection = async () => {
+    setWalletDiagBusy(true);
+    try {
+      setWalletDiag(await api.walletdConnectionDiagnostics());
+    } catch (error) {
+      showError(error);
+    } finally {
+      setWalletDiagBusy(false);
+    }
+  };
+  const [walletAccountPickerOpen, setWalletAccountPickerOpen] = useState(false);
+  const anchorLoadedKeyRef = useRef<string | null>(null);
+  // The frontend only signals whether to attach the walletd credential. The
+  // shell resolves it from OS-backed secure storage (populated once via
+  // Connect Tari Wallet) with WALLETD_AUTH_TOKEN as a dev-only fallback.
   const [anchorUseAuth, setAnchorUseAuth] = useState(false);
+  const [walletdCredential, setWalletdCredential] =
+    useState<WalletdCredentialStatusV1 | null>(null);
+  const [walletdConnectOpen, setWalletdConnectOpen] = useState(false);
+  const [walletdKeyInput, setWalletdKeyInput] = useState("");
+  const [walletdBusy, setWalletdBusy] = useState(false);
+  const [walletdError, setWalletdError] = useState<string | null>(null);
+  const [walletdReadiness, setWalletdReadiness] =
+    useState<WalletdReadinessV1 | null>(null);
+  const [walletdReadinessBusy, setWalletdReadinessBusy] = useState(false);
+  const refreshWalletdReadiness = async () => {
+    setWalletdReadinessBusy(true);
+    try {
+      const readiness = await api.walletdReadiness();
+      // The wallet card derives from the latest successful readiness result.
+      setWalletdReadiness(readiness);
+      // A fresh reachable probe supersedes any stale wallet-unreachable banner
+      // left by an earlier failed account-list attempt.
+      if (readiness.kind === "ready") clearStaleWalletError();
+    } catch {
+      // Bounded — probe failures are non-fatal; the last known state
+      // remains visible.
+    } finally {
+      setWalletdReadinessBusy(false);
+    }
+  };
+  // Production transport authority PUBLIC root (operator setup/review). Only
+  // public material is ever handled here: the form collects a public-key hex,
+  // and the readiness view shows a key id, network, and public-key fingerprint.
+  // No private key is ever requested, entered, displayed, or persisted here.
+  const [prodAuthority, setProdAuthority] =
+    useState<ProductionTransportAuthorityReadinessV1 | null>(null);
+  const [prodAuthorityBusy, setProdAuthorityBusy] = useState(false);
+  const [prodAuthorityError, setProdAuthorityError] = useState<string | null>(null);
+  const [prodAuthorityFormOpen, setProdAuthorityFormOpen] = useState(false);
+  const [prodAuthorityNetwork, setProdAuthorityNetwork] = useState("");
+  const [prodAuthorityKeyId, setProdAuthorityKeyId] = useState("");
+  const [prodAuthorityPublicKeyHex, setProdAuthorityPublicKeyHex] = useState("");
+  const [prodAuthorityLabel, setProdAuthorityLabel] = useState("");
+  const refreshProductionAuthority = async () => {
+    setProdAuthorityBusy(true);
+    try {
+      setProdAuthority(await api.productionTransportAuthorityStatus());
+    } catch {
+      // Bounded: a status probe failure leaves the last known state visible.
+    } finally {
+      setProdAuthorityBusy(false);
+    }
+  };
+  const submitProductionAuthority = async () => {
+    setProdAuthorityBusy(true);
+    setProdAuthorityError(null);
+    try {
+      const readiness = await api.configureProductionTransportAuthorityRoot({
+        network: prodAuthorityNetwork,
+        root_key_id: prodAuthorityKeyId,
+        root_public_key_hex: prodAuthorityPublicKeyHex,
+        label: prodAuthorityLabel.trim().length > 0 ? prodAuthorityLabel.trim() : null,
+      });
+      setProdAuthority(readiness);
+      setProdAuthorityFormOpen(false);
+      setProdAuthorityPublicKeyHex("");
+    } catch (error) {
+      // Field-specific machine code surfaces so the operator sees WHICH field
+      // is bad (key id, public key encoding, reserved id, network, ...).
+      setProdAuthorityError(
+        error instanceof BackendError ? error.payload.code : "GUI_PRODUCTION_TRANSPORT_AUTHORITY_CONFIG_SCHEMA_INVALID",
+      );
+    } finally {
+      setProdAuthorityBusy(false);
+    }
+  };
+  const forgetProductionAuthority = async () => {
+    setProdAuthorityBusy(true);
+    setProdAuthorityError(null);
+    try {
+      setProdAuthority(await api.forgetProductionTransportAuthorityRoot(true));
+    } catch (error) {
+      setProdAuthorityError(error instanceof BackendError ? error.payload.code : "GUI_IO_FAILURE");
+    } finally {
+      setProdAuthorityBusy(false);
+    }
+  };
+
   // Guided organizer workspace (progressive disclosure, presentation only).
   // Default = guided mode: the current lifecycle phase's controls are
   // prominent, completed phases collapse to compact summaries, and future
@@ -184,6 +337,36 @@ export function ManageElection() {
   const canLoad = shellAvailable && manifestPath !== "" && registryPath !== "" && optionSetPath !== "";
   const tallyAvailable = canShowTally(lifecycle);
   const finalArchiveAvailable = canWriteFinalArchive(lifecycle);
+  const verifiedArchiveResult = boundArchiveResult(
+    archiveView.verification,
+    archiveView.directory,
+  );
+  const verifiedFinalArchive =
+    verifiedArchiveResult?.verified &&
+    verifiedArchiveResult.finalized &&
+    verifiedArchiveResult.transport_binding_present &&
+    verifiedArchiveResult.transport_binding_verified &&
+    verifiedArchiveResult.archive_hash_hex !== null &&
+    verifiedArchiveResult.election_manifest_hash_hex === election?.manifest_hash_hex
+      ? {
+          directory: archiveView.directory,
+          archive_hash_hex: verifiedArchiveResult.archive_hash_hex,
+          file_count: verifiedArchiveResult.file_count,
+          source: "verified" as const,
+        }
+      : null;
+  const writtenArchiveVerified =
+    archiveResult !== null && verifiedFinalArchive?.directory === archiveResult.directory;
+  const selectedFinalArchive =
+    archiveResult !== null && writtenArchiveVerified
+      ? {
+          directory: archiveResult.directory,
+          archive_hash_hex: archiveResult.archive_hash_hex,
+          file_count: archiveResult.files.length,
+          source: "written" as const,
+        }
+      : verifiedFinalArchive;
+  const archiveReadyForAnchor = selectedFinalArchive !== null;
   const finalArchiveError =
     localError !== null &&
     (localError.code === "GUI_ARCHIVE_TARGET_NOT_EMPTY" ||
@@ -192,12 +375,25 @@ export function ManageElection() {
   const participationSealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
   const participationDisclosed = participationIsDisclosed(participation);
+  // Persisted terminal anchor state (RECEIPT_VERIFIED) takes priority over
+  // any fresh in-session step result. Reading it here also feeds Next Step so
+  // the completed-anchor case is never overridden by stale prep state.
+  const anchorReceiptVerifiedTerminal =
+    anchorV2StepResult?.receipt_verified === true ||
+    anchorV2Hydrated?.receipt_verified === true;
+  // Anchor submitted (transaction id known) but not yet terminal-verified.
+  const anchorSubmittedButUnverifiedTerminal =
+    !anchorReceiptVerifiedTerminal &&
+    (anchorV2Hydrated?.transaction_id ?? null) !== null;
   // Plain-language organizer guidance derived ONLY from the real lifecycle
-  // state plus this session's tally/archive results. Never invents states.
+  // state plus this session's tally/archive/anchor results. Never invents
+  // states. Terminal persisted anchor state wins over fresh preparation state.
   const nextStep = nextOrganizerStep({
     lifecycle,
     tallyComputed: tally !== null,
-    archiveWritten: archiveResult !== null,
+    archiveVerified: archiveReadyForAnchor,
+    anchorSubmittedButUnverified: anchorSubmittedButUnverifiedTerminal,
+    anchorVerified: anchorReceiptVerifiedTerminal,
   });
 
   // Guided progressive disclosure derived ONLY from the real lifecycle state.
@@ -219,6 +415,10 @@ export function ManageElection() {
   // archive results). A summary is listed only when its full card is not
   // currently prominent; Show all election controls remains the way to inspect
   // any completed step in full.
+  // Only surface items that ADD information beyond the lifecycle ProgressSteps
+  // row (Created / Frozen / Open / Closed / Verified / Finalized). Repeating
+  // "Voting opened", "Voting closed", "Result verified", "Election finalized"
+  // in a second card duplicates what the lifecycle row already shows.
   const completedSummaries: string[] = [];
   if (guidedMode && lifecycle !== null) {
     if (lifecycle !== "FROZEN") {
@@ -228,42 +428,93 @@ export function ManageElection() {
       if (organizerStatus?.transport_provisioned && !showControl("materials")) {
         completedSummaries.push("Voter materials available");
       }
-      completedSummaries.push("Voting opened");
-    }
-    if (lifecycle === "CLOSED" || lifecycle === "VERIFIED" || lifecycle === "FINALIZED") {
-      completedSummaries.push("Voting closed");
     }
     if (tally !== null && !showControl("tally")) {
       completedSummaries.push("Tally computed");
     }
-    if (lifecycle === "VERIFIED" || lifecycle === "FINALIZED") {
-      completedSummaries.push("Result verified");
-    }
-    if (lifecycle === "FINALIZED") {
-      completedSummaries.push("Election finalized");
-    }
-    if (archiveResult !== null && !showControl("finalArchive")) {
-      completedSummaries.push("Final archive written");
+    if (archiveReadyForAnchor && !showControl("finalArchive")) {
+      completedSummaries.push("Final archive written and verified");
     }
   }
 
-  const trustedDeployment = trustedDeploymentStatus?.deployment ?? null;
-  const trustedDeploymentFixed = trustedDeploymentStatus?.fixed ?? null;
+  const trustedDeploymentV2 = trustedDeploymentV2Status?.deployment ?? null;
+  const trustedDeploymentV2Fixed = trustedDeploymentV2Status?.fixed ?? null;
+  // Anchor readiness checklist. Anchoring is locked until the election is
+  // finalized and the archive is verified; the checklist makes each outstanding
+  // prerequisite explicit so the operator is never left guessing why the
+  // Prepare/Publish controls are disabled. Derived only from real state.
+  const anchorDeploymentLocked = trustedDeploymentV2 !== null;
+  const anchorPreparedForVersion = anchorV2Preparation !== null;
+  const anchorPublishApproved = anchorV2StepResult?.receipt_verified === true;
+  const anchorPrereqChecklist: { label: string; done: boolean }[] = [
+    { label: "Election finalized", done: lifecycle === "FINALIZED" },
+    { label: "Archive written", done: archiveResult !== null || verifiedFinalArchive !== null },
+    { label: "Archive verified", done: archiveReadyForAnchor },
+    { label: "Wallet connected", done: walletdReadiness?.kind === "ready" },
+    { label: "Dedicated organizer wallet", done: anchorDedicatedWallet },
+    { label: "Deployment locked", done: anchorDeploymentLocked },
+    { label: "Anchor prepared", done: anchorPreparedForVersion },
+    { label: "Publish approved", done: anchorPublishApproved },
+  ];
+  // The verified, finalized archive is the hard gate for anchoring: while it is
+  // missing the operator must be sent back to the Archive step, not left to poke
+  // at disabled controls.
+  const anchorLockedUntilVerifiedArchive = !archiveReadyForAnchor;
+
+  // Anchor Card status pill: terminal persisted state (receipt verified)
+  // always wins over fresh in-session preparation/readiness state. Otherwise
+  // it advertises what phase the V2 anchor is in without exposing internal
+  // machine phases to a normal operator.
+  const anchorStatusTone: "ok" | "warn" | "info" | "error" = anchorReceiptVerifiedTerminal
+    ? "ok"
+    : anchorSubmittedButUnverifiedTerminal
+      ? "info"
+      : anchorV2StepResult?.rejection_reason
+        ? "error"
+        : anchorV2Preparation
+          ? "info"
+          : archiveReadyForAnchor && anchorDeploymentLocked
+            ? "ok"
+            : "warn";
+  const anchorStatusText = anchorReceiptVerifiedTerminal
+    ? "Anchored · Verified"
+    : anchorSubmittedButUnverifiedTerminal
+      ? "Anchor submitted · verify receipt"
+      : anchorV2StepResult?.rejection_reason
+        ? "Wallet rejected request"
+        : anchorV2Preparation
+          ? "Awaiting wallet approval"
+          : archiveReadyForAnchor && anchorDeploymentLocked
+            ? "Ready to publish"
+            : "Waiting for final archive";
+
+  const commandErrorFromUnknown = (error: unknown): GuiCommandError =>
+    error instanceof BackendError
+      ? error.payload
+      : {
+          code: "GUI_UNEXPECTED_ERROR",
+          category: "INVALID_INPUT",
+          context: null,
+          message: "an unexpected frontend/backend boundary error occurred",
+        };
 
   const showError = (error: unknown) => {
-    setLocalError(
-      error instanceof BackendError
-        ? error.payload
-        : {
-            code: "GUI_UNEXPECTED_ERROR",
-            category: "INVALID_INPUT",
-            context: null,
-            message: "an unexpected frontend/backend boundary error occurred",
-          },
-    );
+    setLocalError(commandErrorFromUnknown(error));
   };
 
   const clearLocalError = () => setLocalError(null);
+
+  // Clears ONLY a stale wallet/account error banner, leaving any unrelated
+  // error intact. A previous "Use connected wallet" attempt that hit a
+  // down walletd leaves a GUI_WALLETD_* banner; once readiness/account-listing
+  // succeeds (or field validation passes) that banner must not survive, or the
+  // operator sees a contradictory "walletd not reachable" beside a Ready wallet.
+  const clearStaleWalletError = () =>
+    setLocalError((prev) =>
+      prev && (prev.context === "walletd" || prev.code.startsWith("GUI_WALLETD"))
+        ? null
+        : prev,
+    );
 
   const onPickManifest = async () => {
     clearLocalError();
@@ -339,6 +590,118 @@ export function ManageElection() {
     }
   };
 
+
+  // HYDRATION: read the persisted V2 lifecycle sidecar for the currently
+  // verified final archive so an already-submitted-but-unverified transaction is
+  // recovered instead of falling back to the fresh Build/Prepare/Submit flow.
+  // Read-only; never contacts walletd or the indexer. Runs for organizer
+  // sessions only (the backend rejects it otherwise).
+  useEffect(() => {
+    if (!shellAvailable || !isOrganizer || !selectedFinalArchive) {
+      setAnchorV2Hydrated(null);
+      return;
+    }
+    let cancelled = false;
+    setAnchorV2HydratedBusy(true);
+    void (async () => {
+      try {
+        const hydrated = await api.inspectV2LiveAnchorState(selectedFinalArchive.directory);
+        if (!cancelled) setAnchorV2Hydrated(hydrated);
+      } catch {
+        // Best-effort hydration. A read failure leaves the fresh flow visible;
+        // the backend still fails closed on any doomed publish action.
+        if (!cancelled) setAnchorV2Hydrated(null);
+      } finally {
+        if (!cancelled) setAnchorV2HydratedBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shellAvailable, isOrganizer, selectedFinalArchive?.directory, selectedFinalArchive?.archive_hash_hex]);
+
+  const onRecoverExistingV2Anchor = async () => {
+    if (!selectedFinalArchive || !anchorV2Hydrated?.transaction_id) return;
+    clearLocalError();
+    setAnchorV2RecoveryBusy(true);
+    try {
+      const result = await api.recoverV2LiveAnchor(
+        selectedFinalArchive.directory,
+        anchorIndexerEndpoint,
+      );
+      setAnchorV2StepResult(result);
+      // Re-hydrate so blocks_fresh_publish / receipt_verified / phase reflect
+      // the post-recovery persisted state.
+      try {
+        const hydrated = await api.inspectV2LiveAnchorState(selectedFinalArchive.directory);
+        setAnchorV2Hydrated(hydrated);
+      } catch {
+        // Best-effort refresh; the step result already reflects the outcome.
+      }
+      recordAction(
+        result.receipt_verified
+          ? "Recovered existing V2 anchor (receipt verified)"
+          : `Recovered existing V2 anchor: ${result.phase}`,
+      );
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnchorV2RecoveryBusy(false);
+    }
+  };
+
+  // Load the walletd credential status + one readiness probe once the shell
+  // is available. The raw key never crosses this boundary — only presence
+  // metadata and a bounded readiness kind. When a credential is present,
+  // default to attaching it on publish so the organizer does not have to
+  // toggle a checkbox on every launch.
+  useEffect(() => {
+    if (!shellAvailable) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await api.walletdCredentialStatus();
+        if (cancelled) return;
+        setWalletdCredential(status);
+        if (status.stored || status.env_fallback_present) {
+          setAnchorUseAuth(true);
+        }
+      } catch {
+        // Best-effort; the Connect Tari Wallet control remains available.
+      }
+      if (cancelled) return;
+      try {
+        const readiness = await api.walletdReadiness();
+        if (!cancelled) setWalletdReadiness(readiness);
+      } catch {
+        // Bounded probe; a failed probe leaves readiness null.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shellAvailable]);
+
+  useEffect(() => {
+    if (!shellAvailable || !election || !isOrganizer || !tallyAvailable) {
+      if (!tallyAvailable) setTally(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await api.currentTally();
+        if (!cancelled) setTally(result);
+      } catch {
+        // Authoritative refresh is best-effort on navigation; the Compute
+        // tally button remains available and surfaces any real error.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [election?.manifest_hash_hex, lifecycle, shellAvailable, isOrganizer, tallyAvailable]);
+
   const onSyncPrivateIntake = async () => {
     clearLocalError();
     setSyncBusy(true);
@@ -380,16 +743,12 @@ export function ManageElection() {
   const refreshTrustedDeployment = async () => {
     if (!shellAvailable || !election || !isOrganizer) return;
     try {
-      const status = await api.trustedOotleDeploymentStatus();
-      setTrustedDeploymentStatus(status);
-      if (status.deployment) {
-        setAnchorNetwork(status.deployment.network);
-        setAnchorTemplateAddress(status.deployment.template_address);
-        setAnchorTemplateWasmPath("");
-        setAnchorTemplateWasmInspection(null);
-      }
+      const v2Status = await api.trustedOotleDeploymentV2Status();
+      setTrustedDeploymentV2Status(v2Status);
+      setTrustedDeploymentV2StatusError(null);
     } catch (error) {
-      setTrustedDeploymentStatus(null);
+      setTrustedDeploymentV2Status(null);
+      setTrustedDeploymentV2StatusError(commandErrorFromUnknown(error));
       showError(error);
     }
   };
@@ -397,19 +756,42 @@ export function ManageElection() {
   const intakeTorExepathOrUndefined = () =>
     intakeTorExePath.length > 0 ? intakeTorExePath : undefined;
 
+  // Load the build's anchor-deployment capability once. It is compile-time
+  // constant, so a single read is sufficient and never needs re-querying.
+  useEffect(() => {
+    if (!shellAvailable) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const caps = await api.anchorDeploymentCapabilities();
+        if (!cancelled) {
+          setTransportBindingProvenanceAvailable(
+            caps.transport_binding_provenance_available,
+          );
+        }
+      } catch {
+        // Best-effort; leave unknown (null) so the UI neither over-promises nor
+        // falsely blocks. The backend still fails closed on any doomed action.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [shellAvailable]);
+
   // Load intake status when an election is loaded so the operator sees the
   // Tor/transport state without acting. Read-only. Also reset the per-election
   // auto-sync observation baseline so the next tick performs a first-observation
   // reconciliation for the newly loaded/recovered election.
   useEffect(() => {
     prevAcceptedRef.current = null;
-    setTrustedDeploymentStatus(null);
+    setTrustedDeploymentV2Status(null);
+    setTrustedDeploymentV2StatusError(null);
     // Only an organizer context may query ballot-office intake status; the
     // backend rejects it for imported voter sessions, so we never ask.
-    if (election && shellAvailable && isOrganizer) {
-      void refreshOrganizerStatus();
-      void refreshTrustedDeployment();
-    }
+    if (election && shellAvailable && isOrganizer) void refreshOrganizerStatus();
+    if (election && shellAvailable && isOrganizer) void refreshTrustedDeployment();
+    if (election && shellAvailable && isOrganizer) void refreshProductionAuthority();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [election?.manifest_hash_hex, shellAvailable, isOrganizer]);
 
@@ -594,165 +976,355 @@ export function ManageElection() {
     clearLocalError();
     setArchiveResult(null);
     try {
+      // This GUI's finalized archive is the anchor-eligible published record, so
+      // it always requires a transport binding. The backend fails closed BEFORE
+      // writing (GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED) when none is available,
+      // so a valid-but-unbound archive is never produced and then mislabelled an
+      // integrity failure.
       const result = await api.writeFinalizedArchive(
         archiveDir,
         archiveGovernanceDocPath,
+        true,
       );
       setArchiveResult(result);
+      const verification = await api.verifyArchive(result.directory);
+      updateArchiveView({
+        directory: result.directory,
+        verification: { result: verification, verifiedDirectory: result.directory },
+        transportAnchor: null,
+      });
+      if (
+        !verification.verified ||
+        !verification.finalized ||
+        !verification.transport_binding_present ||
+        !verification.transport_binding_verified
+      ) {
+        setLocalError({
+          code: "GUI_FINAL_ARCHIVE_VERIFY_FAILED",
+          category: "ARCHIVE_INTEGRITY",
+          context: "archive-directory",
+          message:
+            "the finalized archive was written, but independent verification did not prove a finalized transport-bound archive",
+        });
+        return;
+      }
       recordAction(
         archiveGovernanceDocPath
-          ? "Wrote finalized archive with governance document"
-          : "Wrote finalized archive",
+          ? "Wrote and verified finalized archive with governance document"
+          : "Wrote and verified finalized archive",
       );
     } catch (error) {
       showError(error);
     }
   };
 
-  const anchorPaths = (archiveDirName: string) => ({
-    configPath: `${archiveDirName}-anchor-config.cbor`,
-    snapshotPath: `${archiveDirName}-anchor-snapshot.cbor`,
-    evidencePath: `${archiveDirName}-anchor-evidence.cbor`,
+  // ---- Anchor form persistence (Task D) ---------------------------------
+
+  const anchorStore = (): KeyValueStore | null => {
+    try {
+      return typeof window !== "undefined" && window.localStorage
+        ? window.localStorage
+        : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const anchorFormKey = anchorFormStorageKey(
+    selectedFinalArchive?.archive_hash_hex,
+    trustedDeploymentV2?.template_address,
+  );
+
+  const currentAnchorForm = (): AnchorFormState => ({
+    signerMode: anchorSignerMode,
+    anchorVersion,
+    network: anchorNetwork,
+    walletdEndpoint: anchorWalletdEndpoint,
+    indexerEndpoint: anchorIndexerEndpoint,
+    accountReference: anchorAccountRef,
+    feeComponent: anchorFeeComponent,
+    sealSignerKind: anchorSealSignerKind,
+    sealSignerId: anchorSealSignerId,
+    declaredSealPublicKey: anchorSealPubKey,
+    maxFee: anchorMaxFee,
+    maxEpochDelta: anchorMaxEpochDelta,
+    acceptedBallotFloor: anchorFloor,
+    dedicatedWallet: anchorDedicatedWallet,
   });
 
-  const onPrepareAnchorConfig = async () => {
-    if (!archiveResult || !trustedDeployment) {
-      setLocalError({
-        code: "GUI_TRUSTED_OOTLE_DEPLOYMENT_REQUIRED",
-        category: "INVALID_LIFECYCLE_TRANSITION",
-        context: "trusted-ootle-deployment",
-        message: "lock a trusted Ootle anchor deployment before preparing live anchor config",
-      });
-      return;
-    }
+  const applyAnchorForm = (state: AnchorFormState) => {
+    setAnchorSignerMode(state.signerMode);
+    // Persisted anchorVersion is intentionally ignored: V2 is the only supported
+    // publishing surface. The field is kept in the persisted schema so an
+    // older saved form still loads without a validation failure.
+    setAnchorNetwork(state.network);
+    setAnchorWalletdEndpoint(state.walletdEndpoint);
+    setAnchorIndexerEndpoint(state.indexerEndpoint);
+    setAnchorAccountRef(state.accountReference);
+    setAnchorFeeComponent(state.feeComponent);
+    setAnchorSealSignerKind(state.sealSignerKind);
+    setAnchorSealSignerId(state.sealSignerId);
+    setAnchorSealPubKey(state.declaredSealPublicKey);
+    setAnchorMaxFee(state.maxFee);
+    setAnchorMaxEpochDelta(state.maxEpochDelta);
+    setAnchorFloor(state.acceptedBallotFloor);
+    setAnchorDedicatedWallet(state.dedicatedWallet);
+  };
+
+  // Restore the persisted form whenever the (archive hash, template address)
+  // key changes — this is what survives tab/screen switches and unmount.
+  useEffect(() => {
+    applyAnchorForm(loadAnchorFormState(anchorStore(), anchorFormKey));
+    anchorLoadedKeyRef.current = anchorFormKey;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorFormKey]);
+
+  // Persist on any field change, but only after this key has been loaded, so
+  // the initial default state never clobbers stored values.
+  useEffect(() => {
+    if (anchorLoadedKeyRef.current !== anchorFormKey) return;
+    saveAnchorFormState(anchorStore(), anchorFormKey, currentAnchorForm());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    anchorFormKey,
+    anchorSignerMode,
+    anchorVersion,
+    anchorNetwork,
+    anchorWalletdEndpoint,
+    anchorIndexerEndpoint,
+    anchorAccountRef,
+    anchorFeeComponent,
+    anchorSealSignerKind,
+    anchorSealSignerId,
+    anchorSealPubKey,
+    anchorMaxFee,
+    anchorMaxEpochDelta,
+    anchorFloor,
+    anchorDedicatedWallet,
+  ]);
+
+  const onUseConnectedWallet = async () => {
     clearLocalError();
-    setAnchorBusy(true);
-    setAnchorConfigResult(null);
-    setAnchorStepResult(null);
-    const { configPath, snapshotPath, evidencePath } = anchorPaths(
-      archiveResult.directory,
-    );
+    // A click ALWAYS produces a visible state transition: the status line and the
+    // busy button change before the backend is even contacted, so the action can
+    // never look like a silent no-op.
+    setWalletActionStatus("Checking saved wallet credential…");
+    setWalletAccountsBusy(true);
     try {
-      const result = await api.writeLiveAnchorConfig({
-        archive_directory: archiveResult.directory,
-        output_config_path: configPath,
-        network: trustedDeployment.network,
-        walletd_endpoint: anchorWalletdEndpoint,
-        indexer_endpoint: anchorIndexerEndpoint,
-        template_address: trustedDeployment.template_address,
-        template_module: trustedDeployment.template_module,
-        template_event_topic: trustedDeployment.template_event_topic,
-        template_artifact_digest_hex: trustedDeployment.template_artifact_digest_hex,
-        max_epoch_delta: anchorMaxEpochDelta,
-        account_reference: anchorAccountRef,
+      setWalletActionStatus("Listing wallet accounts…");
+      const result = await api.listWalletdAnchorAccounts();
+      // The account-list result carries the same bounded readiness fields as a
+      // readiness probe. Derive the wallet card status directly from this
+      // latest successful call so the card can never disagree with the auto-fill
+      // outcome (no second probe that could race or transiently fail).
+      setWalletdReadiness({
+        kind: result.kind,
+        endpoint: result.endpoint,
+        network: result.network,
+        summary: result.summary,
+      });
+      // Terminal, secret-free status naming the exact outcome.
+      setWalletActionStatus(walletActionStatusForKind(result.kind));
+      if (result.kind !== "ready") {
+        setWalletAccounts(null);
+        // A reachable walletd whose account list failed (permission gap, call
+        // failure) must never be reported as "not reachable" — the message
+        // names the specific cause the operator can act on.
+        const unreachable = result.kind === "unreachable";
+        setLocalError({
+          code: unreachable
+            ? "GUI_WALLETD_ACCOUNTS_UNAVAILABLE"
+            : "GUI_WALLETD_ACCOUNTS_NOT_READY",
+          category: "UNAVAILABLE",
+          context: "walletd",
+          message: walletAccountsErrorMessage(result.kind),
+        });
+        return;
+      }
+      // A successful listing supersedes any stale wallet-unreachable banner left
+      // by an earlier failed attempt.
+      clearStaleWalletError();
+      setWalletAccounts(result.accounts);
+      if (result.accounts.length === 0) {
+        setWalletActionStatus("Connected wallet has no accounts");
+        setLocalError({
+          code: "GUI_WALLETD_NO_ACCOUNTS",
+          category: "UNAVAILABLE",
+          context: "walletd",
+          message: "the connected wallet has no accounts to select",
+        });
+      } else if (result.accounts.length === 1) {
+        applyWalletAccount(result.accounts[0]);
+      } else {
+        setWalletActionStatus("Select the fee/seal account");
+        setWalletAccountPickerOpen(true);
+      }
+    } catch (error) {
+      setWalletActionStatus("Wallet account listing failed");
+      showError(error);
+    } finally {
+      setWalletAccountsBusy(false);
+    }
+  };
+
+  const applyWalletAccount = (account: GuiWalletdAnchorAccountV1) => {
+    // The wallet layer is shared across versions: the account's fee component and
+    // signer fill identically. Only the network *hint* is version-aware — it must
+    // come from the lock that matches the selected anchor version, never the V1
+    // lock while V2 is selected. A missing relevant lock keeps the safe fallback
+    // (the form's current network is preserved by applyConnectedWallet).
+    const relevantLock = trustedDeploymentV2;
+    const filled = applyConnectedWallet(
+      currentAnchorForm(),
+      account,
+      relevantLock
+        ? { network: relevantLock.network, template_address: relevantLock.template_address }
+        : null,
+    );
+    applyAnchorForm(filled);
+    setWalletAccountPickerOpen(false);
+    recordAction("Filled anchor fields from connected wallet");
+  };
+
+  const onResetAnchorForm = () => {
+    clearAnchorFormState(anchorStore(), anchorFormKey);
+    applyAnchorForm(defaultAnchorFormState());
+    setAnchorV2Result(null);
+    setAnchorV2Preparation(null);
+    setWalletAccounts(null);
+    setWalletAccountPickerOpen(false);
+    recordAction("Reset anchor form");
+  };
+
+  // V2 deployment is independently locked. It never reads a V1 address or digest.
+  const V2_TEMPLATE_MODULE = "tari_private_ballot_anchor_v2";
+  const V2_TEMPLATE_FUNCTION = "publish_anchor_v2";
+  const V2_EVENT_TOPIC =
+    "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2";
+
+  const onBuildV2Payload = async () => {
+    if (!selectedFinalArchive || !trustedDeploymentV2) return;
+    clearLocalError();
+    setAnchorV2Busy(true);
+    setAnchorV2Result(null);
+    setAnchorV2Preparation(null);
+    setAnchorV2StepResult(null);
+    setAnchorV2PublishConfirmed(false);
+    try {
+      const result = await api.buildV2PublicAnchorPayload({
+        archive_directory: selectedFinalArchive.directory,
+        network: trustedDeploymentV2.network,
+        template_address: trustedDeploymentV2.template_address,
+        template_module: V2_TEMPLATE_MODULE,
+        template_function: V2_TEMPLATE_FUNCTION,
+        template_event_topic: V2_EVENT_TOPIC,
+        template_artifact_digest_hex:
+          trustedDeploymentV2.template_artifact_digest_hex,
+      });
+      setAnchorV2Result(result);
+      recordAction("Built V2 public anchor summary");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnchorV2Busy(false);
+    }
+  };
+
+  const onPrepareV2AnchorPublish = async () => {
+    if (!selectedFinalArchive || !anchorV2Result) return;
+    clearLocalError();
+    setAnchorV2Busy(true);
+    setAnchorV2Preparation(null);
+    try {
+      const preparation = await api.prepareV2AnchorPublish(
+        selectedFinalArchive.directory,
+        anchorV2Result.payload_hex,
+        anchorV2Result.v2_anchor_digest_hex,
+      );
+      setAnchorV2Preparation(preparation);
+      setAnchorV2StepResult(null);
+      setAnchorV2PublishConfirmed(false);
+      recordAction("Prepared V2 public-summary template call");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setAnchorV2Busy(false);
+    }
+  };
+
+  const onRunV2AnchorLifecycle = async (decision: "none" | "approve") => {
+    if (!selectedFinalArchive || !anchorV2Result || !anchorV2Preparation) return;
+    clearLocalError();
+    setAnchorV2Busy(true);
+    try {
+      const result = await api.runV2LiveAnchorLifecycleStep({
+        archive_directory: selectedFinalArchive.directory,
+        payload_hex: anchorV2Result.payload_hex,
+        expected_digest_hex: anchorV2Result.v2_anchor_digest_hex,
         fee_component: anchorFeeComponent,
         seal_signer_kind: anchorSealSignerKind,
         seal_signer_id: anchorSealSignerId,
-        declared_seal_public_key: anchorSealPubKey,
-        dedicated_organizer_wallet_attested: anchorDedicatedWallet,
         max_fee: anchorMaxFee,
-        required_accepted_ballot_floor: anchorFloor,
-        reduced_anonymity_acknowledged: true,
-        snapshot_path: snapshotPath,
-        evidence_path: evidencePath,
-        backoff_base_secs: 1,
-        backoff_cap_secs: 10,
-        receipt_query_attempts: 8,
-        request_timeout_secs: 30,
-        ttl_secs: null,
-      });
-      setAnchorConfigResult(result);
-      recordAction("Prepared anchor configuration");
-    } catch (error) {
-      showError(error);
-    } finally {
-      setAnchorBusy(false);
-    }
-  };
-
-  const onPickTemplateWasm = async () => {
-    clearLocalError();
-    const picked = await pickTemplateWasm();
-    if (picked === null) return;
-    setDeploymentBusy(true);
-    setAnchorTemplateWasmPath(picked);
-    setAnchorTemplateWasmInspection(null);
-    try {
-      setAnchorTemplateWasmInspection(await api.inspectTemplateWasm(picked));
-    } catch (error) {
-      setAnchorTemplateWasmPath("");
-      showError(error);
-    } finally {
-      setDeploymentBusy(false);
-    }
-  };
-
-  const onLockTrustedDeployment = async () => {
-    clearLocalError();
-    setDeploymentBusy(true);
-    setAnchorConfigResult(null);
-    setAnchorStepResult(null);
-    try {
-      const status = await api.lockTrustedOotleDeployment({
-        network: anchorNetwork,
-        template_address: anchorTemplateAddress.trim(),
-        selected_wasm_path: anchorTemplateWasmPath,
-      });
-      setTrustedDeploymentStatus(status);
-      setAnchorTemplateWasmPath("");
-      setAnchorTemplateWasmInspection(null);
-      recordAction(`Locked Ootle anchor deployment (${status.deployment?.network ?? anchorNetwork})`);
-    } catch (error) {
-      showError(error);
-    } finally {
-      setDeploymentBusy(false);
-    }
-  };
-
-  const onUnlockTrustedDeployment = async () => {
-    clearLocalError();
-    setDeploymentBusy(true);
-    setAnchorConfigResult(null);
-    setAnchorStepResult(null);
-    try {
-      const status = await api.unlockTrustedOotleDeployment();
-      setTrustedDeploymentStatus(status);
-      recordAction("Unlocked Ootle anchor deployment");
-      setConfirmUnlockDeployment(false);
-    } catch (error) {
-      showError(error);
-    } finally {
-      setDeploymentBusy(false);
-    }
-  };
-
-  const onAnchorStep = async (decision: "approve" | "reject" | "none") => {
-    if (!archiveResult || !anchorConfigResult) return;
-    clearLocalError();
-    setAnchorBusy(true);
-    const { snapshotPath, evidencePath } = anchorPaths(archiveResult.directory);
-    try {
-      const result = await api.runLiveAnchorLifecycleStep({
-        config_path: anchorConfigResult.config_path,
-        archive_directory: archiveResult.directory,
+        max_epoch_delta: anchorMaxEpochDelta,
+        walletd_endpoint: anchorWalletdEndpoint,
+        indexer_endpoint: anchorIndexerEndpoint,
         use_walletd_auth: anchorUseAuth,
         decision,
       });
-      setAnchorStepResult(result);
-      if (result.phase_is_terminal_success) {
-        recordAction(`Anchor finalized: ${result.phase}`);
-      } else if (result.phase_is_terminal) {
-        recordAction(`Anchor terminal: ${result.phase}`);
-      } else {
-        recordAction(`Anchor step: ${result.phase}`);
-      }
-      // Keep snapshot/evidence paths in sync for the inspection screens.
-      void snapshotPath;
-      void evidencePath;
+      setAnchorV2StepResult(result);
+      recordAction(`V2 anchor lifecycle: ${result.phase}`);
     } catch (error) {
       showError(error);
     } finally {
-      setAnchorBusy(false);
+      setAnchorV2Busy(false);
+    }
+  };
+
+  const onLockTrustedDeploymentV2 = async () => {
+    clearLocalError();
+    setDeploymentBusy(true);
+    setAnchorV2Result(null);
+    try {
+      // Default to the pinned reviewed BLAKE3 from the backend fixed status,
+      // so a normal organizer never has to compute or paste the artifact
+      // digest. The Advanced override lets a reviewer submit a different
+      // value, which the Rust lock will still reject unless it matches the
+      // pinned constant.
+      const manualDigest = anchorV2ArtifactDigest.trim();
+      const digest =
+        manualDigest.length === 64
+          ? manualDigest
+          : trustedDeploymentV2Fixed?.expected_artifact_digest_hex ?? "";
+      const status = await api.lockTrustedOotleDeploymentV2({
+        network: anchorNetwork,
+        template_address: anchorV2TemplateAddress.trim(),
+        template_artifact_digest_hex: digest,
+      });
+      setTrustedDeploymentV2Status(status);
+      setTrustedDeploymentV2StatusError(null);
+      recordAction(`Locked V2 Ootle anchor deployment (${status.deployment?.network ?? anchorNetwork})`);
+    } catch (error) {
+      showError(error);
+      await refreshTrustedDeployment();
+    } finally {
+      setDeploymentBusy(false);
+    }
+  };
+
+  const onUnlockTrustedDeploymentV2 = async () => {
+    clearLocalError();
+    setDeploymentBusy(true);
+    setAnchorV2Result(null);
+    try {
+      const status = await api.unlockTrustedOotleDeploymentV2();
+      setTrustedDeploymentV2Status(status);
+      setTrustedDeploymentV2StatusError(null);
+      setConfirmUnlockDeploymentV2(false);
+      recordAction("Unlocked V2 Ootle anchor deployment");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setDeploymentBusy(false);
     }
   };
 
@@ -905,6 +1477,309 @@ export function ManageElection() {
         )}
       </DetailsSection>
     </>
+  );
+
+  // Tari Wallet connection panel — visible on the Anchor card whenever an
+  // organizer session is loaded. The V2 fee/request lifecycle drives every
+  // wallet interaction through this one panel: connect the wallet, see its
+  // readiness, replace the API key, remove it, and diagnose a stalled probe.
+  const walletPanelJsx = (
+    <div className="anchor-wallet-panel">
+      <div className="anchor-wallet-panel__header">
+        <strong>Tari Wallet</strong>
+        {(() => {
+          const kind = walletdReadiness?.kind ?? null;
+          if (kind === "ready")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--ok">
+                Ready
+                {walletdReadiness?.network ? ` — ${walletdReadiness.network}` : ""}
+              </span>
+            );
+          if (kind === "auth_rejected")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                Reconnect Tari Wallet
+              </span>
+            );
+          if (kind === "permission_denied")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                Reconnect with Accounts:Read
+              </span>
+            );
+          if (kind === "call_failed")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                walletd reachable — request failed
+              </span>
+            );
+          if (kind === "unreachable")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                Start Tari Wallet
+              </span>
+            );
+          if (kind === "no_credential")
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                Connect Tari Wallet
+              </span>
+            );
+          if (walletdCredential?.stored)
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--ok">
+                Connected
+              </span>
+            );
+          if (walletdCredential?.env_fallback_present)
+            return (
+              <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+                Using development env var
+              </span>
+            );
+          return (
+            <span className="anchor-wallet-panel__status anchor-wallet-panel__status--warn">
+              Not connected
+            </span>
+          );
+        })()}
+        <button
+          type="button"
+          className="btn btn-link"
+          disabled={walletdReadinessBusy}
+          onClick={() => void refreshWalletdReadiness()}
+          title="Refresh Tari Wallet readiness"
+        >
+          {walletdReadinessBusy ? "Checking…" : "Refresh"}
+        </button>
+      </div>
+      {walletdReadiness?.kind === "ready" && walletdReadiness?.summary && (
+        <p className="form-hint">Selected organizer account: {walletdReadiness.summary}</p>
+      )}
+      {walletdCredential?.stored && (
+        <p className="form-hint">
+          API key stored in {walletdCredential.store_label}. The key is never displayed,
+          exported, or written to logs. Private Ballot retrieves it automatically on
+          every launch.
+        </p>
+      )}
+      {!walletdCredential?.stored && !walletdCredential?.env_fallback_present && (
+        <>
+          <p className="form-hint">
+            Open your Tari Wallet, create an API key named &quot;Private Ballot&quot;
+            with these permissions:
+          </p>
+          <ul className="form-hint anchor-wallet-panel__perms">
+            <li><code>Transactions:Read</code> — read anchor transaction state</li>
+            <li>
+              <code>TransactionRequests:Create</code> — prepare and submit the anchor
+              request
+            </li>
+            <li><code>TransactionRequests:Read</code> — poll the anchor request status</li>
+            <li>
+              <code>TransactionRequests:Approve</code> — approve the prepared anchor
+              request
+            </li>
+            <li>
+              <code>Accounts:Read</code> — list your wallet accounts for one-click auto-fill
+            </li>
+          </ul>
+          <p className="form-hint">
+            Do NOT grant <code>Admin</code>. Paste the key once — Private Ballot
+            stores it in your OS credential store and reuses it automatically.
+          </p>
+        </>
+      )}
+      {walletdConnectOpen ? (
+        <div className="anchor-wallet-panel__form">
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="tw_…"
+            value={walletdKeyInput}
+            disabled={walletdBusy}
+            onChange={(e) => {
+              setWalletdKeyInput(e.target.value);
+              setWalletdError(null);
+            }}
+          />
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={walletdBusy || walletdKeyInput.trim().length < 46}
+              onClick={() => {
+                setWalletdBusy(true);
+                setWalletdError(null);
+                const key = walletdKeyInput;
+                void (walletdCredential?.stored
+                  ? api.reconnectWalletd(key)
+                  : api.connectWalletd(key))
+                  .then(async (status) => {
+                    setWalletdCredential(status);
+                    setWalletdConnectOpen(false);
+                    setWalletdKeyInput("");
+                    if (status.stored) setAnchorUseAuth(true);
+                    setWalletAccounts(null);
+                    clearLocalError();
+                    await refreshWalletdReadiness();
+                  })
+                  .catch((err) => {
+                    setWalletdError(
+                      err instanceof BackendError
+                        ? err.payload.message
+                        : "could not save credential",
+                    );
+                  })
+                  .finally(() => setWalletdBusy(false));
+              }}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={walletdBusy}
+              onClick={() => {
+                setWalletdConnectOpen(false);
+                setWalletdKeyInput("");
+                setWalletdError(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+          {walletdError && <Notice tone="error">{walletdError}</Notice>}
+        </div>
+      ) : (
+        <div className="btn-row">
+          {walletdCredential?.stored ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={walletdBusy}
+                onClick={() => setWalletdConnectOpen(true)}
+              >
+                Reconnect Tari Wallet
+              </button>
+              <button
+                type="button"
+                className="btn btn-tertiary"
+                disabled={walletdBusy}
+                onClick={() => {
+                  setWalletdBusy(true);
+                  void api
+                    .forgetWalletd()
+                    .then(async (status) => {
+                      setWalletdCredential(status);
+                      if (!status.stored && !status.env_fallback_present) {
+                        setAnchorUseAuth(false);
+                      }
+                      await refreshWalletdReadiness();
+                    })
+                    .catch(() => {
+                      setWalletdError("could not remove stored credential");
+                    })
+                    .finally(() => setWalletdBusy(false));
+                }}
+              >
+                Forget Tari Wallet
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={walletdBusy}
+              onClick={() => setWalletdConnectOpen(true)}
+            >
+              Connect Tari Wallet
+            </button>
+          )}
+        </div>
+      )}
+      <div className="anchor-wallet-panel__diag">
+        <button
+          type="button"
+          className="btn btn-link"
+          disabled={walletDiagBusy}
+          onClick={() => void onDiagnoseWalletConnection()}
+          title="Run a read-only walletd connection check (no secrets shown)"
+        >
+          {walletDiagBusy ? "Diagnosing…" : "Diagnose connection"}
+        </button>
+        {walletDiag && (
+          <dl
+            className="form-hint anchor-wallet-diag"
+            data-testid="wallet-connection-diagnostics"
+          >
+            <div>
+              <dt>Endpoint</dt>
+              <dd className="hash">{walletDiag.endpoint_normalized}</dd>
+            </div>
+            <div>
+              <dt>Saved credential</dt>
+              <dd>{walletDiag.saved_credential ? "yes" : "no"}</dd>
+            </div>
+            <div>
+              <dt>TCP loopback</dt>
+              <dd>
+                {walletDiag.tcp_loopback_attempted
+                  ? walletDiag.tcp_loopback_reachable
+                    ? "reachable"
+                    : "unreachable"
+                  : "not attempted"}
+              </dd>
+            </div>
+            <div>
+              <dt>wallet.get_info</dt>
+              <dd>
+                {walletDiag.unauthenticated_wallet_get_info_attempted
+                  ? walletDiag.unauthenticated_wallet_get_info_result.status === "success"
+                    ? "success"
+                    : `failed: ${walletDiag.unauthenticated_wallet_get_info_result.category ?? "unknown"}`
+                  : "not attempted"}
+              </dd>
+            </div>
+            <div>
+              <dt>accounts.list</dt>
+              <dd>
+                {walletDiag.accounts_list_attempted
+                  ? walletDiag.accounts_list_result.status === "success"
+                    ? "success"
+                    : `failed: ${walletDiag.accounts_list_result.category ?? "unknown"}`
+                  : "not attempted"}
+              </dd>
+            </div>
+            <div>
+              <dt>Result</dt>
+              <dd>{walletDiag.final_result_kind}</dd>
+            </div>
+            {walletDiag.network && (
+              <div>
+                <dt>Network</dt>
+                <dd>{walletDiag.network}</dd>
+              </div>
+            )}
+            {walletDiag.account_count !== null && (
+              <div>
+                <dt>Accounts</dt>
+                <dd>{walletDiag.account_count}</dd>
+              </div>
+            )}
+            {walletDiag.selected_account_name && (
+              <div>
+                <dt>Selected account</dt>
+                <dd>{walletDiag.selected_account_name}</dd>
+              </div>
+            )}
+          </dl>
+        )}
+      </div>
+    </div>
   );
 
   return (
@@ -1630,15 +2505,59 @@ export function ManageElection() {
 
         {showControl("finalArchive") && (
         <Card title="Final archive">
-          <p className="card-body">
-            Writes the complete election record to a folder: the election definition, eligible
-            voter list, ballot options, and accepted ballots. Anyone can later verify this
-            record independently on the Archive screen. Optionally include the governance
-            supporting document so its bytes travel with the record.
-          </p>
-          {!finalArchiveAvailable && (
+          {/* Terminal verified state wins: when a verified final archive
+              already exists for this election, its summary leads the card and
+              new-archive creation moves under a disclosure. The warning
+              about the current runtime being unable to CREATE a new
+              transport-bound archive only makes sense while we are still
+              trying to create one; it must not visually imply the existing
+              verified archive is defective. */}
+          {verifiedFinalArchive && (
+            <>
+              <Notice tone="ok">
+                <strong>Final archive verified</strong>
+              </Notice>
+              <div className="field-list" data-testid="final-archive-verified-summary">
+                <Field label="Folder">
+                  <span className="hash">{verifiedFinalArchive.directory}</span>
+                  <CopyButton value={verifiedFinalArchive.directory} />
+                </Field>
+                <Field label="Archive hash">
+                  <HashValue value={verifiedFinalArchive.archive_hash_hex} />
+                  <CopyButton value={verifiedFinalArchive.archive_hash_hex} />
+                </Field>
+                <Field label="Files verified">{verifiedFinalArchive.file_count}</Field>
+                {participationDisclosed && participation?.accepted_ballots != null && (
+                  <Field label="Accepted ballots">{participation.accepted_ballots}</Field>
+                )}
+              </div>
+              <p className="form-hint">
+                The independently verified final archive is the authoritative election record.
+                Anyone can re-verify it on the Archive screen.
+              </p>
+            </>
+          )}
+          {!verifiedFinalArchive && (
+            <p className="card-body">
+              Writes the complete election record to a folder: the election definition, eligible
+              voter list, ballot options, and accepted ballots. Anyone can later verify this
+              record independently on the Archive screen. Optionally include the governance
+              supporting document so its bytes travel with the record.
+            </p>
+          )}
+          {!finalArchiveAvailable && !verifiedFinalArchive && (
             <Notice tone="info">
               Mark verified and finalize the election before writing the final archive.
+            </Notice>
+          )}
+          {transportBindingProvenanceAvailable === false && !verifiedFinalArchive && (
+            <Notice tone="warn">
+              This build cannot produce a transport-bound (anchor-eligible) archive:
+              it has no configured private-transport provenance. Writing the final
+              archive will be refused here (the election record stays valid and can
+              still be verified offline), and live anchoring is unavailable. Use an
+              organizer build with active private intake to produce an anchor-eligible
+              archive.
             </Notice>
           )}
           <DetailsSection summary="Technical details">
@@ -1650,6 +2569,7 @@ export function ManageElection() {
               archive hash. It is supporting evidence, not a fourth canonical election artifact.
             </p>
           </DetailsSection>
+          {!verifiedFinalArchive && (
           <div className="form-row">
             <label htmlFor="archive-dir">Target directory (new or empty)</label>
             <div className="file-row">
@@ -1674,6 +2594,8 @@ export function ManageElection() {
               </button>
             </div>
           </div>
+          )}
+          {!verifiedFinalArchive && (
           <div className="form-row">
             <label htmlFor="archive-gov-doc">Governance document (optional)</label>
             <input
@@ -1703,6 +2625,7 @@ export function ManageElection() {
               )}
             </div>
           </div>
+          )}
           {/* VERIFIED phase: the finalize action is the prominent next step,
               so its permanence warning sits directly beside it (the explicit
               confirmation dialog remains the safeguard). */}
@@ -1712,6 +2635,7 @@ export function ManageElection() {
               cannot be changed afterward.
             </Notice>
           )}
+          {!verifiedFinalArchive && (
           <div className="btn-row">
             <button
               type="button"
@@ -1730,8 +2654,9 @@ export function ManageElection() {
               Write final archive
             </button>
           </div>
+          )}
           <BackendErrorNotice error={finalArchiveError ? localError : null} onDismiss={clearLocalError} />
-          {archiveResult && (
+          {archiveResult && !verifiedFinalArchive && (
             <>
               <Notice tone="ok">
                 Final archive written
@@ -1747,413 +2672,868 @@ export function ManageElection() {
               </div>
             </>
           )}
+          {archiveResult && !writtenArchiveVerified && !verifiedFinalArchive && (
+            <Notice tone="warn">
+              The archive was written, but live anchor preparation is waiting for independent
+              verification of the finalized transport binding.
+            </Notice>
+          )}
+          {verifiedFinalArchive && (
+            <DetailsSection summary="Create another final archive">
+              <p className="form-hint">
+                A verified final archive already exists for this election. Creating another
+                archive does not modify or replace the existing one — it would write a separate
+                record into a different folder.
+              </p>
+              {transportBindingProvenanceAvailable === false && (
+                <Notice tone="warn">
+                  This build cannot produce a transport-bound (anchor-eligible) archive:
+                  it has no configured private-transport provenance. Writing another final
+                  archive would be refused here. Use an organizer build with active private
+                  intake to produce an anchor-eligible archive.
+                </Notice>
+              )}
+              <div className="form-row">
+                <label htmlFor="archive-dir-alt">Target directory (new or empty)</label>
+                <div className="file-row">
+                  <input
+                    id="archive-dir-alt"
+                    type="text"
+                    value={archiveDir}
+                    onChange={(e) => {
+                      setArchiveDir(e.target.value);
+                      setArchiveResult(null);
+                      if (finalArchiveError) clearLocalError();
+                    }}
+                    placeholder="archive output directory"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={!canAct}
+                    onClick={() => void onPickArchiveDir()}
+                  >
+                    Browse
+                  </button>
+                </div>
+              </div>
+              <div className="form-row">
+                <label htmlFor="archive-gov-doc-alt">Governance document (optional)</label>
+                <input
+                  id="archive-gov-doc-alt"
+                  type="text"
+                  readOnly
+                  value={archiveGovernanceDocPath ?? ""}
+                  placeholder="no governance document selected"
+                />
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={onPickArchiveGovernanceDoc}
+                    disabled={!canAct}
+                  >
+                    Select governance document
+                  </button>
+                  {archiveGovernanceDocPath && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => setArchiveGovernanceDocPath(null)}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  disabled={!canAct || !archiveDir || !finalArchiveAvailable}
+                  onClick={() => void onWriteArchive()}
+                >
+                  Write another final archive
+                </button>
+              </div>
+              {archiveResult && (
+                <>
+                  <Notice tone="ok">
+                    Additional archive written
+                    <br />
+                    <span className="hash">{archiveResult.directory}</span>
+                  </Notice>
+                  <div className="field-list">
+                    <Field label="Archive hash">
+                      <HashValue value={archiveResult.archive_hash_hex} />
+                      <CopyButton value={archiveResult.archive_hash_hex} />
+                    </Field>
+                    <Field label="Files written">{archiveResult.files.length}</Field>
+                  </div>
+                </>
+              )}
+            </DetailsSection>
+          )}
         </Card>
         )}
 
-        {showControl("anchor") && (
-        <Card title="Anchor">
+        <Card title="Tari Anchor">
           <Notice tone="info">
             Optional public integrity anchor: anchor the aggregate finalized archive commitment
             on Tari Ootle. Individual votes are not written to Ootle. Anchoring is optional and
             non-binding — the independently verified offline archive remains authoritative.
           </Notice>
-          {!archiveResult && (
-            <p className="form-hint">Write and verify the final archive first.</p>
+
+          {anchorLockedUntilVerifiedArchive && (
+            <Notice tone="warn">
+              <p className="anchor-prereq-title">
+                <strong>Verify ballot results before anchoring</strong>
+              </p>
+              <p>
+                Anchoring is locked until the election is finalized and the archive has been
+                verified. The Ootle anchor is built from the verified archive hash and final
+                tally. Open the Archive menu, verify the results, then return here to prepare the
+                anchor.
+              </p>
+              <ul className="anchor-prereq-checklist">
+                {anchorPrereqChecklist.map((item) => (
+                  <li
+                    key={item.label}
+                    className={item.done ? "prereq-done" : "prereq-todo"}
+                  >
+                    <span aria-hidden="true" className="prereq-mark">
+                      {item.done ? "✓" : "○"}
+                    </span>
+                    <span>{item.label}</span>
+                    {!item.done && <span className="prereq-status"> — required</span>}
+                  </li>
+                ))}
+              </ul>
+            </Notice>
           )}
-          {archiveResult && (
-            <>
-              <div className="field-list">
-                <Field label="Archive directory">
-                  <HashValue value={archiveResult.directory} />
-                </Field>
-                <Field label="Archive hash">
-                  <HashValue value={archiveResult.archive_hash_hex} />
-                </Field>
-              </div>
 
-              <h4 className="screen-section">Ootle Anchor Deployment</h4>
-              <div className="field-list">
-                <Field label="Deployment lock">
-                  {trustedDeployment ? (
-                    <Pill tone="ok">LOCKED</Pill>
-                  ) : (
-                    <Pill tone="warn">UNLOCKED</Pill>
-                  )}
-                </Field>
-                <Field label="Template module">
-                  <span className="hash">{trustedDeploymentFixed?.template_module ?? "—"}</span>
-                </Field>
-                <Field label="Template function">
-                  <span className="hash">{trustedDeploymentFixed?.template_function ?? "—"}</span>
-                </Field>
-                <Field label="Event topic">
-                  <HashValue value={trustedDeploymentFixed?.template_event_topic} />
-                </Field>
-              </div>
+          <div className="field-list anchor-deployment-fields">
+            <Field label="Status">
+              <Pill tone={anchorStatusTone}>{anchorStatusText}</Pill>
+            </Field>
+            <Field label="Wallet">
+              <Pill
+                tone={
+                  walletdReadiness?.kind === "ready"
+                    ? "ok"
+                    : walletdReadiness?.kind === "unreachable" || walletdReadiness === null
+                      ? "warn"
+                      : "info"
+                }
+              >
+                {walletdReadiness?.summary ?? "Checking wallet"}
+                {walletdReadiness?.network ? ` — ${walletdReadiness.network}` : ""}
+              </Pill>
+            </Field>
+          </div>
 
-              {trustedDeployment ? (
-                <>
-                  <div className="field-list">
-                    <Field label="Network">{trustedDeployment.network}</Field>
-                    <Field label="Template address">
-                      <HashValue value={trustedDeployment.template_address} />
-                      <CopyButton value={trustedDeployment.template_address} />
-                    </Field>
-                    <Field label="Artifact digest">
-                      <HashValue value={trustedDeployment.template_artifact_digest_hex} />
-                      <CopyButton value={trustedDeployment.template_artifact_digest_hex} />
-                    </Field>
-                  </div>
-                  <div className="btn-row">
+          {/* Terminal verified anchor: fresh wallet/setup controls are not
+              needed and previously produced contradictory UX (Start Tari
+              Wallet / Ready to publish beside a verified anchor). Keep the
+              wallet panel available under Advanced for diagnostics. */}
+          {anchorReceiptVerifiedTerminal ? (
+            <DetailsSection summary="Advanced: wallet connection">
+              {walletPanelJsx}
+            </DetailsSection>
+          ) : (
+            walletPanelJsx
+          )}
+
+          {/* Anchor setup assistant: one-click fill from the connected wallet.
+              The V2 fee/request lifecycle uses the auto-filled wallet fields —
+              organizers do not hand-type endpoint/fee/seal fields any more.
+              Hidden after the anchor is terminal-verified; it is a preparation
+              control and has no purpose once the anchor is complete. */}
+          {!anchorReceiptVerifiedTerminal && (
+          <div className="anchor-setup-assistant">
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={
+                    !canAct ||
+                    !trustedDeploymentV2 ||
+                    walletAccountsBusy
+                  }
+                  onClick={() => void onUseConnectedWallet()}
+                >
+                  {walletAccountsBusy ? "Reading wallet…" : "Use connected wallet"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onResetAnchorForm}
+                >
+                  Reset anchor form
+                </button>
+              </div>
+              {walletActionStatus && (
+                <p
+                  className="form-hint anchor-wallet-action-status"
+                  role="status"
+                  aria-live="polite"
+                  data-testid="wallet-action-status"
+                >
+                  {walletActionStatus}
+                </p>
+              )}
+              <label
+                className="anchor-checkbox-row"
+                data-testid="dedicated-organizer-wallet-attestation"
+              >
+                <input
+                  type="checkbox"
+                  checked={anchorDedicatedWallet}
+                  onChange={(e) => setAnchorDedicatedWallet(e.target.checked)}
+                />
+                <span>
+                  Dedicated organizer wallet
+                  <small>
+                    Confirm this Tari wallet/account is dedicated to
+                    organizer-side election anchoring and is not being used as a
+                    voter wallet.
+                  </small>
+                </span>
+              </label>
+              {!trustedDeploymentV2 && (
+                <p className="form-hint">
+                  Lock the Ootle anchor deployment (Advanced) before auto-fill.
+                </p>
+              )}
+
+              {walletAccountPickerOpen && walletAccounts && walletAccounts.length > 1 && (
+                <div className="anchor-account-picker">
+                  <p className="form-hint">Select the organizer fee/seal account:</p>
+                  {walletAccounts.map((account) => (
                     <button
                       type="button"
-                      className="btn btn-secondary"
-                      disabled={!canAct || deploymentBusy || anchorBusy}
-                      onClick={() => void refreshTrustedDeployment()}
+                      key={account.component_address}
+                      className="btn btn-secondary anchor-account-option"
+                      onClick={() => applyWalletAccount(account)}
                     >
-                      Reload deployment
+                      <span className="anchor-account-name">
+                        {account.name ?? "(unnamed account)"}
+                        {account.is_default ? " • default" : ""}
+                        {account.is_confirmed_on_chain ? "" : " • unconfirmed"}
+                      </span>
+                      <span className="hash anchor-account-address">
+                        {account.component_address}
+                      </span>
+                      <span className="form-hint">
+                        key index {account.key_index ?? "—"}
+                      </span>
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      disabled={!canAct || deploymentBusy || anchorBusy}
-                      onClick={() => setConfirmUnlockDeployment(true)}
-                    >
-                      Unlock / replace
-                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setWalletAccountPickerOpen(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+
+            </div>
+          )}
+
+          {/* V2 public-summary anchor is the only supported normal publishing
+              surface. Individual votes are never published — Ootle carries only
+              the readable aggregate election summary. */}
+          <div className="anchor-version-selector">
+            <div className="anchor-v2-review">
+                <Notice tone="info">
+                  This anchor publishes the readable public aggregate election summary.
+                  Individual votes are NEVER published. Detached evidence is written beside the
+                  archive for independent re-verification.
+                </Notice>
+                <div className="field-list anchor-deployment-fields">
+                  <Field label="Deployment lock">
+                    {trustedDeploymentV2 ? (
+                      <Pill tone="ok">LOCKED</Pill>
+                    ) : trustedDeploymentV2StatusError ? (
+                      <Pill tone="error">OUTDATED / RESET REQUIRED</Pill>
+                    ) : (
+                      <Pill tone="warn">UNLOCKED</Pill>
+                    )}
+                  </Field>
+                </div>
+                <DetailsSection summary="Advanced: anchor template binding">
+                  <div className="field-list anchor-deployment-fields">
+                    <Field label="Template module"><HashValue value={trustedDeploymentV2Fixed?.template_module} /></Field>
+                    <Field label="Template function"><HashValue value={trustedDeploymentV2Fixed?.template_function} /></Field>
+                    <Field label="Event topic"><HashValue value={trustedDeploymentV2Fixed?.template_event_topic} /></Field>
                   </div>
-                </>
-              ) : (
-                <>
-                  <div className="card-grid">
-                    <div className="form-row">
-                      <label htmlFor="anchor-network">Network</label>
-                      <select
-                        id="anchor-network"
-                        value={anchorNetwork}
-                        onChange={(e) => setAnchorNetwork(e.target.value)}
-                      >
-                        <option value="esmeralda">esmeralda (testnet)</option>
-                        <option value="igor">igor (testnet)</option>
-                        <option value="localnet">localnet</option>
-                      </select>
+                </DetailsSection>
+                {trustedDeploymentV2 ? (
+                  <>
+                    <div className="field-list anchor-deployment-fields">
+                      <Field label="Network">{trustedDeploymentV2.network}</Field>
+                      <Field label="Template address"><HashValue value={trustedDeploymentV2.template_address} /></Field>
+                      <Field label="Artifact digest"><HashValue value={trustedDeploymentV2.template_artifact_digest_hex} /></Field>
                     </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-template-address">
-                        Template address ({anchorNetwork})
-                      </label>
-                      <input
-                        id="anchor-template-address"
-                        type="text"
-                        value={anchorTemplateAddress}
-                        placeholder="template_..."
-                        onChange={(e) => setAnchorTemplateAddress(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>Published template WASM</label>
+                    {/* Anchor deployment replacement is destructive and
+                        rarely needed. It stays under Advanced so a normal
+                        operator does not encounter a prominent red button
+                        beside a completed anchor. The destructive styling and
+                        explicit confirmation dialog are preserved. */}
+                    <DetailsSection summary="Advanced: replace anchor deployment">
+                      {anchorReceiptVerifiedTerminal && (
+                        <p className="form-hint">
+                          This deployment produced the verified anchor for this archive.
+                          Replacing it does not alter the historical transaction, receipt,
+                          or evidence — those remain intact.
+                        </p>
+                      )}
+                      <div className="btn-row">
+                        <button type="button" className="btn btn-danger" disabled={!canAct || deploymentBusy || anchorV2Busy} onClick={() => setConfirmUnlockDeploymentV2(true)}>
+                          Unlock / replace anchor deployment
+                        </button>
+                      </div>
+                    </DetailsSection>
+                  </>
+                ) : trustedDeploymentV2StatusError ? (
+                  <div className="anchor-config-grid">
+                    <Notice tone="error">
+                      The saved anchor deployment record could not be loaded
+                      ({trustedDeploymentV2StatusError.code}). Reset clears only the anchor
+                      deployment lock record; election, archive, tally, and voter data are not
+                      touched.
+                    </Notice>
+                    <div className="btn-row">
                       <button
                         type="button"
                         className="btn btn-secondary"
                         disabled={!canAct || deploymentBusy}
-                        onClick={() => void onPickTemplateWasm()}
+                        onClick={() => void refreshTrustedDeployment()}
                       >
-                        Select WASM file
+                        Reload deployment
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        disabled={!canAct || deploymentBusy || anchorV2Busy}
+                        onClick={() => setConfirmUnlockDeploymentV2(true)}
+                      >
+                        Reset anchor deployment state
                       </button>
                     </div>
                   </div>
-                  {anchorTemplateWasmInspection && (
-                    <div className="field-list">
-                      <Field label="Selected">
-                        <span className="hash">
-                          {anchorTemplateWasmInspection.display_filename}
-                        </span>
+                ) : (
+                  <div className="anchor-config-grid">
+                    <div className="form-row anchor-form-row">
+                      <label htmlFor="anchor-v2-template-address">Anchor template address</label>
+                      <input id="anchor-v2-template-address" type="text" value={anchorV2TemplateAddress} placeholder="template_..." onChange={(e) => setAnchorV2TemplateAddress(e.target.value)} />
+                    </div>
+                    {/* The BLAKE3 artifact digest is pinned in the backend
+                        (Rust constant `TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX`)
+                        and only the reviewed WASM matches it, so the normal
+                        organizer never has to compute or paste it. The lock
+                        RPC still checks the submitted value equals the pinned
+                        constant — pre-fill does not weaken binding. */}
+                    <div className="field-list anchor-deployment-fields">
+                      <Field label="Reviewed anchor artifact">
+                        {trustedDeploymentV2Fixed?.expected_artifact_display_name ?? "—"}
                       </Field>
-                      <Field label="Size">
-                        {anchorTemplateWasmInspection.bytes.toLocaleString()} bytes
-                      </Field>
-                      <Field label="Artifact digest">
-                        <HashValue value={anchorTemplateWasmInspection.digest_hex} />
-                        <CopyButton value={anchorTemplateWasmInspection.digest_hex} />
-                      </Field>
-                      <Field label="Digest source">
-                        Computed locally from selected WASM
+                      <Field label="Expected BLAKE3 (auto)">
+                        <HashValue value={trustedDeploymentV2Fixed?.expected_artifact_digest_hex} />
                       </Field>
                     </div>
-                  )}
-                  <div className="btn-row">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={
-                        !canAct ||
-                        deploymentBusy ||
-                        !anchorTemplateAddress.trim() ||
-                        !anchorTemplateWasmPath ||
-                        !anchorTemplateWasmInspection
-                      }
-                      onClick={() => void onLockTrustedDeployment()}
-                    >
-                      {deploymentBusy ? "Locking..." : "Validate and lock deployment"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={!canAct || deploymentBusy}
-                      onClick={() => void refreshTrustedDeployment()}
-                    >
-                      Reload deployment
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {!anchorConfigResult && (
-                <>
-                  <div className="card-grid">
-                    <div className="form-row">
-                      <label htmlFor="anchor-walletd">Walletd endpoint</label>
-                      <input
-                        id="anchor-walletd"
-                        type="text"
-                        value={anchorWalletdEndpoint}
-                        onChange={(e) => setAnchorWalletdEndpoint(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-indexer">Indexer endpoint</label>
-                      <input
-                        id="anchor-indexer"
-                        type="text"
-                        value={anchorIndexerEndpoint}
-                        onChange={(e) => setAnchorIndexerEndpoint(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-max-epoch-delta">
-                        Max epoch delta
-                      </label>
-                      <input
-                        id="anchor-max-epoch-delta"
-                        type="number"
-                        min="1"
-                        value={anchorMaxEpochDelta}
-                        onChange={(e) =>
-                          setAnchorMaxEpochDelta(Number(e.target.value))
-                        }
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-account">Fee account</label>
-                      <input
-                        id="anchor-account"
-                        type="text"
-                        value={anchorAccountRef}
-                        onChange={(e) => setAnchorAccountRef(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-fee-comp">Fee component address</label>
-                      <input
-                        id="anchor-fee-comp"
-                        type="text"
-                        value={anchorFeeComponent}
-                        placeholder="component_..."
-                        onChange={(e) => setAnchorFeeComponent(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-seal-kind">Seal signer</label>
-                      <select
-                        id="anchor-seal-kind"
-                        value={anchorSealSignerKind}
-                        onChange={(e) => setAnchorSealSignerKind(e.target.value)}
-                      >
-                        <option value="account">account key</option>
-                        <option value="transaction">transaction key</option>
-                        <option value="imported">imported key</option>
-                      </select>
-                      <input
-                        id="anchor-seal-id"
-                        type="number"
-                        min="0"
-                        value={anchorSealSignerId}
-                        onChange={(e) => setAnchorSealSignerId(e.target.value)}
-                        style={{ width: "5rem" }}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-seal-pubkey">Declared seal public key</label>
-                      <input
-                        id="anchor-seal-pubkey"
-                        type="text"
-                        value={anchorSealPubKey}
-                        onChange={(e) => setAnchorSealPubKey(e.target.value)}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-maxfee">Max fee</label>
-                      <input
-                        id="anchor-maxfee"
-                        type="number"
-                        min="1"
-                        value={anchorMaxFee}
-                        onChange={(e) => setAnchorMaxFee(Number(e.target.value))}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label htmlFor="anchor-floor">Accepted ballot floor (min 2)</label>
-                      <input
-                        id="anchor-floor"
-                        type="number"
-                        min="2"
-                        value={anchorFloor}
-                        onChange={(e) => setAnchorFloor(Number(e.target.value))}
-                      />
-                    </div>
-                    <div className="form-row">
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={anchorUseAuth}
-                          onChange={(e) => setAnchorUseAuth(e.target.checked)}
-                        />{" "}
-                        Attach walletd bearer token from the WALLETD_AUTH_TOKEN
-                        environment variable
-                      </label>
-                    </div>
-                    <div className="form-row">
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={anchorDedicatedWallet}
-                          onChange={(e) => setAnchorDedicatedWallet(e.target.checked)}
-                        />{" "}
-                        Dedicated organizer-only wallet (attested)
-                      </label>
+                    <details className="anchor-v2-summary-details">
+                      <summary>Advanced: override artifact BLAKE3</summary>
+                      <div className="form-row anchor-form-row">
+                        <label htmlFor="anchor-v2-artifact-digest">BLAKE3 artifact digest</label>
+                        <input id="anchor-v2-artifact-digest" type="text" value={anchorV2ArtifactDigest} placeholder="Leave blank to use the reviewed value" onChange={(e) => setAnchorV2ArtifactDigest(e.target.value)} />
+                        <p className="form-hint">
+                          Only for reviewers who want to submit a different digest for testing;
+                          the backend will still reject anything that does not match the pinned
+                          reviewed value above.
+                        </p>
+                      </div>
+                    </details>
+                    <div className="btn-row">
+                      <button type="button" className="btn btn-primary" disabled={!canAct || deploymentBusy || trustedDeploymentV2StatusError !== null || anchorV2TemplateAddress.trim().length === 0 || !trustedDeploymentV2Fixed} onClick={() => void onLockTrustedDeploymentV2()}>
+                        {deploymentBusy ? "Locking..." : "Lock anchor deployment"}
+                      </button>
                     </div>
                   </div>
-
-                  <div className="btn-row">
-                    <button
-                      type="button"
-                      className="btn btn-primary"
-                      disabled={
-                        !canAct ||
-                        anchorBusy ||
-                        !trustedDeployment ||
-                        !anchorDedicatedWallet ||
-                        !anchorSealPubKey ||
-                        !anchorFeeComponent ||
-                        anchorFloor < 2
-                      }
-                      onClick={() => void onPrepareAnchorConfig()}
-                    >
-                      Prepare anchor configuration
-                    </button>
-                  </div>
-                  {anchorFloor < 2 && (
-                    <Notice tone="error">
-                      A minimum floor of 2 is required so a one-voter aggregate anchor cannot be
-                      casually published.
+                )}
+                {anchorV2Hydrated && (anchorV2Hydrated.blocks_fresh_publish || anchorV2Hydrated.transaction_id !== null) && (
+                  <div
+                    className="anchor-v2-recovery"
+                    data-testid="anchor-v2-existing-recovery-panel"
+                  >
+                    <Notice tone={anchorV2Hydrated.receipt_verified ? "ok" : "warn"}>
+                      <strong>
+                        {anchorV2Hydrated.receipt_verified
+                          ? "Anchored · Verified"
+                          : "Existing anchor found for this archive"}
+                      </strong>
                     </Notice>
-                  )}
-                </>
-              )}
-
-              {anchorConfigResult && (
-                <>
-                  <div className="field-list">
-                    <Field label="Anchor digest">
-                      <HashValue value={anchorConfigResult.anchor_digest_hex} />
-                      <CopyButton value={anchorConfigResult.anchor_digest_hex} />
-                    </Field>
-                    <Field label="Manifest hash">
-                      <HashValue value={anchorConfigResult.manifest_hash_hex} />
-                    </Field>
-                    <Field label="Archive hash">
-                      <HashValue value={anchorConfigResult.archive_hash_hex} />
-                    </Field>
-                    <Field label="Accepted ballots">
-                      {anchorConfigResult.accepted_ballot_count}
-                    </Field>
-                    <Field label="Floor enforced">
-                      {anchorConfigResult.required_accepted_ballot_floor}
-                    </Field>
+                    {/* Normal summary: the human-useful fields (transaction,
+                        network, receipt verification, evidence path). Wallet
+                        request id and internal lifecycle phase are moved under
+                        Advanced below. */}
+                    <div className="field-list">
+                      <Field label="Transaction">
+                        {anchorV2Hydrated.transaction_id ? (
+                          <>
+                            <HashValue value={anchorV2Hydrated.transaction_id} />
+                            <CopyButton value={anchorV2Hydrated.transaction_id} />
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </Field>
+                      <Field label="Blockchain transaction">
+                        {anchorV2Hydrated.transaction_id ? "Already submitted" : "Not yet submitted"}
+                      </Field>
+                      <Field label="Receipt verification">
+                        {anchorV2Hydrated.receipt_verified
+                          ? "Verified"
+                          : anchorV2Hydrated.recoverable
+                          ? "Needs recovery"
+                          : anchorV2Hydrated.phase ?? "Unknown"}
+                      </Field>
+                      {anchorV2Hydrated.failure_reason && !anchorV2Hydrated.receipt_verified && (
+                        <Field label="Failure">
+                          {anchorV2Hydrated.failure_reason.includes("ANCHOR_RECEIPT_WRONG_EVENT_TOPIC")
+                            ? "Previous receipt topic mismatch"
+                            : anchorV2Hydrated.failure_reason}
+                        </Field>
+                      )}
+                    </div>
+                    {anchorV2Hydrated.receipt_verified ? (
+                      <>
+                        <Notice tone="ok">
+                          Anchor published. Transaction accepted. Receipt verified. Canonical
+                          public summary verified. Anchor digest verified. Evidence written.
+                        </Notice>
+                        <div className="field-list">
+                          <Field label="Canonical public summary">Verified</Field>
+                          <Field label="Anchor digest">Verified</Field>
+                          {trustedDeploymentV2 && (
+                            <Field label="Network">{trustedDeploymentV2.network}</Field>
+                          )}
+                          <Field label="Evidence file">
+                            <span className="hash">{anchorV2Hydrated.evidence_path}</span>
+                            <CopyButton value={anchorV2Hydrated.evidence_path} />
+                          </Field>
+                        </div>
+                        <DetailsSection summary="Advanced: technical anchor fields">
+                          <div className="field-list">
+                            {anchorV2Hydrated.walletd_request_id !== null && (
+                              <Field label="Wallet request ID">
+                                {anchorV2Hydrated.walletd_request_id}
+                              </Field>
+                            )}
+                            {anchorV2Hydrated.phase && (
+                              <Field label="Lifecycle phase">{anchorV2Hydrated.phase}</Field>
+                            )}
+                            {trustedDeploymentV2Fixed?.template_module && (
+                              <Field label="Template module">
+                                <HashValue value={trustedDeploymentV2Fixed.template_module} />
+                              </Field>
+                            )}
+                            {trustedDeploymentV2Fixed?.template_function && (
+                              <Field label="Template function">
+                                <HashValue value={trustedDeploymentV2Fixed.template_function} />
+                              </Field>
+                            )}
+                            {trustedDeploymentV2Fixed?.template_event_topic && (
+                              <Field label="Template event topic">
+                                <HashValue value={trustedDeploymentV2Fixed.template_event_topic} />
+                              </Field>
+                            )}
+                            {trustedDeploymentV2?.template_address && (
+                              <Field label="Template address">
+                                <HashValue value={trustedDeploymentV2.template_address} />
+                              </Field>
+                            )}
+                            {trustedDeploymentV2?.template_artifact_digest_hex && (
+                              <Field label="Artifact digest">
+                                <HashValue value={trustedDeploymentV2.template_artifact_digest_hex} />
+                              </Field>
+                            )}
+                          </div>
+                        </DetailsSection>
+                      </>
+                    ) : (
+                      <div className="field-list">
+                        {anchorV2Hydrated.walletd_request_id !== null && (
+                          <Field label="Wallet request ID">
+                            {anchorV2Hydrated.walletd_request_id}
+                          </Field>
+                        )}
+                        {anchorV2Hydrated.phase && (
+                          <Field label="Lifecycle phase">{anchorV2Hydrated.phase}</Field>
+                        )}
+                      </div>
+                    )}
+                    {anchorV2Hydrated.receipt_verified ? null : anchorV2Hydrated.recoverable ? (
+                      <>
+                        <p className="form-hint">
+                          An accepted transaction already exists. Recovery re-fetches the
+                          on-chain receipt and re-verifies it against the locked anchor deployment
+                          using the preserved public summary. It never creates a new wallet
+                          request and never submits another transaction.
+                        </p>
+                        <div className="btn-row">
+                          <button
+                            type="button"
+                            className="btn btn-primary"
+                            disabled={
+                              !canAct ||
+                              !trustedDeploymentV2 ||
+                              anchorV2RecoveryBusy ||
+                              anchorIndexerEndpoint.trim().length === 0
+                            }
+                            onClick={() => void onRecoverExistingV2Anchor()}
+                          >
+                            {anchorV2RecoveryBusy
+                              ? "Recovering…"
+                              : anchorV2Hydrated.phase === "POLLING_RECEIPT"
+                              ? "Recheck existing receipt"
+                              : "Recover existing anchor"}
+                          </button>
+                        </div>
+                        {anchorV2StepResult?.failure_reason && !anchorV2StepResult.rejection_reason && (
+                          <Notice tone="error">{anchorV2StepResult.failure_reason}</Notice>
+                        )}
+                      </>
+                    ) : (
+                      <Notice tone="warn">
+                        This existing anchor must be resolved before a replacement transaction
+                        can be considered. Continue the walletd lifecycle from its current phase.
+                      </Notice>
+                    )}
                   </div>
+                )}
+                {!(anchorV2Hydrated?.blocks_fresh_publish) && (
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={!canAct || !archiveReadyForAnchor || !trustedDeploymentV2 || anchorV2Busy}
+                      onClick={() => void onBuildV2Payload()}
+                    >
+                      {anchorV2Busy ? "Building…" : "Build public summary"}
+                    </button>
+                  </div>
+                )}
+                {anchorV2HydratedBusy && !anchorV2Hydrated && (
+                  <p className="form-hint">Loading existing anchor state…</p>
+                )}
+                {!(anchorV2Hydrated?.blocks_fresh_publish) && anchorV2Result && (
+                  <div className="anchor-v2-result">
+                    <div className="field-list">
+                      <Field label="Public question">
+                        {anchorV2Result.ballot_question || "(none)"}
+                      </Field>
+                      <Field label="Eligible voter count">
+                        {anchorV2Result.eligible_voter_count}
+                      </Field>
+                      <Field label="Accepted ballots">
+                        {anchorV2Result.accepted_ballot_count}
+                      </Field>
+                      <Field label="Rejected ballots">
+                        {anchorV2Result.rejected_ballot_count}
+                      </Field>
+                      <Field label="Manifest hash">
+                        <HashValue value={anchorV2Result.manifest_hash_hex} />
+                      </Field>
+                      <Field label="Archive hash">
+                        <HashValue value={anchorV2Result.archive_hash_hex} />
+                      </Field>
+                      <Field label="Voter-registry commitment">
+                        <HashValue value={anchorV2Result.registry_commitment_hex} />
+                      </Field>
+                      <Field label="Ballot-option commitment">
+                        <HashValue value={anchorV2Result.option_set_commitment_hex} />
+                      </Field>
+                      <Field label="Anchor digest">
+                        <HashValue value={anchorV2Result.v2_anchor_digest_hex} />
+                        <CopyButton value={anchorV2Result.v2_anchor_digest_hex} />
+                      </Field>
+                      <Field label="Network">{anchorV2Result.network}</Field>
+                    </div>
+                    <div className="anchor-v2-tally">
+                      <strong>Final tally</strong>
+                      <ul>
+                        {anchorV2Result.tally.map((row) => (
+                          <li key={row.machine_id_hex}>
+                            {row.display_label}: {row.count}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <Notice tone="warn">
+                      This anchor publishes the readable public aggregate election summary.
+                      Individual votes are NEVER published. Detached evidence is written beside
+                      the archive for independent re-verification.
+                    </Notice>
+                    <div className="btn-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={!canAct || anchorV2Busy || !trustedDeploymentV2}
+                        onClick={() => void onPrepareV2AnchorPublish()}
+                      >
+                        {anchorV2Busy ? "Preparing..." : "Prepare anchor template call"}
+                      </button>
+                    </div>
+                    {anchorV2Preparation && (
+                      <>
+                        <div className="field-list anchor-deployment-fields">
+                          <Field label="Prepared function">{anchorV2Preparation.template_function}</Field>
+                          <Field label="Prepared arguments">{anchorV2Preparation.arguments.length}</Field>
+                          <Field label="Prepared digest"><HashValue value={anchorV2Preparation.anchor_digest_hex} /></Field>
+                          <Field label="Public summary included">yes ({anchorV2Preparation.public_summary_json.length} bytes)</Field>
+                          <Field label="Public question">{anchorV2Result.ballot_question || "(none)"}</Field>
+                          <Field label="Ballot options">{anchorV2Result.tally.length}</Field>
+                          <Field label="Final tally">
+                            {anchorV2Result.tally
+                              .map((row) => `${row.display_label}: ${row.count}`)
+                              .join(" · ")}
+                          </Field>
+                          <Field label="Wallet approval">
+                            {anchorV2StepResult?.waiting_for_wallet_approval ? "Waiting for explicit approval" : anchorV2StepResult?.phase ?? "Not requested"}
+                          </Field>
+                          <Field label="Wallet request ID">
+                            {anchorV2StepResult?.walletd_request_id ?? "Not created"}
+                          </Field>
+                          <Field label="Request status">
+                            {anchorV2StepResult?.wallet_request_status ?? "Not requested"}
+                          </Field>
+                          <Field label="Estimated fee">
+                            {anchorV2StepResult?.estimated_required_fee ?? "Not estimated"}
+                          </Field>
+                          <Field label="Selected max fee">
+                            {anchorV2StepResult?.selected_max_fee ?? "Not selected"}
+                          </Field>
+                          <Field label="Retry required">
+                            {anchorV2StepResult?.retry_required ? "Yes" : "No"}
+                          </Field>
+                          <Field label="Receipt verification">
+                            {anchorV2StepResult?.receipt_verified ? "Verified" : anchorV2StepResult?.phase === "POLLING_RECEIPT" ? "Polling" : "Not verified"}
+                          </Field>
+                        </div>
+                        <details className="anchor-v2-summary-details">
+                          <summary>Public summary — readable preview</summary>
+                          {(() => {
+                            let pretty: string;
+                            try {
+                              pretty = JSON.stringify(
+                                JSON.parse(anchorV2Preparation.public_summary_json),
+                                null,
+                                2,
+                              );
+                            } catch {
+                              // The canonical payload should always be valid JSON,
+                              // but fall back to the raw string so the operator
+                              // can still inspect what will publish.
+                              pretty = anchorV2Preparation.public_summary_json;
+                            }
+                            return (
+                              <>
+                                <p className="form-hint">
+                                  Formatted for reading only. The exact on-chain payload
+                                  is the canonical one-line JSON below.
+                                </p>
+                                <pre className="anchor-v2-summary-pre anchor-v2-summary-pre--pretty">
+                                  {pretty}
+                                </pre>
+                              </>
+                            );
+                          })()}
+                          <div className="anchor-v2-summary-canonical">
+                            <div className="anchor-v2-summary-canonical__header">
+                              <strong>Exact canonical on-chain payload</strong>
+                              <CopyButton value={anchorV2Preparation.public_summary_json} />
+                            </div>
+                            <pre className="anchor-v2-summary-pre anchor-v2-summary-pre--canonical">
+                              {anchorV2Preparation.public_summary_json}
+                            </pre>
+                          </div>
+                        </details>
+                        <div className="btn-row">
+                          {!anchorV2StepResult && (
+                            <label className="anchor-v2-confirm-row">
+                              <input type="checkbox" checked={anchorV2PublishConfirmed} onChange={(event) => setAnchorV2PublishConfirmed(event.target.checked)} />
+                              <span>I confirm preparation of the anchor wallet request.</span>
+                            </label>
+                          )}
+                          {anchorV2StepResult?.phase === "WAITING_FOR_WALLET_APPROVAL" ? (
+                            <button type="button" className="btn btn-primary" disabled={anchorV2Busy} onClick={() => void onRunV2AnchorLifecycle("approve")}>
+                              {anchorV2Busy ? "Approving…" : "Approve wallet request"}
+                            </button>
+                          ) : (
+                            <button type="button" className="btn btn-primary" disabled={anchorV2Busy || walletdReadiness?.kind !== "ready" || anchorV2StepResult?.receipt_verified === true || (!anchorV2StepResult && !anchorV2PublishConfirmed)} onClick={() => void onRunV2AnchorLifecycle("none")}>
+                              {anchorV2Busy ? "Working…" : anchorV2StepResult?.phase === "APPROVED" ? "Submit anchor request" : anchorV2StepResult?.phase === "POLLING_RECEIPT" ? "Check receipt" : anchorV2StepResult?.retry_required ? "Prepare new wallet request" : "Prepare wallet request"}
+                            </button>
+                          )}
+                        </div>
+                        {anchorV2StepResult?.rejection_reason && (
+                          <Notice tone="error">{anchorV2StepResult.rejection_reason}</Notice>
+                        )}
+                        {anchorV2StepResult?.failure_reason && !anchorV2StepResult.rejection_reason && (
+                          <Notice tone="error">{anchorV2StepResult.failure_reason}</Notice>
+                        )}
+                        {anchorV2StepResult?.receipt_verified && (
+                          <Notice tone="ok">
+                            <strong>Anchor published.</strong> Transaction accepted. Receipt
+                            verified. Canonical public summary verified. Anchor digest
+                            verified. Detached evidence written beside the archive.
+                          </Notice>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+          </div>
 
+          <DetailsSection summary="Advanced: technical release verification">
+          <div className="production-authority-panel">
+            <h4 className="screen-section">Production transport authority</h4>
+            <p className="form-hint">
+              This stores only the <strong>public</strong> verification root a release
+              ceremony publishes. The private signing authority is never entered or
+              stored in the app. Fake/test roots are rejected in release builds.
+            </p>
+            {prodAuthority === null ? (
+              <p className="form-hint" data-testid="production-authority-loading">
+                Checking production authority…
+              </p>
+            ) : prodAuthority.kind === "ready" ? (
+              <div className="field-list" data-testid="production-authority-configured">
+                <Field label="Status">
+                  <Pill tone="ok">CONFIGURED</Pill>
+                </Field>
+                <Field label="Root key id">
+                  <HashValue value={prodAuthority.root_key_id ?? undefined} />
+                </Field>
+                <Field label="Public key fingerprint">
+                  <HashValue value={prodAuthority.public_key_fingerprint_hex ?? undefined} />
+                </Field>
+                <Field label="Network">{prodAuthority.network ?? "—"}</Field>
+                {prodAuthority.label && <Field label="Label">{prodAuthority.label}</Field>}
+                <Notice tone="info">
+                  The private signing authority is NOT stored in this app; it stays with
+                  the release custody process.
+                </Notice>
+                <div className="btn-row">
+                  <button
+                    type="button"
+                    className="btn btn-tertiary"
+                    disabled={prodAuthorityBusy}
+                    onClick={() => void forgetProductionAuthority()}
+                  >
+                    Forget production root
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div data-testid="production-authority-unprovisioned">
+                <Notice tone="warn">
+                  {prodAuthority.kind === "malformed"
+                    ? `Configured production authority root is invalid (${prodAuthority.code}). Fix or forget it.`
+                    : "Production authority not provisioned. Production transport verification fails closed until an operator public root is loaded."}
+                </Notice>
+                {!prodAuthorityFormOpen ? (
                   <div className="btn-row">
                     <button
                       type="button"
                       className="btn btn-primary"
-                      disabled={!canAct || anchorBusy}
-                      onClick={() => void onAnchorStep("approve")}
+                      disabled={prodAuthorityBusy}
+                      onClick={() => {
+                        setProdAuthorityError(null);
+                        // Default to the locked deployment network when known.
+                        setProdAuthorityNetwork(anchorNetwork ?? "");
+                        setProdAuthorityFormOpen(true);
+                      }}
                     >
-                      {anchorBusy ? "Working…" : "Publish aggregate anchor"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-danger"
-                      disabled={!canAct || anchorBusy}
-                      onClick={() => void onAnchorStep("reject")}
-                    >
-                      Reject
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={!canAct || anchorBusy}
-                      onClick={() => void onAnchorStep("none")}
-                    >
-                      Check status
+                      Load production public root
                     </button>
                   </div>
-                </>
-              )}
-
-              {anchorStepResult && (
-                <div className="field-list">
-                  <Field label="Anchor status">
-                    {anchorStepResult.phase_is_terminal_success ? (
-                      <Pill tone="ok">{anchorStepResult.phase}</Pill>
-                    ) : anchorStepResult.phase_is_terminal ? (
-                      <Pill tone="error">{anchorStepResult.phase}</Pill>
-                    ) : (
-                      <Pill tone="info">{anchorStepResult.phase}</Pill>
+                ) : (
+                  <div className="production-authority-form">
+                    <div className="form-row anchor-form-row">
+                      <label htmlFor="prod-authority-network">Network</label>
+                      <input
+                        id="prod-authority-network"
+                        type="text"
+                        value={prodAuthorityNetwork}
+                        onChange={(e) => setProdAuthorityNetwork(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row anchor-form-row">
+                      <label htmlFor="prod-authority-key-id">Root key id</label>
+                      <input
+                        id="prod-authority-key-id"
+                        type="text"
+                        value={prodAuthorityKeyId}
+                        onChange={(e) => setProdAuthorityKeyId(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row anchor-form-row anchor-form-row--full">
+                      <label htmlFor="prod-authority-public-key">
+                        Root public key (64 hex chars — PUBLIC key only)
+                      </label>
+                      <input
+                        id="prod-authority-public-key"
+                        type="text"
+                        value={prodAuthorityPublicKeyHex}
+                        placeholder="ed25519 public key hex"
+                        onChange={(e) => setProdAuthorityPublicKeyHex(e.target.value)}
+                      />
+                    </div>
+                    <div className="form-row anchor-form-row">
+                      <label htmlFor="prod-authority-label">Label (optional)</label>
+                      <input
+                        id="prod-authority-label"
+                        type="text"
+                        value={prodAuthorityLabel}
+                        onChange={(e) => setProdAuthorityLabel(e.target.value)}
+                      />
+                    </div>
+                    {prodAuthorityError && (
+                      <Notice tone="error">
+                        Could not configure production root: {prodAuthorityError}
+                      </Notice>
                     )}
-                  </Field>
-                  <Field label="Machine code">{anchorStepResult.machine_code}</Field>
-                  {anchorStepResult.transaction_id && (
-                    <Field label="Transaction">
-                      <HashValue value={anchorStepResult.transaction_id} />
-                    </Field>
-                  )}
-                  {anchorStepResult.evidence_written && (
-                    <Field label="Evidence">
-                      <HashValue value={anchorStepResult.evidence_path} />
-                    </Field>
-                  )}
-                  {anchorStepResult.diagnostic && (
-                    <Field label="Diagnostic">{anchorStepResult.diagnostic}</Field>
-                  )}
-                  {anchorStepResult.next_backoff_secs !== null && (
-                    <Field label="Next poll backoff">
-                      {anchorStepResult.next_backoff_secs}s
-                    </Field>
-                  )}
-                </div>
-              )}
-              <BackendErrorNotice
-                error={localError}
-                onDismiss={() => setLocalError(null)}
-              />
-            </>
-          )}
+                    <div className="btn-row">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={prodAuthorityBusy}
+                        onClick={() => void submitProductionAuthority()}
+                      >
+                        Save production public root
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-tertiary"
+                        disabled={prodAuthorityBusy}
+                        onClick={() => setProdAuthorityFormOpen(false)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          </DetailsSection>
         </Card>
-        )}
       </div>
       )}
-
       {/* Reference details for the loaded election. The entire technical
           section is collapsed by default so normal ballot-office operation
           never requires scrolling through cryptographic internals; nothing is
@@ -2338,25 +3718,15 @@ export function ManageElection() {
         />
       )}
 
-      {confirmUnlockDeployment && (
+      {confirmUnlockDeploymentV2 && (
         <ConfirmDialog
-          title="Unlock Ootle deployment?"
-          body={
-            <>
-              <p>
-                Future live anchor configs will stop using the currently locked template
-                address and artifact digest.
-              </p>
-              <p>
-                Lock the replacement deployment before preparing another anchor config.
-              </p>
-            </>
-          }
-          confirmLabel="Unlock deployment"
+          title="Unlock Ootle anchor deployment?"
+          body={<p>Future public-summary preparations will require a newly locked anchor template address and artifact digest.</p>}
+          confirmLabel="Unlock anchor deployment"
           confirmTone="danger"
           busy={deploymentBusy}
-          onConfirm={() => void onUnlockTrustedDeployment()}
-          onCancel={() => setConfirmUnlockDeployment(false)}
+          onConfirm={() => void onUnlockTrustedDeploymentV2()}
+          onCancel={() => setConfirmUnlockDeploymentV2(false)}
         />
       )}
     </>

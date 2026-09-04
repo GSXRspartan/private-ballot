@@ -393,32 +393,69 @@ describe("organizer lifecycle progression", () => {
 describe("organizer next step derivation", () => {
   it("guides each real lifecycle state", () => {
     assert.match(
-      nextOrganizerStep({ lifecycle: "FROZEN", tallyComputed: false, archiveWritten: false }).body,
+      nextOrganizerStep({ lifecycle: "FROZEN", tallyComputed: false, archiveVerified: false }).body,
       /Start private intake, distribute the voter materials, then open voting\./,
     );
     assert.match(
-      nextOrganizerStep({ lifecycle: "OPEN", tallyComputed: false, archiveWritten: false }).body,
+      nextOrganizerStep({ lifecycle: "OPEN", tallyComputed: false, archiveVerified: false }).body,
       /Private intake can receive ballots/,
     );
     assert.match(
-      nextOrganizerStep({ lifecycle: "CLOSED", tallyComputed: false, archiveWritten: false }).body,
+      nextOrganizerStep({ lifecycle: "CLOSED", tallyComputed: false, archiveVerified: false }).body,
       /No additional ballots can be accepted\. Compute the tally when ready\./,
     );
     assert.match(
-      nextOrganizerStep({ lifecycle: "CLOSED", tallyComputed: true, archiveWritten: false }).body,
+      nextOrganizerStep({ lifecycle: "CLOSED", tallyComputed: true, archiveVerified: false }).body,
       /mark verification complete/,
     );
     assert.match(
-      nextOrganizerStep({ lifecycle: "VERIFIED", tallyComputed: true, archiveWritten: false }).body,
+      nextOrganizerStep({ lifecycle: "VERIFIED", tallyComputed: true, archiveVerified: false }).body,
       /Finalize the election/,
     );
+    // FINALIZED, archive not yet verified: send the operator to Archive to
+    // verify the record.
     assert.match(
-      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveWritten: false }).body,
-      /Write the final archive/,
+      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveVerified: false })
+        .title,
+      /Verify final archive/,
     );
     assert.match(
-      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveWritten: true }).body,
-      /Verify the final archive independently on the Archive screen/,
+      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveVerified: false })
+        .body,
+      /Open Archive and independently verify the final record/,
+    );
+    // FINALIZED with a verified archive but no anchor at all: the election
+    // record is complete; the Tari Ootle anchor is optional.
+    assert.match(
+      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveVerified: true })
+        .title,
+      /Election record verified/,
+    );
+    assert.match(
+      nextOrganizerStep({ lifecycle: "FINALIZED", tallyComputed: true, archiveVerified: true })
+        .body,
+      /anchoring is optional and non-binding/,
+    );
+    // FINALIZED with a verified archive and an anchor submitted but not yet
+    // receipt-verified: request receipt verification.
+    assert.match(
+      nextOrganizerStep({
+        lifecycle: "FINALIZED",
+        tallyComputed: true,
+        archiveVerified: true,
+        anchorSubmittedButUnverified: true,
+      }).title,
+      /Verify existing anchor/,
+    );
+    // FINALIZED with a verified archive and a receipt-verified anchor: done.
+    assert.match(
+      nextOrganizerStep({
+        lifecycle: "FINALIZED",
+        tallyComputed: true,
+        archiveVerified: true,
+        anchorVerified: true,
+      }).title,
+      /Election complete/,
     );
   });
 

@@ -10,10 +10,10 @@
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
-    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1, ANCHOR_LOG_PAYLOAD_CANDIDATE_PREFIX_V1,
-    AnchorEventPayloadV2, AnchorEventProofV2, AnchorFinalStatusV1, AnchorLogEntryV1,
-    AnchorLogLevelV1, AnchorLogPayloadV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
-    AnchorTransactionId,
+    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
+    ANCHOR_LOG_PAYLOAD_CANDIDATE_PREFIX_V1, AnchorEventPayloadV2, AnchorEventProofV2,
+    AnchorFinalStatusV1, AnchorLogEntryV1, AnchorLogLevelV1, AnchorLogPayloadV1,
+    AnchorReceiptSourceKindV1, AnchorReceiptV1, AnchorTransactionId,
 };
 
 /// Deterministic opaque ledger position reported for a finalized fake receipt.

@@ -38,7 +38,13 @@ export interface GuiElectionWorkspaceSummaryV1 {
   election_manifest_hash_hex: string | null;
   question_preview: string | null;
   lifecycle_state: string;
-  accepted_ballot_count: number;
+  /** Display-only, NON-AUTHORITATIVE count of ballot packages durably stored in
+   *  this workspace revision. Derived without proof replay, so it counts every
+   *  stored package (accepted, duplicate, and rejected alike) and is an upper
+   *  bound on the accepted count — never the verified accepted tally. The
+   *  authoritative accepted count comes only from an opened election's
+   *  participation summary. */
+  stored_ballot_count: number;
   last_revision: number;
   updated_at_unix_secs: number | null;
   finalized: boolean;
@@ -208,6 +214,15 @@ export interface GuiArchiveVerificationV1 {
   transport_reduced_anonymity: boolean | null;
 }
 
+/** Anchor-deployment capabilities of the running build. When
+ *  `transport_binding_provenance_available` is false, this build cannot produce
+ *  a transport-bound (anchor-eligible) finalized archive, so the GUI must
+ *  present live anchoring as unavailable — a capability/readiness limitation,
+ *  never an archive-integrity failure. */
+export interface GuiAnchorDeploymentCapabilitiesV1 {
+  transport_binding_provenance_available: boolean;
+}
+
 export interface GuiTransportAnchorVerificationV1 {
   state: "INCLUDED" | "ANCHORED";
   transport_binding_verified: boolean;
@@ -310,16 +325,156 @@ export interface GuiAnchorEvidenceInspectionV1 {
   human_review_summary: string;
 }
 
+/** Schema-validated projection of a V2 public-anchor evidence JSON file
+ *  (`*.v2-anchor-evidence.json`). Every field is public binding data — no
+ *  secret material is ever present in a V2 evidence file. The `schema` field
+ *  is retained as-is so the UI can display exactly what the file declared. */
+export interface GuiV2AnchorEvidenceFileV1 {
+  schema: string;
+  archive_directory: string;
+  transaction_id: string;
+  network: string;
+  template_address: string;
+  template_module: string;
+  template_function: string;
+  template_topic: string;
+  template_artifact_digest_hex: string;
+  anchor_digest_hex: string;
+  payload_hex: string;
+}
+
 /** Request for one bounded live anchor lifecycle step (organizer-only).
  *
- * The frontend cannot choose which environment variable holds the walletd
- * bearer secret; it only signals whether to attach the token. The backend
- * reads exactly one fixed variable (WALLETD_AUTH_TOKEN) and nothing else. */
+ * The frontend cannot see or supply the walletd bearer secret. It only
+ * signals whether to attach one via `use_walletd_auth`. When set, the shell
+ * resolves the credential from OS-backed secure storage (Windows Credential
+ * Manager / macOS Keychain / Secret Service) populated once by the user
+ * through `connect_walletd`. `WALLETD_AUTH_TOKEN` remains a dev/CI-only
+ * fallback and is never the normal product path. */
 export interface GuiLiveAnchorStepRequestV1 {
   config_path: string;
   archive_directory: string;
   use_walletd_auth: boolean;
   decision: "approve" | "reject" | "none";
+}
+
+/** Presence and metadata for the walletd credential. Never carries the
+ * raw key: `connect_walletd` / `reconnect_walletd` accept it as a
+ * write-only argument, and the frontend only ever sees this status. */
+export interface WalletdCredentialStatusV1 {
+  /** True when a credential is present in OS-backed storage. */
+  stored: boolean;
+  /** True when the development-only env var is set (diagnostic only). */
+  env_fallback_present: boolean;
+  /** Human-readable name of the OS credential store. */
+  store_label: string;
+  /** Development-only env var name (for diagnostics). */
+  env_var_name: string;
+}
+
+/** Bounded walletd readiness kind. The backend maps every raw error into
+ * exactly one of these variants; the frontend never sees an HTTP status. */
+export type WalletdReadinessKindV1 =
+  | "ready"
+  | "no_credential"
+  | "auth_rejected"
+  | "permission_denied"
+  | "call_failed"
+  | "unreachable";
+
+/** Result of one walletd readiness probe. */
+export interface WalletdReadinessV1 {
+  kind: WalletdReadinessKindV1;
+  endpoint: string;
+  network: string | null;
+  summary: string;
+}
+
+/** One public wallet account descriptor for the anchor setup assistant.
+ *  Every field is public identity/ledger data; no secret is present. */
+export interface GuiWalletdAnchorAccountV1 {
+  name: string | null;
+  component_address: string;
+  owner_public_key_hex: string;
+  key_index: number | null;
+  is_default: boolean;
+  is_confirmed_on_chain: boolean;
+}
+
+/** Result of listing the connected wallet's accounts for auto-fill. */
+export interface GuiWalletdAnchorAccountsV1 {
+  kind: WalletdReadinessKindV1;
+  endpoint: string;
+  network: string | null;
+  accounts: GuiWalletdAnchorAccountV1[];
+  summary: string;
+}
+
+/** Read-only, secret-free walletd connection diagnostic. No token/API key. */
+export interface WalletdConnectionDiagnosticsV1 {
+  endpoint_normalized: string;
+  saved_credential: boolean;
+  tcp_loopback_attempted: boolean;
+  tcp_loopback_reachable: boolean;
+  unauthenticated_wallet_get_info_attempted: boolean;
+  unauthenticated_wallet_get_info_result: WalletdDiagnosticStageResultV1;
+  accounts_list_attempted: boolean;
+  accounts_list_result: WalletdDiagnosticStageResultV1;
+  final_result_kind:
+    | "ready"
+    | "no_saved_credential"
+    | "auth_rejected"
+    | "permission_denied"
+    | "call_failed"
+    | "unreachable";
+  network: string | null;
+  account_count: number | null;
+  selected_account_name: string | null;
+  selected_account_component: string | null;
+}
+
+export interface WalletdDiagnosticStageResultV1 {
+  status: "not_attempted" | "success" | "failed";
+  category:
+    | "tokio_reactor_io_driver_failure"
+    | "tokio_runtime_context"
+    | "connection_refused"
+    | "timeout"
+    | "http_response"
+    | "json_rpc_decode_error"
+    | "other_reqwest_transport_error"
+    | null;
+  message: string;
+}
+
+/** Bounded readiness kind for the production transport authority public root. */
+export type ProductionTransportAuthorityReadinessKindV1 =
+  | "unprovisioned"
+  | "ready"
+  | "malformed";
+
+/** Organizer-safe view of the configured production transport authority PUBLIC
+ *  root. Never contains a private key: the public key is shown only as a
+ *  BLAKE3 fingerprint. */
+export interface ProductionTransportAuthorityReadinessV1 {
+  kind: ProductionTransportAuthorityReadinessKindV1;
+  code: string;
+  root_key_id: string | null;
+  public_key_fingerprint_hex: string | null;
+  network: string | null;
+  label: string | null;
+  summary: string;
+  /** True only in a dev/test build compiling managed-tor fake roots. */
+  managed_tor_build: boolean;
+}
+
+/** Operator-supplied public-pin configuration request. PUBLIC material only. */
+export interface ProductionTransportAuthorityConfigureRequestV1 {
+  network: string;
+  root_key_id: string;
+  /** 64 lower-hex characters (32-byte Ed25519 PUBLIC key). Never a private key. */
+  root_public_key_hex: string;
+  label: string | null;
 }
 
 /** Result of one bounded live anchor lifecycle step. */
@@ -375,6 +530,170 @@ export interface GuiLiveAnchorConfigRequestV1 {
   ttl_secs: number | null;
 }
 
+/** Machine status of a single validated operator field. */
+export interface GuiLiveAnchorFieldStatusV1 {
+  /** Stable field identifier (matches the request field names). */
+  field: string;
+  /** Whether this field passed offline validation. */
+  ok: boolean;
+  /** `OK`, `OK_NEEDS_LIVE_CHECK`, or a specific `GUI_LIVE_ANCHOR_*` code. */
+  code: string;
+  message: string;
+  remediation: string | null;
+  /** Normalized, non-secret representation of the accepted value. */
+  normalized: string | null;
+  /** Whether a definitive verdict needs a live walletd/indexer call. */
+  needs_live_check: boolean;
+}
+
+/** Structured, read-only preflight result for the whole operator config. */
+export interface GuiLiveAnchorPreflightResultV1 {
+  ok: boolean;
+  fields: GuiLiveAnchorFieldStatusV1[];
+  first_error_code: string | null;
+  first_error_field: string | null;
+  accepted_ballot_count: number | null;
+  reduced_anonymity: boolean | null;
+  any_needs_live_check: boolean;
+}
+
+/** Request to build or verify a V2 richer public anchor payload. */
+export interface GuiLiveAnchorV2RequestV1 {
+  archive_directory: string;
+  network: string;
+  template_address: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  template_artifact_digest_hex: string;
+}
+
+/** One public tally row in the V2 result. */
+export interface GuiV2TallyRowV1 {
+  display_label: string;
+  machine_id_hex: string;
+  count: number;
+}
+
+/** Result of building/verifying the V2 richer public anchor payload. */
+export interface GuiLiveAnchorV2ResultV1 {
+  v2_anchor_digest_hex: string;
+  /** Hex-encoded canonical public-summary bytes (evidence transport form). */
+  payload_hex: string;
+  /** Readable canonical public-summary UTF-8 string — the exact bytes the V2
+   * template puts on-chain in the `public_summary` metadata field. */
+  public_summary_json: string;
+  network: string;
+  /** Exact canonical election identifier text (e.g. "500-votertest-01") — the
+   *  same UTF-8 string that appears verbatim inside public_summary_json and
+   *  as the on-chain `election_id` metadata value. */
+  election_id: string;
+  /** Lowercase-hex of the same election identifier bytes (kept for evidence
+   *  transport parity; two views of the same data). */
+  election_id_hex: string;
+  ballot_question: string;
+  ballot_kind: string;
+  confidentiality_mode: string;
+  proof_suite: string;
+  manifest_hash_hex: string;
+  archive_hash_hex: string;
+  registry_commitment_hex: string;
+  option_set_commitment_hex: string;
+  eligible_voter_count: number;
+  accepted_ballot_count: number;
+  rejected_ballot_count: number;
+  tally: GuiV2TallyRowV1[];
+  archive_finalized: boolean;
+  template_address: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  template_artifact_digest_hex: string;
+}
+
+export interface GuiV2AnchorPublishPreparationV1 {
+  template_address: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  anchor_digest_hex: string;
+  arguments: string[];
+  /** Readable canonical public summary — the exact `public_summary` value the
+   * template will emit on-chain. Surfaced here so the preview can display it
+   * without slicing the argument list. */
+  public_summary_json: string;
+}
+
+/** One manually-gated V2 walletd lifecycle transition. */
+export interface GuiV2LiveAnchorStepRequestV1 {
+  archive_directory: string;
+  payload_hex: string;
+  expected_digest_hex: string;
+  fee_component: string;
+  seal_signer_kind: string;
+  seal_signer_id: string;
+  max_fee: number;
+  max_epoch_delta: number;
+  walletd_endpoint: string;
+  indexer_endpoint: string;
+  use_walletd_auth: boolean;
+  decision: "none" | "approve";
+}
+
+export interface GuiV2LiveAnchorStepResultV1 {
+  phase: string;
+  waiting_for_wallet_approval: boolean;
+  transaction_id: string | null;
+  walletd_request_id: number | null;
+  estimated_required_fee: number | null;
+  selected_max_fee: number | null;
+  wallet_request_status: string;
+  rejection_reason: string | null;
+  retry_required: boolean;
+  lifecycle_path: string;
+  evidence_path: string;
+  failure_path: string;
+  receipt_verified: boolean;
+  failure_reason: string | null;
+}
+
+/** Read-only projection of the persisted V2 anchor lifecycle for a given
+ *  finalized archive directory. Used by the organizer UI on mount so an
+ *  already-submitted (but unverified) transaction is surfaced for recovery
+ *  instead of the fresh Build/Prepare/Submit controls that would create a
+ *  duplicate wallet request and republish a new anchor. */
+export interface GuiV2LiveAnchorHydratedStateV1 {
+  lifecycle_present: boolean;
+  evidence_present: boolean;
+  failure_present: boolean;
+  archive_directory: string;
+  lifecycle_path: string;
+  evidence_path: string;
+  failure_path: string;
+  payload_hex: string | null;
+  expected_digest_hex: string | null;
+  network: string | null;
+  template_address: string | null;
+  template_module: string | null;
+  template_function: string | null;
+  template_topic: string | null;
+  template_artifact_digest_hex: string | null;
+  fee_component: string | null;
+  seal_signer_kind: string | null;
+  seal_signer_id: string | null;
+  max_fee: number | null;
+  estimated_required_fee: number | null;
+  selected_max_fee: number | null;
+  max_epoch: number | null;
+  walletd_request_id: number | null;
+  phase: string | null;
+  transaction_id: string | null;
+  failure_reason: string | null;
+  recoverable: boolean;
+  blocks_fresh_publish: boolean;
+  receipt_verified: boolean;
+}
+
 /** Result of generating a live anchor config. */
 export interface GuiLiveAnchorConfigResultV1 {
   config_path: string;
@@ -422,6 +741,43 @@ export interface GuiTrustedOotleDeploymentStatusV1 {
   locked: boolean;
   deployment: GuiTrustedOotleDeploymentV1 | null;
   fixed: GuiTrustedOotleDeploymentFixedV1;
+}
+
+/** Separate V2 public-summary deployment lock. It can never stand in for V1. */
+export interface GuiTrustedOotleDeploymentV2 {
+  schema: string;
+  network: string;
+  template_address: string;
+  template_artifact_digest_hex: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  locked_at_unix_ms: number;
+}
+
+export interface GuiTrustedOotleDeploymentFixedV2 {
+  schema: string;
+  template_module: string;
+  template_function: string;
+  template_event_topic: string;
+  /** BLAKE3-256 of the reviewed V2 WASM the lock will accept. The frontend
+   *  pre-fills this so a normal organizer never has to compute or paste it;
+   *  the backend still checks the submitted value equals this constant. */
+  expected_artifact_digest_hex: string;
+  /** Human display name for the reviewed WASM. */
+  expected_artifact_display_name: string;
+}
+
+export interface GuiTrustedOotleDeploymentStatusV2 {
+  locked: boolean;
+  deployment: GuiTrustedOotleDeploymentV2 | null;
+  fixed: GuiTrustedOotleDeploymentFixedV2;
+}
+
+export interface GuiTrustedOotleDeploymentLockRequestV2 {
+  network: string;
+  template_address: string;
+  template_artifact_digest_hex: string;
 }
 
 export interface GuiTrustedOotleDeploymentLockRequestV1 {
@@ -794,10 +1150,10 @@ export interface GuiVoterWorkflowStatusV1 {
 }
 
 // ---------------------------------------------------------------------------
-// managed-tor-test: controlled-test managed Tor transport (voter side).
+// managed-tor: controlled-test managed Tor transport (voter side).
 //
 // These DTOs are produced only when the Tauri shell is compiled with the
-// `managed-tor-test` feature AND the user has explicitly configured a test
+// `managed-tor` feature AND the user has explicitly configured a test
 // transport. No secret material crosses the boundary.
 // ---------------------------------------------------------------------------
 
@@ -821,7 +1177,7 @@ export interface GuiPrivateReleaseResultV1 {
 }
 
 /** Status of the voter-side managed-Tor test transport. */
-export interface ManagedTorTestStatusV1 {
+export interface ManagedTorStatusV1 {
   configured: boolean;
   tor_running: boolean;
   socks_ready: boolean;

@@ -570,7 +570,10 @@ impl AnchorReceiptV1 {
     /// Adds bounded v0.39.2 event facts while retaining the V1 constructor and
     /// V1 log-reader compatibility for historical archives.
     #[must_use]
-    pub fn with_event_proofs_v2(mut self, event_proofs_v2: Vec<crate::event::AnchorEventProofV2>) -> Self {
+    pub fn with_event_proofs_v2(
+        mut self,
+        event_proofs_v2: Vec<crate::event::AnchorEventProofV2>,
+    ) -> Self {
         self.event_proofs_v2 = event_proofs_v2;
         self
     }

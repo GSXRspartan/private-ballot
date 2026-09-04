@@ -22,26 +22,35 @@ use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
     AnchorFinalStatusV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
 };
+use tari_cc_private_ballot_ootle_anchor_adapter::map_ootle_network;
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
     IndexerAnchorReceiptClient, IndexerReceiptFetchV1, IndexerReceiptTransportError,
     convert_receipt_response, transaction_id_to_ootle,
 };
-use tari_cc_private_ballot_ootle_anchor_adapter::map_ootle_network;
 use tari_consensus_types::Decision;
 use tari_engine_types::Epoch;
 use tari_engine_types::events::Event;
 use tari_engine_types::fees::FeeReceipt;
 use tari_engine_types::transaction_receipt::{DiffSummary, FinalizeOutcome, TransactionReceipt};
-use tari_template_lib_types::{Metadata, TemplateAddress};
 use tari_indexer_client::rest_api_client::IndexerRestApiClient;
 use tari_indexer_client::types::{
-    GetNetworkInfoResponse, GetTransactionReceiptResponse, GetTransactionResultRequest, GetTransactionResultResponse,
-    IndexerTransactionFinalizedResult,
+    GetNetworkInfoResponse, GetTransactionReceiptResponse, GetTransactionResultRequest,
+    GetTransactionResultResponse, IndexerTransactionFinalizedResult,
 };
+use tari_template_lib_types::{Metadata, TemplateAddress};
 
 use crate::endpoint::IndexerEndpoint;
 use crate::error::{TransportError, TransportErrorCategory};
 use crate::executor::{BlockingExecutor, BlockingExecutorError};
+
+/// Receipt lookup result for the strictly separate V2 lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum V2IndexerReceiptFetchV1 {
+    Finalized(AnchorReceiptV1),
+    Rejected(AnchorReceiptV1),
+    Pending,
+    NotFound,
+}
 
 /// Maximum byte length of a copied rejection reason.
 const MAX_REJECTION_REASON_BYTES: usize = 4096;
@@ -387,6 +396,7 @@ fn map_transport_error(error: TransportError) -> IndexerReceiptTransportError {
         | TransportErrorCategory::ExecutorUnavailable
         | TransportErrorCategory::TlsFailure
         | TransportErrorCategory::AuthenticationFailure
+        | TransportErrorCategory::InsufficientFeesPaid
         | TransportErrorCategory::HttpStatusError => IndexerReceiptTransportError::Unavailable,
         TransportErrorCategory::Timeout => IndexerReceiptTransportError::Timeout,
         TransportErrorCategory::MalformedResponse => {
@@ -437,7 +447,9 @@ impl<T: IndexerReceiptWireTransport> IndexerReceiptNetworkAdapter<T> {
         let expected_network = map_ootle_network(expected)
             .map_err(|_| TransportError::from_category(TransportErrorCategory::UnsupportedApi))?;
         let response = self.transport.get_network_info()?;
-        if response.network != expected_network || response.network_byte != expected_network.as_byte() {
+        if response.network != expected_network
+            || response.network_byte != expected_network.as_byte()
+        {
             return Err(TransportError::from_category(
                 TransportErrorCategory::MalformedResponse,
             ));
@@ -460,6 +472,72 @@ impl<T: IndexerReceiptWireTransport> IndexerReceiptNetworkAdapter<T> {
             None,
             AnchorReceiptSourceKindV1::IndependentIndexer,
         )
+    }
+
+    /// Retrieves one V2 receipt without constructing a V1 receipt query. V2
+    /// verification is intentionally performed by the V2 caller with its
+    /// distinct template binding and six-field event payload.
+    pub fn fetch_v2_anchor_receipt(
+        &mut self,
+        transaction_id: &tari_cc_private_ballot_anchor_transport::AnchorTransactionId,
+        network: &OotleNetworkIdV1,
+    ) -> Result<V2IndexerReceiptFetchV1, TransportError> {
+        let ootle_id = transaction_id_to_ootle(transaction_id).map_err(|_| {
+            TransportError::from_category(TransportErrorCategory::MalformedResponse)
+        })?;
+        match self
+            .transport
+            .get_transaction_receipt(ootle_id.into_receipt_address())
+        {
+            Ok(response) => convert_receipt_response(&response, transaction_id, network)
+                .map(V2IndexerReceiptFetchV1::Finalized)
+                .map_err(|_| {
+                    TransportError::from_category(TransportErrorCategory::MalformedResponse)
+                }),
+            Err(error) if error.is_not_found() => {
+                let result = self
+                    .transport
+                    .get_transaction_result(&GetTransactionResultRequest {
+                        transaction_id: ootle_id,
+                    });
+                match result {
+                    Ok(response) => match response.result {
+                        IndexerTransactionFinalizedResult::Pending
+                        | IndexerTransactionFinalizedResult::Finalized {
+                            final_decision: Decision::Commit,
+                            ..
+                        } => Ok(V2IndexerReceiptFetchV1::Pending),
+                        IndexerTransactionFinalizedResult::Finalized {
+                            final_decision: Decision::Abort(_),
+                            abort_details,
+                            ..
+                        } => Ok(V2IndexerReceiptFetchV1::Rejected(AnchorReceiptV1::new(
+                            transaction_id.clone(),
+                            network.clone(),
+                            AnchorFinalStatusV1::Rejected,
+                            Vec::new(),
+                            bound_rejection_reason(abort_details),
+                            None,
+                            AnchorReceiptSourceKindV1::IndependentIndexer,
+                        ))),
+                        IndexerTransactionFinalizedResult::Rejected { details, .. } => {
+                            Ok(V2IndexerReceiptFetchV1::Rejected(AnchorReceiptV1::new(
+                                transaction_id.clone(),
+                                network.clone(),
+                                AnchorFinalStatusV1::Rejected,
+                                Vec::new(),
+                                bound_rejection_reason(Some(details)),
+                                None,
+                                AnchorReceiptSourceKindV1::IndependentIndexer,
+                            )))
+                        }
+                    },
+                    Err(error) if error.is_not_found() => Ok(V2IndexerReceiptFetchV1::NotFound),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 

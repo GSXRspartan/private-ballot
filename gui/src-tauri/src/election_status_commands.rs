@@ -1,6 +1,6 @@
 //! Authenticated election-status artifact export/import (feature-gated).
 //!
-//! Compiled only under the `managed-tor-test` feature because the ONLY
+//! Compiled only under the `managed-tor` feature because the ONLY
 //! provisioned ballot-office signing material in this pilot is the controlled-
 //! test organizer bundle (ADR-0010 keeps the production root offline until a
 //! release ceremony pins it). The underlying gui-core machinery
@@ -38,7 +38,7 @@ use tari_cc_private_ballot_gui_core::{
     verify_and_apply_election_status_statement_v1,
 };
 
-use crate::managed_tor_test::configured_transport_root_anchor;
+use crate::managed_tor::configured_transport_root_anchor;
 use crate::organizer_tor_intake::{bound_election, organizer_private_bundle_dir};
 use crate::{AppState, CommandError};
 
@@ -272,9 +272,9 @@ fn import_election_status_blocking(
 /// LOCK-ORDERING INVARIANT (see [`crate::AppState`]): the trust-anchor lookup
 /// (a brief managed-Tor state lock) is resolved BEFORE the session lock is
 /// taken, so this function never holds `session` while acquiring
-/// `managed_tor_test`. Holding both here formed the `session ->
-/// managed_tor_test` half of an ABBA cycle against
-/// `running_transport_endpoint` (`managed_tor_test -> session`) — a stable,
+/// `managed_tor`. Holding both here formed the `session ->
+/// managed_tor` half of an ABBA cycle against
+/// `running_transport_endpoint` (`managed_tor -> session`) — a stable,
 /// zero-CPU deadlock between two blocking-pool workers that permanently parked
 /// every later voter command (including ballot preparation).
 fn apply_election_status_bytes_blocking(
@@ -465,7 +465,7 @@ fn fetch_election_status_blocking(
     // Requires a CONFIGURED connection for this election. A running Tor child
     // is not required up-front: the carrier fails bounded-and-truthfully when
     // the route is unreachable, which the UI surfaces as "cannot reach".
-    let configured = crate::managed_tor_test::running_transport_endpoint(state)?;
+    let configured = crate::managed_tor::running_transport_endpoint(state)?;
     let Some((socks_addr, descriptor)) = configured else {
         return Err(CommandError::new(
             "GUI_ELECTION_STATUS_NO_PRIVATE_CONNECTION",

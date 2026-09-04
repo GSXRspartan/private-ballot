@@ -10,14 +10,14 @@
 
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 use tari_cc_private_ballot_anchor_transport::{
-    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1, AnchorMaxFeeV1,
-    AnchorPreparationRequest, AnchorTemplateBindingV1,
+    AnchorAccountReference, AnchorBindingV1, AnchorEpochBindingV1, AnchorLogPayloadV1,
+    AnchorMaxFeeV1, AnchorPreparationRequest, AnchorTemplateBindingV1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::OotleAnchorTransactionBuildRequestV1;
+use tari_cc_private_ballot_ootle_receipt_anchor_adapter::AnchorReceiptQueryV1;
 use tari_cc_private_ballot_ootle_receipt_anchor_adapter::receipt_scenarios::{
     SCENARIO_TEMPLATE_ADDRESS, SCENARIO_TEMPLATE_MODULE,
 };
-use tari_cc_private_ballot_ootle_receipt_anchor_adapter::AnchorReceiptQueryV1;
 use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     FakeWalletdAnchorClient, SubmittedWalletdAnchorRequestV1, WalletdAnchorCoordinator,
     WalletdDecisionRequestV1, WalletdFeeComponentRef, WalletdSealSignerRef, WalletdSubmitRequestV1,

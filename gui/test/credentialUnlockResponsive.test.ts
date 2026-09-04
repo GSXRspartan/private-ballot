@@ -40,7 +40,7 @@ describe("credential KDF runs off the UI thread", () => {
     return shell.slice(start, start + 1200);
   }
 
-  it("run_blocking_command is available regardless of the managed-tor-test feature", () => {
+  it("run_blocking_command is available regardless of the managed-tor feature", () => {
     // It must NOT be feature-gated, because the always-compiled credential
     // commands rely on it.
     const idx = shell.indexOf("pub(crate) async fn run_blocking_command");
@@ -48,8 +48,8 @@ describe("credential KDF runs off the UI thread", () => {
     const preceding = shell.slice(Math.max(0, idx - 200), idx);
     assert.doesNotMatch(
       preceding,
-      /#\[cfg\(feature = "managed-tor-test"\)\]\s*$/,
-      "run_blocking_command must not be gated to the managed-tor-test feature",
+      /#\[cfg\(feature = "managed-tor"\)\]\s*$/,
+      "run_blocking_command must not be gated to the managed-tor feature",
     );
   });
 

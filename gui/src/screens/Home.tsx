@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { api } from "../api/client";
+import type { GuiV2LiveAnchorHydratedStateV1 } from "../api/types";
+import { boundArchiveResult } from "../archive/archiveBinding";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { NavSection } from "../components/AppFrame";
 import {
@@ -45,6 +48,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     shellAvailable,
     workspaces,
     activeWorkspaceIds,
+    archiveView,
     dismissError,
     resumeElectionWorkspace,
     deleteElectionWorkspace,
@@ -63,6 +67,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     label: string;
   } | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [resumingWorkspaceId, setResumingWorkspaceId] = useState<string | null>(null);
   const presentation = presentationFor(election);
   const sealed =
     participation !== null && participation.participation_visibility === "SEALED_UNTIL_CLOSE";
@@ -70,14 +75,78 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     participation !== null && participation.result_visibility === "SEALED";
   const disclosed = participationIsDisclosed(participation);
   const resumableWorkspaces = workspaces.slice(0, 5);
+  const isOrganizerSession = election !== null && electionAuthority === "organizer";
 
-  async function resumeWorkspace(workspaceId: string, lifecycleState: string) {
-    const result = await resumeElectionWorkspace(workspaceId);
-    if (result.draft || lifecycleState === "DRAFT") {
-      onNavigate?.("create");
+  // Session-scoped, election-bound archive verification. Reuses the SAME
+  // authoritative state ManageElection displays (`archiveView.verification`,
+  // bound to the archive directory it was computed for). A verification is
+  // only rendered here when its bound directory still equals the currently
+  // remembered archive directory AND its manifest hash matches the currently
+  // loaded election — never a second source of truth.
+  const verifiedArchiveResult = boundArchiveResult(
+    archiveView.verification,
+    archiveView.directory,
+  );
+  const verifiedFinalArchive =
+    verifiedArchiveResult?.verified &&
+    verifiedArchiveResult.finalized &&
+    verifiedArchiveResult.transport_binding_present &&
+    verifiedArchiveResult.transport_binding_verified &&
+    verifiedArchiveResult.archive_hash_hex !== null &&
+    verifiedArchiveResult.election_manifest_hash_hex === election?.manifest_hash_hex
+      ? {
+          directory: archiveView.directory,
+          archive_hash_hex: verifiedArchiveResult.archive_hash_hex,
+          file_count: verifiedArchiveResult.file_count,
+        }
+      : null;
+
+  // Read-only hydration of the persisted V2 anchor lifecycle for the verified
+  // final archive of the LOADED election. Never contacts walletd or the
+  // indexer — purely a sidecar read — so surfacing historical anchor
+  // verification never requires the wallet to be running. The backend limits
+  // this command to organizer sessions; Home mirrors that gate here.
+  const [anchorHydrated, setAnchorHydrated] =
+    useState<GuiV2LiveAnchorHydratedStateV1 | null>(null);
+  useEffect(() => {
+    if (!shellAvailable || !isOrganizerSession || !verifiedFinalArchive) {
+      setAnchorHydrated(null);
       return;
     }
-    onNavigate?.("manage");
+    let cancelled = false;
+    void (async () => {
+      try {
+        const hydrated = await api.inspectV2LiveAnchorState(verifiedFinalArchive.directory);
+        if (!cancelled) setAnchorHydrated(hydrated);
+      } catch {
+        if (!cancelled) setAnchorHydrated(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    shellAvailable,
+    isOrganizerSession,
+    verifiedFinalArchive?.directory,
+    verifiedFinalArchive?.archive_hash_hex,
+  ]);
+
+  const anchorTerminalVerified = anchorHydrated?.receipt_verified === true;
+
+  async function resumeWorkspace(workspaceId: string, lifecycleState: string) {
+    if (resumingWorkspaceId !== null) return;
+    setResumingWorkspaceId(workspaceId);
+    try {
+      const result = await resumeElectionWorkspace(workspaceId);
+      if (result.draft || lifecycleState === "DRAFT") {
+        onNavigate?.("create");
+        return;
+      }
+      onNavigate?.("manage");
+    } finally {
+      setResumingWorkspaceId(null);
+    }
   }
 
   async function confirmDeleteWorkspace() {
@@ -98,7 +167,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     <>
       <h1 className="screen-header">Home</h1>
       <p className="screen-lede">
-        Tari Private Ballot lets eligible community members vote without revealing which voter
+        Private Ballot lets eligible voters vote without revealing which voter
         cast a ballot. The saved election archive can be independently verified. Optional Ootle
         anchoring does not determine the result.
       </p>
@@ -195,15 +264,58 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
           </Card>
 
           <Card title="Archive status">
-            {election.lifecycle_state === "FINALIZED" ? (
+            {verifiedFinalArchive ? (
               <>
-                <div className="card-body">
-                  Election finalized — ready to write the final archive.
+                <div className="metric-head">
+                  <Pill tone="ok">Verified</Pill>
                 </div>
                 <p className="card-body">
-                  Write the final offline archive from Manage Election, then verify it on the
-                  Archive screen. Archive integrity is confirmed by the verifier in the session
-                  where you run it, separately from the election being finalized.
+                  Final archive independently verified in this session.
+                </p>
+                <div className="field-list">
+                  <Field label="Archive folder">
+                    <span className="hash" title={verifiedFinalArchive.directory}>
+                      {verifiedFinalArchive.directory}
+                    </span>
+                    <CopyButton
+                      value={verifiedFinalArchive.directory}
+                      label="Copy path"
+                    />
+                  </Field>
+                  <Field label="Archive hash">
+                    <HashValue value={verifiedFinalArchive.archive_hash_hex} />
+                    <CopyButton
+                      value={verifiedFinalArchive.archive_hash_hex}
+                      label="Copy"
+                    />
+                  </Field>
+                  {verifiedArchiveResult?.accepted_count !== undefined && (
+                    <Field label="Accepted ballots">
+                      {verifiedArchiveResult.accepted_count}
+                    </Field>
+                  )}
+                </div>
+                {onNavigate && (
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate("archive")}
+                    >
+                      Open Archive
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : election.lifecycle_state === "FINALIZED" ? (
+              <>
+                <div className="card-body">
+                  Election finalized. Verify the final archive on the Archive screen to
+                  surface it here.
+                </div>
+                <p className="card-body">
+                  Archive integrity is confirmed by the verifier in the session where you run
+                  it, separately from the election being finalized.
                 </p>
               </>
             ) : (
@@ -218,10 +330,77 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
           </Card>
 
           <Card title="Anchor status">
-            <div className="card-body">No anchor state loaded in this session</div>
-            <p className="card-body">
-              Anchoring is optional and non-binding. Inspect a snapshot on the Anchor screen.
-            </p>
+            {anchorTerminalVerified && anchorHydrated ? (
+              <>
+                <div className="metric-head">
+                  <Pill tone="ok">Anchored · Verified</Pill>
+                </div>
+                <p className="card-body">
+                  Transaction accepted. Receipt verified. Canonical public summary verified.
+                  Anchor digest verified. Detached evidence written.
+                </p>
+                <div className="field-list">
+                  {anchorHydrated.transaction_id && (
+                    <Field label="Transaction">
+                      <HashValue value={anchorHydrated.transaction_id} />
+                      <CopyButton
+                        value={anchorHydrated.transaction_id}
+                        label="Copy"
+                      />
+                    </Field>
+                  )}
+                  {anchorHydrated.network && (
+                    <Field label="Network">{anchorHydrated.network}</Field>
+                  )}
+                  {anchorHydrated.evidence_present && (
+                    <Field label="Evidence">
+                      <span
+                        className="hash"
+                        title={anchorHydrated.evidence_path}
+                      >
+                        {anchorHydrated.evidence_path}
+                      </span>
+                      <CopyButton
+                        value={anchorHydrated.evidence_path}
+                        label="Copy path"
+                      />
+                    </Field>
+                  )}
+                </div>
+                {onNavigate && (
+                  <div className="btn-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate("manage")}
+                    >
+                      Open Manage Election
+                    </button>
+                  </div>
+                )}
+              </>
+            ) : verifiedFinalArchive ? (
+              <>
+                <div className="card-body">
+                  No anchor published for this archive.
+                </div>
+                <p className="card-body">
+                  Anchoring is optional and non-binding. The verified final archive remains
+                  authoritative on its own.
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="card-body">
+                  Anchor status appears here once the final archive is verified in this
+                  session.
+                </div>
+                <p className="card-body">
+                  Anchoring is optional and non-binding. Inspect a snapshot on the Anchor
+                  screen.
+                </p>
+              </>
+            )}
           </Card>
         </div>
 
@@ -353,7 +532,9 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                   <tr>
                     <th scope="col">Election</th>
                     <th scope="col">Status</th>
-                    <th scope="col">Accepted ballots</th>
+                    <th scope="col" title="Ballot packages stored locally. This is a display-only count taken without re-verifying ballots; the authoritative accepted tally is shown after you open the election.">
+                      Ballots stored
+                    </th>
                     <th scope="col">Role</th>
                     <th scope="col">Action</th>
                   </tr>
@@ -369,7 +550,7 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                       <td>
                         <LifecyclePill state={workspace.lifecycle_state} />
                       </td>
-                      <td>{workspace.accepted_ballot_count}</td>
+                      <td>{workspace.stored_ballot_count}</td>
                       <td>
                         {/* ROLE TRUTH: only workspaces with durable
                             organizer-authority provenance restore ballot-office
@@ -389,9 +570,15 @@ export function Home({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                       </td>
                       <td>
                         <div className="action-row">
+                          {resumingWorkspaceId === workspace.workspace_id && (
+                            <span className="form-hint" role="status" aria-live="polite">
+                              Resuming and verifying election...
+                            </span>
+                          )}
                           <button
                             type="button"
                             className="btn btn-primary"
+                            disabled={resumingWorkspaceId !== null}
                             onClick={() =>
                               void resumeWorkspace(
                                 workspace.workspace_id,

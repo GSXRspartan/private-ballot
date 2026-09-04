@@ -59,7 +59,7 @@ pub fn run_cli(args: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn print_usage(prog: &str) {
-    eprintln!("Tari CC Private Ballot protocol workspace");
+    eprintln!("Private Ballot protocol workspace");
     eprintln!();
     eprintln!("usage:");
     eprintln!("  {prog} distributed-cohort --count <N> --out <dir> [--passphrase-env <ENV>]");

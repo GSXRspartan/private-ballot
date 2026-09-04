@@ -77,7 +77,10 @@ fn fake_and_real_adapter_agree_on_every_project_boundary_value() {
     );
 
     // Fee policy parity at the project boundary.
-    assert_eq!(prepared.max_fee().value(), preparation_dto.max_fee().value());
+    assert_eq!(
+        prepared.max_fee().value(),
+        preparation_dto.max_fee().value()
+    );
     assert_eq!(preparation_dto.max_fee().value(), 4_242);
 
     // Client reference parity.

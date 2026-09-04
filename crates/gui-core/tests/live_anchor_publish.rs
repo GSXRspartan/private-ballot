@@ -50,6 +50,7 @@ const DECLARED_SEAL_PUBLIC_KEY: &str = "seal-public-key-attested";
 #[derive(Debug, Default)]
 struct RefusingWalletdCounters {
     detect: AtomicU64,
+    dry_run: AtomicU64,
     create: AtomicU64,
     approve: AtomicU64,
     reject: AtomicU64,
@@ -80,6 +81,17 @@ impl WalletdWireTransport for RefusingWalletdTransport {
         TransportError,
     > {
         self.counters.detect.fetch_add(1, Ordering::SeqCst);
+        Err(Self::unavailable())
+    }
+
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        _request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError> {
+        // Refuses like every other call so tests can prove the privacy floor
+        // and binding gates reject BEFORE any network probe — including the
+        // dry-run fee estimate — is issued.
+        self.counters.dry_run.fetch_add(1, Ordering::SeqCst);
         Err(Self::unavailable())
     }
 
@@ -378,6 +390,17 @@ impl WalletdWireTransport for CountingWalletdTransport {
         TransportError,
     > {
         self.inner.detect_transaction_inputs(request)
+    }
+
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        request: &tari_cc_private_ballot_ootle_anchor_network_adapters::TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError> {
+        // Delegates to the underlying scripted transport. The concurrency
+        // gates the test proves — exactly-once create/submit under the
+        // two-layer publish lock — do not apply to dry-run fee estimation,
+        // so no additional shared counter is needed here.
+        self.inner.submit_transaction_dry_run_fee(request)
     }
 
     fn create_transaction_request(

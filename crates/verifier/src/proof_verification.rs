@@ -48,17 +48,21 @@ impl VerifiedApprovalBallotV1 {
     }
 }
 
-/// Reconstructs and verifies one approval-ballot proof.
+/// Runs every non-cryptographic check that precedes proof verification and
+/// returns the reconstructed statement.
 ///
-/// Proof suites receive only verifier-reconstructed statement bytes.
-/// Successful results are rejected if they refer to any other statement.
-pub fn verify_approval_proof<M, H, V>(
+/// This is the single source of truth for the pre-verification boundary shared
+/// by [`verify_approval_proof`] (individual/live intake) and the batched
+/// historical-replay path: proof size limits, the manifest/verifier suite
+/// match, and verifier-owned statement reconstruction. It performs no
+/// cryptographic multiscalar work and mutates nothing.
+pub(crate) fn reconstruct_verification_statement<M, H, V>(
     manifest: &M,
     payload: &ApprovalBallotPayload,
     proof_bytes: &[u8],
     hash_provider: &H,
     proof_verifier: &V,
-) -> Result<VerifiedApprovalBallotV1, ProtocolError>
+) -> Result<ProofStatementV1, ProtocolError>
 where
     M: ElectionManifestModel,
     H: HashProvider,
@@ -85,11 +89,20 @@ where
         ));
     }
 
-    let statement = reconstruct_approval_proof_statement(manifest, payload, hash_provider)?;
+    reconstruct_approval_proof_statement(manifest, payload, hash_provider)
+}
 
-    let verified = proof_verifier.verify(&statement, proof_bytes)?;
-
-    if verified.statement() != &statement {
+/// Binds a successful proof-verification result back to the exact statement and
+/// payload it was verified against.
+///
+/// Rejecting a result whose statement differs prevents a verifier from
+/// returning a proof for one ballot to authenticate another.
+pub(crate) fn bind_verified_statement(
+    statement: &ProofStatementV1,
+    payload: &ApprovalBallotPayload,
+    verified: VerifiedProofV1,
+) -> Result<VerifiedApprovalBallotV1, ProtocolError> {
+    if verified.statement() != statement {
         return Err(ProtocolError::new(
             ValidationCode::InvalidData,
             "proof verifier returned a result for a different statement",
@@ -100,6 +113,35 @@ where
         proof: verified,
         payload: payload.clone(),
     })
+}
+
+/// Reconstructs and verifies one approval-ballot proof.
+///
+/// Proof suites receive only verifier-reconstructed statement bytes.
+/// Successful results are rejected if they refer to any other statement.
+pub fn verify_approval_proof<M, H, V>(
+    manifest: &M,
+    payload: &ApprovalBallotPayload,
+    proof_bytes: &[u8],
+    hash_provider: &H,
+    proof_verifier: &V,
+) -> Result<VerifiedApprovalBallotV1, ProtocolError>
+where
+    M: ElectionManifestModel,
+    H: HashProvider,
+    V: ProofVerifierV1,
+{
+    let statement = reconstruct_verification_statement(
+        manifest,
+        payload,
+        proof_bytes,
+        hash_provider,
+        proof_verifier,
+    )?;
+
+    let verified = proof_verifier.verify(&statement, proof_bytes)?;
+
+    bind_verified_statement(&statement, payload, verified)
 }
 
 #[cfg(test)]

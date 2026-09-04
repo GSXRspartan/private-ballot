@@ -144,7 +144,7 @@ describe("backend organizer-authority model", () => {
 
   for (const command of [
     "open_voting",
-    "close_voting",
+    "close_voting_blocking",
     "mark_verified",
     "finalize_election",
     "intake_ballot_package",
@@ -167,7 +167,7 @@ describe("backend organizer-authority model", () => {
   }
 
   it("close_voting checks authority BEFORE publishing the intake fence", () => {
-    const body = rustFnBody(shell, "close_voting");
+    const body = rustFnBody(shell, "close_voting_blocking");
     const gate = body.indexOf("ensure_organizer_authority()");
     const fence = body.indexOf("fence_close_before_commit");
     assert.notEqual(gate, -1);
@@ -176,7 +176,7 @@ describe("backend organizer-authority model", () => {
   });
 
   it("importing public artifacts grants voter-only authority and NO organizer workspace", () => {
-    const body = rustFnBody(shell, "load_election_from_paths");
+    const body = rustFnBody(shell, "install_imported_election_session");
     // Session AND role are installed atomically under one lock.
     assert.match(
       body,
@@ -247,7 +247,10 @@ describe("backend organizer transport and signing gates", () => {
   });
 
   it("export_voter_transport_bundle is organizer-only", () => {
-    const start = intake.indexOf("pub fn export_voter_transport_bundle(");
+    // Signature is now `pub async fn`; match on `fn` so the async form is
+    // covered. The authority-before-side-effect ordering asserted below is the
+    // security property and is unchanged.
+    const start = intake.indexOf("fn export_voter_transport_bundle(");
     const body = intake.slice(start, start + 1500);
     const gate = body.indexOf("ensure_organizer_authority()");
     const dest = body.indexOf("PathBuf::from(&destination_dir)");

@@ -16,6 +16,37 @@ use url::{Host, Url};
 /// Maximum byte length of the optional bounded base path.
 pub const MAX_ENDPOINT_BASE_PATH_BYTES: usize = 256;
 
+/// The JSON-RPC route pinned walletd serves its API on.
+pub const WALLETD_JSONRPC_PATH: &str = "/json_rpc";
+
+/// Normalizes a walletd base URL to its JSON-RPC route.
+///
+/// Pinned walletd v0.39.2 serves JSON-RPC **only** at `/json_rpc` (and
+/// `/json-rpc`); a bare `http://host:port` is the web-UI root, not the RPC
+/// endpoint, and posting RPC there fails in a way that looks — falsely — like
+/// "walletd is not reachable". This is the single normalizer every walletd RPC
+/// caller uses (readiness, account listing, Prepare, publish), so a caller may
+/// store or display the bare base while every client connects to the RPC path.
+///
+/// Behavior:
+///   * appends `/json_rpc` when no json_rpc route is present;
+///   * is idempotent — an existing `/json_rpc` or `/json-rpc` suffix is kept
+///     verbatim, never appended twice;
+///   * treats `localhost` and `127.0.0.1` identically (host is untouched);
+///   * trims surrounding whitespace and a single trailing slash.
+#[must_use]
+pub fn ensure_walletd_jsonrpc_path(base: &str) -> String {
+    let trimmed = base.trim().trim_end_matches('/');
+    if trimmed.ends_with("/json_rpc") || trimmed.ends_with("/json-rpc") {
+        trimmed.to_owned()
+    } else {
+        format!("{trimmed}{WALLETD_JSONRPC_PATH}")
+    }
+}
+
+/// The Tari-hosted Esmeralda indexer trusted by the normal anchor UI.
+pub const TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1: &str = "https://ootle-indexer-a.tari.com/";
+
 /// Returns whether a parsed URL's host is a loopback address.
 ///
 /// True for the IPv4 loopback block `127.0.0.0/8`, the IPv6 loopback `::1`, and
@@ -273,6 +304,19 @@ impl IndexerEndpoint {
     pub fn is_loopback(&self) -> bool {
         url_host_is_loopback(&self.url)
     }
+
+    /// Returns whether this endpoint is the application-trusted hosted
+    /// Esmeralda indexer.
+    #[must_use]
+    pub fn is_trusted_esmeralda_remote(&self) -> bool {
+        self.url.scheme() == "https"
+            && self
+                .url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("ootle-indexer-a.tari.com"))
+            && self.url.port().is_none_or(|port| port == 443)
+            && self.path().is_empty()
+    }
 }
 
 impl FromStr for IndexerEndpoint {
@@ -291,6 +335,50 @@ impl fmt::Display for IndexerEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jsonrpc_path_is_appended_to_a_bare_base() {
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("http://127.0.0.1:5100"),
+            "http://127.0.0.1:5100/json_rpc"
+        );
+    }
+
+    #[test]
+    fn jsonrpc_path_normalizes_localhost_the_same_as_127() {
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("http://localhost:5100"),
+            "http://localhost:5100/json_rpc"
+        );
+    }
+
+    #[test]
+    fn jsonrpc_path_is_idempotent() {
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("http://127.0.0.1:5100/json_rpc"),
+            "http://127.0.0.1:5100/json_rpc"
+        );
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("http://localhost:5100/json-rpc"),
+            "http://localhost:5100/json-rpc"
+        );
+    }
+
+    #[test]
+    fn jsonrpc_path_trims_trailing_slash_and_whitespace() {
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("  http://127.0.0.1:5100/  "),
+            "http://127.0.0.1:5100/json_rpc"
+        );
+    }
+
+    #[test]
+    fn jsonrpc_path_appends_after_a_reverse_proxy_base_path() {
+        assert_eq!(
+            ensure_walletd_jsonrpc_path("http://127.0.0.1:5100/api/v1"),
+            "http://127.0.0.1:5100/api/v1/json_rpc"
+        );
+    }
 
     #[test]
     fn http_loopback_is_accepted() {
@@ -449,6 +537,38 @@ mod tests {
         ] {
             let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
             assert!(!endpoint.is_loopback(), "{raw} must not be loopback");
+        }
+    }
+
+    #[test]
+    fn trusted_esmeralda_remote_indexer_is_recognized() {
+        for raw in [
+            TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1,
+            "https://ootle-indexer-a.tari.com:443/",
+            "https://OOTLE-INDEXER-A.TARI.COM/",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                endpoint.is_trusted_esmeralda_remote(),
+                "{raw} must be trusted"
+            );
+            assert!(!endpoint.is_loopback());
+        }
+    }
+
+    #[test]
+    fn arbitrary_remote_indexers_are_not_trusted_esmeralda() {
+        for raw in [
+            "http://ootle-indexer-a.tari.com/",
+            "https://indexer.example.com/",
+            "https://ootle-indexer-a.tari.com/api",
+            "http://127.0.0.1:12500",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                !endpoint.is_trusted_esmeralda_remote(),
+                "{raw} must not be trusted"
+            );
         }
     }
 }

@@ -10,11 +10,15 @@
 use tari_cc_private_ballot_anchor::{OotleAnchorRecordHashV1, OotleNetworkIdV1};
 
 use crate::errors::AnchorReceiptVerificationError;
+use crate::event::{
+    ANCHOR_EVENT_DIGEST_KEY_V1, ANCHOR_EVENT_DIGEST_KEY_V2, ANCHOR_EVENT_ELECTION_ID_KEY_V2,
+    ANCHOR_EVENT_NETWORK_KEY_V2, ANCHOR_EVENT_PUBLIC_SUMMARY_KEY_V2, AnchorEventPayloadV3,
+    AnchorTemplateBindingV1, AnchorTemplateBindingV2,
+};
 use crate::identifiers::AnchorTransactionId;
 use crate::model::{
     AnchorFinalStatusV1, AnchorQueryOutcomeV1, AnchorReceiptSourceKindV1, AnchorReceiptV1,
 };
-use crate::event::{ANCHOR_EVENT_DIGEST_KEY_V1, AnchorTemplateBindingV1};
 use crate::payload::{ANCHOR_LOG_PAYLOAD_CANDIDATE_PREFIX_V1, AnchorLogPayloadV1};
 
 /// Verified, bound anchor evidence produced by a successful verification.
@@ -53,6 +57,40 @@ impl VerifiedAnchorEvidenceV1 {
     }
 
     /// Returns which observer produced the verified receipt.
+    #[must_use]
+    pub const fn source(&self) -> AnchorReceiptSourceKindV1 {
+        self.source
+    }
+}
+
+/// Verified compact V2 event evidence. The detached payload is verified by the
+/// GUI/archive layer before this receipt proof is accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAnchorEvidenceV2 {
+    transaction_id: AnchorTransactionId,
+    network: OotleNetworkIdV1,
+    anchor_digest: [u8; 32],
+    ledger_position: Option<u64>,
+    source: AnchorReceiptSourceKindV1,
+}
+
+impl VerifiedAnchorEvidenceV2 {
+    #[must_use]
+    pub const fn transaction_id(&self) -> &AnchorTransactionId {
+        &self.transaction_id
+    }
+    #[must_use]
+    pub const fn network(&self) -> &OotleNetworkIdV1 {
+        &self.network
+    }
+    #[must_use]
+    pub const fn anchor_digest(&self) -> &[u8; 32] {
+        &self.anchor_digest
+    }
+    #[must_use]
+    pub const fn ledger_position(&self) -> Option<u64> {
+        self.ledger_position
+    }
     #[must_use]
     pub const fn source(&self) -> AnchorReceiptSourceKindV1 {
         self.source
@@ -221,6 +259,108 @@ pub fn verify_v39_event_receipt(
         transaction_id: receipt.transaction_id().clone(),
         network: receipt.network().clone(),
         anchor_digest: expected_payload.digest(),
+        ledger_position: receipt.ledger_position(),
+        source: receipt.source(),
+    })
+}
+
+/// Verifies the six-field V2 template event. V1 and V2 bindings are distinct
+/// types, which prevents either protocol path from accepting the other's event.
+pub fn verify_v2_event_receipt(
+    expected_transaction: &AnchorTransactionId,
+    expected_network: &OotleNetworkIdV1,
+    expected_template: &AnchorTemplateBindingV2,
+    expected_payload: &AnchorEventPayloadV3,
+    receipt: &AnchorReceiptV1,
+) -> Result<VerifiedAnchorEvidenceV2, AnchorReceiptVerificationError> {
+    if receipt.transaction_id() != expected_transaction {
+        return Err(AnchorReceiptVerificationError::WrongTransaction);
+    }
+    if receipt.network() != expected_network {
+        return Err(AnchorReceiptVerificationError::WrongNetwork);
+    }
+    match receipt.final_status() {
+        AnchorFinalStatusV1::Accepted => {}
+        AnchorFinalStatusV1::FeeOnlyAccepted => {
+            return Err(AnchorReceiptVerificationError::FeeOnlyAcceptance);
+        }
+        AnchorFinalStatusV1::Rejected => {
+            return Err(AnchorReceiptVerificationError::RejectedTransaction);
+        }
+    }
+
+    let expected_topic = expected_template.canonical_receipt_event_topic();
+    let mut candidates = Vec::new();
+    for event in receipt.event_proofs_v2() {
+        let has_v2_digest = event
+            .metadata()
+            .iter()
+            .any(|(key, _)| key == ANCHOR_EVENT_DIGEST_KEY_V2);
+        if event.template_address() == expected_template.template_address()
+            && event.topic() != expected_topic
+        {
+            return Err(AnchorReceiptVerificationError::WrongEventTopic);
+        }
+        if event.topic() == expected_topic
+            && event.template_address() != expected_template.template_address()
+        {
+            return Err(AnchorReceiptVerificationError::WrongEventTemplate);
+        }
+        if event.topic() == expected_topic || has_v2_digest {
+            candidates.push(event);
+        }
+    }
+    let [event] = candidates.as_slice() else {
+        return if candidates.is_empty() {
+            Err(AnchorReceiptVerificationError::MissingAnchorEvent)
+        } else {
+            Err(AnchorReceiptVerificationError::DuplicateAnchorEvents)
+        };
+    };
+    if event.template_address() != expected_template.template_address() {
+        return Err(AnchorReceiptVerificationError::WrongEventTemplate);
+    }
+    if event.topic() != expected_topic {
+        return Err(AnchorReceiptVerificationError::WrongEventTopic);
+    }
+    let metadata = event.metadata();
+    if metadata.len() != 4 {
+        return Err(AnchorReceiptVerificationError::UnexpectedEventMetadata);
+    }
+    let expected = [
+        (ANCHOR_EVENT_DIGEST_KEY_V2, expected_payload.digest_hex()),
+        (
+            ANCHOR_EVENT_NETWORK_KEY_V2,
+            expected_payload.network().to_owned(),
+        ),
+        (
+            ANCHOR_EVENT_ELECTION_ID_KEY_V2,
+            expected_payload.election_id().to_owned(),
+        ),
+        (
+            ANCHOR_EVENT_PUBLIC_SUMMARY_KEY_V2,
+            expected_payload.public_summary().to_owned(),
+        ),
+    ];
+    for (key, value) in expected {
+        if metadata.iter().filter(|(actual, _)| actual == key).count() != 1 {
+            return Err(AnchorReceiptVerificationError::MalformedAnchorEvent);
+        }
+        if !metadata
+            .iter()
+            .any(|(actual, observed)| actual == key && observed == &value)
+        {
+            return if key == ANCHOR_EVENT_DIGEST_KEY_V2 {
+                Err(AnchorReceiptVerificationError::WrongAnchorDigest)
+            } else {
+                Err(AnchorReceiptVerificationError::MalformedAnchorEvent)
+            };
+        }
+    }
+    Ok(VerifiedAnchorEvidenceV2 {
+        transaction_id: receipt.transaction_id().clone(),
+        network: receipt.network().clone(),
+        anchor_digest: *expected_payload.digest(),
         ledger_position: receipt.ledger_position(),
         source: receipt.source(),
     })

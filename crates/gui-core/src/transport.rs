@@ -38,6 +38,12 @@ type Aead = ChaCha20Poly1305;
 pub enum TransportError {
     InvalidDescriptor,
     UntrustedRoot,
+    /// The current transport authority root is the shipping `ProductionNotProvisioned`
+    /// sentinel: no public pin has been installed by a release ceremony, so nothing
+    /// can be verified. This is the fail-closed default of standard (non
+    /// `managed-tor`) builds and is distinct from `UntrustedRoot` (a real but
+    /// unrecognized/ revoked pin) so operators get an actionable message.
+    ProductionAuthorityNotProvisioned,
     DescriptorConflict,
     UnsupportedRoute,
     InvalidEnvelope,
@@ -54,6 +60,9 @@ impl fmt::Display for TransportError {
         let message = match self {
             Self::InvalidDescriptor => "invalid transport descriptor",
             Self::UntrustedRoot => "transport authority root is not configured or trusted",
+            Self::ProductionAuthorityNotProvisioned => {
+                "the production transport authority root is not provisioned; run the release provisioning ceremony to install the pinned public root before private transport can be used"
+            }
             Self::DescriptorConflict => "conflicting transport descriptor generation",
             Self::UnsupportedRoute => "transport route is not permitted",
             Self::InvalidEnvelope => "invalid transport request",
@@ -92,7 +101,10 @@ impl TransportAuthorityRootV1 {
 
     fn verifying_key(&self) -> Result<VerifyingKey, TransportError> {
         let Self::Pinned { public_key, .. } = self else {
-            return Err(TransportError::UntrustedRoot);
+            // Fail closed, but with a specific, actionable reason: the shipping
+            // default is the unprovisioned sentinel, which must never verify
+            // anything until a release ceremony installs a real pinned root.
+            return Err(TransportError::ProductionAuthorityNotProvisioned);
         };
         VerifyingKey::from_bytes(public_key).map_err(|_| TransportError::UntrustedRoot)
     }
@@ -194,12 +206,57 @@ impl TransportAuthorityRootSetV1 {
     }
 }
 
+/// The reserved key id of the shipping unprovisioned sentinel. A provisioning
+/// ceremony may never reuse it for a real pinned root.
+pub const PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID: &str =
+    "PRODUCTION_TRANSPORT_ROOT_NOT_YET_PROVISIONED";
+
 /// Explicit release state: no production transport authority has been provisioned.
 #[must_use]
 pub fn production_transport_authority_root_v1() -> TransportAuthorityRootV1 {
     TransportAuthorityRootV1::ProductionNotProvisioned {
-        key_id: "PRODUCTION_TRANSPORT_ROOT_NOT_YET_PROVISIONED".to_owned(),
+        key_id: PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID.to_owned(),
     }
+}
+
+/// Installs a genuine production transport authority root from an explicitly
+/// supplied **public** Ed25519 pin.
+///
+/// This is the operator/release-ceremony setup step. It takes only the PUBLIC
+/// verification key — no private/secret material is involved, generated, or
+/// stored by this function — so the resulting root is safe to embed in the
+/// application, export, and archive as part of verification. Private signing
+/// material for the root is held out-of-band by the release custody process and
+/// never touches this code path.
+///
+/// The returned root is a `Pinned` root that `TransportAuthorityRootSetV1` will
+/// accept for descriptor and election-status verification.
+///
+/// # Errors
+///
+/// Returns [`TransportError::UntrustedRoot`] if:
+///   * `key_id` is empty or reuses the reserved unprovisioned sentinel id
+///     ([`PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID`]); or
+///   * `public_key` is all-zero or does not decode to a valid Ed25519
+///     verification key (a small-order / malformed point).
+pub fn provision_production_transport_authority_root_v1(
+    key_id: &str,
+    public_key: [u8; 32],
+) -> Result<TransportAuthorityRootV1, TransportError> {
+    if key_id.is_empty() || key_id == PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID {
+        return Err(TransportError::UntrustedRoot);
+    }
+    if public_key == [0u8; 32] {
+        return Err(TransportError::UntrustedRoot);
+    }
+    // Reuse the same strict decode the verifier uses, so an unusable pin is
+    // rejected at provisioning time rather than silently failing every later
+    // verification.
+    VerifyingKey::from_bytes(&public_key).map_err(|_| TransportError::UntrustedRoot)?;
+    Ok(TransportAuthorityRootV1::Pinned {
+        key_id: key_id.to_owned(),
+        public_key,
+    })
 }
 
 /// Permitted future carrier; none opens a connection in this slice.
@@ -1354,5 +1411,138 @@ mod tests {
         bad_descriptor.padding.id = "other".to_owned();
         assert!(decoded.receiver_opening_material(&bad_descriptor).is_err());
         assert!(PrivateBallotEnvelopeV1::from_canonical_cbor(&[0x87, 1]).is_err());
+    }
+
+    // --- Production transport authority provisioning (Phase 4) ---------------
+
+    /// Signs a descriptor under an explicit `(root_key_id, signing_key)` so a
+    /// test can bind it to a provisioned production root.
+    fn descriptor_signed_by(root_key_id: &str, signing: &SigningKey) -> TransportDescriptorV1 {
+        let (_gateway_private, gateway_public) = Kem::gen_keypair();
+        let mut public = [0u8; 32];
+        public.copy_from_slice(gateway_public.to_bytes().as_slice());
+        TransportDescriptorV1::sign_for_test_or_ceremony(
+            b"transport-test-election".to_vec(),
+            ManifestHash::new([7; 32]),
+            1,
+            TransportRoutePolicyV1::OfflineOnly,
+            Vec::new(),
+            Vec::new(),
+            public,
+            "gateway-2026-1".to_owned(),
+            vec![[3; 32]],
+            PaddingPolicyV1 {
+                id: "fixed-8192".to_owned(),
+                padded_bytes: 8192,
+            },
+            BatchPolicyV1 {
+                id: "accepted-100".to_owned(),
+                accepted_unique_floor: 100,
+            },
+            None,
+            root_key_id.to_owned(),
+            signing,
+        )
+        .expect("test descriptor signs")
+    }
+
+    #[test]
+    fn unprovisioned_production_root_fails_closed_with_specific_error() {
+        // The shipping default (no `managed-tor`, no ceremony) cannot
+        // verify any descriptor, and it reports the actionable
+        // ProductionAuthorityNotProvisioned reason — not the generic
+        // UntrustedRoot used for a real-but-unrecognized pin.
+        let roots = TransportAuthorityRootSetV1::new(production_transport_authority_root_v1());
+        let (signing, _) = authority();
+        // A descriptor that claims the reserved production root id: it selects
+        // the sentinel, which then cannot supply a verifying key.
+        let descriptor =
+            descriptor_signed_by(PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID, &signing);
+        let error = roots
+            .verify_descriptor(&descriptor, ManifestHash::new([7; 32]))
+            .expect_err("unprovisioned production root must reject every descriptor");
+        assert_eq!(error, TransportError::ProductionAuthorityNotProvisioned);
+    }
+
+    #[test]
+    fn provisioned_public_root_verifies_matching_descriptor() {
+        // A release ceremony installs a PUBLIC pin; a descriptor signed by the
+        // matching private key under that root id verifies.
+        let signing = SigningKey::from_bytes(&[23; 32]);
+        let root = provision_production_transport_authority_root_v1(
+            "prod-root-2026-q3",
+            signing.verifying_key().to_bytes(),
+        )
+        .expect("a valid public pin provisions");
+        let roots = TransportAuthorityRootSetV1::new(root);
+        let descriptor = descriptor_signed_by("prod-root-2026-q3", &signing);
+        roots
+            .verify_descriptor(&descriptor, ManifestHash::new([7; 32]))
+            .expect("descriptor signed under the provisioned root verifies");
+    }
+
+    #[test]
+    fn provisioned_root_rejects_descriptor_from_a_different_root() {
+        // A descriptor signed by a DIFFERENT authority (unknown root id) is
+        // rejected before any signature check: the id is not in the set.
+        let installed = SigningKey::from_bytes(&[23; 32]);
+        let root = provision_production_transport_authority_root_v1(
+            "prod-root-2026-q3",
+            installed.verifying_key().to_bytes(),
+        )
+        .expect("valid pin");
+        let roots = TransportAuthorityRootSetV1::new(root);
+        let attacker = SigningKey::from_bytes(&[99; 32]);
+        let descriptor = descriptor_signed_by("attacker-root", &attacker);
+        let error = roots
+            .verify_descriptor(&descriptor, ManifestHash::new([7; 32]))
+            .expect_err("a descriptor from an unknown root must be rejected");
+        assert_eq!(error, TransportError::UntrustedRoot);
+    }
+
+    #[test]
+    fn provisioned_root_rejects_forged_signature_under_the_pinned_id() {
+        // Same (known) root id, but signed by a different key than the pin:
+        // signature verification fails closed.
+        let installed = SigningKey::from_bytes(&[23; 32]);
+        let root = provision_production_transport_authority_root_v1(
+            "prod-root-2026-q3",
+            installed.verifying_key().to_bytes(),
+        )
+        .expect("valid pin");
+        let roots = TransportAuthorityRootSetV1::new(root);
+        let forger = SigningKey::from_bytes(&[24; 32]);
+        let descriptor = descriptor_signed_by("prod-root-2026-q3", &forger);
+        let error = roots
+            .verify_descriptor(&descriptor, ManifestHash::new([7; 32]))
+            .expect_err("a forged signature under the pinned id must be rejected");
+        // `TransportDescriptorV1::verify` maps a failed strict signature check
+        // to `UntrustedRoot` (the signer is not the pinned authority).
+        assert_eq!(error, TransportError::UntrustedRoot);
+    }
+
+    #[test]
+    fn provisioning_rejects_reserved_sentinel_and_empty_ids() {
+        let key = SigningKey::from_bytes(&[23; 32]).verifying_key().to_bytes();
+        assert_eq!(
+            provision_production_transport_authority_root_v1(
+                PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID,
+                key,
+            ),
+            Err(TransportError::UntrustedRoot),
+        );
+        assert_eq!(
+            provision_production_transport_authority_root_v1("", key),
+            Err(TransportError::UntrustedRoot),
+        );
+    }
+
+    #[test]
+    fn provisioning_rejects_unusable_public_keys() {
+        // All-zero and other non-decodable points never become a usable pin.
+        assert_eq!(
+            provision_production_transport_authority_root_v1("prod-root", [0u8; 32]),
+            Err(TransportError::UntrustedRoot),
+        );
     }
 }

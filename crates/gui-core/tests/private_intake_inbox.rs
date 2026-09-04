@@ -73,15 +73,28 @@ fn exact_retry_is_content_addressed_and_never_double_counts() {
     let first = ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("ingest");
     assert_eq!(first.newly_accepted, 1);
     assert_eq!(session.accepted_count(), 1);
+    assert_eq!(session.transcript().accepted_count(), 1);
+    assert_eq!(session.transcript().rejected_count(), 0);
+    assert_eq!(session.packages().len(), 1);
 
     // Ingesting again is idempotent: the same package is now a duplicate
-    // nullifier and never re-counted.
+    // reconciliation result and never mutates the authoritative transcript.
     let second =
         ingest_private_intake_inbox_into_session_v1(&inbox, &mut session).expect("re-sync");
     assert_eq!(second.discovered, 1);
     assert_eq!(second.newly_accepted, 0);
     assert_eq!(second.duplicates, 1);
     assert_eq!(session.accepted_count(), 1, "no double count on re-sync");
+    assert_eq!(
+        session.transcript().rejected_count(),
+        0,
+        "exact content-addressed re-sync must not archive a rejected record",
+    );
+    assert_eq!(
+        session.packages().len(),
+        1,
+        "exact content-addressed re-sync must not archive another package",
+    );
 }
 
 #[test]
@@ -248,6 +261,11 @@ fn empty_or_duplicate_only_reconciliation_signals_no_workspace_write() {
         "duplicate-only inbox → no workspace write"
     );
     assert_eq!(repeat.duplicates, 1);
+    assert_eq!(
+        session.transcript().rejected_count(),
+        0,
+        "duplicate-only exact re-sync must not create rejected transcript rows",
+    );
 }
 
 #[test]
@@ -282,6 +300,11 @@ fn closed_election_drains_admitted_packages_but_the_collector_admits_nothing_new
     assert_eq!(summary.newly_accepted, 0);
     assert_eq!(summary.duplicates, 1);
     assert_eq!(session.accepted_count(), 1, "no double count during drain");
+    assert_eq!(
+        session.transcript().rejected_count(),
+        0,
+        "closed exact re-drain must not inflate the rejected transcript",
+    );
 }
 
 #[test]

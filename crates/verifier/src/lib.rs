@@ -8,7 +8,10 @@ mod proof_suite_policy;
 mod proof_verification;
 mod triptych_registry;
 
-pub use approval_ingestion::ingest_approval_ballot_package_v1;
+pub use approval_ingestion::{
+    PreparedApprovalBallotV1, ingest_approval_ballot_package_v1,
+    prepare_approval_ballot_package_v1, verify_approval_ballot_packages_batch_v1,
+};
 pub use proof_statement::reconstruct_approval_proof_statement;
 pub use proof_suite_policy::ProductionProofSuitePolicyV1;
 pub use proof_verification::{VerifiedApprovalBallotV1, verify_approval_proof};

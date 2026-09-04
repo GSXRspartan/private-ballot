@@ -127,7 +127,7 @@ export async function pickVoterCredentialFile(): Promise<string | null> {
   return openFile(
     "Import voter credential",
     [
-      { name: "Tari Private Ballot credential", extensions: ["tcbcred"] },
+      { name: "Private Ballot credential", extensions: ["tcbcred"] },
       { name: "All files", extensions: ["*"] },
     ],
     "credential",
@@ -144,7 +144,7 @@ export async function pickVoterCredentialBackupPath(
   const picked = await save({
     title: "Back up voter credential",
     defaultPath: rememberedDir ? joinDefaultPath(rememberedDir, defaultPath) : defaultPath,
-    filters: [{ name: "Tari Private Ballot credential", extensions: ["tcbcred"] }],
+    filters: [{ name: "Private Ballot credential", extensions: ["tcbcred"] }],
   });
   if (picked !== null) rememberDirectoryFromFile("credential", picked);
   return picked;
@@ -198,6 +198,30 @@ export async function pickCborFile(
     title,
     [
       { name: "Canonical CBOR", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    category,
+  );
+}
+
+/**
+ * Opens a native single-file picker for a V2 public-anchor evidence JSON file
+ * (`*.v2-anchor-evidence.json`). The current default filter accepts the
+ * `.v2-anchor-evidence.json` suffix and plain `.json`; the frontend only
+ * returns the selected path, and the Rust shell schema-validates the file
+ * before any field is displayed.
+ */
+export async function pickV2AnchorEvidenceJson(
+  title = "Choose V2 anchor evidence file",
+  category: DirectoryCategory = "anchorEvidence",
+): Promise<string | null> {
+  return openFile(
+    title,
+    [
+      {
+        name: "V2 anchor evidence",
+        extensions: ["v2-anchor-evidence.json", "json"],
+      },
       { name: "All files", extensions: ["*"] },
     ],
     category,

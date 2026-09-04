@@ -22,6 +22,7 @@ use tari_cc_private_ballot_ootle_anchor_app::{
     AnchorAppConfig, AnchorConfigInputProvenanceV1, FEE_COMPONENT_ASSURANCE_VERIFIED,
     SEAL_PUBLIC_KEY_ASSURANCE_ATTESTED,
 };
+use tari_cc_private_ballot_ootle_anchor_network_adapters::TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1;
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
 use common::{
@@ -509,10 +510,11 @@ fn live_config_request(
             .into_owned(),
         network: "esmeralda".to_owned(),
         walletd_endpoint: "http://127.0.0.1:12009".to_owned(),
-        indexer_endpoint: "http://127.0.0.1:12500".to_owned(),
+        indexer_endpoint: TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1.to_owned(),
         template_address: format!("template_{}", "22".repeat(32)),
         template_module: "tari_private_ballot_anchor".to_owned(),
-        template_event_topic: "tari_private_ballot_anchor.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1".to_owned(),
+        template_event_topic: "tari_private_ballot_anchor.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1"
+            .to_owned(),
         template_artifact_digest_hex: "33".repeat(32),
         max_epoch_delta: 12,
         account_reference: "fee-account".to_owned(),
@@ -863,7 +865,65 @@ fn live_config_rejects_non_loopback_walletd_endpoint() {
     request.walletd_endpoint = "https://walletd.attacker.example:443".to_owned();
     let error = write_live_anchor_config_from_verified_archive_v1(&request)
         .expect_err("a remote walletd endpoint must be rejected");
-    assert_eq!(error.code(), "GUI_LIVE_ANCHOR_ENDPOINT_NOT_LOOPBACK");
+    // The V1 preflight replaced the generic endpoint code with field-specific
+    // codes; a non-loopback walletd endpoint now reports the walletd-specific
+    // rejection. The fail-closed behavior (endpoint rejected) is unchanged.
+    assert_eq!(
+        error.code(),
+        "GUI_LIVE_ANCHOR_WALLETD_ENDPOINT_NOT_LOOPBACK"
+    );
+}
+
+#[test]
+fn live_config_accepts_trusted_remote_esmeralda_indexer() {
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-live-config-trusted-remote-indexer");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &live_transport_binding(&session, false),
+    )
+    .expect("finalized bound archive must write");
+    let floor = verify_archive_directory_v1(&target)
+        .expect("archive must verify")
+        .accepted_count as u64;
+
+    let request = live_config_request(&dir, &target, floor, false);
+    let result = write_live_anchor_config_from_verified_archive_v1(&request)
+        .expect("trusted remote Esmeralda indexer must be accepted");
+    assert_eq!(result.accepted_ballot_count, floor);
+}
+
+#[test]
+fn live_config_rejects_arbitrary_remote_indexers() {
+    let session = finalized_session_with_ballots();
+    let dir = TestDir::new("archive-live-config-arbitrary-remote-indexer");
+    let target = dir.join("archive");
+    write_finalized_archive_v1_with_transport_binding(
+        &session,
+        &target,
+        &live_transport_binding(&session, false),
+    )
+    .expect("finalized bound archive must write");
+    let floor = verify_archive_directory_v1(&target)
+        .expect("archive must verify")
+        .accepted_count as u64;
+
+    for endpoint in ["http://192.0.2.10:12500", "https://indexer.example.com/"] {
+        let mut request = live_config_request(&dir, &target, floor, false);
+        request.output_config_path = dir
+            .join(&format!("live-anchor-config-{}.cbor", endpoint.len()))
+            .to_string_lossy()
+            .into_owned();
+        request.indexer_endpoint = endpoint.to_owned();
+        let error = write_live_anchor_config_from_verified_archive_v1(&request)
+            .expect_err("untrusted remote indexer must be rejected");
+        // Field-specific V1 preflight: an indexer that is neither loopback nor
+        // the trusted hosted Esmeralda endpoint is rejected as a network
+        // mismatch (still fail-closed; only the code became more specific).
+        assert_eq!(error.code(), "GUI_LIVE_ANCHOR_INDEXER_NETWORK_MISMATCH");
+    }
 }
 
 #[test]

@@ -142,11 +142,11 @@ export interface PrivateSubmissionStatus {
  * build (`featurePresent`) AND there is something to do: a ballot is Ready to
  * submit, or the durable cast state is CAST_PENDING/CAST (so the recovery/status
  * route survives a restart even when the transient prepared-ballot state is
- * gone). A production build without the `managed-tor-test` feature never has the
+ * gone). A production build without the `managed-tor` feature never has the
  * feature present, so this card is always absent there and the truthful offline/
  * unavailable production guidance stands alone.
  */
-export function managedTorTestCardVisible(input: {
+export function managedTorCardVisible(input: {
   /** True only when the controlled-test feature is compiled into this build. */
   featurePresent: boolean;
   /** Whether the prepared ballot is currently in the transient "Ready" state. */
@@ -181,7 +181,7 @@ export interface BallotOfficeConnectionVisibilityInput {
  * Configuring or connecting here is lifecycle/transport setup only: it never
  * advances the election lifecycle and never touches selection, proof, ballot,
  * or cast state (those gates live entirely in the Rust backend). Submission
- * controls remain separately gated by {@link managedTorTestCardVisible}.
+ * controls remain separately gated by {@link managedTorCardVisible}.
  */
 export function ballotOfficeConnectionVisible(
   input: BallotOfficeConnectionVisibilityInput,

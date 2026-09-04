@@ -27,7 +27,7 @@ import { readFileSync } from "node:fs";
 
 import {
   ballotOfficeConnectionVisible,
-  managedTorTestCardVisible,
+  managedTorCardVisible,
 } from "../src/privateSubmission.ts";
 
 function readProjectFile(path: string): string {
@@ -96,7 +96,7 @@ describe("ballot-office connection visibility", () => {
       "submitStageVisible",
       "showAllSteps",
       "currentStageKey",
-      "managedTorTestCardVisible",
+      "managedTorCardVisible",
     ]) {
       assert.ok(
         !card.includes(forbidden),
@@ -112,10 +112,10 @@ describe("ballot-office connection visibility", () => {
   it("the submission card keeps its own separate gating (source assertion)", () => {
     assert.match(
       vote,
-      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*submitStageVisible\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
+      /managedTorCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*submitStageVisible\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
     );
-    assert.equal(managedTorTestCardVisible({ featurePresent: true, preparedReady: false, castState: "NOT_CAST" }), false);
-    assert.equal(managedTorTestCardVisible({ featurePresent: true, preparedReady: true, castState: "NOT_CAST" }), true);
+    assert.equal(managedTorCardVisible({ featurePresent: true, preparedReady: false, castState: "NOT_CAST" }), false);
+    assert.equal(managedTorCardVisible({ featurePresent: true, preparedReady: true, castState: "NOT_CAST" }), true);
   });
 });
 
@@ -132,14 +132,14 @@ describe("connection setup reuses existing backend calls", () => {
     assert.match(dialog, /export async function pickVoterTransportBundle/);
   });
 
-  it("configure/connect invoke api.configureManagedTorTest and api.startManagedTor only", () => {
+  it("configure/connect invoke api.configureManagedTor and api.startManagedTor only", () => {
     const connect = vote.slice(
       vote.indexOf("async function onConnectPrivately"),
       vote.indexOf("async function onBrowseTorExe"),
     );
-    assert.match(connect, /api\.configureManagedTorTest\(torExePath, "", voterBundlePath\)/);
+    assert.match(connect, /api\.configureManagedTor\(torExePath, "", voterBundlePath\)/);
     assert.match(connect, /await api\.startManagedTor\(\)/);
-    assert.match(client, /"configure_managed_tor_test"/);
+    assert.match(client, /"configure_managed_tor"/);
     assert.match(client, /"start_managed_tor"/);
     // No frontend cryptography/trust logic exists: Rust owns all verification.
     assert.doesNotMatch(vote, /ed25519|verify_strict|SigningKey|nacl|tweetnacl/);
@@ -179,11 +179,11 @@ describe("lifecycle authority invariants remain intact", () => {
   });
 
   it("bundle configuration stays election-bound and organizer commands stay gated (K/L)", () => {
-    const managedTor = readProjectFile("src-tauri/src/managed_tor_test.rs");
+    const managedTor = readProjectFile("src-tauri/src/managed_tor.rs");
     assert.match(managedTor, /GUI_VOTER_BUNDLE_WRONG_ELECTION/);
     assert.match(managedTor, /verify_and_accept_descriptor/);
     // Configure never mutates the voter session (existing invariant, restated).
-    const start = managedTor.indexOf("pub fn configure_managed_tor_test");
+    const start = managedTor.indexOf("pub fn configure_managed_tor");
     const body = managedTor.slice(start, managedTor.indexOf("\n}", start));
     assert.doesNotMatch(
       body,
@@ -248,8 +248,8 @@ describe("voter election-folder primary loader", () => {
     // The backend command resolves canonical files and shares the load path.
     assert.match(client, /"load_election_folder"/);
     const tauriShell = readProjectFile("src-tauri/src/lib.rs");
-    assert.match(tauriShell, /fn load_election_folder\(/);
-    assert.match(tauriShell, /load_election_from_paths\(/);
+    assert.match(tauriShell, /async fn load_election_folder\(/);
+    assert.match(tauriShell, /load_election_from_paths_blocking\(/);
   });
 
   it("keeps individual file selection as a manual fallback disclosure", () => {
@@ -328,7 +328,7 @@ describe("guide covers the distributed lifecycle flow", () => {
   it("keeps receipt-vs-archive honesty and optional aggregate organizer-side anchoring", () => {
     assert.match(guide, /does not by itself claim final archive inclusion/);
     assert.match(guide, /aggregate[\s\S]*?organizer-side/);
-    assert.match(guide, /Voters never send\s+an Ootle transaction/);
+    assert.match(guide, /Voters never\s+send an Ootle transaction/);
   });
 
   it("organizer steps cover intake, bundle export, open, and offline signed statuses", () => {
@@ -339,10 +339,14 @@ describe("guide covers the distributed lifecycle flow", () => {
     assert.match(guide, /offline\/manual alternative/);
   });
 
-  it("Vote mini-guide includes the connection step before learning OPEN", () => {
-    const connectStep = vote.indexOf("Configure the ballot-office connection.");
-    const learnStep = vote.indexOf("Learn when voting opens.");
-    assert.ok(connectStep >= 0, "mini-guide has a connection step");
-    assert.ok(learnStep > connectStep, "learning OPEN comes after configuring");
+  it("Vote mini-guide includes the connection + status step and it precedes ballot creation", () => {
+    // The Guide-aligned mini-guide folds "learn when OPEN" into the
+    // "Configure the ballot-office connection and check status" step, so
+    // configuring the pinned authority necessarily happens before creating
+    // and submitting a ballot.
+    const connectStep = vote.indexOf("Configure the ballot-office connection and check status.");
+    const submitStep = vote.indexOf("Create and submit your anonymous ballot.");
+    assert.ok(connectStep >= 0, "mini-guide has a connection + status step");
+    assert.ok(submitStep > connectStep, "ballot creation comes after configuring");
   });
 });

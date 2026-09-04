@@ -21,6 +21,9 @@ import {
   BALLOT_PRESENTATIONS,
 } from "../src/ballot/ballotTypes.ts";
 import {
+  anchorDeploymentLockBlockers,
+  anchorPrepareBlockers,
+  anchorPublishBlockers,
   approvalBps,
   describeLeadingOutcome,
   approvalLabel,
@@ -665,6 +668,115 @@ describe("final archive lifecycle gate", () => {
     assert.equal(canWriteFinalArchive("CLOSED"), false);
     assert.equal(canWriteFinalArchive("VERIFIED"), false);
     assert.equal(canWriteFinalArchive("FINALIZED"), true);
+  });
+});
+
+describe("organizer Ootle anchor blockers", () => {
+  const readyPrepareInput = {
+    canAct: true,
+    busy: false,
+    archiveResultPresent: true,
+    trustedDeploymentPresent: true,
+    walletdEndpoint: "http://127.0.0.1:5100",
+    indexerEndpoint: "http://127.0.0.1:12500",
+    accountReference: "organizer-fee-account",
+    feeComponent: "component_fee",
+    declaredSealPublicKey: KEY64,
+    dedicatedOrganizerWalletAttested: true,
+    acceptedBallotFloor: 2,
+    maxEpochDelta: 12,
+    maxFee: 1000,
+  };
+
+  it("enables prepare for the finalized post-archive successful path", () => {
+    const lifecycle = "FINALIZED";
+    assert.equal(canWriteFinalArchive(lifecycle), true);
+    assert.deepEqual(anchorPrepareBlockers(readyPrepareInput), []);
+  });
+
+  it("names unmet prepare prerequisites without using lifecycle as a blocker", () => {
+    const blockers = anchorPrepareBlockers({
+      ...readyPrepareInput,
+      archiveResultPresent: false,
+      trustedDeploymentPresent: false,
+      walletdEndpoint: "",
+      indexerEndpoint: " ",
+      accountReference: "",
+      feeComponent: "",
+      declaredSealPublicKey: "",
+      dedicatedOrganizerWalletAttested: false,
+      acceptedBallotFloor: 1,
+      maxEpochDelta: 0,
+      maxFee: 0,
+      busy: true,
+    });
+    assert.deepEqual(blockers, [
+      "Final archive has not been written and verified",
+      "Ootle deployment is not locked",
+      "Walletd endpoint is missing",
+      "Indexer endpoint is missing",
+      "Fee account is missing",
+      "Fee component address is missing",
+      "Declared seal public key is missing",
+      "Dedicated organizer wallet acknowledgement required",
+      "Accepted ballot floor must be at least 2",
+      "Max epoch delta must be at least 1",
+      "Max fee must be at least 1",
+      "Another anchor operation is running",
+    ]);
+  });
+
+  it("names deployment-lock blockers", () => {
+    assert.deepEqual(
+      anchorDeploymentLockBlockers({
+        canAct: true,
+        busy: false,
+        templateAddress: "",
+        selectedWasmPath: "",
+        wasmInspectionPresent: false,
+      }),
+      [
+        "Template address is missing",
+        "Published template WASM has not been selected",
+      ],
+    );
+    assert.deepEqual(
+      anchorDeploymentLockBlockers({
+        canAct: true,
+        busy: false,
+        templateAddress: "template_abc",
+        selectedWasmPath: "anchor.wasm",
+        wasmInspectionPresent: true,
+      }),
+      [],
+    );
+  });
+
+  it("names publish blockers including walletd auth-token failures", () => {
+    assert.deepEqual(
+      anchorPublishBlockers({
+        canAct: true,
+        busy: false,
+        archiveResultPresent: true,
+        anchorConfigPresent: true,
+      }),
+      [],
+    );
+    assert.deepEqual(
+      anchorPublishBlockers({
+        canAct: true,
+        busy: true,
+        archiveResultPresent: false,
+        anchorConfigPresent: false,
+        walletdBearerTokenUnavailable: true,
+      }),
+      [
+        "Final archive has not been written and verified",
+        "Anchor configuration has not been prepared",
+        "Walletd bearer token requested but unavailable",
+        "Another anchor operation is running",
+      ],
+    );
   });
 });
 

@@ -11,6 +11,9 @@
 //! existing replay composition does, with `received_before_close = true`.
 //! Attempting intake while not open is a facade error and records nothing.
 
+use std::collections::HashMap;
+use std::time::SystemTime;
+
 use tari_cc_private_ballot_archive::{
     BallotDecisionOutcomeV1, BallotPackageDigestV1, VerificationTranscriptV1,
 };
@@ -21,12 +24,13 @@ use tari_cc_private_ballot_protocol::{
 };
 use tari_cc_private_ballot_tally::ApprovalTally;
 use tari_cc_private_ballot_verifier::{
-    BallotAcceptanceLedger, build_tari_triptych_verifier_from_registry_v1,
-    ingest_approval_ballot_package_v1,
+    BallotAcceptanceLedger, VerifiedApprovalBallotV1,
+    build_tari_triptych_verifier_from_registry_v1, ingest_approval_ballot_package_v1,
 };
 
 use crate::artifacts::GuiElectionArtifactsV1;
 use crate::error::GuiCoreError;
+use crate::historical_replay::HistoricalReplayConfigV1;
 use crate::intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
 use crate::participation::{
     GuiParticipationSummaryV1, ParticipationVisibility, SMALL_ELECTORATE_THRESHOLD,
@@ -34,6 +38,28 @@ use crate::participation::{
 };
 use crate::summary::GuiElectionSummaryV1;
 use crate::tally::{GuiTallySummaryV1, summarize_tally};
+
+/// Derived, in-memory pointer to the FIRST transcript decision for one package
+/// digest. The transcript remains authoritative; this never participates in
+/// durable encoding and every lookup rechecks the pointed-to transcript row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptDecisionIndexEntryV1 {
+    sequence: tari_cc_private_ballot_archive::IngestSequenceV1,
+    outcome: BallotDecisionOutcomeV1,
+}
+
+/// Process-local evidence that an immutable, content-addressed inbox file was
+/// fully read and digest-validated during this session.
+///
+/// This is deliberately not durable state. It is only a short-lived read/hash
+/// avoidance cache for a file that is already represented by the authoritative
+/// transcript. Any identity change makes the caller read and hash the file
+/// again before using it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PrivateInboxFileValidationV1 {
+    byte_len: u64,
+    modified: SystemTime,
+}
 
 /// One organizer election workspace.
 ///
@@ -49,6 +75,10 @@ pub struct GuiElectionSessionV1 {
     ledger: BallotAcceptanceLedger,
     transcript: VerificationTranscriptV1,
     packages: Vec<Vec<u8>>,
+    /// Derived acceleration only: first decision per exact package digest.
+    private_intake_digest_index: HashMap<BallotPackageDigestV1, TranscriptDecisionIndexEntryV1>,
+    /// Process-local evidence for safely unchanged inbox files. Never encoded.
+    private_inbox_validation_cache: HashMap<BallotPackageDigestV1, PrivateInboxFileValidationV1>,
 }
 
 /// Narrow durable representation of one organizer session.
@@ -95,6 +125,8 @@ impl GuiElectionSessionV1 {
             ledger: BallotAcceptanceLedger::new(),
             transcript,
             packages: Vec::new(),
+            private_intake_digest_index: HashMap::new(),
+            private_inbox_validation_cache: HashMap::new(),
         })
     }
 
@@ -107,6 +139,18 @@ impl GuiElectionSessionV1 {
     /// Returns a bounded [`GuiCoreError`] if artifacts fail validation,
     /// lifecycle replay is invalid, or a transcript invariant fails.
     pub fn from_durable_snapshot(
+        snapshot: GuiElectionSessionSnapshotV1,
+    ) -> Result<Self, GuiCoreError> {
+        crate::instrumentation::record_from_durable_snapshot_call();
+        let reconstruction_start = std::time::Instant::now();
+        let result = Self::from_durable_snapshot_inner(snapshot);
+        crate::instrumentation::add_reconstruction_micros(
+            u64::try_from(reconstruction_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+        result
+    }
+
+    fn from_durable_snapshot_inner(
         snapshot: GuiElectionSessionSnapshotV1,
     ) -> Result<Self, GuiCoreError> {
         if matches!(snapshot.lifecycle_state, ElectionLifecycleStateV1::Draft) {
@@ -139,6 +183,7 @@ impl GuiElectionSessionV1 {
 
         session.open()?;
         for package in &snapshot.packages {
+            crate::instrumentation::record_historical_ballot_replayed();
             let _ = session.intake_ballot_package_bytes(package)?;
         }
 
@@ -167,6 +212,208 @@ impl GuiElectionSessionV1 {
         }
 
         Ok(session)
+    }
+
+    /// Reconstructs a durable session using bounded multicore historical
+    /// verification (Slice 4B).
+    ///
+    /// Cryptographic proof validity is computed for every stored package by the
+    /// bounded worker pool ([`crate::historical_replay::parallel_verify_packages`]),
+    /// then the authoritative election semantics — nullifier ledger,
+    /// first-valid-wins, transcript sequencing, accepted/rejected classification
+    /// — are applied SEQUENTIALLY in canonical package order. The resulting
+    /// session is therefore identical, ballot-for-ballot, to the serial
+    /// [`from_durable_snapshot`](Self::from_durable_snapshot), independent of the
+    /// worker count, batch size, or worker completion order.
+    ///
+    /// Small elections (below the configured threshold) and an explicit single
+    /// worker fall back to the serial replay loop, which is byte-for-byte the
+    /// legacy path.
+    ///
+    /// # Errors
+    ///
+    /// Returns a bounded [`GuiCoreError`] on the same conditions as
+    /// [`from_durable_snapshot`](Self::from_durable_snapshot), or if the bounded
+    /// executor faults (fail-closed).
+    pub fn from_durable_snapshot_parallel(
+        snapshot: GuiElectionSessionSnapshotV1,
+        config: &HistoricalReplayConfigV1,
+    ) -> Result<Self, GuiCoreError> {
+        crate::instrumentation::record_from_durable_snapshot_call();
+        let reconstruction_start = std::time::Instant::now();
+        let result = Self::reconstruct_parallel_inner(snapshot, config);
+        crate::instrumentation::add_reconstruction_micros(
+            u64::try_from(reconstruction_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+        result
+    }
+
+    fn reconstruct_parallel_inner(
+        snapshot: GuiElectionSessionSnapshotV1,
+        config: &HistoricalReplayConfigV1,
+    ) -> Result<Self, GuiCoreError> {
+        if matches!(snapshot.lifecycle_state, ElectionLifecycleStateV1::Draft) {
+            return Err(GuiCoreError::new(
+                "GUI_WORKSPACE_INVALID_STATE",
+                crate::error::GuiErrorCategory::ArchiveIntegrity,
+                Some("election-workspace"),
+                "durable session snapshot cannot use draft lifecycle state",
+            ));
+        }
+
+        let artifacts = GuiElectionArtifactsV1::from_bytes(
+            &snapshot.manifest_bytes,
+            &snapshot.registry_bytes,
+            &snapshot.candidate_bytes,
+        )?;
+        let mut session = Self::new(artifacts)?;
+
+        if matches!(snapshot.lifecycle_state, ElectionLifecycleStateV1::Frozen) {
+            if !snapshot.packages.is_empty() {
+                return Err(GuiCoreError::new(
+                    "GUI_WORKSPACE_INVALID_STATE",
+                    crate::error::GuiErrorCategory::ArchiveIntegrity,
+                    Some("election-workspace"),
+                    "frozen durable workspace cannot contain ballot packages",
+                ));
+            }
+            return Ok(session);
+        }
+
+        session.open()?;
+
+        if config.uses_parallel_path(snapshot.packages.len()) {
+            session.replay_packages_parallel(&snapshot.packages, config)?;
+        } else {
+            // Serial fallback: byte-for-byte the legacy replay loop.
+            for package in &snapshot.packages {
+                crate::instrumentation::record_historical_ballot_replayed();
+                let _ = session.intake_ballot_package_bytes(package)?;
+            }
+        }
+
+        Self::apply_terminal_lifecycle(&mut session, snapshot.lifecycle_state)?;
+
+        Ok(session)
+    }
+
+    /// Verifies every package's proof across the bounded worker pool, then
+    /// applies the results to this session in canonical package order.
+    fn replay_packages_parallel(
+        &mut self,
+        packages: &[Vec<u8>],
+        config: &HistoricalReplayConfigV1,
+    ) -> Result<(), GuiCoreError> {
+        crate::instrumentation::record_historical_parallel_reconstruction();
+
+        let crypto_start = std::time::Instant::now();
+        let verify_results = crate::historical_replay::parallel_verify_packages(
+            packages,
+            &self.artifacts,
+            &self.verifier,
+            config,
+        )?;
+        crate::instrumentation::add_parallel_crypto_micros(
+            u64::try_from(crypto_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+
+        if verify_results.len() != packages.len() {
+            // The verifier must return exactly one result per package. Any
+            // mismatch fails the whole reconstruction closed.
+            return Err(GuiCoreError::new(
+                "GUI_HISTORICAL_REPLAY_RESULT_MISMATCH",
+                crate::error::GuiErrorCategory::Unavailable,
+                Some("historical-replay"),
+                "bounded historical verification returned an unexpected result count",
+            ));
+        }
+
+        let apply_start = std::time::Instant::now();
+        self.apply_verified_packages_in_order(packages, verify_results)?;
+        crate::instrumentation::add_ordered_apply_micros(
+            u64::try_from(apply_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+
+        Ok(())
+    }
+
+    /// Applies precomputed per-package cryptographic validity to the
+    /// authoritative session, sequentially and in canonical package order.
+    ///
+    /// This reproduces [`process_intake_package`](Self::process_intake_package)
+    /// exactly, package by package: transcript submission, then the combined
+    /// (crypto validity → ledger acceptance) decision, then transcript decision
+    /// recording and canonical storage. The only difference from serial replay
+    /// is that the expensive proof validity was computed earlier and in
+    /// parallel; the order-sensitive ledger/transcript/tally mutations remain
+    /// strictly sequential here.
+    fn apply_verified_packages_in_order(
+        &mut self,
+        packages: &[Vec<u8>],
+        verify_results: Vec<
+            Result<VerifiedApprovalBallotV1, tari_cc_private_ballot_protocol::ProtocolError>,
+        >,
+    ) -> Result<(), GuiCoreError> {
+        for (package_bytes, verify_result) in packages.iter().zip(verify_results) {
+            crate::instrumentation::record_historical_ballot_replayed();
+            // Preserve the gui-core intake-pipeline verification count: one
+            // logical proof verification per replayed package.
+            crate::instrumentation::record_triptych_verify_call();
+
+            let digest = Self::package_digest(package_bytes);
+            let sequence = self
+                .transcript
+                .record_submission(digest, true)
+                .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
+
+            let outcome = match verify_result {
+                Ok(verified) => match self.ledger.accept_verified(&self.lifecycle, verified) {
+                    Ok(()) => BallotDecisionOutcomeV1::Accepted,
+                    Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
+                },
+                Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
+            };
+
+            self.transcript
+                .record_decision(sequence, digest, outcome)
+                .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
+            self.record_private_intake_digest_index_entry(sequence, digest, outcome);
+
+            self.packages.push(package_bytes.clone());
+        }
+
+        crate::instrumentation::add_historical_serial_order_applies(packages.len() as u64);
+
+        Ok(())
+    }
+
+    /// Applies the terminal lifecycle transitions after all packages are
+    /// replayed. Shared by the parallel reconstruction path.
+    fn apply_terminal_lifecycle(
+        &mut self,
+        lifecycle_state: ElectionLifecycleStateV1,
+    ) -> Result<(), GuiCoreError> {
+        match lifecycle_state {
+            ElectionLifecycleStateV1::Open => Ok(()),
+            ElectionLifecycleStateV1::Closed => self.close(),
+            ElectionLifecycleStateV1::Verified => {
+                self.close()?;
+                self.mark_verified()
+            }
+            ElectionLifecycleStateV1::Finalized => {
+                self.close()?;
+                self.mark_verified()?;
+                self.finalize()
+            }
+            ElectionLifecycleStateV1::Draft | ElectionLifecycleStateV1::Frozen => {
+                Err(GuiCoreError::new(
+                    "GUI_WORKSPACE_INVALID_STATE",
+                    crate::error::GuiErrorCategory::ArchiveIntegrity,
+                    Some("election-workspace"),
+                    "durable workspace lifecycle state is inconsistent",
+                ))
+            }
+        }
     }
 
     /// Returns the replayable durable session representation.
@@ -318,6 +565,100 @@ impl GuiElectionSessionV1 {
         &mut self,
         package_bytes: &[u8],
     ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
+        self.ensure_inbox_reconciliation_lifecycle()?;
+        let digest = Self::package_digest(package_bytes);
+        if let Some(result) = self.indexed_inbox_reconciliation_result(digest)? {
+            return Ok(result);
+        }
+        self.process_intake_package_with_digest(package_bytes, digest)
+    }
+
+    /// Returns the reconciliation result for a previously fully validated,
+    /// unchanged content-addressed inbox file. This avoids rereading/re-hashing
+    /// a file only after an earlier pass proved both its bytes and its filename
+    /// digest. The transcript index is revalidated before it is used.
+    pub(crate) fn reconcile_cached_inbox_digest(
+        &self,
+        digest: BallotPackageDigestV1,
+        byte_len: u64,
+        modified: SystemTime,
+    ) -> Result<Option<GuiBallotIntakeResultV1>, GuiCoreError> {
+        self.ensure_inbox_reconciliation_lifecycle()?;
+        let Some(cached) = self.private_inbox_validation_cache.get(&digest) else {
+            return Ok(None);
+        };
+        if cached.byte_len != byte_len || cached.modified != modified {
+            return Ok(None);
+        }
+        self.indexed_inbox_reconciliation_result(digest)
+    }
+
+    /// Records a successful full inbox file validation for possible reuse in a
+    /// later sync pass. This is transient cache state, not durable authority.
+    pub(crate) fn remember_validated_inbox_file(
+        &mut self,
+        digest: BallotPackageDigestV1,
+        byte_len: u64,
+        modified: SystemTime,
+    ) {
+        self.private_inbox_validation_cache
+            .insert(digest, PrivateInboxFileValidationV1 { byte_len, modified });
+    }
+
+    /// Shared intake pipeline: digest → transcript submission → full protocol
+    /// validation → decision recording → canonical storage.
+    fn process_intake_package(
+        &mut self,
+        package_bytes: &[u8],
+    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
+        self.process_intake_package_with_digest(package_bytes, Self::package_digest(package_bytes))
+    }
+
+    fn process_intake_package_with_digest(
+        &mut self,
+        package_bytes: &[u8],
+        digest: BallotPackageDigestV1,
+    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
+        let provider = Blake3HashProviderV1;
+
+        let sequence = self
+            .transcript
+            .record_submission(digest, true)
+            .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
+
+        // Each intake performs exactly one approval-proof verification, which
+        // performs exactly one Triptych `verify`. Counting here is the
+        // authoritative Triptych-invocation count for the gui-core pipeline.
+        crate::instrumentation::record_triptych_verify_call();
+        let verify_start = std::time::Instant::now();
+        let ingest = ingest_approval_ballot_package_v1(
+            package_bytes,
+            self.artifacts.manifest(),
+            self.artifacts.candidates(),
+            &self.lifecycle,
+            &mut self.ledger,
+            &provider,
+            &self.verifier,
+        );
+        crate::instrumentation::add_proof_verification_micros(
+            u64::try_from(verify_start.elapsed().as_micros()).unwrap_or(u64::MAX),
+        );
+        let outcome = match ingest {
+            Ok(()) => BallotDecisionOutcomeV1::Accepted,
+            Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
+        };
+
+        self.transcript
+            .record_decision(sequence, digest, outcome)
+            .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
+        self.record_private_intake_digest_index_entry(sequence, digest, outcome);
+
+        self.packages.push(package_bytes.to_vec());
+
+        Ok(self.intake_result(sequence, digest, package_bytes, outcome))
+    }
+
+    fn ensure_inbox_reconciliation_lifecycle(&self) -> Result<(), GuiCoreError> {
         if matches!(
             self.lifecycle.state(),
             ElectionLifecycleStateV1::Draft
@@ -332,47 +673,71 @@ impl GuiElectionSessionV1 {
                 "inbox reconciliation is permitted only while voting is open or during the post-close drain",
             ));
         }
-        self.process_intake_package(package_bytes)
+        Ok(())
     }
 
-    /// Shared intake pipeline: digest → transcript submission → full protocol
-    /// validation → decision recording → canonical storage.
-    fn process_intake_package(
+    fn indexed_inbox_reconciliation_result(
+        &self,
+        digest: BallotPackageDigestV1,
+    ) -> Result<Option<GuiBallotIntakeResultV1>, GuiCoreError> {
+        let Some(entry) = self.private_intake_digest_index.get(&digest).copied() else {
+            crate::instrumentation::record_private_intake_digest_index_miss();
+            return Ok(None);
+        };
+        crate::instrumentation::record_private_intake_digest_index_hit();
+
+        let index = usize::try_from(entry.sequence.value()).map_err(|_| {
+            private_intake_digest_index_inconsistent(
+                "the indexed transcript sequence is not addressable",
+            )
+        })?;
+        let Some(authoritative) = self.transcript.decisions().get(index) else {
+            return Err(private_intake_digest_index_inconsistent(
+                "the indexed transcript decision is missing",
+            ));
+        };
+        if authoritative.sequence() != entry.sequence
+            || authoritative.package_digest() != digest
+            || authoritative.outcome() != entry.outcome
+        {
+            return Err(private_intake_digest_index_inconsistent(
+                "the derived digest index disagrees with the authoritative transcript",
+            ));
+        }
+
+        let outcome = if entry.outcome.is_accepted() {
+            BallotDecisionOutcomeV1::Rejected(ValidationCode::DuplicateNullifier)
+        } else {
+            entry.outcome
+        };
+        Ok(Some(self.intake_result(
+            entry.sequence,
+            digest,
+            &[],
+            outcome,
+        )))
+    }
+
+    fn record_private_intake_digest_index_entry(
         &mut self,
-        package_bytes: &[u8],
-    ) -> Result<GuiBallotIntakeResultV1, GuiCoreError> {
-        let provider = Blake3HashProviderV1;
-        let digest = BallotPackageDigestV1::new(hash_domain_separated(
-            &provider,
+        sequence: tari_cc_private_ballot_archive::IngestSequenceV1,
+        digest: BallotPackageDigestV1,
+        outcome: BallotDecisionOutcomeV1,
+    ) {
+        // `reconcile_accepted_package_bytes_from_inbox` historically used
+        // `decisions().iter().find(...)`; retain that exact earliest-decision
+        // semantics when a live exact retry records another transcript row.
+        self.private_intake_digest_index
+            .entry(digest)
+            .or_insert(TranscriptDecisionIndexEntryV1 { sequence, outcome });
+    }
+
+    fn package_digest(package_bytes: &[u8]) -> BallotPackageDigestV1 {
+        BallotPackageDigestV1::new(hash_domain_separated(
+            &Blake3HashProviderV1,
             HashDomain::BallotPackageV1,
             package_bytes,
-        ));
-
-        let sequence = self
-            .transcript
-            .record_submission(digest, true)
-            .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
-
-        let outcome = match ingest_approval_ballot_package_v1(
-            package_bytes,
-            self.artifacts.manifest(),
-            self.artifacts.candidates(),
-            &self.lifecycle,
-            &mut self.ledger,
-            &provider,
-            &self.verifier,
-        ) {
-            Ok(()) => BallotDecisionOutcomeV1::Accepted,
-            Err(error) => BallotDecisionOutcomeV1::Rejected(error.code()),
-        };
-
-        self.transcript
-            .record_decision(sequence, digest, outcome)
-            .map_err(|error| GuiCoreError::from_protocol(&error, "transcript"))?;
-
-        self.packages.push(package_bytes.to_vec());
-
-        Ok(self.intake_result(sequence, digest, package_bytes, outcome))
+        ))
     }
 
     /// Backward-compatible name for the canonical byte-intake boundary.
@@ -566,4 +931,13 @@ impl GuiElectionSessionV1 {
     pub fn packages(&self) -> &[Vec<u8>] {
         &self.packages
     }
+}
+
+fn private_intake_digest_index_inconsistent(message: &'static str) -> GuiCoreError {
+    GuiCoreError::new(
+        "GUI_PRIVATE_INTAKE_DIGEST_INDEX_INCONSISTENT",
+        crate::error::GuiErrorCategory::ArchiveIntegrity,
+        Some("private-intake-inbox"),
+        message,
+    )
 }

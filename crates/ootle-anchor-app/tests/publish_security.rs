@@ -1,8 +1,8 @@
 //! Shared-layer live-publication security tests (Codex remediation).
 //!
 //! These prove the SHARED [`AnchorAppDriver`] enforces, before ANY walletd or
-//! indexer transport call, the privacy floor (HIGH-4), the loopback endpoint
-//! policy (HIGH-3), and the archive-containment guard (HIGH-2); that the
+//! indexer transport call, the live endpoint policy (HIGH-3), and the privacy
+//! floor (HIGH-4), and the archive-containment guard (HIGH-2); that the
 //! walletd bearer token never lands in any persisted artifact (HIGH-3); and
 //! that stepped receipt polling honors the same persisted backoff as the looped
 //! driver across immediate re-calls and a restart (MEDIUM-1). Every scenario is
@@ -26,8 +26,9 @@ use tari_cc_private_ballot_ootle_anchor_app::{
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, NetworkAdapterConfig, ScriptedIndexerTransport,
-    ScriptedWalletdResponse, ScriptedWalletdTransport, TransportError, TransportErrorCategory,
-    WalletdAnchorNetworkAdapter, WalletdAuthSecret, WalletdEndpoint,
+    ScriptedWalletdResponse, ScriptedWalletdTransport, TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1,
+    TransportError, TransportErrorCategory, WalletdAnchorNetworkAdapter, WalletdAuthSecret,
+    WalletdEndpoint,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
@@ -257,7 +258,7 @@ fn two_accepted_ballots_pass_the_floor_and_prepare() {
 }
 
 // ---------------------------------------------------------------------------
-// HIGH-3 — loopback endpoint policy
+// HIGH-3 — live endpoint policy
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -285,7 +286,31 @@ fn non_loopback_walletd_endpoint_blocks_before_transport() {
 }
 
 #[test]
-fn non_loopback_indexer_endpoint_blocks_before_transport() {
+fn trusted_remote_esmeralda_indexer_is_allowed_before_transport() {
+    let config = live_config_with(
+        2,
+        2,
+        LOOPBACK_WALLETD,
+        TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1,
+        snapshot_path(),
+        evidence_path(),
+        1,
+        1,
+    );
+    let mut driver = scripted_driver(
+        config,
+        happy_walletd_transport(),
+        not_found_indexer_transport(),
+    );
+    let result = driver
+        .run_single_step(OperatorDecision::Approve)
+        .expect("trusted remote indexer must be allowed to reach prepare");
+    assert!(!result.phase.is_terminal_success());
+    assert_eq!(driver.walletd_adapter().transport().create_calls(), 1);
+}
+
+#[test]
+fn arbitrary_remote_https_indexer_endpoint_blocks_before_transport() {
     let config = live_config_with(
         2,
         2,
@@ -303,7 +328,31 @@ fn non_loopback_indexer_endpoint_blocks_before_transport() {
     );
     let error = driver
         .run_single_step(OperatorDecision::Approve)
-        .expect_err("a remote indexer endpoint must be rejected");
+        .expect_err("an arbitrary remote indexer endpoint must be rejected");
+    assert_eq!(error, DriverError::NonLoopbackEndpoint);
+    assert_eq!(driver.walletd_adapter().transport().create_calls(), 0);
+}
+
+#[test]
+fn arbitrary_remote_http_indexer_endpoint_blocks_before_transport() {
+    let config = live_config_with(
+        2,
+        2,
+        LOOPBACK_WALLETD,
+        "http://192.0.2.10:12500",
+        snapshot_path(),
+        evidence_path(),
+        1,
+        1,
+    );
+    let mut driver = scripted_driver(
+        config,
+        happy_walletd_transport(),
+        not_found_indexer_transport(),
+    );
+    let error = driver
+        .run_single_step(OperatorDecision::Approve)
+        .expect_err("an insecure remote HTTP indexer endpoint must be rejected");
     assert_eq!(error, DriverError::NonLoopbackEndpoint);
     assert_eq!(driver.walletd_adapter().transport().create_calls(), 0);
 }

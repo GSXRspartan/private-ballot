@@ -423,12 +423,34 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         setBackendError(null);
         recordAction(labels[action]);
         void refreshParticipation();
-        void refreshWorkspaces();
+        // Deliberately NOT re-listing all workspaces here. A full workspace
+        // listing is expensive discovery work, and a lifecycle transition
+        // changes only the ACTIVE workspace's lifecycle state — no workspace is
+        // created or removed. Patch just that one row locally from the
+        // authoritative summary the backend just returned, so the
+        // Resume-Election table stays consistent without a full re-list (which
+        // previously reconstructed every workspace on every
+        // Open/Close/Verify/Finalize). The stored ballot count is unaffected by
+        // a lifecycle transition, so it is left as-is.
+        const activeSessionId = activeWorkspaceIds?.session_workspace_id ?? null;
+        if (activeSessionId) {
+          setWorkspaces((prev) =>
+            prev.map((workspace) =>
+              workspace.workspace_id === activeSessionId
+                ? {
+                    ...workspace,
+                    lifecycle_state: summary.lifecycle_state ?? workspace.lifecycle_state,
+                    finalized: summary.lifecycle_state === "FINALIZED",
+                  }
+                : workspace,
+            ),
+          );
+        }
       } catch (error) {
         captureError(error);
       }
     },
-    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
+    [captureError, recordAction, refreshParticipation, activeWorkspaceIds],
   );
 
   const setSetting = useCallback(

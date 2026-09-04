@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, BackendError } from "../api/client";
 import { pickCborFile, pickDirectory } from "../api/dialog";
@@ -9,11 +9,16 @@ import {
   boundTransportAnchorResult,
   transportAnchorResultIsStale,
 } from "../archive/archiveBinding";
-import type { GuiCommandError } from "../api/types";
+import type {
+  GuiCommandError,
+  GuiV2LiveAnchorHydratedStateV1,
+} from "../api/types";
 import { useAppState } from "../state/AppState";
+import type { NavSection } from "../components/AppFrame";
 import {
   BackendErrorNotice,
   Card,
+  CopyButton,
   DetailsSection,
   Field,
   HashValue,
@@ -21,28 +26,26 @@ import {
   Pill,
 } from "../components/ui";
 import { aggregateStateText } from "../voterWorkflow";
+import {
+  summarizeV2AnchorState,
+  v2AnchorBadgeLabel,
+  v2AnchorBadgeTone,
+} from "../anchor/v2AnchorStatus";
 
 /**
  * Archive: full offline replay verification of an archive directory through
- * the gui-core verifier, plus the archive summary view (manifest, registry,
- * ballot options, accepted/rejected ballots, archive hash, verification
- * status). The offline archive is authoritative.
+ * the gui-core verifier, plus a compact result summary and the current V2
+ * anchor status (hydrated read-only from the app-owned sidecars). The offline
+ * archive is authoritative; the V2 anchor status is optional and never
+ * modified from this screen.
  */
-export function Archive() {
+export function Archive({
+  onNavigate,
+}: { onNavigate?: (section: NavSection) => void } = {}) {
   const { shellAvailable, recordAction, archiveView, updateArchiveView } = useAppState();
-  // Verification state is retained across navigation via AppState (session
-  // memory only) so a just-verified archive is not forgotten when leaving and
-  // returning to this screen. It is intentionally NOT persisted across restart:
-  // a cached "verified" boolean is never treated as proof the archive still
-  // verifies; the authoritative Rust verifier must run again in a new session.
   const directory = archiveView.directory;
   const anchorEvidencePath = archiveView.anchorEvidencePath;
 
-  // Each verification result is bound to the inputs that produced it and is
-  // rendered ONLY while those inputs still match the current inputs. So a
-  // result can never be shown for a directory/evidence path other than the one
-  // actually checked. Changing an input clears the dependent binding outright,
-  // and the bound-render gate additionally rejects a stale async result.
   const result = boundArchiveResult(archiveView.verification, directory);
   const transportAnchor = boundTransportAnchorResult(
     archiveView.transportAnchor,
@@ -50,9 +53,6 @@ export function Archive() {
     anchorEvidencePath,
   );
 
-  // Changing the archive directory invalidates BOTH results (they were computed
-  // against the old directory); changing the evidence path invalidates the
-  // transport-anchor result.
   const setDirectory = (value: string) =>
     updateArchiveView({ directory: value, verification: null, transportAnchor: null });
   const setAnchorEvidencePath = (value: string) =>
@@ -60,16 +60,17 @@ export function Archive() {
 
   const [error, setError] = useState<GuiCommandError | null>(null);
   const [running, setRunning] = useState(false);
+  // Hydrated V2 anchor state for the CURRENTLY verified directory, refreshed
+  // whenever the directory changes or a verification completes. Never contacts
+  // walletd or the indexer — inspect_v2_live_anchor_state only reads app-owned
+  // sidecars. Stored per-directory so a stale response is discarded on switch.
+  const [v2AnchorState, setV2AnchorState] =
+    useState<GuiV2LiveAnchorHydratedStateV1 | null>(null);
+  const [v2InspectionError, setV2InspectionError] = useState<GuiCommandError | null>(null);
 
-  // Always-current inputs, read at async-resolve time to detect a response that
-  // became stale because the user changed inputs while it was in flight.
   const currentInputsRef = useRef({ directory, anchorEvidencePath });
   currentInputsRef.current = { directory, anchorEvidencePath };
 
-  // A directory remembered from a previous session (or a directory typed in)
-  // that has not been verified in THIS session. Distinguishes "we remember
-  // where your archive is" from "this archive verifies", which requires a
-  // fresh run of the authoritative verifier.
   const unverifiedRemembered = directory !== "" && result === null;
 
   const showError = (err: unknown) =>
@@ -84,6 +85,16 @@ export function Archive() {
           },
     );
 
+  const commandError = (err: unknown): GuiCommandError =>
+    err instanceof BackendError
+      ? err.payload
+      : {
+          code: "GUI_UNEXPECTED_ERROR",
+          category: "INVALID_INPUT",
+          context: null,
+          message: "an unexpected frontend/backend boundary error occurred",
+        };
+
   const onPickDirectory = async () => {
     const picked = await pickDirectory("Choose archive directory", "archive");
     if (picked !== null) setDirectory(picked);
@@ -94,32 +105,53 @@ export function Archive() {
     if (picked !== null) setAnchorEvidencePath(picked);
   };
 
+  // Reset V2 state whenever the directory changes (including verification
+  // reset). The next successful verify (or manual refresh) re-hydrates it.
+  useEffect(() => {
+    setV2AnchorState(null);
+    setV2InspectionError(null);
+  }, [directory]);
+
+  // Re-hydrate V2 anchor state whenever a verified archive is loaded. This is
+  // a strictly read-only projection of app-owned sidecars — never network.
+  useEffect(() => {
+    if (!shellAvailable) return;
+    if (!result || !result.verified) return;
+    const submittedDirectory = directory;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const hydrated = await api.inspectV2LiveAnchorState(submittedDirectory);
+        if (cancelled) return;
+        if (submittedDirectory !== currentInputsRef.current.directory) return;
+        setV2AnchorState(hydrated);
+      } catch (err) {
+        if (cancelled) return;
+        if (submittedDirectory !== currentInputsRef.current.directory) return;
+        setV2InspectionError(commandError(err));
+        setV2AnchorState(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [directory, result, shellAvailable]);
+
   const onVerify = async () => {
-    // Capture the exact directory submitted so a response arriving after the
-    // user changed the directory is not installed for the new input.
     const submittedDirectory = directory;
     setError(null);
     setRunning(true);
     try {
       const verification = await api.verifyArchive(submittedDirectory);
-      if (archiveResultIsStale(submittedDirectory, currentInputsRef.current.directory)) {
-        // The directory changed while this ran: discard the UI result. The
-        // backend verification still ran authoritatively; only display is
-        // suppressed for the now-mismatched input.
-        return;
-      }
+      if (archiveResultIsStale(submittedDirectory, currentInputsRef.current.directory)) return;
       updateArchiveView({
         verification: { result: verification, verifiedDirectory: submittedDirectory },
       });
-      // Remember the location (directory only) so it reopens here next session;
-      // the cached result itself is never persisted across restart.
       rememberDirectory("archive", submittedDirectory);
       recordAction(
         verification.verified ? "Archive verification passed" : "Archive verification failed",
       );
     } catch (err) {
-      // A failed verification must not leave a previous success visible for
-      // this input.
       if (!archiveResultIsStale(submittedDirectory, currentInputsRef.current.directory)) {
         updateArchiveView({ verification: null });
         showError(err);
@@ -164,6 +196,8 @@ export function Archive() {
       setRunning(false);
     }
   };
+
+  const v2Summary = summarizeV2AnchorState(v2AnchorState);
 
   return (
     <>
@@ -229,319 +263,529 @@ export function Archive() {
         )}
       </Card>
 
-      <Card title="Check final anchor record">
-        <p className="form-hint">
-          If this election was optionally anchored on Ootle, you can check here whether the
-          saved anchor record matches this archive. This check is informational only and does
-          not change the election result.
-        </p>
-        <DetailsSection summary="Technical details">
-          <p className="form-hint">
-            Verifies an existing finalized Phase 4 evidence record against this completed
-            archive. Submitted or unverified anchors remain INCLUDED, not ANCHORED; this
-            does not imply a voter transaction exists.
-          </p>
-        </DetailsSection>
-        <div className="form-row">
-          <label htmlFor="transport-anchor-evidence">Anchor evidence file</label>
-          <div className="file-row">
-            <input
-              id="transport-anchor-evidence"
-              type="text"
-              value={anchorEvidencePath}
-              onChange={(e) => setAnchorEvidencePath(e.target.value)}
-              placeholder="anchor-evidence.cbor"
-            />
-            <button
-              type="button"
-              className="btn btn-secondary"
-              disabled={!shellAvailable || running}
-              onClick={() => void onPickAnchorEvidence()}
-            >
-              Browse
-            </button>
-          </div>
-        </div>
-        <div className="btn-row">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={!shellAvailable || !directory || !anchorEvidencePath || running}
-            onClick={() => void onVerifyTransportAnchor()}
-          >
-            Check final anchor record
-          </button>
-        </div>
-        {shellAvailable && (!directory || !anchorEvidencePath) && (
-          <p className="form-hint">
-            Choose an archive directory and an anchor evidence file to continue.
-          </p>
-        )}
-        {transportAnchor && (
-          <div className="field-list">
-            <Field label="Transport state">
-              <Pill tone={transportAnchor.state === "ANCHORED" ? "ok" : "neutral"}>
-                {transportAnchor.state}
-              </Pill>
-            </Field>
-            <Field label="Archive finality">
-              {transportAnchor.archive_finalized ? "finalized" : "not finalized"}
-            </Field>
-            <Field label="Meaning">{aggregateStateText(transportAnchor.state)}</Field>
-            <Field label="Archive binding">{transportAnchor.transport_binding_verified ? "verified" : "not verified"}</Field>
-            <Field label="Phase 4 anchor">{transportAnchor.anchor_verified ? "verified" : "not verified"}</Field>
-          </div>
-        )}
-      </Card>
-
       {result && (
         <>
-          <Card title="Result at a glance">
-            <div className="field-list">
-              <Field label="Archive integrity">
-                {result.verified ? (
-                  <Pill tone="ok">Verified</Pill>
-                ) : (
-                  <Pill tone="error">Failed</Pill>
-                )}
-              </Field>
-              <Field label="Election finality">
-                {result.finalized ? (
-                  <Pill tone="ok">Finalized election verified</Pill>
-                ) : (
-                  <Pill tone="warn">Intermediate archive - not finalized</Pill>
-                )}
-              </Field>
-              <Field label="Accepted ballots">{result.accepted_count}</Field>
-              <Field label="Rejected ballots">{result.rejected_count}</Field>
-              <Field label="Archive hash">
-                {result.archive_hash_consistent ? "Matches" : "Mismatch"}
-              </Field>
-              <Field label="Recomputed result">
-                {result.tally ? "tally recomputed" : "not available"}
-              </Field>
-            </div>
-            <p className="form-hint">
-              Rejected ballots are valid audit evidence — for example, the same ballot imported
-              twice — and are never hidden. Raw hashes, machine IDs, and component-level detail
-              are in the sections below.
-            </p>
-            {result.finalized ? (
-              <p className="form-hint">
-                This archive verifies as a finalized election archive. Optional Ootle anchoring,
-                when present, is aggregate evidence over the archive commitment.
-              </p>
-            ) : (
-              <p className="form-hint">
-                This archive may verify internally, but it is an intermediate archive, not a
-                finalized election archive, and is not eligible for live Ootle anchoring.
-              </p>
-            )}
-          </Card>
-
-          <Card title="Verification status">
-            <div className="field-list">
-              {result.failure_stage && (
-                <Field label="First failing stage">{result.failure_stage}</Field>
-              )}
-              {result.failure_code && <Field label="Failure code">{result.failure_code}</Field>}
-              <Field label="Transcript complete">
-                {result.transcript_complete ? "yes" : "no"}
-              </Field>
-              <Field label="Catalog files checked">{result.file_count}</Field>
-            </div>
-          </Card>
-
-          <Card title="Governance source">
-            <p className="card-body">
-              Archive integrity proves the catalog digests match the bytes on disk; it does not
-              by itself prove the archived governance document matches the bound
-              governance source pin. The fact below is a distinct, separate check.
-            </p>
-            <div className="field-list">
-              <Field label="Governance supporting document">
-                {result.files.some(
-                  (f) => f.path === "governance/source.bin" && f.present,
-                ) ? (
-                  <Pill tone="ok">Present</Pill>
-                ) : (
-                  <Pill tone="neutral">Absent</Pill>
-                )}
-              </Field>
-              <Field label="Governance source pin">
-                {(() => {
-                  const fact = result.governance_source_matches_pin;
-                  switch (fact) {
-                    case "Matched":
-                      return <Pill tone="ok">Matched</Pill>;
-                    case "Mismatch":
-                      return <Pill tone="error">Mismatch</Pill>;
-                    case "Missing":
-                      return <Pill tone="error">Missing</Pill>;
-                    case "OperatorAttested":
-                      return <Pill tone="warn">Operator-attested</Pill>;
-                    case "NotApplicable":
-                    default:
-                      return <Pill tone="neutral">Not applicable</Pill>;
-                  }
-                })()}
-              </Field>
-              {result.governance_source_matches_pin === "OperatorAttested" && (
-                <Field label="Note">
-                  <span className="field-value">
-                    Git reference correspondence is not independently verified by this
-                    application; it is operator-attested.
-                  </span>
-                </Field>
-              )}
-              {result.governance_source_matches_pin === "NotApplicable" && (
-                <Field label="Note">
-                  <span className="field-value">
-                    Bound reference is not a recognized immutable pin format; the
-                    governance-source cross-check does not apply.
-                  </span>
-                </Field>
-              )}
-            </div>
-          </Card>
-
-          <Card title="Transport archive binding">
-            <p className="card-body">
-              A verified binding is a hash-covered archive constituent. It is not, by itself,
-              proof that an Ootle anchor was finalized.
-            </p>
-            <div className="field-list">
-              <Field label="Binding">
-                {result.transport_binding_present ? (
-                  <Pill tone={result.transport_binding_verified ? "ok" : "error"}>
-                    {result.transport_binding_verified ? "Verified" : "Invalid"}
-                  </Pill>
-                ) : (
-                  <Pill tone="neutral">Not present</Pill>
-                )}
-              </Field>
-              {result.transport_batch_set_commitment_hex && (
-                <Field label="Final batch-set commitment">
-                  <HashValue value={result.transport_batch_set_commitment_hex} />
-                </Field>
-              )}
-              {result.transport_accepted_count !== null && (
-                <Field label="Transport accepted count">
-                  {result.transport_accepted_count}
-                </Field>
-              )}
-              {result.transport_reduced_anonymity !== null && (
-                <Field label="Reduced anonymity">
-                  {result.transport_reduced_anonymity ? "reported" : "not reported"}
-                </Field>
-              )}
-            </div>
-          </Card>
-
-          <div className="card-grid">
-            <Card title="Manifest">
+          {result.verified ? (
+            <Card title="Archive verified">
+              <Notice tone="ok">
+                <strong>ARCHIVE VERIFIED.</strong>{" "}
+                {result.finalized
+                  ? "Finalized election verified."
+                  : "Intermediate archive verified (not yet finalized)."}
+              </Notice>
               <div className="field-list">
-                <Field label="Manifest schema">
-                  {result.election_manifest_schema_version === null
-                    ? "unknown"
-                    : `ElectionManifestV${result.election_manifest_schema_version}`}
-                </Field>
                 {result.proposal_question && (
-                  <Field label="Ballot question">{result.proposal_question}</Field>
+                  <Field label="Ballot question">
+                    <span className="field-value">{result.proposal_question}</span>
+                  </Field>
                 )}
-                <Field label="Election manifest hash">
-                  <HashValue value={result.election_manifest_hash_hex} />
-                </Field>
-              </div>
-            </Card>
-
-            <Card title="Archive hash">
-              <div className="field-list">
-                <Field label="Archived">
-                  <HashValue value={result.archive_hash_hex} />
-                </Field>
-                <Field label="Recomputed">
-                  <HashValue value={result.recomputed_archive_hash_hex} />
-                </Field>
-              </div>
-            </Card>
-
-            <Card title="Ballots">
-              <div className="field-list">
-                <Field label="Packages">{result.ballot_package_count}</Field>
                 <Field label="Accepted ballots">{result.accepted_count}</Field>
                 <Field label="Rejected ballots">{result.rejected_count}</Field>
-                {result.tally && (
-                  <Field label="Abstentions">{result.tally.abstentions}</Field>
-                )}
+                <Field label="Archive hash">
+                  {result.archive_hash_consistent ? (
+                    <Pill tone="ok">Matches</Pill>
+                  ) : (
+                    <Pill tone="error">Mismatch</Pill>
+                  )}
+                </Field>
+                <Field label="Tally">
+                  {result.tally ? (
+                    <Pill tone="ok">Recomputed successfully</Pill>
+                  ) : (
+                    <Pill tone="neutral">Not available</Pill>
+                  )}
+                </Field>
+                <Field label="Files verified">{result.file_count}</Field>
               </div>
+              <p className="form-hint">
+                The saved election record passed independent verification. Its expected files,
+                integrity hashes, eligible-voter registry, accepted ballots, and recomputed
+                result are internally consistent. Rejected ballots (e.g. duplicate imports) are
+                audit evidence and are never hidden.
+              </p>
             </Card>
-          </div>
-
-          {result.tally && (
-            <Card title="Recomputed tally — ballot options">
-              <table className="data">
-                <thead>
-                  <tr>
-                    <th scope="col">Option</th>
-                    <th scope="col">Machine ID</th>
-                    <th scope="col">Approvals</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.tally.counts.map((count) => (
-                    <tr key={count.candidate_id_hex}>
-                      <td>{count.display_name || "—"}</td>
-                      <td>
-                        <span className="hash">
-                          {count.candidate_id_text ?? count.candidate_id_hex}
-                        </span>
-                      </td>
-                      <td>{count.approvals}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          ) : (
+            <Card title="Archive verification failed">
+              <Notice tone="error">
+                <strong>ARCHIVE VERIFICATION FAILED.</strong> Failure details below are not
+                collapsed; do not treat this archive as verified.
+              </Notice>
+              <div className="field-list">
+                {result.failure_stage && (
+                  <Field label="First failing stage">{result.failure_stage}</Field>
+                )}
+                {result.failure_code && (
+                  <Field label="Failure code">{result.failure_code}</Field>
+                )}
+                <Field label="Accepted ballots">{result.accepted_count}</Field>
+                <Field label="Rejected ballots">{result.rejected_count}</Field>
+                <Field label="Archive hash">
+                  {result.archive_hash_consistent ? "Matches" : "Mismatch"}
+                </Field>
+                <Field label="Transcript complete">
+                  {result.transcript_complete ? "yes" : "no"}
+                </Field>
+              </div>
+              {result.files.some((f) => !f.present || !f.digest_ok) && (
+                <>
+                  <p className="card-body">Files that failed the catalog check:</p>
+                  <table className="data">
+                    <thead>
+                      <tr>
+                        <th scope="col">File</th>
+                        <th scope="col">Present</th>
+                        <th scope="col">Digest</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.files
+                        .filter((file) => !file.present || !file.digest_ok)
+                        .map((file) => (
+                          <tr key={file.path}>
+                            <td>
+                              <span className="hash">{file.path}</span>
+                            </td>
+                            <td>{file.present ? "yes" : "no"}</td>
+                            <td>
+                              {file.digest_ok ? (
+                                <Pill tone="ok">match</Pill>
+                              ) : (
+                                <Pill tone="error">mismatch</Pill>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
             </Card>
           )}
 
-          <Card title="Registry and catalog files">
-            <p className="card-body">
-              The registry and option set are validated during replay: their recomputed
-              commitments must equal the manifest&rsquo;s. Catalog membership is strict —
-              missing and unexpected files both fail verification. Canonical election artifacts
-              (manifest, registry, candidate-set) are distinct from the governance supporting
-              document, if present.
-            </p>
-            <table className="data">
-              <thead>
-                <tr>
-                  <th scope="col">File</th>
-                  <th scope="col">Role</th>
-                  <th scope="col">Present</th>
-                  <th scope="col">Digest</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.files.map((file) => (
-                  <tr key={file.path}>
-                    <td>
-                      <span className="hash">{file.path}</span>
-                    </td>
-                    <td>{archiveFileRole(file.path)}</td>
-                    <td>{file.present ? "yes" : "no"}</td>
-                    <td>
-                      {file.digest_ok ? (
-                        <Pill tone="ok">match</Pill>
-                      ) : (
-                        <Pill tone="error">mismatch</Pill>
+          {result.verified && (
+            <Card title="Ootle anchor">
+              {v2InspectionError && (
+                <Notice tone="warn">
+                  Could not read V2 anchor state: {v2InspectionError.message}
+                </Notice>
+              )}
+              {v2Summary === null && !v2InspectionError && (
+                <p className="form-hint">Loading current anchor state…</p>
+              )}
+              {v2Summary && v2Summary.kind === "verified" && (
+                <>
+                  <div className="field-list">
+                    <Field label="Status">
+                      <Pill tone={v2AnchorBadgeTone(v2Summary.kind)}>
+                        {v2AnchorBadgeLabel(v2Summary.kind)}
+                      </Pill>
+                    </Field>
+                    {v2Summary.transactionId && (
+                      <Field label="Transaction">
+                        <span className="hash">{v2Summary.transactionId}</span>
+                        <CopyButton value={v2Summary.transactionId} />
+                      </Field>
+                    )}
+                    <Field label="Receipt">
+                      <Pill tone="ok">Verified</Pill>
+                    </Field>
+                    <Field label="Canonical public summary">
+                      <Pill tone="ok">Verified</Pill>
+                    </Field>
+                    <Field label="Anchor digest">
+                      <Pill tone="ok">Verified</Pill>
+                    </Field>
+                    {v2Summary.network && (
+                      <Field label="Network">{v2Summary.network}</Field>
+                    )}
+                    <Field label="Evidence">
+                      <span className="hash">{v2Summary.evidencePath}</span>
+                      <CopyButton value={v2Summary.evidencePath} />
+                    </Field>
+                  </div>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate?.("anchor")}
+                      disabled={!onNavigate}
+                    >
+                      Open Anchor screen
+                    </button>
+                  </div>
+                </>
+              )}
+              {v2Summary &&
+                (v2Summary.kind === "submitted-unverified" ||
+                  v2Summary.kind === "recoverable") && (
+                  <>
+                    <Notice tone="warn">
+                      <strong>Anchor submitted · verification pending.</strong> Verify the
+                      existing anchor from Manage Election. Do not submit another transaction.
+                    </Notice>
+                    <div className="field-list">
+                      {v2Summary.transactionId && (
+                        <Field label="Transaction">
+                          <span className="hash">{v2Summary.transactionId}</span>
+                          <CopyButton value={v2Summary.transactionId} />
+                        </Field>
                       )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </Card>
+                      {v2Summary.network && (
+                        <Field label="Network">{v2Summary.network}</Field>
+                      )}
+                      {v2Summary.phase && (
+                        <Field label="Lifecycle phase">{v2Summary.phase}</Field>
+                      )}
+                    </div>
+                    <div className="action-row">
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => onNavigate?.("manage")}
+                        disabled={!onNavigate}
+                      >
+                        Open Manage Election
+                      </button>
+                    </div>
+                  </>
+                )}
+              {v2Summary && v2Summary.kind === "failed" && (
+                <>
+                  <Notice tone="error">
+                    <strong>Anchor lifecycle terminated in FAILED.</strong>{" "}
+                    {v2Summary.failureReason ?? "See Manage Election for details."}
+                  </Notice>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => onNavigate?.("manage")}
+                      disabled={!onNavigate}
+                    >
+                      Open Manage Election
+                    </button>
+                  </div>
+                </>
+              )}
+              {v2Summary && v2Summary.kind === "no-anchor" && (
+                <>
+                  <p className="card-body">
+                    <strong>No Ootle anchor published.</strong>
+                  </p>
+                  <p className="form-hint">
+                    Anchoring is optional and non-binding. This archive remains independently
+                    verifiable and authoritative without an Ootle anchor.
+                  </p>
+                </>
+              )}
+            </Card>
+          )}
+
+          <DetailsSection summary="Advanced verification details">
+            <Card title="Verification status">
+              <div className="field-list">
+                {result.failure_stage && (
+                  <Field label="First failing stage">{result.failure_stage}</Field>
+                )}
+                {result.failure_code && (
+                  <Field label="Failure code">{result.failure_code}</Field>
+                )}
+                <Field label="Transcript complete">
+                  {result.transcript_complete ? "yes" : "no"}
+                </Field>
+                <Field label="Election finality">
+                  {result.finalized ? "finalized" : "not finalized"}
+                </Field>
+                <Field label="Catalog files checked">{result.file_count}</Field>
+              </div>
+            </Card>
+
+            <Card title="Governance source">
+              <p className="card-body">
+                Archive integrity proves the catalog digests match the bytes on disk; it does
+                not by itself prove the archived governance document matches the bound
+                governance source pin. The fact below is a distinct, separate check.
+              </p>
+              <div className="field-list">
+                <Field label="Governance supporting document">
+                  {result.files.some(
+                    (f) => f.path === "governance/source.bin" && f.present,
+                  ) ? (
+                    <Pill tone="ok">Present</Pill>
+                  ) : (
+                    <Pill tone="neutral">Absent</Pill>
+                  )}
+                </Field>
+                <Field label="Governance source pin">
+                  {(() => {
+                    const fact = result.governance_source_matches_pin;
+                    switch (fact) {
+                      case "Matched":
+                        return <Pill tone="ok">Matched</Pill>;
+                      case "Mismatch":
+                        return <Pill tone="error">Mismatch</Pill>;
+                      case "Missing":
+                        return <Pill tone="error">Missing</Pill>;
+                      case "OperatorAttested":
+                        return <Pill tone="warn">Operator-attested</Pill>;
+                      case "NotApplicable":
+                      default:
+                        return <Pill tone="neutral">Not applicable</Pill>;
+                    }
+                  })()}
+                </Field>
+                {result.governance_source_matches_pin === "OperatorAttested" && (
+                  <Field label="Note">
+                    <span className="field-value">
+                      Git reference correspondence is not independently verified by this
+                      application; it is operator-attested.
+                    </span>
+                  </Field>
+                )}
+                {result.governance_source_matches_pin === "NotApplicable" && (
+                  <Field label="Note">
+                    <span className="field-value">
+                      Bound reference is not a recognized immutable pin format; the
+                      governance-source cross-check does not apply.
+                    </span>
+                  </Field>
+                )}
+              </div>
+            </Card>
+
+            <Card title="Transport archive binding">
+              <p className="card-body">
+                A verified binding is a hash-covered archive constituent. It is not, by itself,
+                proof that an Ootle anchor was finalized.
+              </p>
+              <div className="field-list">
+                <Field label="Binding">
+                  {result.transport_binding_present ? (
+                    <Pill tone={result.transport_binding_verified ? "ok" : "error"}>
+                      {result.transport_binding_verified ? "Verified" : "Invalid"}
+                    </Pill>
+                  ) : (
+                    <Pill tone="neutral">Not present</Pill>
+                  )}
+                </Field>
+                {result.transport_batch_set_commitment_hex && (
+                  <Field label="Final batch-set commitment">
+                    <HashValue value={result.transport_batch_set_commitment_hex} />
+                  </Field>
+                )}
+                {result.transport_accepted_count !== null && (
+                  <Field label="Transport accepted count">
+                    {result.transport_accepted_count}
+                  </Field>
+                )}
+                {result.transport_reduced_anonymity !== null && (
+                  <Field label="Reduced anonymity">
+                    {result.transport_reduced_anonymity ? "reported" : "not reported"}
+                  </Field>
+                )}
+              </div>
+            </Card>
+
+            <div className="card-grid">
+              <Card title="Manifest">
+                <div className="field-list">
+                  <Field label="Manifest schema">
+                    {result.election_manifest_schema_version === null
+                      ? "unknown"
+                      : `ElectionManifestV${result.election_manifest_schema_version}`}
+                  </Field>
+                  {result.proposal_question && (
+                    <Field label="Ballot question">{result.proposal_question}</Field>
+                  )}
+                  <Field label="Election manifest hash">
+                    <HashValue value={result.election_manifest_hash_hex} />
+                  </Field>
+                </div>
+              </Card>
+
+              <Card title="Archive hash">
+                <div className="field-list">
+                  <Field label="Archived">
+                    <HashValue value={result.archive_hash_hex} />
+                  </Field>
+                  <Field label="Recomputed">
+                    <HashValue value={result.recomputed_archive_hash_hex} />
+                  </Field>
+                </div>
+              </Card>
+
+              <Card title="Ballots">
+                <div className="field-list">
+                  <Field label="Packages">{result.ballot_package_count}</Field>
+                  <Field label="Accepted ballots">{result.accepted_count}</Field>
+                  <Field label="Rejected ballots">{result.rejected_count}</Field>
+                  {result.tally && (
+                    <Field label="Abstentions">{result.tally.abstentions}</Field>
+                  )}
+                </div>
+              </Card>
+            </div>
+
+            {result.tally && (
+              <Card title="Recomputed tally — technical detail">
+                <p className="card-body">
+                  Includes machine identifiers for each ballot option. The default tally view
+                  above summarizes just the response label and count.
+                </p>
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th scope="col">Option</th>
+                      <th scope="col">Machine ID</th>
+                      <th scope="col">Approvals</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.tally.counts.map((count) => (
+                      <tr key={count.candidate_id_hex}>
+                        <td>{count.display_name || "—"}</td>
+                        <td>
+                          <span className="hash">
+                            {count.candidate_id_text ?? count.candidate_id_hex}
+                          </span>
+                        </td>
+                        <td>{count.approvals}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Card>
+            )}
+
+            <Card title="Registry and catalog files">
+              <p className="card-body">
+                The registry and option set are validated during replay: their recomputed
+                commitments must equal the manifest&rsquo;s. Catalog membership is strict —
+                missing and unexpected files both fail verification. Canonical election
+                artifacts (manifest, registry, candidate-set) are distinct from the governance
+                supporting document, if present.
+              </p>
+              <p className="form-hint">
+                Files checked: {result.file_count} · Expected files:{" "}
+                {result.files.every((f) => f.present) ? "present" : "some missing"} ·
+                Digest checks:{" "}
+                {result.files.every((f) => f.digest_ok) ? "all match" : "one or more mismatches"}
+              </p>
+              <DetailsSection summary={`Show verified file catalogue (${result.file_count})`}>
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th scope="col">File</th>
+                      <th scope="col">Role</th>
+                      <th scope="col">Present</th>
+                      <th scope="col">Digest</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.files.map((file) => (
+                      <tr key={file.path}>
+                        <td>
+                          <span className="hash">{file.path}</span>
+                        </td>
+                        <td>{archiveFileRole(file.path)}</td>
+                        <td>{file.present ? "yes" : "no"}</td>
+                        <td>
+                          {file.digest_ok ? (
+                            <Pill tone="ok">match</Pill>
+                          ) : (
+                            <Pill tone="error">mismatch</Pill>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </DetailsSection>
+            </Card>
+
+            {result.tally && (
+              <Card title="Recomputed tally — summary">
+                <p className="form-hint">
+                  Default summary of the recomputed tally, without raw machine identifiers.
+                </p>
+                <ul className="option-list">
+                  {result.tally.counts.map((count) => (
+                    <li key={count.candidate_id_hex} className="option-item">
+                      <span>{count.display_name || "—"}</span>
+                      <span>— {count.approvals}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Card>
+            )}
+          </DetailsSection>
+
+          <DetailsSection summary="Legacy V1 verification">
+            <Card title="Verify legacy V1 anchor evidence (anchor-evidence.cbor)">
+              <p className="form-hint">
+                Historical compatibility only. Current V2 anchor verification is shown above
+                and reads app-owned JSON evidence sidecars automatically — you do not need to
+                choose a file. This section remains for older archives whose anchor evidence
+                was written as anchor-evidence.cbor.
+              </p>
+              <div className="form-row">
+                <label htmlFor="transport-anchor-evidence">Anchor evidence file</label>
+                <div className="file-row">
+                  <input
+                    id="transport-anchor-evidence"
+                    type="text"
+                    value={anchorEvidencePath}
+                    onChange={(e) => setAnchorEvidencePath(e.target.value)}
+                    placeholder="anchor-evidence.cbor"
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={!shellAvailable || running}
+                    onClick={() => void onPickAnchorEvidence()}
+                  >
+                    Browse
+                  </button>
+                </div>
+              </div>
+              <div className="btn-row">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={!shellAvailable || !directory || !anchorEvidencePath || running}
+                  onClick={() => void onVerifyTransportAnchor()}
+                >
+                  Check legacy V1 anchor record
+                </button>
+              </div>
+              {shellAvailable && (!directory || !anchorEvidencePath) && (
+                <p className="form-hint">
+                  Choose an archive directory and an anchor evidence file to continue.
+                </p>
+              )}
+              {transportAnchor && (
+                <div className="field-list">
+                  <Field label="Transport state">
+                    <Pill tone={transportAnchor.state === "ANCHORED" ? "ok" : "neutral"}>
+                      {transportAnchor.state}
+                    </Pill>
+                  </Field>
+                  <Field label="Archive finality">
+                    {transportAnchor.archive_finalized ? "finalized" : "not finalized"}
+                  </Field>
+                  <Field label="Meaning">
+                    {aggregateStateText(transportAnchor.state)}
+                  </Field>
+                  <Field label="Archive binding">
+                    {transportAnchor.transport_binding_verified ? "verified" : "not verified"}
+                  </Field>
+                  <Field label="Phase 4 anchor">
+                    {transportAnchor.anchor_verified ? "verified" : "not verified"}
+                  </Field>
+                </div>
+              )}
+            </Card>
+          </DetailsSection>
         </>
       )}
     </>

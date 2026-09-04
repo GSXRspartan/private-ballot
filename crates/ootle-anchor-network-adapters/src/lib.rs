@@ -54,22 +54,27 @@ pub use auth::{WalletdAuthSecret, WalletdAuthSecretError};
 pub use config::{
     NetworkAdapterConfig, NetworkAdapterConfigError, OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1,
     OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1, OOTLE_ANCHOR_REQUEST_TIMEOUT_MIN_SECS_V1,
+    default_indexer_endpoint_for_network_v1, indexer_endpoint_allowed_for_network_v1,
 };
 pub use endpoint::{
-    IndexerEndpoint, IndexerEndpointError, MAX_ENDPOINT_BASE_PATH_BYTES, WalletdEndpoint,
-    WalletdEndpointError,
+    IndexerEndpoint, IndexerEndpointError, MAX_ENDPOINT_BASE_PATH_BYTES,
+    TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, WALLETD_JSONRPC_PATH, WalletdEndpoint,
+    WalletdEndpointError, ensure_walletd_jsonrpc_path,
 };
 pub use error::{TransportError, TransportErrorCategory};
 pub use executor::{BlockingExecutor, BlockingExecutorError, SimpleBlockingExecutor};
 pub use indexer::{
     IndexerReceiptNetworkAdapter, IndexerReceiptWireTransport, RealIndexerTransport,
-    ScriptedIndexerResponse, ScriptedIndexerTransport,
+    ScriptedIndexerResponse, ScriptedIndexerTransport, V2IndexerReceiptFetchV1,
 };
 pub use walletd::{
-    RealWalletdTransport, ScriptedWalletdResponse, ScriptedWalletdTransport,
-    TransactionDetectInputsRequest, TransactionDetectInputsResponse,
+    AccountInfo, AccountsListRequest, AccountsListResponse, PinnedWalletDaemonClient,
+    PinnedWalletDaemonClientError, RealWalletdTransport, ScriptedWalletdResponse,
+    ScriptedWalletdTransport, TransactionDetectInputsRequest, TransactionDetectInputsResponse,
     TransactionRequestCreateRequest, TransactionRequestCreateResponse,
     TransactionRequestDecisionRequest, TransactionRequestDecisionResponse,
-    TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestSubmitRequest,
-    TransactionRequestSubmitResponse, WalletdAnchorNetworkAdapter, WalletdWireTransport,
+    TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestListRequest,
+    TransactionRequestListResponse, TransactionRequestSubmitRequest,
+    TransactionRequestSubmitResponse, TransactionSubmitDryRunRequest, WalletGetInfoRequest,
+    WalletGetInfoResponse, WalletdAnchorNetworkAdapter, WalletdWireTransport,
 };

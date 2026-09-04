@@ -573,7 +573,7 @@ describe("automatic lifecycle refresh wiring (Vote screen)", () => {
     );
     assert.doesNotMatch(
       slice,
-      /startManagedTor|configureManagedTorTest|onConnectPrivately|onStartManagedTor|start_private_intake/,
+      /startManagedTor|configureManagedTor|onConnectPrivately|onStartManagedTor|start_private_intake/,
     );
     assert.doesNotMatch(engine, /startManagedTor|start_tor|spawn/i);
   });

@@ -178,13 +178,63 @@ where
     I: IndexerReceiptWireTransport,
 {
     enforce_publish_privacy_floor(&config)?;
-    let mut driver = AnchorAppDriver::restore_live(
+    let driver = AnchorAppDriver::restore_live(
         config.clone(),
         walletd_adapter,
         indexer_adapter,
         archive_directory,
     )
     .map_err(map_driver_error)?;
+    finish_live_step(driver, config, decision, terminal_index_root)
+}
+
+/// Runs one bounded live lifecycle step, reusing a same-process memoized archive
+/// verification for an unchanged archive (Slice 4D).
+///
+/// Behavior is identical to [`run_step_with_transports`]; only the repeated
+/// archive verification/proof-replay that `restore_live` performs is served from
+/// the memo. The memo re-establishes the current on-disk identity and full
+/// catalog before returning any cached result, so archive/config binding is
+/// enforced exactly as before every network action.
+#[doc(hidden)]
+pub fn run_step_with_transports_memoized<W, I>(
+    memo: &tari_cc_private_ballot_archive::ArchiveVerificationMemoV1,
+    config: AnchorAppConfig,
+    archive_directory: &Path,
+    decision: OperatorDecision,
+    walletd_adapter: WalletdAnchorNetworkAdapter<W>,
+    indexer_adapter: IndexerReceiptNetworkAdapter<I>,
+    terminal_index_root: Option<&Path>,
+) -> Result<GuiLiveAnchorStepResultV1, GuiCoreError>
+where
+    W: WalletdWireTransport,
+    I: IndexerReceiptWireTransport,
+{
+    enforce_publish_privacy_floor(&config)?;
+    let verification = memo
+        .verify(archive_directory)
+        .map_err(crate::archive_verify::map_archive_verifier_error)?;
+    let driver = AnchorAppDriver::restore_live_with_verification(
+        config.clone(),
+        walletd_adapter,
+        indexer_adapter,
+        archive_directory,
+        &verification,
+    )
+    .map_err(map_driver_error)?;
+    finish_live_step(driver, config, decision, terminal_index_root)
+}
+
+fn finish_live_step<W, I>(
+    mut driver: AnchorAppDriver<W, I>,
+    config: AnchorAppConfig,
+    decision: OperatorDecision,
+    terminal_index_root: Option<&Path>,
+) -> Result<GuiLiveAnchorStepResultV1, GuiCoreError>
+where
+    W: WalletdWireTransport,
+    I: IndexerReceiptWireTransport,
+{
     #[cfg(feature = "test-support")]
     if let Some(root) = terminal_index_root {
         driver = driver.with_terminal_index_root_for_test(root.to_path_buf());

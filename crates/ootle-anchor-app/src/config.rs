@@ -880,7 +880,9 @@ fn decode_body(
     let ttl_secs = decode_option_u64(&mut reader)?;
     let live_approval_facts = match record_version {
         ConfigRecordVersion::V1 | ConfigRecordVersion::V2 => None,
-        ConfigRecordVersion::V3 | ConfigRecordVersion::V4 => Some(decode_live_approval_facts(&mut reader)?),
+        ConfigRecordVersion::V3 | ConfigRecordVersion::V4 => {
+            Some(decode_live_approval_facts(&mut reader)?)
+        }
     };
     let (event_template, max_epoch_delta) = match record_version {
         ConfigRecordVersion::V4 => {
@@ -947,11 +949,21 @@ fn encode_event_template_binding(
     binding: &AnchorTemplateBindingV1,
 ) -> Result<(), ConfigFileError> {
     writer.write_array_len(5).map_err(from_protocol)?;
-    writer.write_text_string(binding.template_address()).map_err(from_protocol)?;
-    writer.write_text_string(binding.module()).map_err(from_protocol)?;
-    writer.write_text_string(binding.function()).map_err(from_protocol)?;
-    writer.write_text_string(binding.full_event_topic()).map_err(from_protocol)?;
-    writer.write_byte_string(binding.artifact_digest()).map_err(from_protocol)?;
+    writer
+        .write_text_string(binding.template_address())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(binding.module())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(binding.function())
+        .map_err(from_protocol)?;
+    writer
+        .write_text_string(binding.full_event_topic())
+        .map_err(from_protocol)?;
+    writer
+        .write_byte_string(binding.artifact_digest())
+        .map_err(from_protocol)?;
     Ok(())
 }
 

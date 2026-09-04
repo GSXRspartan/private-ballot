@@ -497,7 +497,7 @@ fn lifecycle_resume_preserves_state_and_reconstructs_tally() {
     let mut session = match loaded {
         LoadedElectionWorkspaceV1::Session { workspace, session } => {
             assert_eq!(workspace.lifecycle_state, "CLOSED");
-            assert_eq!(workspace.accepted_ballot_count, 2);
+            assert_eq!(workspace.stored_ballot_count, 2);
             assert_eq!(session.accepted_count(), 2);
             assert_eq!(ok(session.tally(), "resumed tally"), expected_tally);
             session
@@ -998,7 +998,7 @@ fn incomplete_temp_and_orphan_revision_with_ballot_do_not_destroy_committed_resu
     match loaded {
         LoadedElectionWorkspaceV1::Session { workspace, session } => {
             assert_eq!(workspace.last_revision, 1);
-            assert_eq!(workspace.accepted_ballot_count, 1);
+            assert_eq!(workspace.stored_ballot_count, 1);
             assert_eq!(session.accepted_count(), 1);
         }
         LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
@@ -1023,7 +1023,7 @@ fn incomplete_temp_and_orphan_revision_with_ballot_do_not_destroy_committed_resu
     match loaded {
         LoadedElectionWorkspaceV1::Session { workspace, session } => {
             assert_eq!(workspace.last_revision, 1);
-            assert_eq!(workspace.accepted_ballot_count, 1);
+            assert_eq!(workspace.stored_ballot_count, 1);
             assert_eq!(session.accepted_count(), 1);
         }
         LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
@@ -1106,7 +1106,7 @@ fn invalid_future_revision_without_marker_is_ignored_as_uncommitted_orphan() {
     match loaded {
         LoadedElectionWorkspaceV1::Session { workspace, session } => {
             assert_eq!(workspace.last_revision, 1);
-            assert_eq!(workspace.accepted_ballot_count, 1);
+            assert_eq!(workspace.stored_ballot_count, 1);
             assert_eq!(session.accepted_count(), 1);
         }
         LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),
@@ -1727,7 +1727,7 @@ fn resume_replays_accepted_packages_and_rejects_duplicate_nullifier() {
     let mut resumed = match loaded {
         LoadedElectionWorkspaceV1::Session { session, workspace } => {
             assert_eq!(workspace.lifecycle_state, "OPEN");
-            assert_eq!(workspace.accepted_ballot_count, 1);
+            assert_eq!(workspace.stored_ballot_count, 1);
             session
         }
         LoadedElectionWorkspaceV1::Draft { .. } => panic!("expected session workspace"),

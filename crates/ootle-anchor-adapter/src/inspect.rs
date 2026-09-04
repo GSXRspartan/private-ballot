@@ -1,6 +1,6 @@
 //! Pure v0.39.2 transaction inspection for the event-only anchor contract.
 
-use tari_cc_private_ballot_anchor::{OotleNetworkIdV1};
+use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
     AnchorAccountReference, AnchorEpochBindingV1, AnchorEventPayloadV2, AnchorMaxFeeV1,
     AnchorTemplateBindingV1,
@@ -27,7 +27,10 @@ pub(crate) const PAY_FEE_METHOD_NAME: &str = "pay_fee";
 #[derive(Debug, Clone)]
 enum FeeExpectation {
     Forbidden,
-    Required { component: ComponentAddress, max_fee: AnchorMaxFeeV1 },
+    Required {
+        component: ComponentAddress,
+        max_fee: AnchorMaxFeeV1,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,47 +76,75 @@ impl AnchorInspectionExpectationV1 {
         }
     }
 
-    pub fn for_request(request: &OotleAnchorTransactionBuildRequestV1) -> Result<Self, OotleAnchorAdapterError> {
+    pub fn for_request(
+        request: &OotleAnchorTransactionBuildRequestV1,
+    ) -> Result<Self, OotleAnchorAdapterError> {
         Ok(Self::new(
             request.network().clone(),
             map_ootle_network(request.network())?,
             request.account().clone(),
             request.event_payload(),
-            request.template_binding().ok_or(OotleAnchorAdapterError::MissingEventBinding)?.clone(),
-            request.epoch_binding().ok_or(OotleAnchorAdapterError::MissingEpochBinding)?,
+            request
+                .template_binding()
+                .ok_or(OotleAnchorAdapterError::MissingEventBinding)?
+                .clone(),
+            request
+                .epoch_binding()
+                .ok_or(OotleAnchorAdapterError::MissingEpochBinding)?,
         ))
     }
 
     #[must_use]
-    pub const fn ootle_network(&self) -> Network { self.ootle_network }
+    pub const fn ootle_network(&self) -> Network {
+        self.ootle_network
+    }
     #[must_use]
-    pub const fn project_network(&self) -> &OotleNetworkIdV1 { &self.project_network }
+    pub const fn project_network(&self) -> &OotleNetworkIdV1 {
+        &self.project_network
+    }
     #[must_use]
-    pub const fn account(&self) -> &AnchorAccountReference { &self.account }
+    pub const fn account(&self) -> &AnchorAccountReference {
+        &self.account
+    }
     #[must_use]
-    pub const fn event_payload(&self) -> AnchorEventPayloadV2 { self.event_payload }
+    pub const fn event_payload(&self) -> AnchorEventPayloadV2 {
+        self.event_payload
+    }
     #[must_use]
-    pub const fn template_binding(&self) -> &AnchorTemplateBindingV1 { &self.template_binding }
+    pub const fn template_binding(&self) -> &AnchorTemplateBindingV1 {
+        &self.template_binding
+    }
     #[must_use]
-    pub const fn epoch_binding(&self) -> AnchorEpochBindingV1 { self.epoch_binding }
+    pub const fn epoch_binding(&self) -> AnchorEpochBindingV1 {
+        self.epoch_binding
+    }
 }
 
 pub fn fingerprint_unsigned_anchor_transaction(
     unsigned: &UnsignedTransaction,
 ) -> Result<OotleAnchorInspectionFingerprintV1, OotleAnchorAdapterError> {
-    let canonical = minicbor::to_vec(unsigned).map_err(|_| OotleAnchorAdapterError::FingerprintFailure)?;
-    let mut framed = Vec::with_capacity(INSPECTION_FINGERPRINT_DOMAIN_V1.len() + 1 + canonical.len());
+    let canonical =
+        minicbor::to_vec(unsigned).map_err(|_| OotleAnchorAdapterError::FingerprintFailure)?;
+    let mut framed =
+        Vec::with_capacity(INSPECTION_FINGERPRINT_DOMAIN_V1.len() + 1 + canonical.len());
     framed.extend_from_slice(INSPECTION_FINGERPRINT_DOMAIN_V1);
     framed.push(0);
     framed.extend_from_slice(&canonical);
-    Ok(OotleAnchorInspectionFingerprintV1::new(Blake3HashProviderV1.hash(&framed)))
+    Ok(OotleAnchorInspectionFingerprintV1::new(
+        Blake3HashProviderV1.hash(&framed),
+    ))
 }
 
 pub fn inspect_unsigned_anchor_transaction(
     unsigned: &UnsignedTransaction,
     expectation: &AnchorInspectionExpectationV1,
 ) -> Result<OotleUnsignedAnchorTransactionEvidenceV1, OotleAnchorAdapterError> {
-    inspect_core(unsigned, expectation, &FeeExpectation::Forbidden, InputExpectation::Empty)
+    inspect_core(
+        unsigned,
+        expectation,
+        &FeeExpectation::Forbidden,
+        InputExpectation::Empty,
+    )
 }
 
 pub fn inspect_fee_bearing_anchor_transaction(
@@ -125,7 +156,10 @@ pub fn inspect_fee_bearing_anchor_transaction(
     inspect_core(
         unsigned,
         expectation,
-        &FeeExpectation::Required { component: fee_component, max_fee },
+        &FeeExpectation::Required {
+            component: fee_component,
+            max_fee,
+        },
         InputExpectation::Empty,
     )
 }
@@ -143,7 +177,10 @@ pub fn inspect_detected_fee_bearing_anchor_transaction(
     inspect_core(
         unsigned,
         expectation,
-        &FeeExpectation::Required { component: fee_component, max_fee },
+        &FeeExpectation::Required {
+            component: fee_component,
+            max_fee,
+        },
         InputExpectation::Detected,
     )
 }
@@ -155,7 +192,9 @@ fn inspect_core(
     input_expectation: InputExpectation,
 ) -> Result<OotleUnsignedAnchorTransactionEvidenceV1, OotleAnchorAdapterError> {
     if unsigned.schema_version() != SUPPORTED_UNSIGNED_SCHEMA_VERSION {
-        return Err(OotleAnchorAdapterError::UnsupportedTransactionSchema { schema_version: unsigned.schema_version() });
+        return Err(OotleAnchorAdapterError::UnsupportedTransactionSchema {
+            schema_version: unsigned.schema_version(),
+        });
     }
     if unsigned.network() != expectation.ootle_network().as_byte() {
         return Err(OotleAnchorAdapterError::NetworkBindingMismatch);
@@ -173,10 +212,13 @@ fn inspect_core(
         InputExpectation::Empty | InputExpectation::Detected => {}
     }
 
-    let fee_instructions_present = validate_fee_instructions(unsigned, fee, expectation.epoch_binding())?;
+    let fee_instructions_present =
+        validate_fee_instructions(unsigned, fee, expectation.epoch_binding())?;
     let instructions = unsigned.instructions();
     if instructions.len() != 1 {
-        return Err(OotleAnchorAdapterError::UnexpectedInstruction { detail: "expected exactly one anchor call" });
+        return Err(OotleAnchorAdapterError::UnexpectedInstruction {
+            detail: "expected exactly one anchor call",
+        });
     }
     verify_anchor_call(&instructions[0], expectation)?;
 
@@ -202,7 +244,12 @@ fn verify_anchor_call(
     instruction: &Instruction,
     expectation: &AnchorInspectionExpectationV1,
 ) -> Result<(), OotleAnchorAdapterError> {
-    let Instruction::CallFunction { address, function, args: actual_args } = instruction else {
+    let Instruction::CallFunction {
+        address,
+        function,
+        args: actual_args,
+    } = instruction
+    else {
         return Err(OotleAnchorAdapterError::TemplateCallMismatch);
     };
     let expected_address =
@@ -221,8 +268,14 @@ fn verify_anchor_call(
         args![expectation.event_payload().digest_hex()],
     )
     .build_unsigned();
-    let Some(Instruction::CallFunction { args: expected_args, .. }) = reference.instructions().first() else {
-        return Err(OotleAnchorAdapterError::TransactionBuilderFailure { reason: "reference call missing" });
+    let Some(Instruction::CallFunction {
+        args: expected_args,
+        ..
+    }) = reference.instructions().first()
+    else {
+        return Err(OotleAnchorAdapterError::TransactionBuilderFailure {
+            reason: "reference call missing",
+        });
     };
     if actual_args != expected_args {
         return Err(OotleAnchorAdapterError::TemplateCallMismatch);
@@ -241,7 +294,13 @@ fn validate_fee_instructions(
         FeeExpectation::Required { component, max_fee } => match unsigned.fee_instructions() {
             [] => Err(OotleAnchorAdapterError::MissingFeeInstruction),
             [instruction] => {
-                verify_pay_fee_instruction(instruction, unsigned.network(), *component, *max_fee, epoch)?;
+                verify_pay_fee_instruction(
+                    instruction,
+                    unsigned.network(),
+                    *component,
+                    *max_fee,
+                    epoch,
+                )?;
                 Ok(true)
             }
             _ => Err(OotleAnchorAdapterError::UnexpectedFeeInstruction),
@@ -256,7 +315,12 @@ fn verify_pay_fee_instruction(
     max_fee: AnchorMaxFeeV1,
     epoch: AnchorEpochBindingV1,
 ) -> Result<(), OotleAnchorAdapterError> {
-    let Instruction::CallMethod { call, method, args: actual_args } = instruction else {
+    let Instruction::CallMethod {
+        call,
+        method,
+        args: actual_args,
+    } = instruction
+    else {
         return Err(OotleAnchorAdapterError::MalformedFeeInstruction);
     };
     if &**method != PAY_FEE_METHOD_NAME {
@@ -268,7 +332,11 @@ fn verify_pay_fee_instruction(
     let reference = TransactionBuilder::new(network, Epoch::from(epoch.max_epoch()))
         .pay_fee_from_component(component, Amount::from_u64(max_fee.value()))
         .build_unsigned();
-    let Some(Instruction::CallMethod { args: expected_args, .. }) = reference.fee_instructions().first() else {
+    let Some(Instruction::CallMethod {
+        args: expected_args,
+        ..
+    }) = reference.fee_instructions().first()
+    else {
         return Err(OotleAnchorAdapterError::MalformedFeeInstruction);
     };
     if actual_args != expected_args {

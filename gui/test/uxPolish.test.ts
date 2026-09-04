@@ -44,6 +44,38 @@ const types = readProjectFile("src/api/types.ts");
 const archive = readProjectFile("src/screens/Archive.tsx");
 const client = readProjectFile("src/api/client.ts");
 const tauriShell = readProjectFile("src-tauri/src/lib.rs");
+const styles = readProjectFile("src/styles/global.css");
+
+// -------------------------------------------------------------------------
+// Anchor layout contracts
+// -------------------------------------------------------------------------
+
+describe("organizer Anchor responsive layout", () => {
+  it("keeps the Tari Wallet panel in the normal (non-advanced) anchor surface", () => {
+    const cardStart = manage.indexOf('<Card title="Tari Anchor">');
+    const advancedStart = manage.indexOf('<DetailsSection summary="Advanced: technical release verification">');
+    const walletPanelUse = manage.indexOf('{walletPanelJsx}');
+
+    assert.ok(cardStart >= 0, "Tari Anchor card is present");
+    assert.ok(advancedStart > cardStart, "advanced disclosure follows the normal card summary");
+    assert.ok(walletPanelUse > cardStart, "wallet panel is rendered in the anchor card");
+    assert.ok(
+      walletPanelUse < advancedStart,
+      "wallet panel is part of the normal (non-advanced) flow",
+    );
+  });
+
+  it("keeps production transport authority behind the Advanced disclosure only", () => {
+    const advancedStart = manage.indexOf('<DetailsSection summary="Advanced: technical release verification">');
+    const prodAuthority = manage.indexOf('className="production-authority-panel"');
+    assert.ok(advancedStart >= 0, "advanced disclosure present");
+    assert.ok(prodAuthority > advancedStart, "production authority is advanced-only");
+  });
+
+  it("contains long Anchor values and collapses before the app frame gets cramped", () => {
+    assert.match(styles, /\.card\[aria-label="Tari Anchor"\] \.hash \{\s*display: inline-block;\s*max-width: 100%;/);
+  });
+});
 
 // -------------------------------------------------------------------------
 // Primary voter UI: no raw machine IDs, no internal protocol state
@@ -275,7 +307,7 @@ describe("built-in guide", () => {
 
   it("describes Ootle anchoring as aggregate and organizer-side, not a voter transaction", () => {
     assert.match(guide, /Ootle anchoring is aggregate and organizer-side\./);
-    assert.match(guide, /Voters never send\s+an Ootle transaction/);
+    assert.match(guide, /Voters never\s+send an Ootle transaction/);
   });
 
   it("explains acceptance, inclusion, and anchoring accurately", () => {
@@ -385,7 +417,9 @@ describe("durable election workspace resume", () => {
     assert.match(home, /Resume Election/);
     assert.match(home, /workspaces\.slice\(0, 5\)/);
     assert.match(home, /workspace\.workspace_id/);
-    assert.match(home, /workspace\.accepted_ballot_count/);
+    // Slice 1: the workspace count is a display-only stored-package count
+    // (no proof replay), renamed from accepted_ballot_count.
+    assert.match(home, /workspace\.stored_ballot_count/);
     assert.match(home, /workspace\.question_preview/);
     assert.match(home, /Recovery state saved locally/);
     assert.doesNotMatch(home, /workspace\.(path|directory|absolute)/);
@@ -458,16 +492,22 @@ describe("export folder error wording", () => {
 
 describe("archive result presentation", () => {
   it("offers a scannable top-level result", () => {
-    assert.match(archive, /Result at a glance/);
-    assert.match(archive, /Archive integrity/);
-    assert.match(archive, /Election finality/);
-    assert.match(archive, /Recomputed result/);
+    // Primary top-level result: simple "ARCHIVE VERIFIED" summary with the
+    // scannable facts (accepted, rejected, hash, tally, files).
+    assert.match(archive, /ARCHIVE VERIFIED/);
+    assert.match(archive, /Accepted ballots/);
+    assert.match(archive, /Rejected ballots/);
+    assert.match(archive, /Archive hash/);
+    assert.match(archive, /Tally/);
+    assert.match(archive, /Files verified/);
   });
 
   it("separates archive integrity from election finality", () => {
+    // Simple finalized/intermediate wording sits in the top-level summary; the
+    // "not eligible for live Ootle anchoring" auditor language moved out with
+    // the old "Result at a glance" surface intentionally.
     assert.match(archive, /Finalized election verified/);
-    assert.match(archive, /Intermediate archive - not finalized/);
-    assert.match(archive, /not eligible for live Ootle anchoring/);
+    assert.match(archive, /Intermediate archive verified/);
   });
 
   it("uses finalized archive command for Manage Election archive writes", () => {
@@ -499,14 +539,24 @@ describe("archive result presentation", () => {
     );
   });
 
-  it("confirms a successful final archive write with destination but not verification", () => {
-    const successBlock = manage.slice(
-      manage.indexOf("{archiveResult && ("),
-      manage.indexOf("<Card title=\"Anchor\">"),
+  it("confirms archive write and separately surfaces anchor-ready verification", () => {
+    // The Final archive card presents a distinct terminal "verified" summary
+    // (leading the card when a verified archive already exists) AND a
+    // write-success surface for the fresh-write path. Both must be present so
+    // an organizer sees the right thing whether the archive is a session-fresh
+    // write or a recovered verified archive.
+    const finalArchiveCard = manage.slice(manage.indexOf('<Card title="Final archive">'));
+    // Terminal verified summary: leads the card when a verified archive exists.
+    assert.match(finalArchiveCard, /Final archive verified/);
+    assert.match(finalArchiveCard, /verifiedFinalArchive\.directory/);
+    assert.match(finalArchiveCard, /verifiedFinalArchive\.archive_hash_hex/);
+    // Fresh-write success confirmation still appears for the create-new path.
+    assert.match(finalArchiveCard, /Final archive written/);
+    assert.match(finalArchiveCard, /archiveResult\.directory/);
+    assert.match(
+      finalArchiveCard,
+      /independent\s+verification of the finalized transport binding/,
     );
-    assert.match(successBlock, /Final archive written/);
-    assert.match(successBlock, /archiveResult\.directory/);
-    assert.doesNotMatch(successBlock, /Verified|verified|verification/);
   });
 
   it("keeps chooser cancellation harmless for archive and export actions", () => {
@@ -548,12 +598,17 @@ describe("credential presentation", () => {
   });
 
   it("routes visible credential creation through durable commands", () => {
+    // Voter credential management no longer appears on Create Election — that
+    // is an organizer screen and voter private-credential controls belong on
+    // Vote. Assert the durable command is wired on Vote and that Create
+    // Election does not render voter-credential controls at all.
     const create = readProjectFile("src/screens/CreateElection.tsx");
     assert.match(credentialCard, /Create credential/);
     assert.match(vote, /api\.createDurableVoterCredential\(passphrase\)/);
-    assert.match(create, /api\.createDurableVoterCredential\(passphrase\)/);
     assert.doesNotMatch(vote, /generatePendingVoterGovernanceCredential/);
     assert.doesNotMatch(create, /generatePendingVoterGovernanceCredential/);
+    assert.doesNotMatch(create, /VoterCredentialCard/);
+    assert.doesNotMatch(create, /Voter credential bootstrap/);
   });
 });
 
@@ -598,6 +653,15 @@ describe("home workspace resume and delete", () => {
     assert.match(home, /deleteElectionWorkspace\(/);
   });
 
+  it("disables duplicate Resume clicks and shows a busy state", () => {
+    assert.match(home, /resumingWorkspaceId/);
+    assert.match(home, /if \(resumingWorkspaceId !== null\) return/);
+    assert.match(home, /disabled=\{resumingWorkspaceId !== null\}/);
+    assert.match(home, /Resuming and verifying election\.\.\./);
+    assert.match(home, /role="status"/);
+    assert.match(home, /aria-live="polite"/);
+  });
+
   it("guards delete behind an explicit confirmation naming the local workspace", () => {
     assert.match(home, /Delete local election workspace\?/);
     assert.match(home, /removes the local organizer workspace from this device/);
@@ -629,10 +693,10 @@ describe("one-folder election loader", () => {
 
   it("wires the folder command and reuses the shared backend validation", () => {
     assert.match(client, /"load_election_folder"/);
-    assert.match(tauriShell, /fn load_election_folder\(/);
+    assert.match(tauriShell, /async fn load_election_folder\(/);
     // No election validation is duplicated in TypeScript; the backend resolves
     // the three canonical files and reuses the shared load path.
-    assert.match(tauriShell, /load_election_from_paths\(/);
+    assert.match(tauriShell, /load_election_from_paths_blocking\(/);
     assert.match(tauriShell, /election-manifest\.cbor/);
     assert.match(tauriShell, /GUI_ELECTION_FOLDER_INCOMPLETE/);
   });

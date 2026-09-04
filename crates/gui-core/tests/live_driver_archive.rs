@@ -30,8 +30,8 @@ use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     TransactionRequestCreateResponse, TransactionRequestDecisionRequest,
     TransactionRequestDecisionResponse, TransactionRequestGetRequest,
     TransactionRequestGetResponse, TransactionRequestSubmitRequest,
-    TransactionRequestSubmitResponse, TransportError, TransportErrorCategory,
-    WalletdAnchorNetworkAdapter, WalletdWireTransport,
+    TransactionRequestSubmitResponse, TransactionSubmitDryRunRequest, TransportError,
+    TransportErrorCategory, WalletdAnchorNetworkAdapter, WalletdWireTransport,
 };
 
 use common::{TestDir, open_session, triptych_package_bytes};
@@ -75,6 +75,15 @@ impl WalletdWireTransport for CountingWalletdTransport {
         &mut self,
         _request: &TransactionDetectInputsRequest,
     ) -> Result<TransactionDetectInputsResponse, TransportError> {
+        Err(Self::unavailable())
+    }
+
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        _request: &TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError> {
+        // Refuses like every other call: this driver test proves the archive
+        // integration surface without any successful walletd interaction.
         Err(Self::unavailable())
     }
 

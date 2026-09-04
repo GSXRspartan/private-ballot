@@ -59,7 +59,11 @@ fn esmeralda_builder() -> TransactionBuilder {
 /// The valid `publish_anchor` call for digest 0x22.
 fn valid_call() -> Instruction {
     match esmeralda_builder()
-        .call_function(expected_address(), "publish_anchor", args![valid_digest_hex()])
+        .call_function(
+            expected_address(),
+            "publish_anchor",
+            args![valid_digest_hex()],
+        )
         .build_unsigned()
         .instructions()
         .first()
@@ -77,7 +81,11 @@ fn inspect(unsigned: &UnsignedTransaction) -> Result<(), OotleAnchorAdapterError
 #[test]
 fn valid_transaction_passes_inspection() {
     let unsigned = esmeralda_builder()
-        .call_function(expected_address(), "publish_anchor", args![valid_digest_hex()])
+        .call_function(
+            expected_address(),
+            "publish_anchor",
+            args![valid_digest_hex()],
+        )
         .build_unsigned();
     match inspect_unsigned_anchor_transaction(&unsigned, &expectation()) {
         Ok(evidence) => {
@@ -92,7 +100,11 @@ fn valid_transaction_passes_inspection() {
 #[test]
 fn wrong_network_is_rejected() {
     let unsigned = TransactionBuilder::new(Network::Igor, Epoch::from(EXPECTED_MAX_EPOCH))
-        .call_function(expected_address(), "publish_anchor", args![valid_digest_hex()])
+        .call_function(
+            expected_address(),
+            "publish_anchor",
+            args![valid_digest_hex()],
+        )
         .build_unsigned();
     assert_eq!(
         inspect(&unsigned),
@@ -103,7 +115,11 @@ fn wrong_network_is_rejected() {
 #[test]
 fn wrong_max_epoch_is_rejected() {
     let unsigned = TransactionBuilder::new(Network::Esmeralda, Epoch::from(EXPECTED_MAX_EPOCH + 1))
-        .call_function(expected_address(), "publish_anchor", args![valid_digest_hex()])
+        .call_function(
+            expected_address(),
+            "publish_anchor",
+            args![valid_digest_hex()],
+        )
         .build_unsigned();
     assert_eq!(
         inspect(&unsigned),
@@ -115,7 +131,10 @@ fn wrong_max_epoch_is_rejected() {
 fn wrong_template_address_is_rejected() {
     // A call to a different published template (e.g. one from another network's
     // deployment) is rejected even though the function and digest are correct.
-    assert_ne!(template_binding().template_address(), other_template_binding().template_address());
+    assert_ne!(
+        template_binding().template_address(),
+        other_template_binding().template_address()
+    );
     let unsigned = esmeralda_builder()
         .call_function(other_address(), "publish_anchor", args![valid_digest_hex()])
         .build_unsigned();
@@ -128,7 +147,11 @@ fn wrong_template_address_is_rejected() {
 #[test]
 fn wrong_function_is_rejected() {
     let unsigned = esmeralda_builder()
-        .call_function(expected_address(), "publish_something_else", args![valid_digest_hex()])
+        .call_function(
+            expected_address(),
+            "publish_something_else",
+            args![valid_digest_hex()],
+        )
         .build_unsigned();
     assert_eq!(
         inspect(&unsigned),
@@ -140,7 +163,11 @@ fn wrong_function_is_rejected() {
 fn wrong_digest_argument_is_rejected() {
     let wrong_digest_hex = "99".repeat(32);
     let unsigned = esmeralda_builder()
-        .call_function(expected_address(), "publish_anchor", args![wrong_digest_hex])
+        .call_function(
+            expected_address(),
+            "publish_anchor",
+            args![wrong_digest_hex],
+        )
         .build_unsigned();
     assert_eq!(
         inspect(&unsigned),

@@ -7,12 +7,15 @@
 
 mod common;
 
-use common::{
-    build_request, epoch_binding, template_binding, valid_request,
+use common::{build_request, epoch_binding, template_binding, valid_request};
+use tari_cc_private_ballot_anchor_transport::{
+    ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V2,
+    AnchorEventPayloadV3, AnchorTemplateBindingV2,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::{
     AnchorTransactionConstructor, OotleAnchorAdapterError, OotleAnchorBuildResultV1,
     PinnedOotleAnchorTransactionConstructor, build_unsigned_anchor_transaction,
+    build_v2_anchor_call_function,
 };
 use tari_ootle_transaction::{Instruction, Network, UnsignedTransaction};
 
@@ -63,7 +66,10 @@ fn fee_less_construction_has_no_fees_inputs_or_blobs() {
     let result = build(0x22);
     let unsigned = result.unsigned_transaction();
 
-    assert!(unsigned.fee_instructions().is_empty(), "no fee instructions");
+    assert!(
+        unsigned.fee_instructions().is_empty(),
+        "no fee instructions"
+    );
     assert!(unsigned.inputs().is_empty(), "no inputs");
     assert!(unsigned.blobs().is_empty(), "no blobs");
 
@@ -161,4 +167,41 @@ fn legacy_request_without_event_binding_is_fail_closed() {
         build_unsigned_anchor_transaction(&legacy).err(),
         Some(OotleAnchorAdapterError::MissingEventBinding)
     );
+}
+
+#[test]
+fn v2_instruction_uses_the_four_string_template_abi() {
+    let template = AnchorTemplateBindingV2::new(
+        format!("template_{}", "77".repeat(32)),
+        ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        [0x77; 32],
+    )
+    .expect("valid V2 binding");
+    // A representative readable canonical public summary. The corrected V2
+    // template puts this exact string on-chain as the `public_summary` value,
+    // so a real preparation carries the readable election result verbatim.
+    // Regression: use a realistic canonical election id text (matching the
+    // preserved "500-votertest-01" fixture) — NOT lowercase hex — to prove
+    // the V2 ABI passes the exact archive-frozen string through byte-for-byte.
+    let public_summary = "{\"schema\":\"TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_V2\",\
+        \"version\":2,\"network\":\"esmeralda\",\"election_id\":\"500-votertest-01\",\
+        \"question\":\"Which test option should win?\",\"eligible_voters\":10,\
+        \"accepted_ballots\":8,\"rejected_ballots\":2,\"results\":[]}";
+    let payload = AnchorEventPayloadV3::new(
+        [0x55; 32],
+        "esmeralda".to_owned(),
+        "500-votertest-01".to_owned(),
+        public_summary.to_owned(),
+    )
+    .expect("valid V2 payload");
+    let instruction = build_v2_anchor_call_function(&template, &payload).expect("instruction");
+    match instruction {
+        Instruction::CallFunction { function, args, .. } => {
+            assert_eq!(&*function, ANCHOR_EVENT_FUNCTION_V2);
+            assert_eq!(args.len(), 4);
+        }
+        _ => panic!("V2 must use CallFunction"),
+    }
 }

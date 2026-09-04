@@ -12,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_cc_private_ballot_anchor_transport::{
-    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1, ANCHOR_TEMPLATE_MODULE_V1,
-    AnchorTemplateBindingV1,
+    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
+    ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V1, ANCHOR_TEMPLATE_MODULE_V2,
+    AnchorTemplateBindingV1, AnchorTemplateBindingV2,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 
@@ -23,6 +24,16 @@ use crate::live_anchor_config::GuiLiveAnchorConfigRequestV1;
 pub const TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1: &str =
     "TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V1";
 pub const TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1: &str = "trusted-ootle-anchor-deployment-v1.json";
+pub const TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2: &str =
+    "TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2";
+pub const TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2: &str = "trusted-ootle-anchor-deployment-v2.json";
+/// BLAKE3-256 of the reviewed V2 WASM that is eligible for manual publication.
+///
+/// Corrected V2 template (four-argument ABI with readable `public_summary`) —
+/// the previous six-argument WASM (BLAKE3
+/// `e0bdf9c4…4c8c`) is intentionally obsolete and rejected by the lock.
+pub const TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX: &str =
+    "475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc";
 pub const TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1: &str = "BLAKE3-256";
 pub const MAX_TEMPLATE_WASM_BYTES_V1: usize = 16 * 1024 * 1024;
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -62,6 +73,51 @@ pub struct GuiTrustedOotleDeploymentLockRequestV1 {
     pub selected_wasm_path: String,
 }
 
+/// Public V2 deployment lock input. The V2 artifact digest is manually
+/// confirmed after a local WASM inspection; no filesystem path is persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct GuiTrustedOotleDeploymentLockRequestV2 {
+    pub network: String,
+    pub template_address: String,
+    pub template_artifact_digest_hex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuiTrustedOotleDeploymentV2 {
+    pub schema: String,
+    pub network: String,
+    pub template_address: String,
+    pub template_artifact_digest_hex: String,
+    pub template_module: String,
+    pub template_function: String,
+    pub template_event_topic: String,
+    pub locked_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiTrustedOotleDeploymentFixedV2 {
+    pub schema: &'static str,
+    pub template_module: &'static str,
+    pub template_function: &'static str,
+    pub template_event_topic: String,
+    /// The BLAKE3-256 of the reviewed V2 WASM. Surfaced to the frontend so
+    /// the normal Lock V2 UI can pre-fill (and read-only display) the exact
+    /// artifact digest the lock will accept — the organizer never has to
+    /// compute or paste it. The Rust lock still verifies the submitted
+    /// digest equals this constant, so pre-fill does not weaken binding.
+    pub expected_artifact_digest_hex: &'static str,
+    /// Human display name for the reviewed WASM (matches the artifact the
+    /// digest above refers to).
+    pub expected_artifact_display_name: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuiTrustedOotleDeploymentStatusV2 {
+    pub locked: bool,
+    pub deployment: Option<GuiTrustedOotleDeploymentV2>,
+    pub fixed: GuiTrustedOotleDeploymentFixedV2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GuiTrustedOotleTemplateWasmInspectionV1 {
     pub display_filename: String,
@@ -73,6 +129,11 @@ pub struct GuiTrustedOotleTemplateWasmInspectionV1 {
 #[must_use]
 pub fn trusted_ootle_deployment_path_v1(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1)
+}
+
+#[must_use]
+pub fn trusted_ootle_deployment_path_v2(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2)
 }
 
 #[must_use]
@@ -88,6 +149,23 @@ pub fn trusted_ootle_deployment_fixed_v1() -> GuiTrustedOotleDeploymentFixedV1 {
 #[must_use]
 pub fn trusted_ootle_deployment_event_topic_v1() -> String {
     format!("{ANCHOR_TEMPLATE_MODULE_V1}.{ANCHOR_EVENT_TOPIC_SUFFIX_V1}")
+}
+
+#[must_use]
+pub fn trusted_ootle_deployment_fixed_v2() -> GuiTrustedOotleDeploymentFixedV2 {
+    GuiTrustedOotleDeploymentFixedV2 {
+        schema: TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2,
+        template_module: ANCHOR_TEMPLATE_MODULE_V2,
+        template_function: ANCHOR_EVENT_FUNCTION_V2,
+        template_event_topic: trusted_ootle_deployment_event_topic_v2(),
+        expected_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        expected_artifact_display_name: "tari_cc_private_ballot_ootle_anchor_event_template_v2.wasm",
+    }
+}
+
+#[must_use]
+pub fn trusted_ootle_deployment_event_topic_v2() -> String {
+    format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}")
 }
 
 pub fn inspect_template_wasm_v1(
@@ -152,6 +230,100 @@ pub fn unlock_trusted_ootle_deployment_v1(
     }
 }
 
+/// Loads the independent V2 deployment lock. A V1 record is never consulted.
+pub fn load_trusted_ootle_deployment_v2(
+    app_data_dir: &Path,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    let path = trusted_ootle_deployment_path_v2(app_data_dir);
+    if !path.exists() {
+        return Ok(unlocked_status_v2());
+    }
+    let bytes =
+        fs::read(&path).map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
+    let deployment: GuiTrustedOotleDeploymentV2 = serde_json::from_slice(&bytes)
+        .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
+    validate_saved_deployment_v2(&deployment)?;
+    Ok(GuiTrustedOotleDeploymentStatusV2 {
+        locked: true,
+        deployment: Some(deployment),
+        fixed: trusted_ootle_deployment_fixed_v2(),
+    })
+}
+
+/// Creates the independent V2 deployment lock. The immutable V2 ABI is
+/// derived here, never supplied by the GUI.
+pub fn lock_trusted_ootle_deployment_v2(
+    app_data_dir: &Path,
+    request: &GuiTrustedOotleDeploymentLockRequestV2,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    let path = trusted_ootle_deployment_path_v2(app_data_dir);
+    if path.exists() {
+        let _ = load_trusted_ootle_deployment_v2(app_data_dir)?;
+        return Err(GuiCoreError::trusted_ootle_deployment_locked());
+    }
+
+    let artifact_digest = parse_lower_digest_hex(&request.template_artifact_digest_hex)?;
+    if request.template_artifact_digest_hex != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
+    let deployment = GuiTrustedOotleDeploymentV2 {
+        schema: TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2.to_owned(),
+        network: request.network.trim().to_owned(),
+        template_address: request.template_address.trim().to_owned(),
+        template_artifact_digest_hex: crate::hex::to_lower_hex(&artifact_digest),
+        template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: trusted_ootle_deployment_event_topic_v2(),
+        locked_at_unix_ms: now_unix_ms()?,
+    };
+    validate_saved_deployment_v2(&deployment)?;
+    fs::create_dir_all(app_data_dir)
+        .map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
+    write_deployment_create_new(&path, &deployment)?;
+    Ok(GuiTrustedOotleDeploymentStatusV2 {
+        locked: true,
+        deployment: Some(deployment),
+        fixed: trusted_ootle_deployment_fixed_v2(),
+    })
+}
+
+pub fn unlock_trusted_ootle_deployment_v2(
+    app_data_dir: &Path,
+    confirm: bool,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    if !confirm {
+        return Err(GuiCoreError::trusted_ootle_deployment_unlock_not_confirmed());
+    }
+    let path = trusted_ootle_deployment_path_v2(app_data_dir);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(unlocked_status_v2()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(unlocked_status_v2()),
+        Err(_) => Err(GuiCoreError::io_failure("trusted-ootle-deployment-v2")),
+    }
+}
+
+/// Applies only a V2 lock to the V2 detached-evidence request. A V1 lock does
+/// not share this type and therefore cannot populate this request.
+pub fn trusted_ootle_deployment_to_live_anchor_v2_request_v1(
+    mut request: crate::live_anchor_v2::GuiLiveAnchorV2RequestV1,
+    deployment: &GuiTrustedOotleDeploymentV2,
+) -> Result<crate::live_anchor_v2::GuiLiveAnchorV2RequestV1, GuiCoreError> {
+    validate_saved_deployment_v2(deployment)?;
+    request.network = deployment.network.clone();
+    request.template_address = deployment.template_address.clone();
+    request.template_module = ANCHOR_TEMPLATE_MODULE_V2.to_owned();
+    request.template_function = ANCHOR_EVENT_FUNCTION_V2.to_owned();
+    request.template_event_topic = trusted_ootle_deployment_event_topic_v2();
+    request.template_artifact_digest_hex = deployment.template_artifact_digest_hex.clone();
+    Ok(request)
+}
+
+pub fn trusted_ootle_deployment_v2_binding(
+    deployment: &GuiTrustedOotleDeploymentV2,
+) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
+    validate_saved_deployment_v2(deployment)
+}
+
 pub fn trusted_ootle_deployment_to_live_anchor_request_v1(
     mut request: GuiLiveAnchorConfigRequestV1,
     deployment: &GuiTrustedOotleDeploymentV1,
@@ -170,6 +342,14 @@ fn unlocked_status() -> GuiTrustedOotleDeploymentStatusV1 {
         locked: false,
         deployment: None,
         fixed: trusted_ootle_deployment_fixed_v1(),
+    }
+}
+
+fn unlocked_status_v2() -> GuiTrustedOotleDeploymentStatusV2 {
+    GuiTrustedOotleDeploymentStatusV2 {
+        locked: false,
+        deployment: None,
+        fixed: trusted_ootle_deployment_fixed_v2(),
     }
 }
 
@@ -215,6 +395,32 @@ fn validate_saved_deployment(
         ANCHOR_TEMPLATE_MODULE_V1.to_owned(),
         ANCHOR_EVENT_FUNCTION_V1.to_owned(),
         trusted_ootle_deployment_event_topic_v1(),
+        parse_lower_digest_hex(&deployment.template_artifact_digest_hex)?,
+    )
+    .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())
+}
+
+fn validate_saved_deployment_v2(
+    deployment: &GuiTrustedOotleDeploymentV2,
+) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
+    if deployment.schema != TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2
+        || deployment.template_module != ANCHOR_TEMPLATE_MODULE_V2
+        || deployment.template_function != ANCHOR_EVENT_FUNCTION_V2
+        || deployment.template_event_topic != trusted_ootle_deployment_event_topic_v2()
+        || deployment.network.trim() != deployment.network
+        || deployment.template_address.trim() != deployment.template_address
+        || deployment.template_artifact_digest_hex
+            != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX
+    {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
+    OotleNetworkIdV1::new(deployment.network.clone())
+        .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
+    AnchorTemplateBindingV2::new(
+        deployment.template_address.clone(),
+        ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        trusted_ootle_deployment_event_topic_v2(),
         parse_lower_digest_hex(&deployment.template_artifact_digest_hex)?,
     )
     .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())
@@ -299,9 +505,9 @@ fn hex_nibble(byte: u8) -> u8 {
     }
 }
 
-fn write_deployment_create_new(
+fn write_deployment_create_new<T: Serialize>(
     path: &Path,
-    deployment: &GuiTrustedOotleDeploymentV1,
+    deployment: &T,
 ) -> Result<(), GuiCoreError> {
     let tmp_path = path.with_extension(format!("json.tmp.{}", now_unix_ms()?));
     let bytes = serde_json::to_vec_pretty(deployment)

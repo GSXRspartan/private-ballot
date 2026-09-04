@@ -53,6 +53,11 @@ export function Settings() {
       </Card>
 
       <Card title="Directories">
+        <p className="form-hint">
+          These directories are optional overrides; leave blank to use the application's
+          default location; the app does not move existing archives if you change the
+          export directory later.
+        </p>
         <div className="form-row">
           <label htmlFor="data-dir">Data directory</label>
           <div className="file-row">
@@ -61,7 +66,7 @@ export function Settings() {
               type="text"
               value={settings.dataDirectory}
               onChange={(e) => setSetting("dataDirectory", e.target.value)}
-              placeholder="where election artifacts are kept"
+              placeholder="Using application default"
             />
             <button
               type="button"
@@ -72,6 +77,10 @@ export function Settings() {
               Browse
             </button>
           </div>
+          <p className="form-hint">
+            Where the application keeps its local working data (draft elections, saved
+            voter credentials, private-intake inbox, and anchor lifecycle sidecars).
+          </p>
         </div>
         <div className="form-row">
           <label htmlFor="export-dir">Default export directory</label>
@@ -81,7 +90,7 @@ export function Settings() {
               type="text"
               value={settings.exportDirectory}
               onChange={(e) => setSetting("exportDirectory", e.target.value)}
-              placeholder="default target for archives and ballot packages"
+              placeholder="Using application default"
             />
             <button
               type="button"
@@ -92,10 +101,14 @@ export function Settings() {
               Browse
             </button>
           </div>
+          <p className="form-hint">
+            Suggested destination for exported election packages, ballot packages, and
+            finalized archives. Existing exports are never moved.
+          </p>
         </div>
       </Card>
 
-      <Card title="Developer diagnostics">
+      <Card title="Advanced / Developer diagnostics">
         <label className="radio-option">
           <input
             type="checkbox"
@@ -105,9 +118,11 @@ export function Settings() {
           Enable developer diagnostics
         </label>
         <p className="form-hint">
-          Shows additional technical detail for troubleshooting, such as backend, network, and
-          data-directory information in the footer. Diagnostics never expose secret material —
-          none exists in the frontend.
+          Off by default. When enabled, shows extra technical detail for troubleshooting
+          in the footer: backend boundary, target network, lifecycle state, and the
+          configured data-directory override. Diagnostics never expose credentials,
+          tokens, wallet material, private keys, voter credentials, or transport
+          authority secrets — no secret material exists in the frontend.
         </p>
       </Card>
     </>

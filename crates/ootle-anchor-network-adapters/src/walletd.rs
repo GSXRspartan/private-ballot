@@ -36,19 +36,24 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
     canonicalize_transaction_id,
 };
 use tari_ootle_transaction::{Network, TransactionBuilder, TransactionId, UnsignedTransaction};
-use tari_template_lib_types::ComponentAddress;
 use tari_ootle_wallet_sdk::models::{KeyBranch, KeyId};
 use tari_ootle_walletd_client::WalletDaemonClient;
+pub use tari_ootle_walletd_client::WalletDaemonClient as PinnedWalletDaemonClient;
+pub use tari_ootle_walletd_client::error::WalletDaemonClientError as PinnedWalletDaemonClientError;
 pub use tari_ootle_walletd_client::types::{
-    TransactionRequestCreateRequest, TransactionRequestCreateResponse,
-    TransactionRequestDecisionRequest, TransactionRequestDecisionResponse,
-    TransactionRequestGetRequest, TransactionRequestGetResponse, TransactionRequestInfo,
-    TransactionRequestSubmitRequest, TransactionRequestSubmitResponse,
-    TransactionDetectInputsRequest, TransactionDetectInputsResponse,
+    AccountInfo, AccountsListRequest, AccountsListResponse, TransactionDetectInputsRequest,
+    TransactionDetectInputsResponse, TransactionRequestCreateRequest,
+    TransactionRequestCreateResponse, TransactionRequestDecisionRequest,
+    TransactionRequestDecisionResponse, TransactionRequestGetRequest,
+    TransactionRequestGetResponse, TransactionRequestInfo, TransactionRequestListRequest,
+    TransactionRequestListResponse, TransactionRequestSubmitRequest,
+    TransactionRequestSubmitResponse, TransactionSubmitDryRunRequest, WalletGetInfoRequest,
+    WalletGetInfoResponse,
 };
+use tari_template_lib_types::ComponentAddress;
 
 use crate::auth::WalletdAuthSecret;
-use crate::endpoint::WalletdEndpoint;
+use crate::endpoint::{WalletdEndpoint, ensure_walletd_jsonrpc_path};
 use crate::error::{TransportError, TransportErrorCategory};
 use crate::executor::{BlockingExecutor, BlockingExecutorError};
 
@@ -64,6 +69,14 @@ pub trait WalletdWireTransport {
         &mut self,
         request: &TransactionDetectInputsRequest,
     ) -> Result<TransactionDetectInputsResponse, TransportError>;
+
+    /// Executes an unsigned transaction as a walletd dry run and returns the
+    /// minimum fee walletd reports. This does not commit or create a wallet
+    /// approval request.
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        request: &TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError>;
 
     /// Creates a frozen transaction request.
     ///
@@ -138,7 +151,11 @@ pub struct RealWalletdTransport<E: BlockingExecutor> {
 impl<E: BlockingExecutor> RealWalletdTransport<E> {
     /// Constructs a real walletd transport.
     ///
-    /// The `endpoint` is the walletd JSON-RPC URL. The optional `auth` is a
+    /// The `endpoint` is the operator-configured walletd base URL. It is
+    /// normalized to the walletd JSON-RPC route (`/json_rpc`) via
+    /// [`ensure_walletd_jsonrpc_path`] before the client connects, so the stored
+    /// or displayed config may be a bare `http://127.0.0.1:5100` while every RPC
+    /// (Prepare and publish) reaches `.../json_rpc`. The optional `auth` is a
     /// bearer JWT or API key. The optional `request_timeout` bounds every
     /// walletd request at the real network boundary; when `None` the request is
     /// unbounded. The `executor` is provided by the application (e.g. a tokio
@@ -155,13 +172,22 @@ impl<E: BlockingExecutor> RealWalletdTransport<E> {
         executor: E,
     ) -> Result<Self, TransportError> {
         let token = auth.map(WalletdAuthSecret::as_jwt_string);
-        let client = WalletDaemonClient::connect(endpoint.as_str(), token)
+        let rpc_url = ensure_walletd_jsonrpc_path(endpoint.as_str());
+        let client = WalletDaemonClient::connect(&rpc_url, token)
             .map_err(|_error| TransportError::from_category(TransportErrorCategory::Unknown))?;
         Ok(Self {
             client,
             executor,
             request_timeout,
         })
+    }
+
+    /// The fully-qualified walletd JSON-RPC URL this transport connects to.
+    /// Always normalized to the `/json_rpc` route, regardless of whether the
+    /// configured endpoint included the path.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        self.client.endpoint().as_str()
     }
 }
 
@@ -192,6 +218,15 @@ impl<E: BlockingExecutor> WalletdWireTransport for RealWalletdTransport<E> {
     ) -> Result<TransactionDetectInputsResponse, TransportError> {
         let future = self.client.detect_transaction_inputs(request);
         resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
+    }
+
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        request: &TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError> {
+        let future = self.client.submit_transaction_dry_run(request);
+        resolve_executor_outcome(self.executor.block_on_bounded(future, self.request_timeout))
+            .map(|response| response.required_fees)
     }
 
     fn create_transaction_request(
@@ -272,6 +307,10 @@ pub enum ScriptedWalletdResponse {
     },
     /// A transport error for status lookup.
     GetError(TransportError),
+    /// A successful dry-run fee estimate.
+    DryRun { required_fees: u64 },
+    /// A transport error for dry-run fee estimation.
+    DryRunError(TransportError),
     /// A successful submit response.
     Submit { transaction_id: AnchorTransactionId },
     /// A transport error for submit.
@@ -336,17 +375,20 @@ pub struct ScriptedWalletdTransport {
     approve_response: ScriptedWalletdResponse,
     reject_response: ScriptedWalletdResponse,
     get_response: ScriptedWalletdResponse,
+    dry_run_response: ScriptedWalletdResponse,
     submit_response: ScriptedWalletdResponse,
     captured_create: Option<TransactionRequestCreateRequest>,
     captured_approve: Option<TransactionRequestDecisionRequest>,
     captured_reject: Option<TransactionRequestDecisionRequest>,
     captured_get: Option<TransactionRequestGetRequest>,
+    captured_dry_run: Option<TransactionSubmitDryRunRequest>,
     captured_submit: Option<TransactionRequestSubmitRequest>,
     get_transaction: Option<UnsignedTransaction>,
     create_calls: u64,
     approve_calls: u64,
     reject_calls: u64,
     get_calls: u64,
+    dry_run_calls: u64,
     submit_calls: u64,
     detect_calls: u64,
 }
@@ -374,6 +416,9 @@ impl ScriptedWalletdTransport {
             get_response: ScriptedWalletdResponse::GetError(TransportError::from_category(
                 TransportErrorCategory::NotFound,
             )),
+            dry_run_response: ScriptedWalletdResponse::DryRunError(TransportError::from_category(
+                TransportErrorCategory::NotFound,
+            )),
             submit_response: ScriptedWalletdResponse::SubmitError(TransportError::from_category(
                 TransportErrorCategory::NotFound,
             )),
@@ -383,12 +428,14 @@ impl ScriptedWalletdTransport {
             captured_approve: None,
             captured_reject: None,
             captured_get: None,
+            captured_dry_run: None,
             captured_submit: None,
             get_transaction: None,
             create_calls: 0,
             approve_calls: 0,
             reject_calls: 0,
             get_calls: 0,
+            dry_run_calls: 0,
             submit_calls: 0,
             detect_calls: 0,
         }
@@ -412,6 +459,11 @@ impl ScriptedWalletdTransport {
     /// Sets the scripted response for `get_transaction_request`.
     pub fn set_get_response(&mut self, response: ScriptedWalletdResponse) {
         self.get_response = response;
+    }
+
+    /// Sets the scripted response for `submit_transaction_dry_run`.
+    pub fn set_dry_run_response(&mut self, response: ScriptedWalletdResponse) {
+        self.dry_run_response = response;
     }
 
     /// Sets the scripted response for `submit_transaction_request`.
@@ -460,6 +512,12 @@ impl ScriptedWalletdTransport {
         self.captured_get.as_ref()
     }
 
+    /// Returns the captured dry-run request, if one was sent.
+    #[must_use]
+    pub fn captured_dry_run(&self) -> Option<&TransactionSubmitDryRunRequest> {
+        self.captured_dry_run.as_ref()
+    }
+
     /// Returns the captured submit request, if one was sent.
     #[must_use]
     pub fn captured_submit(&self) -> Option<&TransactionRequestSubmitRequest> {
@@ -488,6 +546,12 @@ impl ScriptedWalletdTransport {
     #[must_use]
     pub const fn get_calls(&self) -> u64 {
         self.get_calls
+    }
+
+    /// Returns the number of dry-run calls.
+    #[must_use]
+    pub const fn dry_run_calls(&self) -> u64 {
+        self.dry_run_calls
     }
 
     /// Returns the number of submit calls.
@@ -524,6 +588,21 @@ impl WalletdWireTransport for ScriptedWalletdTransport {
                 .clone()
                 .unwrap_or_else(|| request.transaction.clone()),
         })
+    }
+
+    fn submit_transaction_dry_run_fee(
+        &mut self,
+        request: &TransactionSubmitDryRunRequest,
+    ) -> Result<u64, TransportError> {
+        self.dry_run_calls += 1;
+        self.captured_dry_run = Some(request.clone());
+        match &self.dry_run_response {
+            ScriptedWalletdResponse::DryRun { required_fees } => Ok(*required_fees),
+            ScriptedWalletdResponse::DryRunError(error) => Err(error.clone()),
+            _ => Err(TransportError::from_category(
+                TransportErrorCategory::MalformedResponse,
+            )),
+        }
     }
 
     fn create_transaction_request(
@@ -724,6 +803,14 @@ impl<T: WalletdWireTransport> WalletdAnchorNetworkAdapter<T> {
             TransportErrorCategory::ExecutorUnavailable => {
                 WalletdAnchorAdapterError::WalletdUnavailable
             }
+            TransportErrorCategory::InsufficientFeesPaid => {
+                match error.insufficient_fee_details() {
+                    Some((paid, required)) => {
+                        WalletdAnchorAdapterError::InsufficientFeesPaid { paid, required }
+                    }
+                    None => WalletdAnchorAdapterError::TransportFailure,
+                }
+            }
         }
     }
 
@@ -754,6 +841,154 @@ impl<T: WalletdWireTransport> WalletdAnchorNetworkAdapter<T> {
             .map_err(
                 tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError::UnsafeUnsignedTransaction,
             )
+    }
+
+    /// Runs walletd input detection for the separately-versioned V2 anchor
+    /// path. The caller must re-inspect the returned transaction with the V2
+    /// ABI expectation before creating a request.
+    pub fn detect_v2_anchor_inputs(
+        &mut self,
+        transaction: &UnsignedTransaction,
+    ) -> Result<
+        UnsignedTransaction,
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        let request = TransactionDetectInputsRequest {
+            transaction: transaction.clone(),
+            use_unversioned: true,
+        };
+        self.transport
+            .detect_transaction_inputs(&request)
+            .map(|response| response.transaction)
+            .map_err(Self::map_transport_error)
+    }
+
+    /// Runs walletd's dry-run endpoint for the exact detected V2 transaction
+    /// and returns the required fee that walletd computed. The caller rebuilds
+    /// and re-detects a fresh transaction with the selected final fee before
+    /// creating a human-approved request.
+    pub fn estimate_v2_anchor_fee(
+        &mut self,
+        transaction: &UnsignedTransaction,
+        seal_signer: tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdSealSignerRef,
+    ) -> Result<u64, tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError>
+    {
+        let wire = TransactionSubmitDryRunRequest {
+            transaction: transaction.clone(),
+            seal_signer: seal_signer.to_key_id(),
+            other_signers: Vec::new(),
+            signatures: Vec::new(),
+            detect_inputs: false,
+            detect_inputs_use_unversioned: true,
+            lock_ids: Vec::new(),
+        };
+        self.transport
+            .submit_transaction_dry_run_fee(&wire)
+            .map_err(Self::map_transport_error)
+    }
+
+    /// Creates a frozen V2 request from an already V2-inspected transaction.
+    /// This has no V1 binding or V1 payload fallback.
+    pub fn create_v2_anchor_request(
+        &mut self,
+        transaction: &UnsignedTransaction,
+        seal_signer: tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdSealSignerRef,
+        ttl_secs: Option<u64>,
+    ) -> Result<
+        WalletdCreateOutcomeV1,
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        let wire = TransactionRequestCreateRequest {
+            transaction: transaction.clone(),
+            seal_signer: seal_signer.to_key_id(),
+            other_signers: Vec::new(),
+            signatures: Vec::new(),
+            lock_ids: Vec::new(),
+            ttl_secs,
+        };
+        let response = self
+            .transport
+            .create_transaction_request(&wire)
+            .map_err(Self::map_transport_error)?;
+        Ok(WalletdCreateOutcomeV1::new(
+            WalletdRequestId::from_walletd(response.request_id),
+            response.expires_at,
+        ))
+    }
+
+    /// Explicitly approves the V2 request. It is never called as part of
+    /// preparation, preserving the manual wallet approval gate.
+    pub fn approve_v2_anchor_request(
+        &mut self,
+        walletd_request_id: WalletdRequestId,
+    ) -> Result<
+        WalletdDecisionOutcomeV1,
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        let response = self
+            .transport
+            .approve_transaction_request(&TransactionRequestDecisionRequest {
+                request_id: walletd_request_id.value(),
+            })
+            .map_err(Self::map_transport_error)?;
+        Ok(WalletdDecisionOutcomeV1::new(
+            WalletdRequestId::from_walletd(response.request_id),
+            WalletdEffectiveStatusV1::from_wire(response.status),
+        ))
+    }
+
+    /// Reads the current walletd status of a V2 request without recomputing a
+    /// V1 fingerprint or touching the V1 coordinator.
+    ///
+    /// The V2 lifecycle uses this only for crash recovery and duplicate-action
+    /// prevention: before it approves it confirms the request is still
+    /// `Pending`, and before it submits it confirms the request has not already
+    /// advanced to `Submitting`/`Submitted` (in which case it adopts the sealed
+    /// transaction id instead of resubmitting). Receipt authenticity is proved
+    /// separately by the V2 receipt verifier against the locked deployment
+    /// binding, so no fingerprint is returned here.
+    pub fn get_v2_anchor_request_status(
+        &mut self,
+        walletd_request_id: WalletdRequestId,
+    ) -> Result<
+        (WalletdEffectiveStatusV1, Option<AnchorTransactionId>),
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        let response = self
+            .transport
+            .get_transaction_request(&TransactionRequestGetRequest {
+                request_id: walletd_request_id.value(),
+            })
+            .map_err(Self::map_transport_error)?;
+        let info = response.request;
+        let transaction_id = info
+            .transaction_id
+            .map(|id| canonicalize_transaction_id(&id));
+        Ok((
+            WalletdEffectiveStatusV1::from_wire(info.status),
+            transaction_id,
+        ))
+    }
+
+    /// Submits an explicitly approved V2 request and returns only walletd's
+    /// sealed transaction identifier.
+    pub fn submit_v2_anchor_request(
+        &mut self,
+        walletd_request_id: WalletdRequestId,
+    ) -> Result<
+        WalletdSubmitOutcomeV1,
+        tari_cc_private_ballot_ootle_walletd_anchor_adapter::WalletdAnchorAdapterError,
+    > {
+        let response = self
+            .transport
+            .submit_transaction_request(&TransactionRequestSubmitRequest {
+                request_id: walletd_request_id.value(),
+            })
+            .map_err(Self::map_transport_error)?;
+        Ok(WalletdSubmitOutcomeV1::new(
+            walletd_request_id,
+            canonicalize_transaction_id(&response.transaction_id),
+        ))
     }
 }
 
@@ -873,5 +1108,48 @@ impl<T: WalletdWireTransport> WalletdAnchorClient for WalletdAnchorNetworkAdapte
             command.walletd_request_id(),
             transaction_id,
         ))
+    }
+}
+
+#[cfg(test)]
+mod real_transport_endpoint_tests {
+    use super::RealWalletdTransport;
+    use crate::endpoint::WalletdEndpoint;
+    use crate::executor::SimpleBlockingExecutor;
+
+    fn transport(raw: &str) -> RealWalletdTransport<SimpleBlockingExecutor> {
+        let endpoint = WalletdEndpoint::parse(raw).expect("valid loopback endpoint");
+        RealWalletdTransport::new(&endpoint, None, None, SimpleBlockingExecutor)
+            .expect("client constructs offline")
+    }
+
+    #[test]
+    fn bare_config_endpoint_connects_to_jsonrpc_route() {
+        // Prepare and publish both go through RealWalletdTransport, so this
+        // proves the live path targets /json_rpc even when the stored config is
+        // the bare web-UI base.
+        assert!(
+            transport("http://127.0.0.1:5100")
+                .endpoint()
+                .ends_with("/json_rpc")
+        );
+    }
+
+    #[test]
+    fn localhost_config_endpoint_connects_to_jsonrpc_route() {
+        assert!(
+            transport("http://localhost:5100")
+                .endpoint()
+                .ends_with("/json_rpc")
+        );
+    }
+
+    #[test]
+    fn already_jsonrpc_endpoint_is_not_doubled() {
+        let ep = transport("http://127.0.0.1:5100/json_rpc")
+            .endpoint()
+            .to_owned();
+        assert!(ep.ends_with("/json_rpc"), "{ep}");
+        assert!(!ep.contains("/json_rpc/json_rpc"), "{ep}");
     }
 }

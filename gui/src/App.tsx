@@ -83,10 +83,10 @@ export default function App() {
         {section === "guide" && <Guide />}
         {section === "create" && <CreateElection onNavigate={navigate} />}
         {section === "manage" && <ManageElection />}
-        {section === "vote" && <Vote />}
-        {section === "archive" && <Archive />}
-        {section === "anchor" && <Anchor />}
-        {section === "evidence" && <Evidence />}
+        {section === "vote" && <Vote onNavigate={navigate} />}
+        {section === "archive" && <Archive onNavigate={navigate} />}
+        {section === "anchor" && <Anchor onNavigate={navigate} />}
+        {section === "evidence" && <Evidence onNavigate={navigate} />}
         {section === "settings" && <Settings />}
         {section === "about" && <About />}
       </ScreenErrorBoundary>

@@ -188,6 +188,23 @@ pub fn write_finalized_archive_v1_with_governance_document(
     )
 }
 
+/// Writes one finalized election archive with both an optional governance
+/// supporting document and a hash-covered public transport binding artifact.
+pub fn write_finalized_archive_v1_with_governance_document_and_transport_binding(
+    session: &GuiElectionSessionV1,
+    target_dir: &Path,
+    governance_document_bytes: Option<&[u8]>,
+    transport_binding: &TransportArchiveBindingV1,
+) -> Result<GuiArchiveWriteResultV1, GuiCoreError> {
+    write_archive_directory_v1_with_optional_binding(
+        session,
+        target_dir,
+        governance_document_bytes,
+        Some(transport_binding),
+        ArchiveFinalityMode::Finalized,
+    )
+}
+
 /// Writes one finalized election archive with a hash-covered public transport
 /// binding artifact.
 pub fn write_finalized_archive_v1_with_transport_binding(

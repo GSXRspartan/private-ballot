@@ -41,18 +41,25 @@ pub mod election_status;
 pub mod error;
 pub mod governance;
 mod hex;
+pub mod historical_replay;
 pub mod inspect;
+pub mod instrumentation;
 pub mod intake;
 pub mod live_anchor_config;
 pub mod live_anchor_driver;
+pub mod live_anchor_preflight;
+pub mod live_anchor_v2;
+pub mod live_anchor_v2_lifecycle;
 pub mod participation;
 pub mod private_intake_inbox;
+pub mod production_transport_authority_config;
 pub mod session;
 pub mod summary;
 pub mod tally;
 pub mod transport;
 pub mod transport_anchor;
 pub mod trusted_anchor_deployment;
+pub mod verified_session_cache;
 pub mod voter_cast_lock;
 pub mod voter_confirmation;
 pub mod voter_credential;
@@ -63,12 +70,14 @@ pub mod workspace;
 
 pub use archive_verify::{
     GuiArchiveFileCheckV1, GuiArchiveVerificationV1, STAGE_TRANSPORT_BINDING,
-    verify_archive_directory_v1,
+    verify_archive_directory_v1, verify_archive_directory_with_memo_v1,
 };
+// Slice 4D: process-local, memory-only, bounded archive-verification memo.
 pub use archive_writer::{
     GuiArchiveFileSummaryV1, GuiArchiveWriteResultV1, write_archive_directory_v1,
     write_archive_directory_v1_with_transport_binding, write_finalized_archive_v1,
     write_finalized_archive_v1_with_governance_document,
+    write_finalized_archive_v1_with_governance_document_and_transport_binding,
     write_finalized_archive_v1_with_transport_binding,
 };
 pub use artifacts::GuiElectionArtifactsV1;
@@ -95,6 +104,10 @@ pub use governance::{
     compute_governance_document_digest, content_digest_pin_for_bytes, match_governance_document,
     read_governance_document, validate_governance_source_pin,
 };
+pub use historical_replay::{
+    DEFAULT_HISTORICAL_REPLAY_BATCH_SIZE_V1, DEFAULT_HISTORICAL_REPLAY_PARALLEL_THRESHOLD_V1,
+    HISTORICAL_REPLAY_HARD_WORKER_CAP_V1, HistoricalReplayConfigV1, global_crypto_worker_budget_v1,
+};
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
     GuiReceiptSnapshotSummaryV1, GuiWalletdSnapshotSummaryV1, inspect_anchor_config_v1,
@@ -104,11 +117,31 @@ pub use intake::{GuiBallotIntakeResultV1, GuiIntakeCategory};
 pub use live_anchor_config::{
     GuiLiveAnchorConfigRequestV1, GuiLiveAnchorConfigResultV1,
     write_live_anchor_config_from_verified_archive_v1,
+    write_live_anchor_config_from_verified_archive_with_memo_v1,
 };
 pub use live_anchor_driver::{
     GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1, GuiLiveAnchorStepRequestV1,
     GuiLiveAnchorStepResultV1, enforce_publish_privacy_floor, map_driver_error, parse_decision,
-    run_step_with_transports, walletd_auth_env_var_name,
+    run_step_with_transports, run_step_with_transports_memoized, walletd_auth_env_var_name,
+};
+pub use live_anchor_preflight::{
+    GuiFieldRejectionV1, GuiLiveAnchorFieldStatusV1, GuiLiveAnchorPreflightResultV1,
+    validate_live_anchor_operator_config_v1, validate_live_anchor_operator_config_with_memo_v1,
+};
+pub use live_anchor_v2::{
+    GuiLiveAnchorV2RequestV1, GuiLiveAnchorV2ResultV1, GuiV2AnchorPublishPreparationRequestV1,
+    GuiV2AnchorPublishPreparationV1, GuiV2TallyRowV1,
+    build_v2_public_payload_from_verified_archive_v1,
+    build_v2_public_payload_from_verified_archive_with_memo_v1,
+    prepare_v2_anchor_publish_from_verified_evidence_v1,
+    v2_event_payload_from_verified_evidence_v1, verify_v2_public_payload_against_archive_v1,
+};
+pub use live_anchor_v2_lifecycle::{
+    GuiV2AnchorEvidenceFileV1, GuiV2LiveAnchorHydratedStateV1, GuiV2LiveAnchorStepRequestV1,
+    GuiV2LiveAnchorStepResultV1, __set_v2_anchor_sidecar_root_test_override,
+    inspect_v2_live_anchor_state, read_v2_public_anchor_evidence_file,
+    run_v2_live_anchor_recovery_step_with_indexer, run_v2_live_anchor_step_with_transports,
+    v2_evidence_sidecar_path, v2_failure_sidecar_path, v2_lifecycle_sidecar_path,
 };
 pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
@@ -120,28 +153,56 @@ pub use private_intake_inbox::{
     ballot_package_digest_hex_v1, ensure_private_intake_inbox_directory_v1,
     ingest_private_intake_inbox_into_session_v1, private_intake_inbox_directory_v1,
 };
+pub use production_transport_authority_config::{
+    PRODUCTION_TRANSPORT_AUTHORITY_FILENAME_V1, PRODUCTION_TRANSPORT_AUTHORITY_SCHEMA_V1,
+    ProductionTransportAuthorityConfigureRequestV1, ProductionTransportAuthorityReadinessKindV1,
+    ProductionTransportAuthorityReadinessV1, ProductionTransportAuthorityRootConfigV1,
+    configure_production_transport_authority_root_v1, ensure_configured_root_matches_v1,
+    forget_production_transport_authority_root_v1, production_transport_authority_path_v1,
+    production_transport_authority_readiness_v1, production_transport_authority_root_set_v1,
+};
 pub use session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
 pub use tally::{GuiLeadingResultV1, GuiTallyCountV1, GuiTallySummaryV1};
+pub use tari_cc_private_ballot_archive::{
+    ARCHIVE_VERIFICATION_MEMO_CAPACITY_V1, ArchiveVerificationCountersSnapshotV1,
+    ArchiveVerificationMemoV1, archive_verification_snapshot, reset_archive_verification_counters,
+};
 pub use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
 pub use transport::{
     AuthenticatedTransportReceiptV1, BatchPolicyV1, DescriptorConsistencyStoreV1,
-    EnvelopeOpeningMaterialV1, MAX_AUTHENTICATED_RECEIPT_BYTES, PaddingPolicyV1,
-    PrivateBallotEnvelopeV1, RetryStatusV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1,
-    TransportDescriptorV1, TransportError, TransportRoutePolicyV1, VoterReceiptStateV1,
-    VoterTransportReceiptV1, production_transport_authority_root_v1,
+    EnvelopeOpeningMaterialV1, MAX_AUTHENTICATED_RECEIPT_BYTES,
+    PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID, PaddingPolicyV1, PrivateBallotEnvelopeV1,
+    RetryStatusV1, TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    TransportError, TransportRoutePolicyV1, VoterReceiptStateV1, VoterTransportReceiptV1,
+    production_transport_authority_root_v1, provision_production_transport_authority_root_v1,
 };
-pub use transport_anchor::{GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1};
+pub use transport_anchor::{
+    GuiTransportAnchorVerificationV1, verify_transport_archive_anchor_v1,
+    verify_transport_archive_anchor_with_memo_v1,
+};
 pub use trusted_anchor_deployment::{
-    GuiTrustedOotleDeploymentFixedV1, GuiTrustedOotleDeploymentLockRequestV1,
-    GuiTrustedOotleDeploymentStatusV1, GuiTrustedOotleDeploymentV1,
+    GuiTrustedOotleDeploymentFixedV1, GuiTrustedOotleDeploymentFixedV2,
+    GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
+    GuiTrustedOotleDeploymentStatusV1, GuiTrustedOotleDeploymentStatusV2,
+    GuiTrustedOotleDeploymentV1, GuiTrustedOotleDeploymentV2,
     GuiTrustedOotleTemplateWasmInspectionV1, MAX_TEMPLATE_WASM_BYTES_V1,
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1,
-    TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1, inspect_template_wasm_v1, load_trusted_ootle_deployment_v1,
-    lock_trusted_ootle_deployment_v1, template_wasm_digest_for_bytes_v1,
-    trusted_ootle_deployment_event_topic_v1, trusted_ootle_deployment_fixed_v1,
-    trusted_ootle_deployment_path_v1, trusted_ootle_deployment_to_live_anchor_request_v1,
-    unlock_trusted_ootle_deployment_v1,
+    TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
+    TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
+    template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
+    trusted_ootle_deployment_event_topic_v2, trusted_ootle_deployment_fixed_v1,
+    trusted_ootle_deployment_fixed_v2, trusted_ootle_deployment_path_v1,
+    trusted_ootle_deployment_path_v2, trusted_ootle_deployment_to_live_anchor_request_v1,
+    trusted_ootle_deployment_to_live_anchor_v2_request_v1, trusted_ootle_deployment_v2_binding,
+    unlock_trusted_ootle_deployment_v1, unlock_trusted_ootle_deployment_v2,
+};
+pub use verified_session_cache::{
+    DEFAULT_VERIFIED_SESSION_CACHE_CAPACITY_V1, VERIFIED_SESSION_CACHE_EPOCH_V1,
+    VerifiedElectionSessionCacheV1, VerifiedElectionSessionV1, VerifiedSessionCacheSnapshotV1,
+    VerifiedSessionKeyV1,
 };
 pub use voter_cast_lock::{
     GuiVoterCastLockStateV1, MAX_STAGED_RELEASE_ENVELOPE_BYTES, PendingReleaseRetryHandleV1,
@@ -200,13 +261,17 @@ pub use voter_session::{
     voter_selectable_options,
 };
 pub use workspace::{
-    ELECTION_WORKSPACES_DIRECTORY_NAME, GuiElectionWorkspaceResumeResultV1,
-    GuiElectionWorkspaceSummaryV1, LoadedElectionWorkspaceV1, MAX_BALLOT_PACKAGE_BYTES_V1,
-    MAX_ELECTION_WORKSPACES_V1, MAX_WORKSPACE_PACKAGE_COUNT_V1, MAX_WORKSPACE_REVISION_BYTES_V1,
-    create_draft_workspace_id_v1, delete_election_workspace_v1, election_workspaces_directory_v1,
+    DURABLE_HEAD_BODY_CACHE_MAX_BYTES_V1, ELECTION_WORKSPACES_DIRECTORY_NAME,
+    GuiElectionWorkspaceResumeResultV1, GuiElectionWorkspaceSummaryV1, LoadedElectionWorkspaceV1,
+    MAX_BALLOT_PACKAGE_BYTES_V1, MAX_ELECTION_WORKSPACES_V1, MAX_WORKSPACE_PACKAGE_COUNT_V1,
+    MAX_WORKSPACE_REVISION_BYTES_V1, advance_verified_session_after_commit_v1,
+    clear_workspace_append_trusted_heads_v1, create_draft_workspace_id_v1,
+    delete_election_workspace_v1, election_workspaces_directory_v1,
     ensure_election_workspaces_directory_v1, list_election_workspaces_v1,
     mark_draft_workspace_superseded_v1, mark_workspace_organizer_authority_v1,
-    read_ballot_package_file_bounded_v1, resume_election_workspace_v1, validate_workspace_id_v1,
+    read_ballot_package_file_bounded_v1, resume_election_workspace_v1,
+    resume_election_workspace_with_verified_session_cache_v1,
+    set_durable_head_body_cache_max_bytes_v1, validate_workspace_id_v1,
     workspace_has_organizer_authority_v1, workspace_id_for_session_v1,
     write_draft_workspace_revision_v1, write_session_workspace_revision_v1,
 };

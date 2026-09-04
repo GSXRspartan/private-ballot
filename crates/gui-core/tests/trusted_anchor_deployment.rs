@@ -8,10 +8,13 @@ use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V1, ANCHOR_TEMPLATE_MODULE_V1,
 };
 use tari_cc_private_ballot_gui_core::{
-    GuiTrustedOotleDeploymentLockRequestV1, TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1,
-    TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1, inspect_template_wasm_v1, load_trusted_ootle_deployment_v1,
-    lock_trusted_ootle_deployment_v1, template_wasm_digest_for_bytes_v1,
-    trusted_ootle_deployment_event_topic_v1, trusted_ootle_deployment_path_v1,
+    GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
+    TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
+    TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
+    template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
+    trusted_ootle_deployment_path_v1, trusted_ootle_deployment_path_v2,
     unlock_trusted_ootle_deployment_v1,
 };
 use tempfile::TempDir;
@@ -282,4 +285,135 @@ fn corrupt_or_unsupported_saved_record_fails_closed() {
             .code(),
         "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
     );
+}
+
+fn valid_v2_request() -> GuiTrustedOotleDeploymentLockRequestV2 {
+    GuiTrustedOotleDeploymentLockRequestV2 {
+        network: "esmeralda".to_owned(),
+        template_address: format!("template_{}", "66".repeat(32)),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+    }
+}
+
+#[test]
+fn v1_and_v2_locks_are_independent() {
+    let dir = TempDir::new().expect("temp dir");
+    let wasm_path = write_wasm(&dir, "v1.wasm", VALID_WASM);
+    lock_trusted_ootle_deployment_v1(dir.path(), &valid_request(&wasm_path)).expect("V1 lock");
+    assert!(
+        !load_trusted_ootle_deployment_v2(dir.path())
+            .expect("V2 status")
+            .locked
+    );
+
+    let v2 = lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+    assert!(v2.locked);
+    assert_eq!(
+        v2.deployment.as_ref().expect("deployment").schema,
+        TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2
+    );
+    assert!(trusted_ootle_deployment_path_v1(dir.path()).exists());
+    assert!(trusted_ootle_deployment_path_v2(dir.path()).exists());
+}
+
+#[test]
+fn v2_replacement_guard_reads_existing_record_before_refusing_lock() {
+    let dir = TempDir::new().expect("temp dir");
+    lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request())
+            .expect_err("valid existing V2 lock refuses replacement")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_LOCKED"
+    );
+
+    fs::write(
+        trusted_ootle_deployment_path_v2(dir.path()),
+        br#"{"schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2"}"#,
+    )
+    .expect("write stale V2 lock");
+
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request())
+            .expect_err("stale existing V2 lock is reported precisely")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+}
+
+#[test]
+fn v2_lock_rejects_wrong_abi_or_artifact_digest() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut request = valid_v2_request();
+    request.template_artifact_digest_hex = "00".repeat(32);
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &request)
+            .expect_err("uppercase digest rejects")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+
+    fs::write(
+        trusted_ootle_deployment_path_v2(dir.path()),
+        br#"{
+          "schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2",
+          "network":"esmeralda",
+          "template_address":"template_6666666666666666666666666666666666666666666666666666666666666666",
+          "template_artifact_digest_hex":"7777777777777777777777777777777777777777777777777777777777777777",
+          "template_module":"tari_private_ballot_anchor",
+          "template_function":"publish_anchor",
+          "template_event_topic":"tari_private_ballot_anchor.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1",
+          "locked_at_unix_ms":1
+        }"#,
+    )
+    .expect("write malformed V2 lock");
+    assert_eq!(
+        load_trusted_ootle_deployment_v2(dir.path())
+            .expect_err("V1 ABI cannot satisfy V2")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+
+    for (module, function, topic, digest) in [
+        (
+            "wrong_module",
+            "publish_anchor_v2",
+            "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
+            TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        ),
+        (
+            "tari_private_ballot_anchor_v2",
+            "wrong_function",
+            "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
+            TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        ),
+        (
+            "tari_private_ballot_anchor_v2",
+            "publish_anchor_v2",
+            "wrong.topic",
+            TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        ),
+        (
+            "tari_private_ballot_anchor_v2",
+            "publish_anchor_v2",
+            "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
+            "00",
+        ),
+    ] {
+        let digest = if digest == "00" {
+            "00".repeat(32)
+        } else {
+            digest.to_owned()
+        };
+        fs::write(
+            trusted_ootle_deployment_path_v2(dir.path()),
+            format!(
+                r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2","network":"esmeralda","template_address":"template_{address}","template_artifact_digest_hex":"{digest}","template_module":"{module}","template_function":"{function}","template_event_topic":"{topic}","locked_at_unix_ms":1}}"#,
+                address = "66".repeat(32),
+            ),
+        )
+        .expect("write V2 mutation");
+        assert!(load_trusted_ootle_deployment_v2(dir.path()).is_err());
+    }
 }

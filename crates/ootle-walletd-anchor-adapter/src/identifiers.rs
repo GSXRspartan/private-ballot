@@ -77,7 +77,7 @@ impl WalletdSealSignerRef {
     ///
     /// This produces only a key handle; it derives no key and holds no secret.
     #[must_use]
-    pub(crate) fn to_key_id(self) -> KeyId {
+    pub fn to_key_id(self) -> KeyId {
         match self {
             Self::AccountKey { index } => KeyId::derived(KeyBranch::Account, index),
             Self::TransactionKey { index } => KeyId::derived(KeyBranch::Transaction, index),

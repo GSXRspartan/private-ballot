@@ -35,11 +35,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
+use tari_cc_private_ballot_archive::BallotPackageDigestV1;
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashDomain, hash_domain_separated};
 
 use crate::error::{GuiCoreError, GuiErrorCategory};
 use crate::hex::to_lower_hex;
+use crate::intake::GuiBallotIntakeResultV1;
 use crate::session::GuiElectionSessionV1;
 use crate::workspace::MAX_BALLOT_PACKAGE_BYTES_V1;
 
@@ -72,6 +75,16 @@ pub struct GuiPrivateIntakeSyncSummaryV1 {
     pub duplicates: usize,
     /// Packages the session rejected for any other reason (proof/binding).
     pub rejected: usize,
+}
+
+/// Non-authoritative file identity used only to notice an unchanged immutable
+/// content-addressed inbox file during one application process. The filename
+/// remains the BLAKE3 commitment to the contents; this identity never replaces
+/// that commitment and any change forces a full read/hash validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InboxFileIdentityV1 {
+    byte_len: u64,
+    modified: Option<SystemTime>,
 }
 
 /// Returns the app-owned, election-scoped inbox directory for a manifest hash.
@@ -201,7 +214,7 @@ pub fn append_accepted_ballot_package_to_inbox_v1(
 }
 
 fn verify_existing_inbox_package(path: &Path, expected_bytes: &[u8]) -> Result<(), GuiCoreError> {
-    let existing = read_bounded_package_file(path)?;
+    let (existing, _) = read_bounded_package_file(path)?;
     if existing != expected_bytes {
         return Err(GuiCoreError::new(
             "GUI_PRIVATE_INTAKE_INBOX_EXISTING_PACKAGE_MISMATCH",
@@ -279,9 +292,38 @@ pub fn ingest_private_intake_inbox_into_session_v1(
     let mut summary = GuiPrivateIntakeSyncSummaryV1::default();
     for digest_hex in digests {
         let path = inbox_dir.join(format!("{digest_hex}{INBOX_PACKAGE_FILE_SUFFIX}"));
-        let package_bytes = read_bounded_package_file(&path)?;
+        let expected_digest = inbox_digest_from_filename(&digest_hex).ok_or_else(|| {
+            GuiCoreError::new(
+                "GUI_PRIVATE_INTAKE_INBOX_INVALID_FILENAME",
+                GuiErrorCategory::InvalidInput,
+                Some("private-intake-inbox"),
+                "an inbox package filename is not a canonical digest",
+            )
+        })?;
+        let identity = inspect_bounded_package_file(&path)?;
+        summary.discovered = summary.discovered.saturating_add(1);
+
+        // A skip is available only for a package previously FULLY validated in
+        // this process, whose immutable content-addressed file identity is
+        // unchanged, and whose digest is already present in the authoritative
+        // transcript. New, restarted, changed, malformed, or otherwise
+        // anomalous files always take the full read + BLAKE3 validation path.
+        if let Some(modified) = identity.modified {
+            if let Some(result) = session.reconcile_cached_inbox_digest(
+                expected_digest,
+                identity.byte_len,
+                modified,
+            )? {
+                crate::instrumentation::record_private_inbox_file_skipped_unchanged();
+                update_sync_summary(&mut summary, result);
+                continue;
+            }
+        }
+
+        let (package_bytes, validated_identity) = read_bounded_package_file(&path)?;
         // Integrity: the file content MUST hash to the digest in its name. A
         // mismatch means on-disk tampering/corruption; fail closed.
+        crate::instrumentation::record_private_inbox_file_hashed();
         if ballot_package_digest_hex_v1(&package_bytes) != digest_hex {
             return Err(GuiCoreError::new(
                 "GUI_PRIVATE_INTAKE_INBOX_DIGEST_MISMATCH",
@@ -290,21 +332,34 @@ pub fn ingest_private_intake_inbox_into_session_v1(
                 "an inbox package file does not match its content-address digest",
             ));
         }
-        summary.discovered = summary.discovered.saturating_add(1);
         // Reconciliation entry point: every inbox file was already accepted by
         // the collector (and receipted) while the election was OPEN, so the
         // durable hand-off may drain during CLOSED. Identical validation and
         // ledger semantics; VERIFIED/FINALIZED refuse outright.
         let result = session.reconcile_accepted_package_bytes_from_inbox(&package_bytes)?;
-        if result.accepted {
-            summary.newly_accepted = summary.newly_accepted.saturating_add(1);
-        } else if matches!(result.category, crate::intake::GuiIntakeCategory::Duplicate) {
-            summary.duplicates = summary.duplicates.saturating_add(1);
-        } else {
-            summary.rejected = summary.rejected.saturating_add(1);
+        if let Some(modified) = validated_identity.modified {
+            session.remember_validated_inbox_file(
+                expected_digest,
+                validated_identity.byte_len,
+                modified,
+            );
         }
+        update_sync_summary(&mut summary, result);
     }
     Ok(summary)
+}
+
+fn update_sync_summary(
+    summary: &mut GuiPrivateIntakeSyncSummaryV1,
+    result: GuiBallotIntakeResultV1,
+) {
+    if result.accepted {
+        summary.newly_accepted = summary.newly_accepted.saturating_add(1);
+    } else if matches!(result.category, crate::intake::GuiIntakeCategory::Duplicate) {
+        summary.duplicates = summary.duplicates.saturating_add(1);
+    } else {
+        summary.rejected = summary.rejected.saturating_add(1);
+    }
 }
 
 fn parse_inbox_package_filename(name: &str) -> Option<&str> {
@@ -319,7 +374,28 @@ fn parse_inbox_package_filename(name: &str) -> Option<&str> {
     Some(stem)
 }
 
-fn read_bounded_package_file(path: &Path) -> Result<Vec<u8>, GuiCoreError> {
+fn inbox_digest_from_filename(digest_hex: &str) -> Option<BallotPackageDigestV1> {
+    if digest_hex.len() != DIGEST_HEX_BYTES {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in digest_hex.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0])?;
+        let low = hex_nibble(pair[1])?;
+        bytes[index] = (high << 4) | low;
+    }
+    Some(BallotPackageDigestV1::new(bytes))
+}
+
+const fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn inspect_bounded_package_file(path: &Path) -> Result<InboxFileIdentityV1, GuiCoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             GuiCoreError::file_not_found("private-intake-inbox")
@@ -338,7 +414,28 @@ fn read_bounded_package_file(path: &Path) -> Result<Vec<u8>, GuiCoreError> {
             "an inbox package file exceeds the canonical size limit",
         ));
     }
-    fs::read(path).map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))
+    Ok(InboxFileIdentityV1 {
+        byte_len: metadata.len(),
+        // An unavailable timestamp is an anomaly for the cache: callers simply
+        // reread and rehash instead of treating it as an integrity signal.
+        modified: metadata.modified().ok(),
+    })
+}
+
+fn read_bounded_package_file(path: &Path) -> Result<(Vec<u8>, InboxFileIdentityV1), GuiCoreError> {
+    let before = inspect_bounded_package_file(path)?;
+    crate::instrumentation::record_private_inbox_file_read();
+    let bytes = fs::read(path).map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?;
+    let after = inspect_bounded_package_file(path)?;
+    if before != after || u64::try_from(bytes.len()).ok() != Some(after.byte_len) {
+        return Err(GuiCoreError::new(
+            "GUI_PRIVATE_INTAKE_INBOX_FILE_CHANGED_DURING_READ",
+            GuiErrorCategory::ArchiveIntegrity,
+            Some("private-intake-inbox"),
+            "an inbox package file changed while it was being validated",
+        ));
+    }
+    Ok((bytes, after))
 }
 
 pub(crate) fn ensure_direct_directory(path: &Path) -> Result<(), GuiCoreError> {

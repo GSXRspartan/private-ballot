@@ -156,7 +156,9 @@ impl WalletdAnchorBindingV1 {
         if self.fingerprint != supplied.fingerprint {
             return Err(WalletdAnchorAdapterError::FingerprintMismatch);
         }
-        if self.template_binding != supplied.template_binding || self.epoch_binding != supplied.epoch_binding {
+        if self.template_binding != supplied.template_binding
+            || self.epoch_binding != supplied.epoch_binding
+        {
             return Err(WalletdAnchorAdapterError::PayloadMismatch);
         }
         Ok(())

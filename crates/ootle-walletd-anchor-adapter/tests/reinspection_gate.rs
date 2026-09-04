@@ -69,9 +69,13 @@ fn duplicate_anchor_call_is_rejected_by_the_gate() {
 
 #[test]
 fn valid_anchor_transaction_passes_the_gate() {
-    let Ok(build) =
-        build_unsigned_anchor_transaction(&build_request("esmeralda", "fee-account", 0x22, 1_000, None))
-    else {
+    let Ok(build) = build_unsigned_anchor_transaction(&build_request(
+        "esmeralda",
+        "fee-account",
+        0x22,
+        1_000,
+        None,
+    )) else {
         panic!("valid build must succeed");
     };
 

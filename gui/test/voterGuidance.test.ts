@@ -38,19 +38,21 @@ describe("voter-facing how voting works", () => {
     assert.ok(loadCard > guide, "guide must precede the first action card");
   });
 
-  it("walks the voter through the journey steps in plain language", () => {
-    assert.match(vote, /Load the election\./);
+  it("walks the voter through the journey steps in plain language, matching the Guide", () => {
+    // Ordering must match the final Guide (Create credential → share public
+    // key → load package → configure connection → prove eligibility →
+    // create+submit → receipt → verify later).
+    assert.match(vote, /Create or load your private voter credential\./);
+    assert.match(vote, /Share only your public enrollment key with the organizer, before freeze\./);
+    assert.match(vote, /Load the election package\./);
     assert.match(vote, /belong together and have not\s+been\s+altered/);
-    assert.match(vote, /Review the election\./);
-    assert.match(vote, /Prove you are eligible privately\./);
-    assert.match(vote, /Configure the ballot-office connection\./);
-    assert.match(vote, /Learn when voting opens\./);
-    assert.match(vote, /Choose your vote\./);
-    assert.match(vote, /tied to this specific election/);
-    assert.match(vote, /Create your anonymous proof and submit\./);
-    assert.match(vote, /Check its status\./);
-    assert.match(vote, /authenticated your exact ballot/);
-    assert.match(vote, /not yet final archive inclusion or Ootle\s+anchoring/);
+    assert.match(vote, /Configure the ballot-office connection and check status\./);
+    assert.match(vote, /Prove you are eligible anonymously\./);
+    assert.match(vote, /Create and submit your anonymous ballot\./);
+    assert.match(vote, /Receive an authenticated organizer receipt\./);
+    assert.match(vote, /authenticated the exact ballot/);
+    assert.match(vote, /not proof of\s+final archive inclusion or Ootle anchoring/);
+    assert.match(vote, /Verify the final record later\./);
   });
 
   it("keeps protocol vocabulary out of the primary voter explanation", () => {

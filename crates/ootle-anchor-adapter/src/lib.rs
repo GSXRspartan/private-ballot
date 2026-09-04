@@ -35,11 +35,12 @@
 mod build;
 mod constructor;
 mod errors;
+mod event_instruction;
 mod evidence;
 mod inspect;
-mod event_instruction;
 mod network;
 mod request;
+mod v2_build;
 
 pub use build::{
     OotleAnchorBuildResultV1, OotleWalletdAnchorPreparationV1,
@@ -47,12 +48,15 @@ pub use build::{
 };
 pub use constructor::{AnchorTransactionConstructor, PinnedOotleAnchorTransactionConstructor};
 pub use errors::OotleAnchorAdapterError;
+pub use event_instruction::{build_anchor_call_function, build_v2_anchor_call_function};
 pub use evidence::{OotleAnchorInspectionFingerprintV1, OotleUnsignedAnchorTransactionEvidenceV1};
 pub use inspect::{
     AnchorInspectionExpectationV1, fingerprint_unsigned_anchor_transaction,
     inspect_detected_fee_bearing_anchor_transaction, inspect_fee_bearing_anchor_transaction,
     inspect_unsigned_anchor_transaction,
 };
-pub use event_instruction::build_anchor_call_function;
 pub use network::{map_ootle_network, supported_testnet_network_ids};
 pub use request::OotleAnchorTransactionBuildRequestV1;
+pub use v2_build::{
+    build_fee_bearing_v2_anchor_transaction, inspect_detected_fee_bearing_v2_anchor_transaction,
+};

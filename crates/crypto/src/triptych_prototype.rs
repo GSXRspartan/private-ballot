@@ -26,13 +26,31 @@ const TRIPTYCH_MINIMUM_EXPONENT_V1: u32 = 2;
 const UNIFORM_RISTRETTO_BYTES: usize = 64;
 const COMPRESSED_RISTRETTO_BYTES: usize = 32;
 
-pub(crate) fn build_triptych_statement_v1(
+/// Immutable per-election Triptych verification context.
+///
+/// This is a pure function of `(protocol_version, proof_suite_id,
+/// election_scope, registry_keys)` — every ballot in one frozen election shares
+/// it — and is only ever read during verification. It holds no ballot-specific,
+/// secret, or linkable material (the per-ballot linking tag is combined later in
+/// [`finish_triptych_statement_v1`]), so a single instance can be reused for the
+/// whole election. Rebuilding it once per election instead of once per ballot is
+/// the source-side reuse the Slice 4A audit identified (the election-constant
+/// registry-key decompression is the bulk of it).
+pub(crate) struct TriptychElectionContextV1 {
+    parameters: TriptychParameters,
+    input_set: TriptychInputSet,
+}
+
+/// Builds the election-constant `(parameters, input_set)` context once.
+///
+/// This performs the O(N) registry-key decompression and input-set padding that
+/// the current per-ballot `verify` rebuilds on every call.
+pub(crate) fn build_triptych_election_context_v1(
     protocol_version: u16,
     proof_suite_id: &str,
     election_scope: &[u8],
     registry_keys: &[[u8; COMPRESSED_RISTRETTO_BYTES]],
-    linking_tag: [u8; COMPRESSED_RISTRETTO_BYTES],
-) -> Result<TriptychStatement, ProtocolError> {
+) -> Result<TriptychElectionContextV1, ProtocolError> {
     let exponent = ring_exponent_v1(registry_keys.len())?;
     let scope_generator =
         derive_scope_generator_v1(protocol_version, proof_suite_id, election_scope)?;
@@ -50,13 +68,47 @@ pub(crate) fn build_triptych_statement_v1(
     let verification_keys = parse_sorted_registry_keys_v1(registry_keys)?;
     let input_set = TriptychInputSet::new_with_padding(&verification_keys, &parameters)
         .map_err(|_| malformed_proof("Triptych rejected the prototype registry input set"))?;
+
+    Ok(TriptychElectionContextV1 {
+        parameters,
+        input_set,
+    })
+}
+
+/// Combines the immutable election context with one ballot's linking tag.
+///
+/// This is the only per-ballot portion of statement construction: decoding the
+/// linking tag and binding it to the shared parameters/input set. The result is
+/// byte-identical to building the whole statement from scratch for the same
+/// `(context inputs, linking_tag)`.
+pub(crate) fn finish_triptych_statement_v1(
+    context: &TriptychElectionContextV1,
+    linking_tag: [u8; COMPRESSED_RISTRETTO_BYTES],
+) -> Result<TriptychStatement, ProtocolError> {
     let linking_tag = decode_non_identity_v4(
         linking_tag,
         "Triptych linking tag is not a canonical non-identity Ristretto point",
     )?;
 
-    TriptychStatement::new(&parameters, &input_set, &linking_tag)
+    TriptychStatement::new(&context.parameters, &context.input_set, &linking_tag)
         .map_err(|_| malformed_proof("Triptych rejected the prototype proof statement"))
+}
+
+pub(crate) fn build_triptych_statement_v1(
+    protocol_version: u16,
+    proof_suite_id: &str,
+    election_scope: &[u8],
+    registry_keys: &[[u8; COMPRESSED_RISTRETTO_BYTES]],
+    linking_tag: [u8; COMPRESSED_RISTRETTO_BYTES],
+) -> Result<TriptychStatement, ProtocolError> {
+    let context = build_triptych_election_context_v1(
+        protocol_version,
+        proof_suite_id,
+        election_scope,
+        registry_keys,
+    )?;
+
+    finish_triptych_statement_v1(&context, linking_tag)
 }
 
 pub(crate) fn validate_triptych_registry_keys_v1(

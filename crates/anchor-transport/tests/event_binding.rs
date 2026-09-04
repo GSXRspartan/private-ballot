@@ -6,8 +6,10 @@
 //! network itself stays runtime data — nothing here hard-codes a network.
 
 use tari_cc_private_ballot_anchor_transport::{
-    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_TOPIC_SUFFIX_V1, AnchorEpochBindingV1,
-    AnchorEventBindingError, AnchorEventProofV2, AnchorTemplateBindingV1,
+    ANCHOR_EVENT_FUNCTION_V1, ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V1,
+    ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V2,
+    ANCHOR_TEMPLATE_RECEIPT_TOPIC_PREFIX_V2, AnchorEpochBindingV1, AnchorEventBindingError,
+    AnchorEventProofV2, AnchorTemplateBindingV1, AnchorTemplateBindingV2,
     MAX_ANCHOR_EVENT_METADATA_BYTES_V2, MAX_ANCHOR_EVENT_METADATA_FIELDS_V2,
     OOTLE_MAX_EPOCH_WINDOW_V1,
 };
@@ -170,6 +172,54 @@ fn event_proof_enforces_bounded_metadata() {
         AnchorEventProofV2::new(String::new(), topic(), Vec::new(), 0, 1_000, [0_u8; 32]).is_err()
     );
     assert!(
-        AnchorEventProofV2::new(address(), String::new(), Vec::new(), 0, 1_000, [0_u8; 32]).is_err()
+        AnchorEventProofV2::new(address(), String::new(), Vec::new(), 0, 1_000, [0_u8; 32])
+            .is_err()
+    );
+}
+
+#[test]
+fn v2_template_binding_accepts_only_the_v2_abi() {
+    let valid = AnchorTemplateBindingV2::new(
+        address(),
+        ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        [0x44; 32],
+    );
+    assert!(valid.is_ok());
+    let valid = valid.expect("valid V2 binding");
+    assert_eq!(
+        valid.canonical_receipt_event_topic(),
+        format!("{ANCHOR_TEMPLATE_RECEIPT_TOPIC_PREFIX_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}")
+    );
+    assert_eq!(
+        AnchorTemplateBindingV2::new(
+            address(),
+            MODULE.to_owned(),
+            ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+            format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+            [0x44; 32],
+        ),
+        Err(AnchorEventBindingError::InvalidModule)
+    );
+    assert_eq!(
+        AnchorTemplateBindingV2::new(
+            address(),
+            ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+            ANCHOR_EVENT_FUNCTION_V1.to_owned(),
+            format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+            [0x44; 32],
+        ),
+        Err(AnchorEventBindingError::InvalidFunction)
+    );
+    assert_eq!(
+        AnchorTemplateBindingV2::new(
+            address(),
+            ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+            ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+            format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V1}"),
+            [0x44; 32],
+        ),
+        Err(AnchorEventBindingError::InvalidEventTopic)
     );
 }

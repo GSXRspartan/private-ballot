@@ -2,9 +2,9 @@
 //! by the Phase 4 operator-tooling slice).
 //!
 //! Thin wrapper that parses the manual flag set, dispatches to the selected
-//! mode, and for the lifecycle mode loads the canonical config, verifies both
-//! local endpoints, optionally loads walletd auth from the one fixed backend
-//! environment variable, constructs one
+//! mode, and for the lifecycle mode loads the canonical config, verifies the
+//! walletd endpoint and indexer endpoint policy, optionally loads walletd auth
+//! from the one fixed backend environment variable, constructs one
 //! current-thread Tokio runtime, builds the real Slice 4A9 transports, creates
 //! or restores the driver, runs it, and prints the human-review summary plus
 //! the stable machine code and locator paths.
@@ -30,7 +30,7 @@ use tari_cc_private_ballot_ootle_anchor_app::{
 };
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
-    WalletdAnchorNetworkAdapter, WalletdAuthSecret,
+    WalletdAnchorNetworkAdapter, WalletdAuthSecret, indexer_endpoint_allowed_for_network_v1,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 
@@ -161,7 +161,9 @@ fn run_lifecycle(lifecycle: cli::LifecycleArgs) -> Result<(), String> {
 
 fn ensure_loopback_endpoints(config: &AnchorAppConfig) -> Result<(), String> {
     let adapter = config.network_adapter();
-    if !adapter.walletd_endpoint().is_loopback() || !adapter.indexer_endpoint().is_loopback() {
+    if !adapter.walletd_endpoint().is_loopback()
+        || !indexer_endpoint_allowed_for_network_v1(adapter.network(), adapter.indexer_endpoint())
+    {
         return Err(MachineReportCode::ConfigurationFailure.as_str().to_owned());
     }
     Ok(())

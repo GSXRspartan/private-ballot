@@ -11,6 +11,8 @@ import {
 import {
   APP_IDENTITY_TAG,
   APP_NAME,
+  APP_NETWORK_LABEL,
+  APP_RELEASE_STATUS,
   APP_STATUS_LABEL,
   APP_VERSION,
   COMMUNITY_DISCLAIMER,
@@ -19,8 +21,8 @@ import { QrCode } from "../components/QrCode";
 import { Card, CopyButton, DetailsSection, Field, Notice, Pill } from "../components/ui";
 
 /**
- * About: community project identity, open-source acknowledgements, plain
- * architecture explanation, and the single fuller scope notice.
+ * About: project identity, open-source acknowledgements, plain architecture
+ * explanation, and the single fuller scope notice.
  */
 export function About() {
   const [info, setInfo] = useState<ShellInfoV1 | null>(null);
@@ -47,7 +49,14 @@ export function About() {
           </span>
         </div>
         <div className="field-list">
-          <Field label="Status">
+          <Field label="Release status">
+            <Pill tone="warn">{APP_RELEASE_STATUS}</Pill>{" "}
+            <span className="form-hint">
+              Experimental pre-release software; not audited for production governance use.
+            </span>
+          </Field>
+          <Field label="Network">{APP_NETWORK_LABEL}</Field>
+          <Field label="Purpose">
             <Pill tone="brand">{APP_STATUS_LABEL}</Pill>
           </Field>
           <Field label="Version">{info?.shell_version ?? `${APP_VERSION} (browser preview)`}</Field>
@@ -57,11 +66,11 @@ export function About() {
 
       <Card title="Open-source acknowledgements">
         <p className="card-body">
-          This community project builds on open-source technology from the Tari ecosystem,
-          including the Tari Triptych implementation (BSD-3-Clause, The Tari Project), and on
-          Tari Ootle for optional anchoring. These are licence acknowledgements only: they do
-          not make this an official Tari Labs application, and they imply no endorsement of
-          this community project.
+          Private Ballot builds on open-source technology from the Tari ecosystem, including
+          the Tari Triptych implementation (BSD-3-Clause, The Tari Project), and on Tari Ootle
+          for optional public anchoring. These are licence acknowledgements only: they do not
+          make this an official Tari Labs application, and they imply no endorsement of this
+          independent open-source project.
         </p>
         <div className="field-list">
           <Field label="Stack">Tauri 2 · React · TypeScript · Vite (system WebView)</Field>

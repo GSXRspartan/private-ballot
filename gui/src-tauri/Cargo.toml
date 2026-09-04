@@ -1,9 +1,10 @@
 [package]
 name = "tari-cc-private-ballot-gui"
 version = "0.1.0"
-description = "Tari Private Ballot desktop shell (Tauri 2)"
+description = "Private Ballot desktop shell (Tauri 2)"
 edition = "2024"
 rust-version = "1.97"
+license = "MIT OR Apache-2.0"
 publish = false
 
 # This crate is deliberately detached from the election workspace: the shell
@@ -25,21 +26,32 @@ tauri-plugin-dialog = "2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+# OS-backed secure credential storage for the walletd API key. On Windows this
+# resolves to Credential Manager (DPAPI). No plaintext ever touches disk, env,
+# or logs. See src/walletd_credential_store.rs for the boundary contract.
+keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native"] }
 tari-cc-private-ballot-gui-core = { path = "../../crates/gui-core" }
+tari-cc-private-ballot-archive = { path = "../../crates/archive" }
+tari-cc-private-ballot-anchor = { path = "../../crates/anchor" }
 tari-cc-private-ballot-ootle-anchor-app = { path = "../../crates/ootle-anchor-app" }
 tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../../crates/ootle-anchor-network-adapters" }
 tari-cc-private-ballot-transport-gateway = { path = "../../crates/transport-gateway" }
 tari-cc-private-ballot-transport-network = { path = "../../crates/transport-network" }
 
 [features]
-default = []
-# Controlled-test integration slice: voter managed-Tor start/stop and the
-# private-submit rewire through the shared durable release boundary. The
-# feature alone never starts networking; the user must additionally supply
-# explicit runtime configuration (tor.exe path, voter Tor data directory, and a
-# voter-public transport bundle) before any Tor process or carrier is active.
-managed-tor-test = [
-    "tari-cc-private-ballot-transport-gateway/managed-tor-test",
+# The normal public release enables the managed-Tor production transport. The
+# feature alone never starts networking; the operator must still supply
+# explicit runtime configuration (validated tor.exe path, voter Tor data
+# directory, and — for voter submission — a voter-public transport bundle)
+# before any Tor process or carrier is active.
+default = ["managed-tor"]
+
+# Managed-Tor production integration: organizer near-one-click private intake
+# (hidden service + collector service loop), voter managed-Tor start/stop,
+# and the private-submit rewire through the shared durable release boundary
+# using TorSocksPrivateReleaseCarrierV1.
+managed-tor = [
+    "tari-cc-private-ballot-transport-gateway/managed-tor",
 ]
 
 [dev-dependencies]

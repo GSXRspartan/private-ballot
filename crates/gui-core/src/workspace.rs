@@ -5,10 +5,11 @@
 //! replayable representation: public organizer draft fields, or canonical
 //! public election artifacts plus exact canonical ballot-package bytes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tari_cc_private_ballot_ballot::ElectionLifecycleStateV1;
@@ -17,12 +18,16 @@ use tari_cc_private_ballot_protocol::{
     MAX_CANDIDATES, MAX_CANONICAL_OBJECT_BYTES, MAX_GOVERNANCE_KEY_BYTES, MAX_REGISTRY_MEMBERS,
 };
 
+use crate::artifacts::GuiElectionArtifactsV1;
 use crate::creation::{GuiBallotPresentationType, GuiElectionDraftSnapshotV1, GuiElectionDraftV1};
 use crate::error::{GuiCoreError, GuiErrorCategory};
 use crate::governance::MAX_GOVERNANCE_DOCUMENT_BYTES;
 use crate::hex::to_lower_hex;
 use crate::session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 use crate::summary::GuiElectionSummaryV1;
+use crate::verified_session_cache::{
+    VerifiedElectionSessionCacheV1, VerifiedElectionSessionV1, VerifiedSessionKeyV1,
+};
 
 /// Backend-controlled directory name below the Tauri app-data root.
 pub const ELECTION_WORKSPACES_DIRECTORY_NAME: &str = "election-workspaces";
@@ -77,13 +82,28 @@ const ORGANIZER_AUTHORITY_MAGIC_V1: &[u8] = b"TARI_PRIVATE_BALLOT_WORKSPACE_ORGA
 const MAX_ORGANIZER_AUTHORITY_MARKER_BYTES_V1: usize = 256;
 
 /// Public, organizer-safe discovery summary.
+///
+/// This is **display metadata**, derived without cryptographically replaying or
+/// re-verifying any stored ballot (see [`summarize_workspace`]). It must never
+/// be treated as authoritative verified election state: the authoritative
+/// accepted-ballot count and tally come only from a loaded, replay-verified
+/// session ([`GuiElectionSessionV1`], surfaced through the participation and
+/// tally facades), never from this summary.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GuiElectionWorkspaceSummaryV1 {
     pub workspace_id: String,
     pub election_manifest_hash_hex: Option<String>,
     pub question_preview: Option<String>,
     pub lifecycle_state: String,
-    pub accepted_ballot_count: usize,
+    /// Number of ballot packages durably STORED in this workspace revision.
+    ///
+    /// This is a display-only, NON-AUTHORITATIVE count taken from the durable
+    /// package list without proof replay. It counts every stored package
+    /// (accepted, duplicate, and rejected alike), so it is an upper bound on
+    /// the accepted count, never the verified accepted tally. The authoritative
+    /// accepted count is disclosed only after the election is opened, via the
+    /// participation facade over a replay-verified session.
+    pub stored_ballot_count: usize,
     pub last_revision: u64,
     pub updated_at_unix_secs: Option<u64>,
     pub finalized: bool,
@@ -155,6 +175,273 @@ struct DurableWorkspaceCommitV1 {
     workspace_id: String,
     revision: u64,
     revision_digest_hex: String,
+}
+
+/// The committed head an append will chain onto, resolved either by the
+/// process-local validated-head fast path or by the full committed-history walk.
+struct AppendHead {
+    revision: u64,
+    digest_hex: String,
+    /// Shared so the warm-head body cache (Slice 4F) can hand out a decoded head
+    /// without re-decoding or deep-cloning it.
+    body: Arc<DurableElectionWorkspaceBodyV1>,
+}
+
+/// Process-local, memory-only validated-head fast-append state (Slice 3B).
+///
+/// Maps `workspace_id` to the `(head_revision, head_revision_digest_hex)` that a
+/// full [`load_committed_history`] in THIS process validated. It is an
+/// optimization hint only: every fast append re-derives the head identity from
+/// disk and compares before use, and any mismatch discards the entry and falls
+/// back to the full walk. It is never persisted, so process restart starts
+/// empty and there is no durable "history verified" bit.
+static VALIDATED_APPEND_HEADS: LazyLock<Mutex<HashMap<String, (u64, String)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Process-local per-workspace append serialization (Slice 3B).
+///
+/// Hands out one `Arc<Mutex<()>>` per `workspace_id` so the read-head →
+/// write-commit critical section for a single workspace is serialized in-process
+/// without a global lock across unrelated elections. No cryptographic
+/// verification is performed while this lock is held.
+static WORKSPACE_APPEND_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn workspace_append_lock(workspace_id: &str) -> Arc<Mutex<()>> {
+    let mut registry = WORKSPACE_APPEND_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Arc::clone(
+        registry
+            .entry(workspace_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+fn trusted_append_head(workspace_id: &str) -> Option<(u64, String)> {
+    VALIDATED_APPEND_HEADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(workspace_id)
+        .cloned()
+}
+
+fn set_trusted_append_head(workspace_id: &str, revision: u64, digest_hex: String) {
+    VALIDATED_APPEND_HEADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(workspace_id.to_owned(), (revision, digest_hex));
+}
+
+fn clear_trusted_append_head(workspace_id: &str) {
+    let removed = VALIDATED_APPEND_HEADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(workspace_id)
+        .is_some();
+    // The decoded-head body cache is bound to the same head identity, so any
+    // event that invalidates the trusted head (drift, delete, import/recovery)
+    // must also drop the cached body for this workspace.
+    warm_head_body_cache_clear(workspace_id);
+    if removed {
+        crate::instrumentation::record_workspace_append_trusted_head_invalidation();
+    }
+}
+
+/// Clears all process-local validated-append-head state.
+///
+/// Memory-only diagnostic/test helper that reproduces a process restart: the
+/// next append for any workspace performs a full committed-history validation
+/// before any fast path is possible. Changing this state has no protocol effect
+/// and no durable footprint.
+pub fn clear_workspace_append_trusted_heads_v1() {
+    VALIDATED_APPEND_HEADS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+    warm_head_body_cache_clear_all();
+}
+
+/// Default byte cap for the warm durable-head body cache (Slice 4F).
+///
+/// A conservative total across all workspaces. A single decoded head body for a
+/// 4096-ballot election is on the order of a few MiB, so this holds one or a few
+/// hot heads (or many small ones). It is a byte cap, NOT a per-workspace object
+/// store: two workspaces cannot each pin an unbounded body.
+pub const DURABLE_HEAD_BODY_CACHE_MAX_BYTES_V1: usize = 16 * 1024 * 1024;
+
+/// One cached decoded head body, bound to the exact `(revision, digest)` it was
+/// decoded from. Reuse requires that identity to still match the freshly
+/// re-hashed on-disk head, so a cached body can never mask external mutation.
+struct WarmHeadBodyEntryV1 {
+    revision: u64,
+    digest_hex: String,
+    body: Arc<DurableElectionWorkspaceBodyV1>,
+    bytes: usize,
+}
+
+/// Process-local, memory-only, byte-bounded LRU of decoded head bodies (Slice 4F).
+///
+/// At most one entry per workspace (the current head). It is not persisted, so a
+/// process restart starts empty. It only ever holds a body that this process
+/// decoded from a durable head whose digest it verified; every reuse re-hashes
+/// the current on-disk head file first (see [`fast_path_append_head`]), so the
+/// cache eliminates only the repeated CBOR decode, never the integrity read.
+struct WarmHeadBodyCacheV1 {
+    entries: HashMap<String, WarmHeadBodyEntryV1>,
+    recency: VecDeque<String>,
+    total_bytes: usize,
+    max_bytes: usize,
+}
+
+impl WarmHeadBodyCacheV1 {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+            total_bytes: 0,
+            max_bytes: DURABLE_HEAD_BODY_CACHE_MAX_BYTES_V1,
+        }
+    }
+
+    fn touch(&mut self, workspace_id: &str) {
+        self.recency.retain(|existing| existing != workspace_id);
+        self.recency.push_back(workspace_id.to_owned());
+    }
+
+    fn remove(&mut self, workspace_id: &str) {
+        if let Some(entry) = self.entries.remove(workspace_id) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.bytes);
+        }
+        self.recency.retain(|existing| existing != workspace_id);
+    }
+}
+
+static WARM_HEAD_BODY_CACHE: LazyLock<Mutex<WarmHeadBodyCacheV1>> =
+    LazyLock::new(|| Mutex::new(WarmHeadBodyCacheV1::new()));
+
+/// Returns the cached decoded body for `workspace_id` only when it is bound to
+/// the exact `(revision, digest)` requested. A present-but-mismatched entry is
+/// recorded as identity drift (the head advanced or changed) and not returned.
+fn warm_head_body_cache_get(
+    workspace_id: &str,
+    revision: u64,
+    digest_hex: &str,
+) -> Option<Arc<DurableElectionWorkspaceBodyV1>> {
+    let mut cache = WARM_HEAD_BODY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match cache.entries.get(workspace_id) {
+        Some(entry) if entry.revision == revision && entry.digest_hex == digest_hex => {
+            let body = Arc::clone(&entry.body);
+            cache.touch(workspace_id);
+            crate::instrumentation::record_durable_head_body_cache_hit();
+            Some(body)
+        }
+        Some(_) => {
+            crate::instrumentation::record_durable_head_body_identity_drift();
+            None
+        }
+        None => None,
+    }
+}
+
+/// Caches a decoded head body under its exact identity, superseding any prior
+/// entry for the workspace and enforcing the total byte cap by LRU eviction. A
+/// single body larger than the cap is simply not cached.
+fn warm_head_body_cache_put(
+    workspace_id: &str,
+    revision: u64,
+    digest_hex: String,
+    body: Arc<DurableElectionWorkspaceBodyV1>,
+    bytes: usize,
+) {
+    let mut cache = WARM_HEAD_BODY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.remove(workspace_id);
+    if bytes > cache.max_bytes {
+        crate::instrumentation::set_durable_head_body_cache_bytes(cache.total_bytes as u64);
+        return;
+    }
+    cache.total_bytes = cache.total_bytes.saturating_add(bytes);
+    cache.entries.insert(
+        workspace_id.to_owned(),
+        WarmHeadBodyEntryV1 {
+            revision,
+            digest_hex,
+            body,
+            bytes,
+        },
+    );
+    cache.touch(workspace_id);
+    while cache.total_bytes > cache.max_bytes {
+        let Some(evicted) = cache.recency.pop_front() else {
+            break;
+        };
+        if let Some(entry) = cache.entries.remove(&evicted) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.bytes);
+            crate::instrumentation::record_durable_head_body_cache_eviction();
+        }
+    }
+    crate::instrumentation::set_durable_head_body_cache_bytes(cache.total_bytes as u64);
+}
+
+fn warm_head_body_cache_clear(workspace_id: &str) {
+    let mut cache = WARM_HEAD_BODY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.remove(workspace_id);
+    crate::instrumentation::set_durable_head_body_cache_bytes(cache.total_bytes as u64);
+}
+
+fn warm_head_body_cache_clear_all() {
+    let mut cache = WARM_HEAD_BODY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.entries.clear();
+    cache.recency.clear();
+    cache.total_bytes = 0;
+    crate::instrumentation::set_durable_head_body_cache_bytes(0);
+}
+
+/// Overrides the warm durable-head body cache byte cap. Diagnostic/test helper
+/// (memory-only, no protocol effect); shrinking it may evict existing entries.
+pub fn set_durable_head_body_cache_max_bytes_v1(max_bytes: usize) {
+    let mut cache = WARM_HEAD_BODY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.max_bytes = max_bytes.max(1);
+    while cache.total_bytes > cache.max_bytes {
+        let Some(evicted) = cache.recency.pop_front() else {
+            break;
+        };
+        if let Some(entry) = cache.entries.remove(&evicted) {
+            cache.total_bytes = cache.total_bytes.saturating_sub(entry.bytes);
+            crate::instrumentation::record_durable_head_body_cache_eviction();
+        }
+    }
+    crate::instrumentation::set_durable_head_body_cache_bytes(cache.total_bytes as u64);
+}
+
+/// Estimates the in-memory byte footprint of a decoded workspace body for the
+/// byte-bounded cache accounting. A conservative lower bound proportional to the
+/// stored payload (artifact bytes plus ballot-package bytes) is sufficient to
+/// bound total memory; the write path uses the exact encoded length instead.
+fn estimate_workspace_body_bytes(body: &DurableElectionWorkspaceBodyV1) -> usize {
+    match body {
+        DurableElectionWorkspaceBodyV1::Session(snapshot) => {
+            let packages: usize = snapshot.packages.iter().map(Vec::len).sum();
+            snapshot
+                .manifest_bytes
+                .len()
+                .saturating_add(snapshot.registry_bytes.len())
+                .saturating_add(snapshot.candidate_bytes.len())
+                .saturating_add(packages)
+        }
+        // Drafts carry no ballot packages; a small fixed estimate suffices.
+        DurableElectionWorkspaceBodyV1::Draft(_) => 4096,
+    }
 }
 
 /// Returns the backend-controlled election-workspaces root for an app-data
@@ -262,6 +549,7 @@ pub fn write_session_workspace_revision_v1(
 pub fn list_election_workspaces_v1(
     workspaces_root: &Path,
 ) -> Result<Vec<GuiElectionWorkspaceSummaryV1>, GuiCoreError> {
+    crate::instrumentation::record_workspace_list_call();
     ensure_direct_directory(workspaces_root, "election-workspaces")?;
 
     let mut summaries = Vec::new();
@@ -321,21 +609,35 @@ pub fn resume_election_workspace_v1(
     workspaces_root: &Path,
     workspace_id: &str,
 ) -> Result<LoadedElectionWorkspaceV1, GuiCoreError> {
-    let record = load_newest_workspace(workspaces_root, workspace_id)?.ok_or_else(|| {
-        GuiCoreError::new(
-            "GUI_WORKSPACE_NOT_FOUND",
-            GuiErrorCategory::FileIo,
-            Some("election-workspace"),
-            "no valid election workspace revision was found",
-        )
-    })?;
-    // Resume-by-id must honor the same supersession rule as discovery: a stale
-    // draft that was already frozen into a committed session must never be
-    // revived as an active mutable draft, even when the caller already knows
-    // its workspace id. Fail-open cases (malformed marker, missing/uncommitted
-    // successor, non-session successor, self-reference) fall through and the
-    // draft resumes normally.
-    if draft_superseding_session_v1(workspaces_root, &record).is_some() {
+    // Compatibility helper for callers that intentionally do not retain a
+    // process-level cache. Its fresh local cache is empty, so this preserves
+    // the historical full-replay behavior while keeping one reconstruction
+    // boundary for all resume paths.
+    let cache = VerifiedElectionSessionCacheV1::default();
+    resume_election_workspace_with_verified_session_cache_v1(workspaces_root, workspace_id, &cache)
+}
+
+/// Resumes one workspace using a process-local cache of fully replay-verified
+/// session snapshots. Drafts are never cacheable.
+///
+/// The durable head is loaded and chain-validated before every lookup. Both a
+/// cache miss and a cache hit load it again before returning; any identity
+/// change between those observations fails closed and cannot be inserted.
+pub fn resume_election_workspace_with_verified_session_cache_v1(
+    workspaces_root: &Path,
+    workspace_id: &str,
+    cache: &VerifiedElectionSessionCacheV1,
+) -> Result<LoadedElectionWorkspaceV1, GuiCoreError> {
+    let initial =
+        load_newest_committed_workspace(workspaces_root, workspace_id)?.ok_or_else(|| {
+            GuiCoreError::new(
+                "GUI_WORKSPACE_NOT_FOUND",
+                GuiErrorCategory::FileIo,
+                Some("election-workspace"),
+                "no valid election workspace revision was found",
+            )
+        })?;
+    if draft_superseding_session_v1(workspaces_root, &initial.record).is_some() {
         return Err(GuiCoreError::new(
             "GUI_WORKSPACE_SUPERSEDED",
             GuiErrorCategory::InvalidLifecycleTransition,
@@ -343,15 +645,50 @@ pub fn resume_election_workspace_v1(
             "this draft was superseded by a frozen election workspace; resume the successor election instead",
         ));
     }
-    let workspace = summarize_workspace(workspaces_root, &record)?;
-    match record.body {
+
+    match initial.record.body.clone() {
         DurableElectionWorkspaceBodyV1::Draft(snapshot) => {
+            let workspace = summarize_workspace(workspaces_root, &initial.record)?;
             let draft = GuiElectionDraftV1::from_durable_snapshot(snapshot)?;
             Ok(LoadedElectionWorkspaceV1::Draft { workspace, draft })
         }
         DurableElectionWorkspaceBodyV1::Session(snapshot) => {
-            let session = GuiElectionSessionV1::from_durable_snapshot(snapshot)?;
-            Ok(LoadedElectionWorkspaceV1::Session { workspace, session })
+            let key = verified_session_key_for_committed(&initial)?;
+            let expected_key = key.clone();
+            let root_for_recheck = workspaces_root.to_path_buf();
+            let workspace_id_for_recheck = workspace_id.to_owned();
+            let verified = cache.get_or_reconstruct(key.clone(), move || {
+                // Cold reconstruction runs the bounded multicore historical
+                // verifier (Slice 4B). It is byte-for-byte equivalent to the
+                // serial replay for the authoritative session, and runs inside
+                // this single-flight owner (bounded by the reconstruction
+                // permit) with no cache or durable-storage lock held.
+                let session = GuiElectionSessionV1::from_durable_snapshot_parallel(
+                    snapshot,
+                    &crate::historical_replay::HistoricalReplayConfigV1::default(),
+                )?;
+                let observed =
+                    load_newest_committed_workspace(&root_for_recheck, &workspace_id_for_recheck)?
+                        .ok_or_else(workspace_identity_changed)?;
+                if verified_session_key_for_committed(&observed)? != expected_key {
+                    return Err(workspace_identity_changed());
+                }
+                Ok(VerifiedElectionSessionV1::from_reconstruction(session))
+            })?;
+
+            // Cache hits receive the same verify-after protection as misses.
+            // The summary is deliberately rebuilt here too, so authority is
+            // read from its sidecar afresh rather than cached with the session.
+            let observed = load_newest_committed_workspace(workspaces_root, workspace_id)?
+                .ok_or_else(workspace_identity_changed)?;
+            if verified_session_key_for_committed(&observed)? != key {
+                return Err(workspace_identity_changed());
+            }
+            let workspace = summarize_workspace(workspaces_root, &observed.record)?;
+            Ok(LoadedElectionWorkspaceV1::Session {
+                workspace,
+                session: verified.session_clone(),
+            })
         }
     }
 }
@@ -374,6 +711,8 @@ pub fn delete_election_workspace_v1(
     workspace_id: &str,
 ) -> Result<(), GuiCoreError> {
     validate_workspace_id_v1(workspace_id)?;
+    // Any process-local validated head for this workspace is now stale.
+    clear_trusted_append_head(workspace_id);
     let dir = workspaces_root.join(workspace_id);
     let metadata = match fs::symlink_metadata(&dir) {
         Ok(metadata) => metadata,
@@ -681,18 +1020,36 @@ fn write_workspace_revision(
     body: DurableElectionWorkspaceBodyV1,
 ) -> Result<u64, GuiCoreError> {
     ensure_workspace_dirs(workspaces_root, workspace_id)?;
-    let committed = load_committed_history(workspaces_root, workspace_id)?;
-    let (current_revision, predecessor) = match committed.last() {
+
+    // Serialize the read-head → write-commit critical section per workspace so
+    // two in-process appenders can never both chain onto the same head and fork
+    // silently. This is a narrow per-workspace lock, never a global one, and no
+    // cryptographic verification runs while it is held.
+    let append_lock = workspace_append_lock(workspace_id);
+    let _append_guard = match append_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::WouldBlock) => {
+            crate::instrumentation::record_workspace_append_lock_contention();
+            append_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+
+    crate::instrumentation::record_workspace_append_call();
+    let (current_revision, predecessor) = match load_head_for_append(workspaces_root, workspace_id)?
+    {
         Some(head) => {
-            if head.record.body == body {
+            if *head.body == body {
                 return Ok(head.revision);
             }
-            enforce_workspace_append_allowed(&head.record.body, &body)?;
+            enforce_workspace_append_allowed(head.body.as_ref(), &body)?;
             (
                 head.revision,
                 RevisionPredecessorV1::Previous {
                     revision: head.revision,
-                    digest_hex: head.digest_hex.clone(),
+                    digest_hex: head.digest_hex,
                 },
             )
         }
@@ -734,21 +1091,357 @@ fn write_workspace_revision(
     let commit = DurableWorkspaceCommitV1 {
         workspace_id: workspace_id.to_owned(),
         revision,
-        revision_digest_hex: digest_hex,
+        revision_digest_hex: digest_hex.clone(),
     };
     let commit_payload = encode_commit_marker(&commit)?;
     write_create_new_sync(&commit_path, &commit_payload, "election-workspace")?;
     sync_directory_best_effort(&commits_dir);
+
+    // Advance the process-local validated head ONLY after the commit marker is
+    // durably written, so the fast path can never chain onto an uncommitted
+    // revision. Even if this update were skipped, the next append re-derives and
+    // re-confirms the head from disk, so this is an optimization, not trust.
+    set_trusted_append_head(workspace_id, revision, digest_hex.clone());
+    // Slice 4F: seed the warm-head body cache with the just-committed head body,
+    // reusing the round-trip decode performed above (no extra decode). The next
+    // warm append still re-reads and re-hashes this head file for integrity, then
+    // reuses this already-decoded body instead of decoding it again.
+    warm_head_body_cache_put(
+        workspace_id,
+        revision,
+        digest_hex,
+        Arc::new(decoded.body),
+        payload.len(),
+    );
     Ok(revision)
+}
+
+/// Resolves the committed head an append will chain onto.
+///
+/// Takes the process-local validated-head FAST path when the on-disk committed
+/// head is byte-identical to the head this process already fully validated, and
+/// otherwise performs the full [`load_committed_history`] walk (which
+/// re-establishes trust). Returns `None` when the workspace has no committed
+/// history yet (the append is genesis).
+///
+/// Safety: the fast path re-reads the commit markers (still validating
+/// contiguity, conflicts, and that the head marker names the trusted digest) and
+/// re-reads and digest-verifies ONLY the single head revision file it will chain
+/// onto, then relies on the already-validated integrity of the revisions behind
+/// that confirmed head. ANY anomaly — head drift, a missing or mismatched head
+/// file, an I/O or decode failure — discards the trusted head and falls back to
+/// the full walk, so the fast path can never accept anything the full walk would
+/// reject; it only ever skips re-reading a tail this process already validated.
+fn load_head_for_append(
+    workspaces_root: &Path,
+    workspace_id: &str,
+) -> Result<Option<AppendHead>, GuiCoreError> {
+    if let Some((trusted_revision, trusted_digest)) = trusted_append_head(workspace_id) {
+        match fast_path_append_head(
+            workspaces_root,
+            workspace_id,
+            trusted_revision,
+            &trusted_digest,
+        ) {
+            Ok(Some(head)) => {
+                crate::instrumentation::record_workspace_append_fast_path_hit();
+                // Exactly one prior revision file (the head) is read on the fast
+                // path, versus one per committed revision on the full walk.
+                crate::instrumentation::add_workspace_append_revision_files_read(1);
+                return Ok(Some(head));
+            }
+            Ok(None) => {
+                // The on-disk head drifted from the trusted identity (external
+                // mutation, a concurrent advance, deletion, import/recovery).
+                // Discard and defer to the authoritative full walk.
+                crate::instrumentation::record_workspace_append_identity_drift();
+                clear_trusted_append_head(workspace_id);
+            }
+            Err(_) => {
+                // A fast-path anomaly never yields acceptance: discard the
+                // trusted head and let the full walk surface the authoritative
+                // result (success or fail-closed error).
+                clear_trusted_append_head(workspace_id);
+            }
+        }
+    }
+
+    crate::instrumentation::record_workspace_append_full_history_validation();
+    let committed = load_committed_history(workspaces_root, workspace_id)?;
+    crate::instrumentation::add_workspace_append_revision_files_read(
+        u64::try_from(committed.len()).unwrap_or(u64::MAX),
+    );
+    match committed.last() {
+        Some(head) => {
+            set_trusted_append_head(workspace_id, head.revision, head.digest_hex.clone());
+            // Seed the body cache from the fully-validated head so an immediate
+            // subsequent warm append reuses this decode.
+            let body = Arc::new(head.record.body.clone());
+            warm_head_body_cache_put(
+                workspace_id,
+                head.revision,
+                head.digest_hex.clone(),
+                Arc::clone(&body),
+                estimate_workspace_body_bytes(&body),
+            );
+            Ok(Some(AppendHead {
+                revision: head.revision,
+                digest_hex: head.digest_hex.clone(),
+                body,
+            }))
+        }
+        None => {
+            clear_trusted_append_head(workspace_id);
+            Ok(None)
+        }
+    }
+}
+
+/// Attempts the validated-head fast path.
+///
+/// Returns `Ok(Some(head))` only when the on-disk committed head is
+/// byte-identical to the trusted `(revision, digest)` — the head commit marker
+/// still names the trusted digest and the head revision file re-hashes to it.
+/// Returns `Ok(None)` when the on-disk head has drifted (caller must fall back
+/// to the full walk to re-establish trust), and `Err(_)` on a reparse/unsafe
+/// path or a read/decode failure of the confirmed head (caller falls back to the
+/// full walk, which surfaces the authoritative fail-closed error). A missing or
+/// tampered head file is reported as `Err`, never as `Ok(None)`, so a corrupt
+/// workspace can never be mistaken for an empty (genesis) one.
+fn fast_path_append_head(
+    workspaces_root: &Path,
+    workspace_id: &str,
+    trusted_revision: u64,
+    trusted_digest: &str,
+) -> Result<Option<AppendHead>, GuiCoreError> {
+    let commits_dir = workspace_commits_dir(workspaces_root, workspace_id)?;
+    match fs::symlink_metadata(&commits_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+                return Err(unsafe_workspace_path());
+            }
+        }
+        // No commits directory: the head this process trusted is gone. Defer to
+        // the full walk, which will treat the workspace as empty (genesis).
+        Err(_) => return Ok(None),
+    }
+
+    let committed_digests = load_commit_markers(&commits_dir, workspace_id)?;
+    let Some((&head_revision, head_digest)) = committed_digests.iter().next_back() else {
+        return Ok(None);
+    };
+    if head_revision != trusted_revision || head_digest != trusted_digest {
+        return Ok(None);
+    }
+
+    let revisions_dir = workspace_revisions_dir(workspaces_root, workspace_id)?;
+    match fs::symlink_metadata(&revisions_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+                return Err(unsafe_workspace_path());
+            }
+        }
+        Err(_) => return Ok(None),
+    }
+
+    // The head revision file name is fully determined by the trusted identity.
+    // The head file is ALWAYS read and re-hashed here (the Slice 3B tamper
+    // check): `read_head_payload_verified` rejects it unless it re-hashes to
+    // `trusted_digest`, so external mutation of the revision file still fails
+    // closed and forces the full-walk fallback — the Slice 4F body cache never
+    // skips this integrity read.
+    let head_path = revisions_dir.join(format!(
+        "{trusted_revision:010}-{trusted_digest}{REVISION_FILE_SUFFIX}"
+    ));
+    crate::instrumentation::record_durable_head_body_disk_read();
+    let payload = read_head_payload_verified(&head_path, trusted_digest, workspace_id)?;
+
+    // Only the repeated CBOR DECODE is elided: reuse the cached decoded body iff
+    // it is bound to this exact confirmed `(revision, digest)`. Because the
+    // digest was just re-hashed from the current file bytes and is
+    // collision-resistant, a matching cached body is byte-identical to the
+    // current head.
+    let body = match warm_head_body_cache_get(workspace_id, trusted_revision, trusted_digest) {
+        Some(body) => body,
+        None => {
+            crate::instrumentation::record_durable_head_body_cache_miss();
+            crate::instrumentation::record_durable_head_body_decode();
+            let record = decode_workspace(&payload)?;
+            if record.revision != trusted_revision || record.workspace_id != workspace_id {
+                return Err(corrupt_workspace());
+            }
+            let body = Arc::new(record.body);
+            warm_head_body_cache_put(
+                workspace_id,
+                trusted_revision,
+                trusted_digest.to_owned(),
+                Arc::clone(&body),
+                payload.len(),
+            );
+            body
+        }
+    };
+    Ok(Some(AppendHead {
+        revision: trusted_revision,
+        digest_hex: trusted_digest.to_owned(),
+        body,
+    }))
+}
+
+/// Reads and integrity-verifies the current head revision file WITHOUT decoding
+/// it. This is the mandatory Slice 3B tamper check on the warm-append fast path:
+/// it bounds-checks the file, reads its bytes, and rejects it unless the payload
+/// re-hashes to `expected_digest_hex`. The CBOR decode is performed by the caller
+/// only on a body-cache miss.
+fn read_head_payload_verified(
+    path: &Path,
+    expected_digest_hex: &str,
+    _workspace_id: &str,
+) -> Result<Vec<u8>, GuiCoreError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| GuiCoreError::io_failure("election-workspace"))?;
+    if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+        return Err(unsafe_workspace_path());
+    }
+    if metadata.len() > MAX_WORKSPACE_REVISION_BYTES_V1 as u64 {
+        return Err(corrupt_workspace());
+    }
+    let payload = fs::read(path).map_err(|_| GuiCoreError::io_failure("election-workspace"))?;
+    if revision_digest_hex(&payload) != expected_digest_hex {
+        return Err(corrupt_workspace());
+    }
+    Ok(payload)
 }
 
 fn load_newest_workspace(
     workspaces_root: &Path,
     workspace_id: &str,
 ) -> Result<Option<DurableElectionWorkspaceV1>, GuiCoreError> {
-    Ok(load_committed_history(workspaces_root, workspace_id)?
-        .pop()
-        .map(|committed| committed.record))
+    Ok(
+        load_newest_committed_workspace(workspaces_root, workspace_id)?
+            .map(|committed| committed.record),
+    )
+}
+
+fn load_newest_committed_workspace(
+    workspaces_root: &Path,
+    workspace_id: &str,
+) -> Result<Option<CommittedRevision>, GuiCoreError> {
+    Ok(load_committed_history(workspaces_root, workspace_id)?.pop())
+}
+
+/// Incrementally advances the verified-session cache after a successful durable
+/// commit (Slice 4E), instead of invalidating and later replaying history.
+///
+/// This is the trust boundary for advancement. It follows the mandatory
+/// write → trust ordering: the caller has already applied the mutation in
+/// memory and committed the new durable revision; this function then
+/// **independently re-reads and fully validates the newest committed head from
+/// disk** (`load_newest_committed_workspace` runs the same chain validation a
+/// cold resume does), derives its authoritative identity, and installs the
+/// advanced session ONLY when both hold:
+///
+/// 1. the re-read head is exactly `expected_new_revision`, and
+/// 2. the committed head body equals `advanced_session.to_durable_snapshot()`.
+///
+/// Because the committed body then equals the advanced session's own snapshot,
+/// the proven invariant `session ≡ from_durable_snapshot(session.to_durable_snapshot())`
+/// (see `tests/verified_session_advancement.rs`) makes the advanced session
+/// identical to a fresh authoritative reconstruction of that exact head.
+///
+/// Any external drift, revision mismatch, body mismatch, non-session head,
+/// missing head, or read error fails closed to plain invalidation, so a later
+/// resume performs a normal cold reconstruction. It never advances trust on
+/// uncertainty.
+///
+/// Returns `Ok(true)` if the cache was advanced, `Ok(false)` if it fell back to
+/// invalidation.
+pub fn advance_verified_session_after_commit_v1(
+    workspaces_root: &Path,
+    workspace_id: &str,
+    expected_new_revision: u64,
+    advanced_session: &GuiElectionSessionV1,
+    cache: &VerifiedElectionSessionCacheV1,
+) -> Result<bool, GuiCoreError> {
+    let expected_snapshot = match advanced_session.to_durable_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            crate::instrumentation::record_verified_session_cache_advance_failure();
+            return advance_fallback(cache, workspace_id);
+        }
+    };
+
+    let head = match load_newest_committed_workspace(workspaces_root, workspace_id) {
+        Ok(Some(head)) => head,
+        Ok(None) => return advance_fallback(cache, workspace_id),
+        Err(_) => {
+            crate::instrumentation::record_verified_session_cache_advance_failure();
+            return advance_fallback(cache, workspace_id);
+        }
+    };
+
+    let DurableElectionWorkspaceBodyV1::Session(committed_snapshot) = &head.record.body else {
+        // The newest committed head is not a session body (e.g. a draft): do not
+        // advance.
+        crate::instrumentation::record_verified_session_cache_advance_identity_drift();
+        return advance_fallback(cache, workspace_id);
+    };
+
+    let key = match verified_session_key_for_committed(&head) {
+        Ok(key) => key,
+        Err(_) => {
+            crate::instrumentation::record_verified_session_cache_advance_identity_drift();
+            return advance_fallback(cache, workspace_id);
+        }
+    };
+
+    // Independent identity confirmation: the newest committed head must be
+    // exactly the revision we just wrote, and its body must be byte-identical to
+    // the advanced session's own durable snapshot. A concurrent writer, external
+    // replacement, or any drift breaks one of these and forces cold replay.
+    if head.revision != expected_new_revision || *committed_snapshot != expected_snapshot {
+        crate::instrumentation::record_verified_session_cache_advance_identity_drift();
+        return advance_fallback(cache, workspace_id);
+    }
+
+    let advanced =
+        VerifiedElectionSessionV1::from_incremental_advance(advanced_session.transactional_clone());
+    cache.install_advanced(workspace_id, key, advanced)?;
+    Ok(true)
+}
+
+fn advance_fallback(
+    cache: &VerifiedElectionSessionCacheV1,
+    workspace_id: &str,
+) -> Result<bool, GuiCoreError> {
+    cache.invalidate_workspace(workspace_id);
+    crate::instrumentation::record_verified_session_cache_advance_fallback_replay();
+    Ok(false)
+}
+
+fn verified_session_key_for_committed(
+    committed: &CommittedRevision,
+) -> Result<VerifiedSessionKeyV1, GuiCoreError> {
+    if !matches!(
+        &committed.record.body,
+        DurableElectionWorkspaceBodyV1::Session(_)
+    ) {
+        return Err(workspace_identity_changed());
+    }
+    Ok(VerifiedSessionKeyV1::new(
+        committed.record.workspace_id.clone(),
+        committed.revision,
+        committed.digest_hex.clone(),
+    ))
+}
+
+fn workspace_identity_changed() -> GuiCoreError {
+    GuiCoreError::new(
+        "GUI_WORKSPACE_IDENTITY_CHANGED",
+        GuiErrorCategory::ArchiveIntegrity,
+        Some("election-workspace"),
+        "durable election workspace changed during verified-session reconstruction",
+    )
 }
 
 fn load_committed_history(
@@ -1052,10 +1745,40 @@ fn lifecycle_rank(state: ElectionLifecycleStateV1) -> Result<u8, GuiCoreError> {
     }
 }
 
+/// Builds the public discovery summary for one already-loaded, revision-chain
+/// validated durable workspace record.
+///
+/// # Metadata-only, no cryptographic replay (Slice 1)
+///
+/// This deliberately does NOT reconstruct a [`GuiElectionSessionV1`] and does
+/// NOT replay or re-verify any stored ballot proof. It derives every field from
+/// data already in hand:
+///
+/// * the durable record's own fields (`revision`, `updated_at`, and the stored
+///   `lifecycle_state`, all authenticated by the revision digest chain that
+///   [`load_committed_history`] already validated before this is called);
+/// * the election manifest hash and proposal question, decoded and validated
+///   from the snapshot's canonical artifact bytes via
+///   [`GuiElectionArtifactsV1::from_bytes`] — which recomputes the manifest hash
+///   and cross-binding commitments but builds NO Triptych verifier and replays
+///   NO ballot;
+/// * the ballot-office provenance marker (a cheap sidecar file read).
+///
+/// The revealed `stored_ballot_count` is display-only and non-authoritative:
+/// it is the number of durably stored packages, never a verified accepted
+/// tally. This preserves the required separation between display metadata and
+/// cryptographically verified authoritative state — a listing can never cause
+/// unverified data to be treated as trusted election state.
+///
+/// Corruption/tamper detection is unchanged: the revision digest and
+/// predecessor-chain checks in [`load_committed_history`] run before this, and
+/// artifact decode failures here still propagate. Ballot-level verification is
+/// intentionally deferred to the moment the election is opened/resumed.
 fn summarize_workspace(
     workspaces_root: &Path,
     record: &DurableElectionWorkspaceV1,
 ) -> Result<GuiElectionWorkspaceSummaryV1, GuiCoreError> {
+    crate::instrumentation::record_workspace_summarize_call();
     // Provenance is a durable property of the WORKSPACE DIRECTORY: drafts are
     // organizer-created objects by construction, while session workspaces are
     // organizer-authoritative only with a valid marker (fail-closed otherwise).
@@ -1067,6 +1790,7 @@ fn summarize_workspace(
     };
     match &record.body {
         DurableElectionWorkspaceBodyV1::Draft(snapshot) => {
+            // A draft holds no ballots; its preview is pure metadata already.
             let draft = GuiElectionDraftV1::from_durable_snapshot(snapshot.clone())?;
             let preview = draft.preview();
             Ok(GuiElectionWorkspaceSummaryV1 {
@@ -1074,7 +1798,7 @@ fn summarize_workspace(
                 election_manifest_hash_hex: preview.manifest_hash_hex,
                 question_preview: preview.proposal_question.as_deref().map(question_preview),
                 lifecycle_state: "DRAFT".to_owned(),
-                accepted_ballot_count: 0,
+                stored_ballot_count: 0,
                 last_revision: record.revision,
                 updated_at_unix_secs: record.updated_at_unix_secs,
                 finalized: false,
@@ -1082,18 +1806,29 @@ fn summarize_workspace(
             })
         }
         DurableElectionWorkspaceBodyV1::Session(snapshot) => {
-            let session = GuiElectionSessionV1::from_durable_snapshot(snapshot.clone())?;
-            let election = session.summary();
-            let lifecycle_state = session.lifecycle_state().to_owned();
+            // Decode and cross-validate the canonical artifacts WITHOUT building
+            // a verifier or replaying any ballot. This yields the manifest hash
+            // and proposal question at metadata cost only.
+            let artifacts = GuiElectionArtifactsV1::from_bytes(
+                &snapshot.manifest_bytes,
+                &snapshot.registry_bytes,
+                &snapshot.candidate_bytes,
+            )?;
+            let election = artifacts.summary();
             Ok(GuiElectionWorkspaceSummaryV1 {
                 workspace_id: record.workspace_id.clone(),
                 election_manifest_hash_hex: Some(election.manifest_hash_hex),
                 question_preview: election.proposal_question.as_deref().map(question_preview),
-                lifecycle_state,
-                accepted_ballot_count: session.accepted_count(),
+                // The durable lifecycle state is a stored, digest-authenticated
+                // field; a full replay would only reproduce this same value.
+                lifecycle_state: snapshot.lifecycle_state.as_str().to_owned(),
+                // Display-only stored-package count (see the field docs). No
+                // replay is performed, so this is not the verified accepted
+                // count.
+                stored_ballot_count: snapshot.packages.len(),
                 last_revision: record.revision,
                 updated_at_unix_secs: record.updated_at_unix_secs,
-                finalized: session.lifecycle_state_v1() == ElectionLifecycleStateV1::Finalized,
+                finalized: snapshot.lifecycle_state == ElectionLifecycleStateV1::Finalized,
                 organizer_workspace,
             })
         }

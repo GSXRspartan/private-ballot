@@ -10,8 +10,6 @@ import type {
   GuiElectionExportResultV1,
   GuiElectionSummaryV1,
   GuiGovernanceDocumentDigestV1,
-  GuiSavedVoterCredentialsV1,
-  GuiVoterCredentialStatusV1,
 } from "../api/types";
 import { presentationIdentifier } from "../api/client";
 import { NavSection } from "../components/AppFrame";
@@ -57,8 +55,6 @@ import {
   Notice,
   Pill,
 } from "../components/ui";
-import { VoterCredentialCard } from "../components/VoterCredentialCard";
-
 type Step = CreateElectionStep;
 
 const STEPS: { id: Step; label: string }[] = [
@@ -116,10 +112,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
   const draftRequestRef = useRef<Promise<boolean> | null>(null);
   const errorNoticeRef = useRef<HTMLDivElement | null>(null);
   const [confirmFreeze, setConfirmFreeze] = useState(false);
-  const [bootstrapCredential, setBootstrapCredential] =
-    useState<GuiVoterCredentialStatusV1 | null>(null);
-  const [savedCredentials, setSavedCredentials] =
-    useState<GuiSavedVoterCredentialsV1 | null>(null);
 
   function captureError(error: unknown) {
     if (error instanceof BackendError) setLocalError(error.payload);
@@ -169,7 +161,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
             }
           },
         );
-        await refreshBootstrapCredential();
         return true;
       } catch (error) {
         captureError(error);
@@ -243,6 +234,9 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
       setDraftNotReadyError();
       return false;
     }
+    // Governance source revision has moved to Step 2 (Governance source).
+    // Preserve any existing revision the caller has already recorded so
+    // returning to Basics does not clear it.
     const ok = await runAction(() =>
       api.setDraftBasics(electionIdText, proposalQuestion, governanceRevision),
     );
@@ -293,14 +287,13 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     }
     if (
       electionIdText.trim().length === 0 ||
-      proposalQuestion.trim().length === 0 ||
-      governanceRevision.trim().length === 0
+      proposalQuestion.trim().length === 0
     ) {
       setLocalError({
         code: "GUI_DRAFT_INCOMPLETE",
         category: "INVALID_INPUT",
         context: "draft",
-        message: "election identifier, ballot question, and governance source revision are required",
+        message: "election ID and ballot question are required",
       });
       return;
     }
@@ -341,60 +334,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
     if (!ok) return;
     await refreshPreview();
     goNext("voters");
-  }
-
-  async function refreshSavedCredentials() {
-    const saved = await api.listSavedVoterCredentials();
-    setSavedCredentials(saved);
-    return saved;
-  }
-
-  async function refreshBootstrapCredential() {
-    const [status, saved] = await Promise.all([
-      api.voterGovernanceCredentialStatus(),
-      api.listSavedVoterCredentials(),
-    ]);
-    setBootstrapCredential(status);
-    setSavedCredentials(saved);
-    return status;
-  }
-
-  async function applyBootstrapCredentialStatus(status: GuiVoterCredentialStatusV1) {
-    setBootstrapCredential(status);
-    await refreshSavedCredentials();
-  }
-
-  async function onCreateBootstrapCredential(passphrase: string) {
-    const status = await api.createDurableVoterCredential(passphrase);
-    await applyBootstrapCredentialStatus(status);
-  }
-
-  async function onUnlockBootstrapCredential(publicKeyHex: string, passphrase: string) {
-    const status = await api.unlockSavedVoterCredential(publicKeyHex, passphrase);
-    await applyBootstrapCredentialStatus(status);
-  }
-
-  async function onImportBootstrapCredential(
-    path: string,
-    passphrase: string,
-    persistLocally: boolean,
-  ) {
-    const status = await api.importVoterCredential(path, passphrase, persistLocally);
-    await applyBootstrapCredentialStatus(status);
-  }
-
-  async function onBackupBootstrapCredential(path: string, passphrase: string) {
-    await api.backupVoterCredential(path, passphrase);
-  }
-
-  async function onClearBootstrapCredential() {
-    const status = await api.clearVoterCredentialFromMemory();
-    await applyBootstrapCredentialStatus(status);
-  }
-
-  async function onDeleteBootstrapSavedCredential(publicKeyHex: string) {
-    await api.deleteSavedVoterCredential(publicKeyHex);
-    await refreshBootstrapCredential();
   }
 
   // ---- Voters ------------------------------------------------------------
@@ -599,21 +538,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
 
       {ready && (
         <>
-          <VoterCredentialCard
-            title="Voter credential bootstrap"
-            status={bootstrapCredential}
-            savedCredentials={savedCredentials}
-            shellAvailable={shellAvailable}
-            busy={busy}
-            context="bootstrap"
-            onCreate={onCreateBootstrapCredential}
-            onUnlock={onUnlockBootstrapCredential}
-            onImport={onImportBootstrapCredential}
-            onBackup={onBackupBootstrapCredential}
-            onClear={onClearBootstrapCredential}
-            onDeleteSaved={onDeleteBootstrapSavedCredential}
-            onError={captureError}
-          />
           <ol className="stepper" aria-label="Creation steps">
         {STEPS.map((s, i) => {
           const state =
@@ -640,10 +564,6 @@ export function CreateElection({ onNavigate }: { onNavigate: (s: NavSection) => 
           proposalQuestion={proposalQuestion}
           setProposalQuestion={(proposalQuestion) =>
             updateSession((current) => ({ ...current, proposalQuestion }))
-          }
-          governanceRevision={governanceRevision}
-          setGovernanceRevision={(governanceRevision) =>
-            updateSession((current) => ({ ...current, governanceRevision }))
           }
           busy={busy}
           onNext={onBasicsNext}
@@ -758,8 +678,6 @@ function BasicsStep(props: {
   setElectionIdText: (v: string) => void;
   proposalQuestion: string;
   setProposalQuestion: (v: string) => void;
-  governanceRevision: string;
-  setGovernanceRevision: (v: string) => void;
   busy: boolean;
   onNext: () => void;
 }) {
@@ -792,9 +710,9 @@ function BasicsStep(props: {
         </DetailsSection>
       </Card>
 
-      <Card title="Election identifier">
+      <Card title="Election ID">
         <label className="field-label" htmlFor="election-id">
-          Election identifier (text)
+          Election ID
         </label>
         <input
           id="election-id"
@@ -824,29 +742,6 @@ function BasicsStep(props: {
           This exact question is written into the version-two election manifest and covered by
           the manifest hash shown to voters and verifiers.
         </p>
-      </Card>
-
-      <Card title="Governance source">
-        <label className="field-label" htmlFor="governance-revision">
-          Governance source revision
-        </label>
-        <input
-          id="governance-revision"
-          className="text-input"
-          value={props.governanceRevision}
-          onChange={(e) => props.setGovernanceRevision(e.target.value)}
-          placeholder="e.g. rfc-pr-185:f9e86cca"
-        />
-        <p className="form-hint">
-          Records the source material that defines what is being voted on (for example, a
-          proposal document revision), so voters and verifiers can confirm they are using the
-          same information. You can refine this on the next step.
-        </p>
-        <Notice tone="info">
-          The election files are the source of truth. Review the governance source and ballot
-          options carefully before freezing the election, because voters will use the frozen
-          information.
-        </Notice>
         <DetailsSection summary="Technical details">
           <p className="form-hint">
             New elections use a version-two manifest with the proposal question appended to the
@@ -948,6 +843,11 @@ function GovernanceStep(props: {
         <Notice tone="info">
           Format validity is not cryptographic verification. A green &ldquo;Matched&rdquo; status
           appears below only when the selected document digest actually equals the bound reference.
+        </Notice>
+        <Notice tone="info">
+          The election files are the source of truth. Review the governance source and ballot
+          options carefully before freezing the election, because voters will use the frozen
+          information.
         </Notice>
       </Card>
 

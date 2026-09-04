@@ -1,6 +1,8 @@
 //! Exact v0.39.2 `CallFunction` construction for the stateless anchor template.
 
-use tari_cc_private_ballot_anchor_transport::{AnchorEventPayloadV2, AnchorTemplateBindingV1};
+use tari_cc_private_ballot_anchor_transport::{
+    AnchorEventPayloadV2, AnchorEventPayloadV3, AnchorTemplateBindingV1, AnchorTemplateBindingV2,
+};
 use tari_ootle_transaction::{Instruction, args};
 use tari_template_lib_types::TemplateAddress;
 
@@ -39,11 +41,41 @@ pub fn build_anchor_call_function(
     let transaction = tari_ootle_transaction::TransactionBuilder::new(0_u8, 1_u64.into())
         .call_function(address, template.function(), args![payload.digest_hex()])
         .build_unsigned();
-    transaction
-        .instructions()
-        .first()
-        .cloned()
-        .ok_or(OotleAnchorAdapterError::TransactionBuilderFailure {
+    transaction.instructions().first().cloned().ok_or(
+        OotleAnchorAdapterError::TransactionBuilderFailure {
             reason: "call-function builder emitted no instruction",
-        })
+        },
+    )
+}
+
+/// Builds the V2 four-argument `publish_anchor_v2` call from an already
+/// verified detached public payload.
+///
+/// The four arguments are: the domain-separated anchor digest (hex), the
+/// network id, the election id (lowercase hex), and the exact canonical
+/// public-summary JSON string. No individual ballot, credential, nullifier,
+/// proof, voter, or wallet material enters the transaction.
+pub fn build_v2_anchor_call_function(
+    template: &AnchorTemplateBindingV2,
+    payload: &AnchorEventPayloadV3,
+) -> Result<Instruction, OotleAnchorAdapterError> {
+    let address = parse_anchor_template_address(template.template_address())
+        .ok_or(OotleAnchorAdapterError::InvalidTemplateAddress)?;
+    let transaction = tari_ootle_transaction::TransactionBuilder::new(0_u8, 1_u64.into())
+        .call_function(
+            address,
+            template.function(),
+            args![
+                payload.digest_hex(),
+                payload.network().to_owned(),
+                payload.election_id().to_owned(),
+                payload.public_summary().to_owned(),
+            ],
+        )
+        .build_unsigned();
+    transaction.instructions().first().cloned().ok_or(
+        OotleAnchorAdapterError::TransactionBuilderFailure {
+            reason: "V2 call-function builder emitted no instruction",
+        },
+    )
 }
