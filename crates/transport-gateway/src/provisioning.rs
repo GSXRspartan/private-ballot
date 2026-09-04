@@ -1,6 +1,6 @@
 //! Controlled-test provisioning material and public/private bundle separation.
 //!
-//! This module is compiled only under the `managed-tor-test` feature. It
+//! This module is compiled only under the `managed-tor` feature. It
 //! creates the organizer-side secret material and the voter-side public bundle
 //! for the one-computer controlled Tor test, and enforces the strict
 //! separation required by the reviewed architecture:
@@ -55,7 +55,7 @@ const MAX_ROOT_KEY_ID_BYTES: usize = 256;
 /// `gen_keypair` path used by `new_retry_capability_v1`); no secret is ever
 /// hard-coded or printed. This struct deliberately does NOT derive `Debug` so
 /// a secret can never be accidentally formatted into a log.
-pub struct TestAuthorityMaterialV1 {
+pub struct TransportAuthorityMaterialV1 {
     /// Ed25519 root signing key (descriptor authority).
     pub root_signing_key: SigningKey,
     /// Test root public identifier (key_id + public key).
@@ -71,7 +71,7 @@ pub struct TestAuthorityMaterialV1 {
 
 /// Non-secret metadata binding the test material to a specific election.
 #[derive(Debug, Clone)]
-pub struct TestElectionBindingV1 {
+pub struct TransportElectionBindingV1 {
     pub election_id: Vec<u8>,
     pub manifest_hash: [u8; 32],
 }
@@ -79,9 +79,9 @@ pub struct TestElectionBindingV1 {
 /// Generates fresh organizer-side authority material for the controlled test.
 /// Uses only the existing CSPRNG (`new_retry_capability_v1`) and the HPKE
 /// receiver-key constructor; no secret is hard-coded or logged.
-pub fn generate_test_authority_material_v1(
+pub fn generate_transport_authority_material_v1(
     root_key_id: String,
-) -> Result<TestAuthorityMaterialV1, ProvisioningErrorV1> {
+) -> Result<TransportAuthorityMaterialV1, ProvisioningErrorV1> {
     if root_key_id.is_empty() || root_key_id.len() > MAX_ROOT_KEY_ID_BYTES {
         return Err(ProvisioningErrorV1::InvalidConfiguration);
     }
@@ -107,7 +107,7 @@ pub fn generate_test_authority_material_v1(
     let receipt_seed = new_retry_capability_v1();
     let receipt_signing_key = SigningKey::from_bytes(&receipt_seed);
 
-    Ok(TestAuthorityMaterialV1 {
+    Ok(TransportAuthorityMaterialV1 {
         root_signing_key,
         root,
         gateway_receiver_key,
@@ -121,9 +121,9 @@ pub fn generate_test_authority_material_v1(
 /// `validity_end_epoch` is forced to `None` for this controlled test (no
 /// trustworthy current Ootle epoch source exists at this boundary).
 #[allow(clippy::too_many_arguments)]
-pub fn build_test_descriptor_v1(
-    material: &TestAuthorityMaterialV1,
-    binding: &TestElectionBindingV1,
+pub fn build_transport_descriptor_v1(
+    material: &TransportAuthorityMaterialV1,
+    binding: &TransportElectionBindingV1,
     onion_hostname: String,
     generation: u64,
     padding: PaddingPolicyV1,
@@ -156,8 +156,8 @@ pub fn build_test_descriptor_v1(
 #[allow(clippy::too_many_arguments)]
 pub fn write_organizer_private_bundle_v1(
     dir: &Path,
-    material: &TestAuthorityMaterialV1,
-    binding: &TestElectionBindingV1,
+    material: &TransportAuthorityMaterialV1,
+    binding: &TransportElectionBindingV1,
     descriptor: &TransportDescriptorV1,
     tor_data_directory: &Path,
     hidden_service_dir: &Path,
@@ -303,8 +303,8 @@ pub fn load_voter_public_bundle_v1(
 /// The loaded organizer PRIVATE bundle: all secret material reconstructed from
 /// persisted files, plus the election binding, descriptor, and Tor paths.
 pub struct LoadedOrganizerPrivateBundleV1 {
-    pub material: TestAuthorityMaterialV1,
-    pub binding: TestElectionBindingV1,
+    pub material: TransportAuthorityMaterialV1,
+    pub binding: TransportElectionBindingV1,
     pub descriptor: TransportDescriptorV1,
     pub tor_data_directory: std::path::PathBuf,
     pub hidden_service_dir: std::path::PathBuf,
@@ -393,14 +393,14 @@ pub fn load_organizer_private_bundle_v1(
         key_id: descriptor.root_key_id().to_owned(),
         public_key: root_public_key,
     };
-    let material = TestAuthorityMaterialV1 {
+    let material = TransportAuthorityMaterialV1 {
         root_signing_key,
         root,
         gateway_receiver_key,
         gateway_receiver_public_key: manifest_gateway_public,
         receipt_signing_key,
     };
-    let binding = TestElectionBindingV1 {
+    let binding = TransportElectionBindingV1 {
         election_id,
         manifest_hash,
     };
@@ -571,16 +571,16 @@ pub fn validate_intake_startup_v1(
 /// test authority material, and writes both bundles given a discovered onion
 /// hostname. This is the test-only helper used by the provisioning binary; it
 /// performs no network I/O and starts no tor.exe.
-pub fn provision_organizer_test_bundles_v1(
+pub fn provision_organizer_transport_bundles_v1(
     organizer_private_dir: &Path,
     voter_public_bundle_path: &Path,
-    material: &TestAuthorityMaterialV1,
-    binding: &TestElectionBindingV1,
+    material: &TransportAuthorityMaterialV1,
+    binding: &TransportElectionBindingV1,
     onion_hostname: String,
     tor_data_directory: &Path,
     hidden_service_dir: &Path,
 ) -> Result<TransportDescriptorV1, ProvisioningErrorV1> {
-    let descriptor = build_test_descriptor_v1(
+    let descriptor = build_transport_descriptor_v1(
         material,
         binding,
         onion_hostname,
@@ -766,12 +766,12 @@ mod tests {
         dir
     }
 
-    fn material() -> TestAuthorityMaterialV1 {
-        generate_test_authority_material_v1("test-root".to_owned()).expect("material")
+    fn material() -> TransportAuthorityMaterialV1 {
+        generate_transport_authority_material_v1("test-root".to_owned()).expect("material")
     }
 
-    fn binding() -> TestElectionBindingV1 {
-        TestElectionBindingV1 {
+    fn binding() -> TransportElectionBindingV1 {
+        TransportElectionBindingV1 {
             election_id: vec![0x11; 32],
             manifest_hash: [0x22; 32],
         }
@@ -782,13 +782,13 @@ mod tests {
     fn provision(
         dir: &Path,
     ) -> (
-        TestAuthorityMaterialV1,
-        TestElectionBindingV1,
+        TransportAuthorityMaterialV1,
+        TransportElectionBindingV1,
         TransportDescriptorV1,
     ) {
         let material = material();
         let binding = binding();
-        let descriptor = provision_organizer_test_bundles_v1(
+        let descriptor = provision_organizer_transport_bundles_v1(
             &dir.join("organizer-private"),
             &dir.join("voter-public-bundle.cbor"),
             &material,

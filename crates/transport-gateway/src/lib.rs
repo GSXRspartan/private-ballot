@@ -15,25 +15,26 @@ pub use collector::{
     OPAQUE_ENVELOPE_HTTP_PATH_V1, OpaqueEnvelopeCollectorV1, OpaqueEnvelopeGatewayHandlerV1,
 };
 
-#[cfg(feature = "managed-tor-test")]
-mod test_service_loop;
+#[cfg(feature = "managed-tor")]
+mod service_loop;
 
-#[cfg(feature = "managed-tor-test")]
-pub use test_service_loop::{
+#[cfg(feature = "managed-tor")]
+pub use service_loop::{
     OrganizerCollectorServiceLoopV1, ServicedRequestObservationV1, ThreadSafeCollectorHandlerV1,
 };
 
-#[cfg(feature = "managed-tor-test")]
-mod test_provisioning;
+#[cfg(feature = "managed-tor")]
+mod provisioning;
 
-#[cfg(feature = "managed-tor-test")]
-pub use test_provisioning::{
+#[cfg(feature = "managed-tor")]
+pub use provisioning::{
     IntakeValidationErrorV1, LoadedOrganizerPrivateBundleV1, ProvisioningErrorV1,
-    TestAuthorityMaterialV1, TestElectionBindingV1, VoterPublicBundleV1, build_test_descriptor_v1,
-    directory_contains_any_secret_bytes_v1, generate_test_authority_material_v1,
-    load_organizer_private_bundle_v1, load_voter_public_bundle_v1,
-    provision_organizer_test_bundles_v1, validate_intake_startup_v1,
-    write_organizer_private_bundle_v1, write_voter_public_bundle_v1,
+    TransportAuthorityMaterialV1, TransportElectionBindingV1, VoterPublicBundleV1,
+    build_transport_descriptor_v1, directory_contains_any_secret_bytes_v1,
+    generate_transport_authority_material_v1, load_organizer_private_bundle_v1,
+    load_voter_public_bundle_v1, provision_organizer_transport_bundles_v1,
+    validate_intake_startup_v1, write_organizer_private_bundle_v1,
+    write_voter_public_bundle_v1,
 };
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

@@ -1,10 +1,10 @@
 //! Controlled-test organizer intake binary.
 //!
-//! Compiled only under the `managed-tor-test` feature:
+//! Compiled only under the `managed-tor` feature:
 //!
 //! ```text
 //! cargo run -p tari-cc-private-ballot-transport-gateway `
-//!     --features managed-tor-test --bin private-ballot-tor-test-intake -- `
+//!     --features managed-tor --bin private-ballot-tor-test-intake -- `
 //!     <manifest.cbor> <registry.cbor> <option-set.cbor> <tor.exe> <test-root>
 //! ```
 //!

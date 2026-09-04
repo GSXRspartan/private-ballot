@@ -1,4 +1,4 @@
-//! Provisioning / intake validation regression tests (managed-tor-test only).
+//! Provisioning / intake validation regression tests (managed-tor only).
 //!
 //! These prove the gateway receiver secret loaded from
 //! `gateway-receiver-secret.bin` is proven against the bundle manifest AND the
@@ -8,7 +8,7 @@
 //!
 //! No real Tor, no network.
 
-#![cfg(feature = "managed-tor-test")]
+#![cfg(feature = "managed-tor")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[path = "../../gui-core/tests/common/mod.rs"]
@@ -16,9 +16,9 @@ mod common;
 
 use tari_cc_private_ballot_gui_core::GuiElectionArtifactsV1;
 use tari_cc_private_ballot_transport_gateway::{
-    IntakeValidationErrorV1, ProvisioningErrorV1, TestElectionBindingV1,
-    generate_test_authority_material_v1, load_organizer_private_bundle_v1,
-    provision_organizer_test_bundles_v1, validate_intake_startup_v1,
+    IntakeValidationErrorV1, ProvisioningErrorV1, TransportElectionBindingV1,
+    generate_transport_authority_material_v1, load_organizer_private_bundle_v1,
+    provision_organizer_transport_bundles_v1, validate_intake_startup_v1,
 };
 
 const GOOD_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
@@ -40,19 +40,19 @@ fn provision_valid_bundle(
 ) -> (
     std::path::PathBuf,
     GuiElectionArtifactsV1,
-    TestElectionBindingV1,
+    TransportElectionBindingV1,
 ) {
     let dir = unique_dir(label);
     let artifacts = common::artifacts();
     let election_id = artifacts.manifest().election_id().as_bytes().to_vec();
     let manifest_hash = artifacts.manifest_hash().as_bytes().to_owned();
-    let binding = TestElectionBindingV1 {
+    let binding = TransportElectionBindingV1 {
         election_id,
         manifest_hash,
     };
-    let material = generate_test_authority_material_v1("provision-regression-root".to_owned())
+    let material = generate_transport_authority_material_v1("provision-regression-root".to_owned())
         .expect("material");
-    provision_organizer_test_bundles_v1(
+    provision_organizer_transport_bundles_v1(
         &dir.join("organizer-private"),
         &dir.join("voter-public-bundle.cbor"),
         &material,

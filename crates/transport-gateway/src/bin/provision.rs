@@ -1,10 +1,10 @@
 //! Controlled-test organizer provisioning binary.
 //!
-//! Compiled only under the `managed-tor-test` feature:
+//! Compiled only under the `managed-tor` feature:
 //!
 //! ```text
 //! cargo run -p tari-cc-private-ballot-transport-gateway `
-//!     --features managed-tor-test --bin private-ballot-tor-test-provision -- `
+//!     --features managed-tor --bin private-ballot-tor-test-provision -- `
 //!     <manifest.cbor> <registry.cbor> <option-set.cbor> <tor.exe> <test-root>
 //! ```
 //!
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use tari_cc_private_ballot_gui_core::{GuiElectionArtifactsV1, TransportDescriptorV1};
 use tari_cc_private_ballot_transport_gateway::{
-    TestElectionBindingV1, generate_test_authority_material_v1, provision_organizer_test_bundles_v1,
+    TransportElectionBindingV1, generate_transport_authority_material_v1, provision_organizer_transport_bundles_v1,
 };
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
@@ -111,7 +111,7 @@ fn run(
     let artifacts =
         GuiElectionArtifactsV1::from_paths(manifest_path, registry_path, option_set_path)
             .map_err(|e| format!("election artifacts: {}", e.code()))?;
-    let binding = TestElectionBindingV1 {
+    let binding = TransportElectionBindingV1 {
         election_id: artifacts.manifest().election_id().as_bytes().to_vec(),
         manifest_hash: *artifacts.manifest_hash().as_bytes(),
     };
@@ -158,10 +158,10 @@ fn run(
     eprintln!("tor.exe stopped (hostname is persistent for the intake phase).");
 
     // 6. Sign the descriptor and write both bundles.
-    let descriptor: TransportDescriptorV1 = provision_organizer_test_bundles_v1(
+    let descriptor: TransportDescriptorV1 = provision_organizer_transport_bundles_v1(
         &organizer_private_dir,
         &voter_public_bundle_path,
-        &generate_test_authority_material_v1("test-root".to_owned())
+        &generate_transport_authority_material_v1("test-root".to_owned())
             .map_err(|_| "could not generate test authority material".to_owned())?,
         &binding,
         hostname,

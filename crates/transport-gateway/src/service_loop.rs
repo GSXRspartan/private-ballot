@@ -7,7 +7,7 @@
 //! connections until a bounded stop is requested, reusing the exact same
 //! gateway/intake boundary (no duplicate HPKE or intake logic).
 //!
-//! This is compiled only under the `managed-tor-test` feature. It runs the
+//! This is compiled only under the `managed-tor` feature. It runs the
 //! loopback collector only; the request deadline remains enforced; stop is
 //! bounded via the non-blocking poll path; no unbounded thread spawning
 //! occurs; and the gateway/election state is shared behind `Mutex`.
@@ -25,6 +25,8 @@ use tari_cc_private_ballot_gui_core::{
     AuthenticatedElectionStatusStatementV1, AuthoritativeLifecycleFenceV1, GuiElectionSessionV1,
     TransportDescriptorV1,
 };
+
+use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 
 use crate::TransportGatewaySimulatorV1;
 use crate::collector::{
@@ -323,6 +325,21 @@ impl OrganizerCollectorServiceLoopV1 {
                 last_receipt_returned: false,
                 last_stage: "NONE",
             })
+    }
+
+    /// Seals every currently pending accepted package digest into a final
+    /// transport batch and returns the archive binding derived from the
+    /// gateway's actual accepted transport history.
+    pub fn finalize_transport_archive_binding(
+        &self,
+        descriptor: &TransportDescriptorV1,
+    ) -> Result<Option<TransportArchiveBindingV1>, TransportError> {
+        let mut gateway = self
+            .gateway
+            .lock()
+            .map_err(|_| TransportError::Unavailable)?;
+        gateway.seal_pending_batch(descriptor.batch().accepted_unique_floor, true);
+        gateway.transport_archive_binding(descriptor)
     }
 
     /// Cheap liveness check: true only when the worker thread is still running

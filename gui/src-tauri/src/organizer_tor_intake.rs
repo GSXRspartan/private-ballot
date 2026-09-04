@@ -1,6 +1,6 @@
 //! Organizer near-one-click private ballot intake (feature-gated).
 //!
-//! Compiled only under the `managed-tor-test` feature. This is the in-process
+//! Compiled only under the `managed-tor` feature. This is the in-process
 //! GUI equivalent of the controlled-test `private-ballot-tor-test-provision`
 //! and `private-ballot-tor-test-intake` binaries: it runs the SAME reviewed
 //! library orchestration on a Tauri-managed background worker so a ballot-office
@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
+use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
     GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
@@ -41,9 +42,9 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_transport_gateway::{
     GatewayReceiverKeyV1, LoadedOrganizerPrivateBundleV1, OpaqueEnvelopeCollectorV1,
-    OrganizerCollectorServiceLoopV1, TestElectionBindingV1, ThreadSafeCollectorHandlerV1,
-    TransportGatewaySimulatorV1, generate_test_authority_material_v1,
-    load_organizer_private_bundle_v1, provision_organizer_test_bundles_v1,
+    OrganizerCollectorServiceLoopV1, TransportElectionBindingV1, ThreadSafeCollectorHandlerV1,
+    TransportGatewaySimulatorV1, generate_transport_authority_material_v1,
+    load_organizer_private_bundle_v1, provision_organizer_transport_bundles_v1,
     validate_intake_startup_v1,
 };
 use tari_cc_private_ballot_transport_network::{
@@ -52,7 +53,7 @@ use tari_cc_private_ballot_transport_network::{
 };
 use tauri::{AppHandle, Manager};
 
-use crate::managed_tor_test::{
+use crate::managed_tor::{
     DiagnosticTorSpawnerV1, classify_start_failure_from_log, fresh_run_directory,
     remove_stale_run_directories,
 };
@@ -106,6 +107,24 @@ impl OrganizerIntakeState {
     #[must_use]
     pub(crate) fn is_bound_to_manifest(&self, manifest_hash_hex: &str) -> bool {
         self.manifest_hash_hex == manifest_hash_hex
+    }
+
+    pub(crate) fn accepted_unique_count(&self) -> u64 {
+        self.service_loop.accepted_unique_count()
+    }
+
+    pub(crate) fn finalize_transport_archive_binding(
+        &self,
+    ) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+        self.service_loop
+            .finalize_transport_archive_binding(&self.descriptor)
+            .map_err(|_| {
+                CommandError::new(
+                    "GUI_TRANSPORT_ARCHIVE_BINDING_UNAVAILABLE",
+                    "ARCHIVE_INTEGRITY",
+                    "the active private transport history could not produce a finalized archive binding",
+                )
+            })
     }
 }
 
@@ -685,76 +704,79 @@ pub(crate) fn shutdown_intake_on_exit(state: &AppState) {
 /// voter bundle. An imported voter election can never export (and thereby
 /// socially distribute) a bundle for an election it does not organize.
 #[tauri::command]
-pub fn export_voter_transport_bundle(
+pub async fn export_voter_transport_bundle(
     destination_dir: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<VoterBundleExportResultV1, CommandError> {
-    state.ensure_organizer_authority()?;
-    let destination = PathBuf::from(&destination_dir);
-    if !destination.is_absolute() {
-        return Err(CommandError::new(
-            "GUI_EXPORT_DIR_NOT_ABSOLUTE",
-            "INVALID_INPUT",
-            "the export destination directory must be absolute",
-        ));
-    }
-    let dest_meta = std::fs::symlink_metadata(&destination).map_err(|_| {
-        CommandError::new(
-            "GUI_EXPORT_DIR_NOT_FOUND",
-            "FILE_IO",
-            "the export destination directory was not found",
-        )
-    })?;
-    if !dest_meta.is_dir() || is_windows_reparse_point(&dest_meta) {
-        return Err(CommandError::new(
-            "GUI_EXPORT_DIR_UNSAFE",
-            "INVALID_INPUT",
-            "the export destination must be a real directory (no symlinks/reparse points)",
-        ));
-    }
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let destination = PathBuf::from(&destination_dir);
+        if !destination.is_absolute() {
+            return Err(CommandError::new(
+                "GUI_EXPORT_DIR_NOT_ABSOLUTE",
+                "INVALID_INPUT",
+                "the export destination directory must be absolute",
+            ));
+        }
+        let dest_meta = std::fs::symlink_metadata(&destination).map_err(|_| {
+            CommandError::new(
+                "GUI_EXPORT_DIR_NOT_FOUND",
+                "FILE_IO",
+                "the export destination directory was not found",
+            )
+        })?;
+        if !dest_meta.is_dir() || is_windows_reparse_point(&dest_meta) {
+            return Err(CommandError::new(
+                "GUI_EXPORT_DIR_UNSAFE",
+                "INVALID_INPUT",
+                "the export destination must be a real directory (no symlinks/reparse points)",
+            ));
+        }
 
-    let bound = bound_election(&state)?;
-    let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
-    let paths = TransportPaths::under(&root);
-    // The source is the voter PUBLIC bundle only; organizer-private material is
-    // never read here.
-    let source = &paths.voter_bundle_path;
-    let source_meta = std::fs::symlink_metadata(source).map_err(|_| {
-        CommandError::new(
-            "GUI_VOTER_BUNDLE_MISSING",
-            "FILE_IO",
-            "no voter transport bundle exists yet; start private intake first to provision it",
-        )
-    })?;
-    if !source_meta.is_file() || is_windows_reparse_point(&source_meta) {
-        return Err(CommandError::new(
-            "GUI_VOTER_BUNDLE_UNSAFE",
-            "INVALID_INPUT",
-            "the voter transport bundle is not an app-owned regular file",
-        ));
-    }
+        let bound = bound_election(state.inner())?;
+        let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
+        let paths = TransportPaths::under(&root);
+        // The source is the voter PUBLIC bundle only; organizer-private material is
+        // never read here.
+        let source = &paths.voter_bundle_path;
+        let source_meta = std::fs::symlink_metadata(source).map_err(|_| {
+            CommandError::new(
+                "GUI_VOTER_BUNDLE_MISSING",
+                "FILE_IO",
+                "no voter transport bundle exists yet; start private intake first to provision it",
+            )
+        })?;
+        if !source_meta.is_file() || is_windows_reparse_point(&source_meta) {
+            return Err(CommandError::new(
+                "GUI_VOTER_BUNDLE_UNSAFE",
+                "INVALID_INPUT",
+                "the voter transport bundle is not an app-owned regular file",
+            ));
+        }
 
-    let target = destination.join("voter-public-bundle.cbor");
-    // No-overwrite: refuse if a file already exists at the target.
-    if std::fs::symlink_metadata(&target).is_ok() {
-        return Err(CommandError::new(
-            "GUI_EXPORT_TARGET_EXISTS",
-            "INVALID_INPUT",
-            "a voter-public-bundle.cbor already exists in that folder; choose another folder",
-        ));
-    }
-    let bytes = std::fs::read(source).map_err(|_| CommandError::package_read_failed())?;
-    std::fs::write(&target, &bytes).map_err(|_| {
-        CommandError::new(
-            "GUI_EXPORT_WRITE_FAILED",
-            "FILE_IO",
-            "the voter transport bundle could not be written to that folder",
-        )
-    })?;
-    Ok(VoterBundleExportResultV1 {
-        written_path: target.to_string_lossy().into_owned(),
+        let target = destination.join("voter-public-bundle.cbor");
+        // No-overwrite: refuse if a file already exists at the target.
+        if std::fs::symlink_metadata(&target).is_ok() {
+            return Err(CommandError::new(
+                "GUI_EXPORT_TARGET_EXISTS",
+                "INVALID_INPUT",
+                "a voter-public-bundle.cbor already exists in that folder; choose another folder",
+            ));
+        }
+        let bytes = std::fs::read(source).map_err(|_| CommandError::package_read_failed())?;
+        std::fs::write(&target, &bytes).map_err(|_| {
+            CommandError::new(
+                "GUI_EXPORT_WRITE_FAILED",
+                "FILE_IO",
+                "the voter transport bundle could not be written to that folder",
+            )
+        })?;
+        Ok(VoterBundleExportResultV1 {
+            written_path: target.to_string_lossy().into_owned(),
+        })
     })
+    .await
 }
 
 // -------------------------------------------------------------------------
@@ -770,7 +792,7 @@ fn provision_transport(
     paths: &TransportPaths,
     bound: &BoundElection,
 ) -> Result<(), CommandError> {
-    let binding = TestElectionBindingV1 {
+    let binding = TransportElectionBindingV1 {
         election_id: bound.election_id.clone(),
         manifest_hash: bound.manifest_hash,
     };
@@ -828,14 +850,14 @@ fn provision_transport(
     let _ = child.kill();
     let _ = child.wait();
 
-    let material = generate_test_authority_material_v1("test-root".to_owned()).map_err(|_| {
+    let material = generate_transport_authority_material_v1("test-root".to_owned()).map_err(|_| {
         CommandError::new(
             "GUI_ORGANIZER_MATERIAL_FAILED",
             "INVALID_INPUT",
             "the organizer transport authority material could not be generated",
         )
     })?;
-    provision_organizer_test_bundles_v1(
+    provision_organizer_transport_bundles_v1(
         &paths.organizer_private_dir,
         &paths.voter_bundle_path,
         &material,
@@ -1287,7 +1309,7 @@ fn hostname_discovery_failed() -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::managed_tor_test::ManagedTorStartFailureKind;
+    use crate::managed_tor::ManagedTorStartFailureKind;
 
     const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
 

@@ -3,13 +3,14 @@ name = "tari-cc-private-ballot-cli"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
 tari-cc-private-ballot-gui-core = { path = "../gui-core" }
 tari-cc-private-ballot-protocol = { path = "../protocol" }
 tari-cc-private-ballot-registry = { path = "../registry" }
-tari-cc-private-ballot-transport-gateway = { path = "../transport-gateway", features = ["managed-tor-test"] }
+tari-cc-private-ballot-transport-gateway = { path = "../transport-gateway", features = ["managed-tor"] }
 tari-cc-private-ballot-transport-network = { path = "../transport-network" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"

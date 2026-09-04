@@ -33,7 +33,7 @@ describe("voter one-click Tor connect", () => {
   it("auto-derives the Tor data directory (passes an empty dir to the backend)", () => {
     // The one-click connect passes "" for the data dir so the backend derives an
     // app-owned, election-scoped directory the voter never chooses.
-    assert.match(vote, /configureManagedTorTest\(torExePath, "", voterBundlePath\)/);
+    assert.match(vote, /configureManagedTor\(torExePath, "", voterBundlePath\)/);
   });
 
   it("keeps the manual tor.exe/data-dir inputs under Advanced only", () => {

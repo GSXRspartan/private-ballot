@@ -1,6 +1,6 @@
 //! Controlled-test managed-Tor wiring for the voter side (feature-gated).
 //!
-//! Compiled only under the `managed-tor-test` feature. It adds the minimum
+//! Compiled only under the `managed-tor` feature. It adds the minimum
 //! backend state needed to:
 //!
 //!   * configure the voter test transport (absolute tor.exe path, voter Tor
@@ -17,7 +17,7 @@
 //!     envelope.
 //!
 //! Compile-time feature alone never starts networking. The user must explicitly
-//! call `configure_managed_tor_test` with a valid runtime configuration, then
+//! call `configure_managed_tor` with a valid runtime configuration, then
 //! `start_managed_tor`, before any carrier can be built.
 
 use std::net::{SocketAddr, TcpListener};
@@ -275,7 +275,7 @@ const STATUS_SOCKS_CONNECT: Duration = Duration::from_secs(3);
 const STATUS_SOCKS_HANDSHAKE: Duration = Duration::from_secs(3);
 
 /// The voter-side managed-Tor test runtime state.
-pub(crate) struct ManagedTorTestState {
+pub(crate) struct ManagedTorState {
     controller: Option<ManagedTorControllerV1<Child>>,
     descriptor: TransportDescriptorV1,
     roots: TransportAuthorityRootSetV1,
@@ -294,7 +294,7 @@ pub(crate) fn configured_transport_descriptor(
     state: &AppState,
 ) -> Result<Option<TransportDescriptorV1>, CommandError> {
     let managed = state
-        .managed_tor_test
+        .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     Ok(managed.as_ref().map(|m| m.descriptor.clone()))
@@ -308,7 +308,7 @@ pub(crate) fn configured_transport_root_anchor(
     state: &AppState,
 ) -> Result<Option<(String, [u8; 32])>, CommandError> {
     let managed = state
-        .managed_tor_test
+        .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     Ok(managed.as_ref().map(|m| m.root_anchor.clone()))
@@ -323,9 +323,9 @@ pub(crate) fn configured_transport_root_anchor(
 /// hold the managed-Tor state lock while acquiring the session lock. The
 /// managed-state snapshot is taken and RELEASED first; the session is then
 /// locked separately for the manifest comparison. Holding both at once here
-/// was the live two-computer deadlock: it formed the `managed_tor_test ->
+/// was the live two-computer deadlock: it formed the `managed_tor ->
 /// session` half of an ABBA cycle against
-/// `apply_election_status_bytes_blocking` (`session -> managed_tor_test`),
+/// `apply_election_status_bytes_blocking` (`session -> managed_tor`),
 /// permanently parking every later voter command (including ballot
 /// preparation) at its very first lock acquisition with zero CPU.
 pub(crate) fn running_transport_endpoint(
@@ -335,7 +335,7 @@ pub(crate) fn running_transport_endpoint(
     //    other lock is touched.
     let snapshot = {
         let managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         managed.as_ref().map(|m| {
@@ -368,7 +368,7 @@ pub(crate) fn running_transport_endpoint(
 
 /// Serializable runtime configuration supplied by the user.
 #[derive(Debug, Clone, Deserialize)]
-pub struct ManagedTorTestConfigInputV1 {
+pub struct ManagedTorConfigInputV1 {
     /// Absolute path to an already-installed tor.exe.
     pub tor_exe_path: String,
     /// Absolute path to the voter Tor data/config directory (outside the repo).
@@ -379,7 +379,7 @@ pub struct ManagedTorTestConfigInputV1 {
 
 /// Serializable status of the managed-Tor test transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ManagedTorTestStatusV1 {
+pub struct ManagedTorStatusV1 {
     pub configured: bool,
     pub tor_running: bool,
     pub socks_ready: bool,
@@ -389,7 +389,7 @@ pub struct ManagedTorTestStatusV1 {
     pub message: &'static str,
 }
 
-impl Default for ManagedTorTestStatusV1 {
+impl Default for ManagedTorStatusV1 {
     fn default() -> Self {
         Self {
             configured: false,
@@ -452,11 +452,11 @@ fn voter_tor_data_dir(app: &AppHandle, manifest_hash_hex: &str) -> Result<PathBu
 /// verifies the voter-public transport bundle, and confirms the descriptor
 /// matches the currently loaded election. No Tor process is started here.
 #[tauri::command]
-pub fn configure_managed_tor_test(
-    input: ManagedTorTestConfigInputV1,
+pub fn configure_managed_tor(
+    input: ManagedTorConfigInputV1,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
-) -> Result<ManagedTorTestStatusV1, CommandError> {
+) -> Result<ManagedTorStatusV1, CommandError> {
     // Tor executable: an empty path means "auto-detect" — resolve from the
     // reviewed allowlist (or a remembered/selected path when provided). The
     // resolver re-validates (absolute, real regular file, no reparse/control).
@@ -561,7 +561,7 @@ pub fn configure_managed_tor_test(
     let socks_port = reserve_loopback_socks_port()?;
     let socks_addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
 
-    let managed_state = ManagedTorTestState {
+    let managed_state = ManagedTorState {
         controller: None,
         descriptor: bundle.descriptor,
         roots,
@@ -574,12 +574,12 @@ pub fn configure_managed_tor_test(
     };
     drop(session_guard);
     let mut managed = state
-        .managed_tor_test
+        .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     *managed = Some(managed_state);
 
-    Ok(ManagedTorTestStatusV1 {
+    Ok(ManagedTorStatusV1 {
         configured: true,
         tor_running: false,
         socks_ready: false,
@@ -611,7 +611,7 @@ pub fn voter_tor_status(tor_exe_path: Option<String>) -> Result<VoterTorStatusV1
 /// real SOCKS5 readiness probe. Returns Ready only after valid SOCKS5
 /// negotiation. No ballot is released by this command.
 #[tauri::command]
-pub async fn start_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1, CommandError> {
+pub async fn start_managed_tor(app: AppHandle) -> Result<ManagedTorStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
         start_managed_tor_blocking(state.inner())
@@ -620,7 +620,7 @@ pub async fn start_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1,
 }
 
 /// Blocking body of [`start_managed_tor`], run on the blocking thread pool.
-fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1, CommandError> {
+fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, CommandError> {
     // Reserve a FRESH loopback ephemeral SOCKS port for this (re)connect and
     // record it as authoritative BEFORE building the Tor config, so a reconnect
     // after a child exit never reuses a possibly-orphaned port.
@@ -629,7 +629,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
     // I/O below runs unlocked.
     let base_dir = {
         let managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         let Some(m) = managed.as_ref() else {
@@ -652,7 +652,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
     let stderr_log = run_dir.join("tor-stderr.log");
     let config = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         let Some(m) = managed.as_mut() else {
@@ -707,7 +707,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
         )?;
 
     let mut managed = state
-        .managed_tor_test
+        .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let Some(m) = managed.as_mut() else {
@@ -720,7 +720,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
     m.controller = Some(controller);
     let hostname = m.descriptor.onion_endpoints().first().cloned();
     let fingerprint = m.descriptor.fingerprint().ok().map(|fp| hex_lower(&fp));
-    Ok(ManagedTorTestStatusV1 {
+    Ok(ManagedTorStatusV1 {
         configured: true,
         tor_running: true,
         socks_ready: true,
@@ -734,7 +734,7 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1
 /// Stops the managed voter Tor process (bounded). Only the child this
 /// application launched is terminated.
 #[tauri::command]
-pub async fn stop_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1, CommandError> {
+pub async fn stop_managed_tor(app: AppHandle) -> Result<ManagedTorStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
         stop_managed_tor_blocking(state.inner())
@@ -743,9 +743,9 @@ pub async fn stop_managed_tor(app: AppHandle) -> Result<ManagedTorTestStatusV1, 
 }
 
 /// Blocking body of [`stop_managed_tor`], run on the blocking thread pool.
-fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1, CommandError> {
+fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, CommandError> {
     let mut managed = state
-        .managed_tor_test
+        .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     if let Some(m) = managed.as_mut() {
@@ -754,7 +754,7 @@ fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1,
         }
         m.controller = None;
     }
-    Ok(ManagedTorTestStatusV1 {
+    Ok(ManagedTorStatusV1 {
         configured: managed.is_some(),
         tor_running: false,
         socks_ready: false,
@@ -775,7 +775,7 @@ fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorTestStatusV1,
 /// SOCKS port and data-directory lock across the next launch. Idempotent and
 /// best-effort; only the child this application launched is touched.
 pub(crate) fn shutdown_managed_tor_on_exit(state: &AppState) {
-    if let Ok(mut managed) = state.managed_tor_test.lock() {
+    if let Ok(mut managed) = state.managed_tor.lock() {
         if let Some(m) = managed.as_mut() {
             if let Some(controller) = m.controller.as_mut() {
                 controller.shutdown();
@@ -792,28 +792,28 @@ pub(crate) fn shutdown_managed_tor_on_exit(state: &AppState) {
 /// whose SOCKS listener no longer responds, never reports ready. Status is
 /// read-only: it never creates a PENDING record or changes voter cast state.
 #[tauri::command]
-pub async fn managed_tor_test_status(
+pub async fn managed_tor_status(
     app: AppHandle,
-) -> Result<ManagedTorTestStatusV1, CommandError> {
+) -> Result<ManagedTorStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
-        managed_tor_test_status_blocking(state.inner())
+        managed_tor_status_blocking(state.inner())
     })
     .await
 }
 
-/// Blocking body of [`managed_tor_test_status`], run on the blocking thread pool
+/// Blocking body of [`managed_tor_status`], run on the blocking thread pool
 /// so the fresh loopback SOCKS probe never stalls the main UI thread.
-pub(crate) fn managed_tor_test_status_blocking(
+pub(crate) fn managed_tor_status_blocking(
     state: &AppState,
-) -> Result<ManagedTorTestStatusV1, CommandError> {
+) -> Result<ManagedTorStatusV1, CommandError> {
     let (descriptor, socks_addr, controller_present, child_alive) = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         let Some(m) = managed.as_mut() else {
-            return Ok(ManagedTorTestStatusV1::default());
+            return Ok(ManagedTorStatusV1::default());
         };
         let controller_present = m.controller.is_some();
         // check_crash is the controller health API (try_wait). It mutates the
@@ -845,7 +845,7 @@ pub(crate) fn managed_tor_test_status_blocking(
     } else {
         "Managed Tor test transport is configured but Tor is not running."
     };
-    Ok(ManagedTorTestStatusV1 {
+    Ok(ManagedTorStatusV1 {
         configured: true,
         tor_running: decision.tor_running,
         socks_ready: decision.socks_ready,
@@ -881,7 +881,7 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
     //    the bounded network probe.
     let (descriptor, roots, socks_addr) = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         let m = managed.as_mut().ok_or_else(|| {
@@ -945,7 +945,7 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
     // returned after the release call. Default replaces it meanwhile.
     let mut consistency = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         managed
@@ -994,7 +994,7 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
     );
 
     // Return the consistency store to the managed state.
-    if let Ok(mut managed) = state.managed_tor_test.lock() {
+    if let Ok(mut managed) = state.managed_tor.lock() {
         if let Some(m) = managed.as_mut() {
             m.consistency = consistency;
         }
@@ -1020,7 +1020,7 @@ pub fn retry_private_submission_via_managed_tor(
     //    died, remain CastPending without invoking the carrier.
     let (descriptor, roots, socks_addr) = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         let m = managed.as_mut().ok_or_else(|| {
@@ -1079,7 +1079,7 @@ pub fn retry_private_submission_via_managed_tor(
 
     let mut consistency = {
         let mut managed = state
-            .managed_tor_test
+            .managed_tor
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         managed
@@ -1105,7 +1105,7 @@ pub fn retry_private_submission_via_managed_tor(
         &mut carrier as &mut dyn tari_cc_private_ballot_gui_core::PrivateReleaseCarrierV1,
     );
 
-    if let Ok(mut managed) = state.managed_tor_test.lock() {
+    if let Ok(mut managed) = state.managed_tor.lock() {
         if let Some(m) = managed.as_mut() {
             m.consistency = consistency;
         }
@@ -1217,8 +1217,8 @@ pub(crate) fn test_configured_state(
     descriptor: TransportDescriptorV1,
     roots: TransportAuthorityRootSetV1,
     root_anchor: (String, [u8; 32]),
-) -> ManagedTorTestState {
-    ManagedTorTestState {
+) -> ManagedTorState {
+    ManagedTorState {
         controller: None,
         descriptor,
         roots,
@@ -1324,7 +1324,7 @@ mod tests {
 
     fn temp_base(tag: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
-            "tari-managed-tor-test-{tag}-{}-{}",
+            "tari-managed-tor-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

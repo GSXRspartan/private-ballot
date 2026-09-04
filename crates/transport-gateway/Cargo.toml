@@ -3,6 +3,7 @@ name = "tari-cc-private-ballot-transport-gateway"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]
@@ -21,7 +22,11 @@ tari-cc-private-ballot-archive = { path = "../archive" }
 tari-cc-private-ballot-ballot = { path = "../ballot" }
 tari-cc-private-ballot-crypto = { path = "../crypto" }
 tari-cc-private-ballot-ootle-anchor-adapter = { path = "../ootle-anchor-adapter" }
-tari-cc-private-ballot-ootle-anchor-app = { path = "../ootle-anchor-app" }
+# test-support is required: the shared gui-core integration harness
+# (../../gui-core/tests/common/mod.rs, included by these tests) drives the
+# anchor-app through its `*_for_test` seams, which are gated behind this
+# feature. Without it the transport-gateway integration suite cannot compile.
+tari-cc-private-ballot-ootle-anchor-app = { path = "../ootle-anchor-app", features = ["test-support"] }
 tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator = { path = "../ootle-anchor-lifecycle" }
 tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../ootle-anchor-network-adapters" }
 tari-cc-private-ballot-ootle-receipt-anchor-adapter = { path = "../ootle-receipt-anchor-adapter" }
@@ -32,23 +37,32 @@ curve25519-dalek-v4 = { package = "curve25519-dalek", version = "=4.1.3", defaul
 
 [features]
 default = []
-# Controlled-test integration slice: organizer hidden-service lifecycle,
-# provisioning, collector service loop, and the test provisioning binary.
-# Compile-time feature alone never starts networking; the Tauri shell and the
-# provisioning binary additionally require explicit runtime configuration.
-managed-tor-test = []
+# Managed-Tor production integration: organizer hidden-service lifecycle,
+# per-election transport authority material generation, provisioning of the
+# organizer private bundle and voter public bundle, and the collector service
+# loop. Compile-time feature alone never starts networking; the Tauri shell
+# and the standalone provisioning/intake binaries additionally require
+# explicit runtime configuration (validated tor.exe path, organizer private
+# state directory, voter public bundle).
+managed-tor = []
 
-# Test-only provisioning binary. Built only with `--features managed-tor-test`.
+# Standalone provisioning binary used by the one-computer manual test
+# runbook and by developer workflows. The Tauri shell drives the same
+# provisioning path in-process, so this binary is not required for a
+# normal release; it is built only with `--features managed-tor`.
 [[bin]]
-name = "private-ballot-tor-test-provision"
+name = "private-ballot-tor-provision"
 path = "src/bin/provision.rs"
-required-features = ["managed-tor-test"]
+required-features = ["managed-tor"]
 
-# Test-only organizer intake binary. Built only with `--features managed-tor-test`.
+# Standalone organizer intake binary used by the one-computer manual test
+# runbook. The Tauri shell drives the same intake service loop in-process,
+# so this binary is not required for a normal release; it is built only
+# with `--features managed-tor`.
 [[bin]]
-name = "private-ballot-tor-test-intake"
+name = "private-ballot-tor-intake"
 path = "src/bin/intake.rs"
-required-features = ["managed-tor-test"]
+required-features = ["managed-tor"]
 
 [lints]
 workspace = true

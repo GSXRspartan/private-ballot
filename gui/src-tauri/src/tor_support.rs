@@ -23,15 +23,13 @@ use std::path::{Path, PathBuf};
 use crate::CommandError;
 
 /// The SMALL explicit allowlist of well-known Tor executable locations probed
-/// during auto-detection. The known validated Windows test installation is the
-/// only default entry. New entries must be concrete absolute paths, never
-/// directories to scan or PATH-relative names.
-///
-/// Kept intentionally tiny and Windows-first: this is the reviewed controlled
-/// test surface. Portability is preserved structurally (the resolver logic is
-/// OS-agnostic) without inventing unverified installation paths on other
-/// platforms merely to claim cross-platform support.
-pub const TOR_EXECUTABLE_ALLOWLIST_V1: &[&str] = &[r"C:\purr-tools\tor-expert\tor\tor.exe"];
+/// during auto-detection. Deliberately empty in public source: no developer
+/// machine path or unverified default is baked in. Operators must select their
+/// installed `tor.exe` explicitly the first time; the selection is remembered
+/// in the app's stored config, not here. Any new default entry must be a
+/// concrete absolute path deliberately reviewed for public source (never a
+/// directory to scan, never a PATH-relative name, never a per-user path).
+pub const TOR_EXECUTABLE_ALLOWLIST_V1: &[&str] = &[];
 
 /// Validates a candidate `tor.exe` path: absolute, exists, regular file, not a
 /// symlink/reparse point, no control characters. This is the SAME validation
@@ -163,7 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn known_validated_windows_test_install_is_in_allowlist() {
-        assert!(TOR_EXECUTABLE_ALLOWLIST_V1.contains(&r"C:\purr-tools\tor-expert\tor\tor.exe"));
+    fn public_source_has_no_developer_machine_tor_path_in_allowlist() {
+        // Public source ships with an empty allowlist: no developer machine
+        // path or unverified default is baked into the binary. Operators are
+        // asked once to select `tor.exe`; the app then remembers that choice
+        // in stored config.
+        assert!(
+            TOR_EXECUTABLE_ALLOWLIST_V1.is_empty(),
+            "public source Tor allowlist must be empty; got {:?}",
+            TOR_EXECUTABLE_ALLOWLIST_V1
+        );
     }
 }

@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
-  managedTorTestCardVisible,
+  managedTorCardVisible,
   privateSubmissionStageLabel,
   privateSubmissionStatus,
 } from "../src/privateSubmission.ts";
@@ -35,7 +35,7 @@ function readProjectFile(path: string): string {
 
 const vote = readProjectFile("src/screens/Vote.tsx");
 const dialog = readProjectFile("src/api/dialog.ts");
-const managedTor = readProjectFile("src-tauri/src/managed_tor_test.rs");
+const managedTor = readProjectFile("src-tauri/src/managed_tor.rs");
 
 // -------------------------------------------------------------------------
 // privateSubmissionStatus: derived from DURABLE cast state (Issues 4, 17)
@@ -133,7 +133,7 @@ describe("controlled-test recovery card gating", () => {
   // 1. Feature present + Ready → card visible.
   it("feature present + prepared Ready → controlled-test card visible", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: true,
         preparedReady: true,
         castState: "NOT_CAST",
@@ -145,7 +145,7 @@ describe("controlled-test recovery card gating", () => {
   // 2. Feature present + CAST_PENDING + NOT Ready → recovery card visible.
   it("feature present + CAST_PENDING + not Ready → recovery card visible (restart fix)", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: true,
         preparedReady: false,
         castState: "CAST_PENDING",
@@ -157,7 +157,7 @@ describe("controlled-test recovery card gating", () => {
   // 3. Feature present + CAST + NOT Ready → success card visible.
   it("feature present + CAST + not Ready → terminal success card visible", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: true,
         preparedReady: false,
         castState: "CAST",
@@ -169,7 +169,7 @@ describe("controlled-test recovery card gating", () => {
   // 4. Feature absent + Ready → controlled-test card absent.
   it("feature absent + Ready → controlled-test card absent", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: false,
         preparedReady: true,
         castState: "NOT_CAST",
@@ -181,7 +181,7 @@ describe("controlled-test recovery card gating", () => {
   // 5. Feature absent + CAST_PENDING → controlled-test card absent.
   it("feature absent + CAST_PENDING → controlled-test card absent", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: false,
         preparedReady: false,
         castState: "CAST_PENDING",
@@ -189,7 +189,7 @@ describe("controlled-test recovery card gating", () => {
       false,
     );
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: false,
         preparedReady: false,
         castState: "CAST",
@@ -200,7 +200,7 @@ describe("controlled-test recovery card gating", () => {
 
   it("feature present + NOT_CAST + not Ready → card absent (nothing to submit yet)", () => {
     assert.equal(
-      managedTorTestCardVisible({
+      managedTorCardVisible({
         featurePresent: true,
         preparedReady: false,
         castState: "NOT_CAST",
@@ -210,13 +210,13 @@ describe("controlled-test recovery card gating", () => {
   });
 
   it("the Vote screen gates the card through the feature-aware predicate", () => {
-    // The card is rendered only via managedTorTestCardVisible with the feature
+    // The card is rendered only via managedTorCardVisible with the feature
     // flag, never on prepared-ballot/cast state alone. Guided progressive
     // disclosure additionally gates visibility on the Submit stage being
     // current (or show-all/a locked ballot) — presentation only.
     assert.match(
       vote,
-      /managedTorTestCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*submitStageVisible\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
+      /managedTorCardVisible\(\{\s*featurePresent: managedTorFeaturePresent,[\s\S]*?castState,\s*\}\)\s*&&\s*submitStageVisible\s*&&\s*\(\s*<Card title="Submit your ballot privately">/,
     );
     // The guided gate only ADDS presentation conditions; the feature predicate
     // remains mandatory.
@@ -240,7 +240,7 @@ describe("controlled-test recovery card gating", () => {
 
 describe("managed-Tor ready state cannot go stale", () => {
   it("polls the authoritative status while configured and not yet CAST", () => {
-    // A bounded interval re-reads managedTorTestStatus so a Tor child that exits
+    // A bounded interval re-reads managedTorStatus so a Tor child that exits
     // flips tor_running to false and the banner stops claiming "ready". The Rust
     // status checks child liveness (try_wait) + a fresh SOCKS probe.
     assert.match(vote, /setInterval\(\s*\(\)\s*=>\s*\{\s*void refreshManagedTorStatus\(\)/);

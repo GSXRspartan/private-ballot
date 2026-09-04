@@ -1,5 +1,5 @@
 //! Authenticated election-status route + authoritative lifecycle fencing
-//! tests (managed-tor-test only).
+//! tests (managed-tor only).
 //!
 //! These prove the two distributed-lifecycle guarantees added to the
 //! organizer collector:
@@ -15,7 +15,7 @@
 //!
 //! No real Tor, no internet; loopback sockets only.
 
-#![cfg(feature = "managed-tor-test")]
+#![cfg(feature = "managed-tor")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[path = "../../gui-core/tests/common/mod.rs"]

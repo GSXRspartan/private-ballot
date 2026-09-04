@@ -1,4 +1,4 @@
-//! Organizer collector service-loop liveness tests (managed-tor-test only).
+//! Organizer collector service-loop liveness tests (managed-tor only).
 //!
 //! These prove the dedicated worker remains alive after start, services
 //! requests, and exits cleanly on stop. They would FAIL under the old
@@ -7,7 +7,7 @@
 //!
 //! No real Tor, no network beyond loopback sockets.
 
-#![cfg(feature = "managed-tor-test")]
+#![cfg(feature = "managed-tor")]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 #[path = "../../gui-core/tests/common/mod.rs"]

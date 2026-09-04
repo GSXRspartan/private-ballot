@@ -442,7 +442,7 @@ impl OpaqueEnvelopeCollectorV1 {
     /// authenticated receipt was returned; `Ok(Some(false))` means a request
     /// was serviced but rejected. Never blocks longer than `poll_interval`
     /// while waiting, so shutdown is bounded.
-    #[cfg(feature = "managed-tor-test")]
+    #[cfg(feature = "managed-tor")]
     pub fn serve_next_or_stop(
         &self,
         handler: &mut dyn OpaqueEnvelopeGatewayHandlerV1,

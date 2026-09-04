@@ -1,8 +1,13 @@
 # One-Computer Managed Tor Integration Test — Runbook
 
-> **INTERNAL developer/test document.** This is NOT the public Guide. The Tor
-> feature is controlled-test-only under the `managed-tor-test` cargo feature.
-> Do not use it for a binding or consequential election.
+> **INTERNAL developer/test document.** This is NOT the public Guide.
+>
+> This runbook exercises the same managed-Tor production functionality the
+> Tauri release ships (the `managed-tor` cargo feature is enabled by default
+> for the desktop shell) using the standalone `private-ballot-tor-provision`
+> and `private-ballot-tor-intake` binaries. Do not use it for a binding or
+> consequential election. See
+> [OPERATOR_SETUP.md](OPERATOR_SETUP.md) for the normal end-user flow.
 
 This runbook performs a MANUAL REAL one-computer test of the managed Tor
 private-ballot transport using an installed `tor.exe`. All automated tests
@@ -22,7 +27,7 @@ remain loopback/fake-Tor only; this document is for the human-run rehearsal.
 Open a PowerShell terminal and set these once (all three terminals reuse them):
 
 ```powershell
-$Repo = "C:\Users\pdark\Documents\Codex\2026-07-30\tari-cc-private-ballot"
+$Repo = "C:\path\to\tari-private-ballot"
 
 # REPLACE with your real tor.exe absolute path:
 $TorExe = "C:\REPLACE\WITH\REAL\tor.exe"
@@ -36,7 +41,7 @@ $Registry = "C:\REPLACE\WITH\REAL\registry.cbor"
 $OptionSet = "C:\REPLACE\WITH\REAL\option-set.cbor"
 ```
 
-## Build the managed-tor-test binaries
+## Build the managed-tor binaries
 
 ```powershell
 cd $Repo
@@ -44,19 +49,19 @@ cd $Repo
 # Provision + intake binaries (transport-gateway with the feature):
 cargo +stable-x86_64-pc-windows-msvc build `
     -p tari-cc-private-ballot-transport-gateway `
-    --features managed-tor-test --bins --locked --offline
+    --features managed-tor --bins --locked --offline
 
 # Tauri app with the feature (voter side):
 cd gui\src-tauri
-cargo +stable-x86_64-pc-windows-msvc build --features managed-tor-test --locked --offline
+cargo +stable-x86_64-pc-windows-msvc build --features managed-tor --locked --offline
 cd $Repo
 ```
 
 You can verify `--help` parses without launching Tor:
 
 ```powershell
-& "$Repo\target\debug\private-ballot-tor-test-provision.exe" --help
-& "$Repo\target\debug\private-ballot-tor-test-intake.exe" --help
+& "$Repo\target\debug\private-ballot-tor-provision.exe" --help
+& "$Repo\target\debug\private-ballot-tor-intake.exe" --help
 ```
 
 ---
@@ -81,8 +86,8 @@ then stops `tor.exe`.
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc run `
     -p tari-cc-private-ballot-transport-gateway `
-    --features managed-tor-test `
-    --bin private-ballot-tor-test-provision -- `
+    --features managed-tor `
+    --bin private-ballot-tor-provision -- `
     $Manifest $Registry $OptionSet $TorExe $TestRoot
 ```
 
@@ -121,8 +126,8 @@ Open a **second** PowerShell terminal and set the same variables, then:
 ```powershell
 cargo +stable-x86_64-pc-windows-msvc run `
     -p tari-cc-private-ballot-transport-gateway `
-    --features managed-tor-test `
-    --bin private-ballot-tor-test-intake -- `
+    --features managed-tor `
+    --bin private-ballot-tor-intake -- `
     $Manifest $Registry $OptionSet $TorExe $TestRoot
 ```
 
@@ -169,7 +174,7 @@ Open a **third** PowerShell terminal and set the same variables, then:
 
 ```powershell
 cd $Repo\gui\src-tauri
-cargo +stable-x86_64-pc-windows-msvc run --features managed-tor-test --locked --offline
+cargo +stable-x86_64-pc-windows-msvc run --features managed-tor --locked --offline
 ```
 
 The Tauri desktop application launches. This is the feature-enabled build that
