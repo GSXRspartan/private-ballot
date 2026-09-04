@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "tari_cc_private_ballot_ootle_anchor_event_template_v2"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# The event ABI must match the audited Tari Ootle v0.39.2 template library,
+# exactly as the V1 template pins it.
+tari_template_lib = "=0.31.1"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

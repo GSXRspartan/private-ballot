@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "Private Ballot Ootle Anchor V2",
+  "version": "2.0.1",
+  "description": "Public aggregate anchor template for Tari Private Ballot elections",
+  "tags": [
+    "ballot",
+    "governance",
+    "privacy",
+    "tari",
+    "ootle"
+  ],
+  "category": "governance"
+}
