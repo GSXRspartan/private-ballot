@@ -59,6 +59,88 @@ export function shouldWarnLargeRun(voterCount: number): boolean {
   return voterCount >= LARGE_RUN_WARNING_THRESHOLD;
 }
 
+// The run-affecting fields the operator fills in on the Run tab. `count` and
+// `startIndex` are the exact-selection levers: the number the operator enters
+// here is the number of local voters the backend must submit, and it MUST
+// reach the load driver unchanged. Kept as its own shape (rather than inlined
+// in App.tsx) so the value flow can be unit-tested across the frontend/backend
+// boundary without a DOM.
+export interface RunConfigInput {
+  manifestPath: string;
+  registryPath: string;
+  candidatePath: string;
+  voterPublicBundlePath: string;
+  credentialsDir: string;
+  passphrase: string;
+  torMode: TorMode;
+  torExe: string;
+  torSocks: string;
+  resultsPath: string;
+  choice: string;
+  count: number;
+  startIndex: number;
+}
+
+// The exact camelCase payload the `validate_load_test` / `start_load_test`
+// Tauri commands deserialize. `count` and `startIndex` are passed through
+// verbatim from `RunConfigInput`; nothing between the operator's entry and this
+// payload is allowed to recompute the requested voter count from a selected /
+// remaining / detected credential total.
+export interface LoadTestRequestPayload {
+  manifestPath: string;
+  registryPath: string;
+  candidatePath: string;
+  voterPublicBundlePath: string;
+  credentialsDir: string;
+  passphrase: string;
+  torMode: TorMode;
+  torExe: string | null;
+  torSocks: string | null;
+  resultsPath: string;
+  choice: string;
+  count: number;
+  startIndex: number;
+  runId: string;
+}
+
+// Builds the Tauri command payload from the operator's run form. Shared by both
+// Validate Inputs and Start Load Test so the two calls can never disagree about
+// the requested count: the same `count` / `startIndex` the operator entered are
+// transmitted verbatim. Only Tor-mode-dependent transport fields are nulled and
+// a fresh per-run id is stamped; the selection levers are copied unchanged.
+export function buildLoadTestRequest(
+  form: RunConfigInput,
+  runId: string,
+): LoadTestRequestPayload {
+  return {
+    manifestPath: form.manifestPath,
+    registryPath: form.registryPath,
+    candidatePath: form.candidatePath,
+    voterPublicBundlePath: form.voterPublicBundlePath,
+    credentialsDir: form.credentialsDir,
+    passphrase: form.passphrase,
+    torMode: form.torMode,
+    torExe: form.torMode === "managed" ? form.torExe : null,
+    torSocks: form.torMode === "manual-socks" ? form.torSocks : null,
+    resultsPath: form.resultsPath,
+    choice: form.choice,
+    count: form.count,
+    startIndex: form.startIndex,
+    runId,
+  };
+}
+
+// Frontend-only validation-staleness key. Never sent to the backend and never
+// persisted; it only ever compares the current run form to the form that
+// passed validation. `count` and `startIndex` are part of the key, so any edit
+// to the requested count (or the first-local index, or any other run-affecting
+// field) makes the prior validation stale and disables Start until the operator
+// re-validates. The per-run id is deliberately NOT part of the run form and so
+// never enters this key.
+export function runConfigKey(form: RunConfigInput): string {
+  return JSON.stringify(form);
+}
+
 export function canStartLoadTest(
   runState: RunState,
   validated: boolean,

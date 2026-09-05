@@ -2459,6 +2459,110 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Builds a config that only exercises the credential-selection levers
+    /// (`credentials_dir`, `start_index`, `count`); the other fields are inert
+    /// placeholders so `ensure_exact_selection` can be driven directly.
+    fn selection_only_config(
+        credentials_dir: &Path,
+        start_index: usize,
+        count: Option<usize>,
+    ) -> LoadDriverConfig {
+        LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: credentials_dir.to_path_buf(),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path: PathBuf::from("results.json"),
+            state_dir: None,
+            count,
+            start_index,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "repro".to_owned(),
+        }
+    }
+
+    /// Physical-incident reproduction at the exact-selection boundary. A cohort
+    /// of 100 credentials is present locally. The requested count is the ONLY
+    /// lever that decides how many voters run, and `requested_voter_count` in
+    /// the report is exactly `selected_paths.len()`:
+    ///   * start=1,  count=100 → 100 selected (the intended run)
+    ///   * start=1,  count=89  → 89 selected  (the value that was actually sent)
+    ///   * start=90, count=11  → 11 selected  (the manual follow-up run)
+    /// This proves the backend never fabricates 89 from a 100-file directory: a
+    /// 100-file directory with count=Some(100) selects 100. The 89 in the
+    /// preserved evidence can only have come from a count of 89 reaching the
+    /// driver — i.e. upstream of this layer, in the value that was sent.
+    #[test]
+    fn exact_selection_reproduces_the_hundred_voter_partitioning() {
+        let root = unique_temp_dir("repro-100");
+        if let Err(error) = fs::create_dir_all(&root) {
+            panic!("{error}");
+        }
+        for index in 1..=100 {
+            let name = format!("voter-{index:04}.tcbcred");
+            if let Err(error) = write_new_file(&root.join(name), b"not-a-real-container") {
+                panic!("{error}");
+            }
+        }
+
+        // The intended run: first=1, count=100 selects exactly 100.
+        let intended = selection_only_config(&root, 1, Some(100));
+        let selected = ensure_exact_selection(&intended).expect("100 must select exactly 100");
+        assert_eq!(selected.len(), 100, "requested_voter_count would be 100");
+
+        // The value that was actually sent: first=1, count=89 selects exactly 89.
+        let regressed = selection_only_config(&root, 1, Some(89));
+        let selected = ensure_exact_selection(&regressed).expect("89 selects 89");
+        assert_eq!(
+            selected.len(),
+            89,
+            "requested_voter_count=89 in the evidence can only come from count=89"
+        );
+
+        // The manual follow-up: first=90, count=11 selects exactly 11.
+        let follow_up = selection_only_config(&root, 90, Some(11));
+        let selected = ensure_exact_selection(&follow_up).expect("start 90 count 11 selects 11");
+        assert_eq!(selected.len(), 11);
+
+        // A directory of 100 with count=None (count omitted) selects ALL 100 —
+        // it can never silently become 89. This rules out a "use remaining"
+        // interpretation at this layer.
+        let unbounded = selection_only_config(&root, 1, None);
+        let selected = ensure_exact_selection(&unbounded).expect("None selects all present");
+        assert_eq!(selected.len(), 100);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Exact-selection still fails closed on a short selection: asking for more
+    /// voters than are available from the local start index is rejected before
+    /// any voter runs (never a partial run that reports COMPLETE).
+    #[test]
+    fn exact_selection_rejects_a_short_selection() {
+        let root = unique_temp_dir("repro-short");
+        if let Err(error) = fs::create_dir_all(&root) {
+            panic!("{error}");
+        }
+        for index in 1..=100 {
+            let name = format!("voter-{index:04}.tcbcred");
+            if let Err(error) = write_new_file(&root.join(name), b"not-a-real-container") {
+                panic!("{error}");
+            }
+        }
+        // From local start index 90 only 11 credentials remain; requesting 20
+        // must be rejected, not silently truncated to 11.
+        let short = selection_only_config(&root, 90, Some(20));
+        assert!(
+            ensure_exact_selection(&short).is_err(),
+            "a requested count that exceeds the available local credentials must fail closed"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn unique_temp_dir(label: &str) -> PathBuf {
         let mut dir = env::temp_dir();
         let now = std::time::SystemTime::now()

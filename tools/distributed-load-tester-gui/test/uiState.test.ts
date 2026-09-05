@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { RunConfigInput } from "../src/model.ts";
 import {
   VOTES_DELIVERED_LABEL,
+  buildLoadTestRequest,
   canStartLoadTest,
   canStopRun,
   formatDuration,
@@ -11,6 +13,7 @@ import {
   isValidationCurrent,
   nextStateAfterStopRequest,
   passphraseMismatch,
+  runConfigKey,
   secretFreeProgressText,
   shouldWarnLargeRun,
   stateAfterFailedAction,
@@ -18,6 +21,28 @@ import {
 } from "../src/model.ts";
 
 const RESULTS_PATH = "C:\\runs\\desktop\\distributed-load-results.json";
+
+// A representative Run-tab form: managed Tor, 100 credentials available, first
+// local credential 1, count 100 — the exact shape of the physical qualification
+// run that regressed to 89.
+function runForm(overrides: Partial<RunConfigInput> = {}): RunConfigInput {
+  return {
+    manifestPath: "C:\\election\\election-manifest.cbor",
+    registryPath: "C:\\election\\voter-registry.cbor",
+    candidatePath: "C:\\election\\candidate-set.cbor",
+    voterPublicBundlePath: "C:\\election\\voter-public-bundle.cbor",
+    credentialsDir: "C:\\voters",
+    passphrase: "correct horse battery staple",
+    torMode: "managed",
+    torExe: "C:\\tor\\tor.exe",
+    torSocks: "127.0.0.1:9050",
+    resultsPath: RESULTS_PATH,
+    choice: "round-robin",
+    count: 100,
+    startIndex: 1,
+    ...overrides,
+  };
+}
 
 test("run test is gated until a results path is selected", () => {
   // Fully validated but no results destination: Run Test must stay disabled —
@@ -28,6 +53,77 @@ test("run test is gated until a results path is selected", () => {
   assert.equal(canStartLoadTest("STOPPED", true, ""), false);
   // A selected results path unblocks Start (with validation and Tor ready).
   assert.equal(canStartLoadTest("VALIDATED", true, RESULTS_PATH), true);
+});
+
+test("the entered voter count reaches the start payload verbatim (100 stays 100)", () => {
+  // The physical regression: operator enters first=1, count=100. The payload
+  // the backend receives must carry exactly that — never a selected/remaining/
+  // detected total.
+  const payload = buildLoadTestRequest(runForm({ startIndex: 1, count: 100 }), "gui-123");
+  assert.equal(payload.count, 100);
+  assert.equal(payload.startIndex, 1);
+});
+
+test("an arbitrary count is passed through unchanged (37 stays 37)", () => {
+  const payload = buildLoadTestRequest(runForm({ startIndex: 1, count: 37 }), "gui-1");
+  assert.equal(payload.count, 37);
+  assert.equal(payload.startIndex, 1);
+});
+
+test("first-local index and count are independent and both survive (start=38,count=13)", () => {
+  const payload = buildLoadTestRequest(runForm({ startIndex: 38, count: 13 }), "gui-1");
+  assert.equal(payload.startIndex, 38);
+  assert.equal(payload.count, 13);
+});
+
+test("start payload nulls the transport field that does not match the Tor mode", () => {
+  const managed = buildLoadTestRequest(runForm({ torMode: "managed" }), "gui-1");
+  assert.equal(managed.torExe, "C:\\tor\\tor.exe");
+  assert.equal(managed.torSocks, null);
+  const manual = buildLoadTestRequest(runForm({ torMode: "manual-socks" }), "gui-1");
+  assert.equal(manual.torSocks, "127.0.0.1:9050");
+  assert.equal(manual.torExe, null);
+});
+
+test("validate and start build byte-identical payloads apart from the run id", () => {
+  // Both Validate Inputs and Start Load Test go through buildLoadTestRequest on
+  // the same unchanged form, so the two payloads can only differ by their
+  // per-invocation run id — never by the requested count.
+  const form = runForm({ startIndex: 1, count: 100 });
+  const validated = buildLoadTestRequest(form, "gui-validate");
+  const started = buildLoadTestRequest(form, "gui-start");
+  assert.notEqual(validated.runId, started.runId);
+  assert.deepEqual({ ...validated, runId: "X" }, { ...started, runId: "X" });
+  assert.equal(started.count, 100);
+});
+
+test("changing the count after validation invalidates the prior validation", () => {
+  // The operator validates at 100; any later change to the count produces a
+  // different key, so Start is gated until they re-validate — the corrupted
+  // value can never ride a stale validation into a run.
+  const validatedKey = runConfigKey(runForm({ count: 100 }));
+  assert.equal(isValidationCurrent(validatedKey, runConfigKey(runForm({ count: 100 }))), true);
+  assert.equal(isValidationCurrent(validatedKey, runConfigKey(runForm({ count: 89 }))), false);
+});
+
+test("changing the first-local index after validation invalidates it", () => {
+  const validatedKey = runConfigKey(runForm({ startIndex: 1 }));
+  assert.equal(isValidationCurrent(validatedKey, runConfigKey(runForm({ startIndex: 90 }))), false);
+});
+
+test("changing the credential directory or election artifacts invalidates validation", () => {
+  const validatedKey = runConfigKey(runForm());
+  assert.equal(isValidationCurrent(validatedKey, runConfigKey(runForm({ credentialsDir: "C:\\other" }))), false);
+  assert.equal(isValidationCurrent(validatedKey, runConfigKey(runForm({ manifestPath: "C:\\other.cbor" }))), false);
+});
+
+test("the run id is not part of the validation key", () => {
+  // buildLoadTestRequest stamps a fresh run id every call; that id must not be
+  // part of the run form, or validation would go stale between validate and
+  // start even when nothing the operator controls changed.
+  const key = runConfigKey(runForm());
+  assert.equal(key.includes("runId"), false);
+  assert.equal(key.includes("gui-"), false);
 });
 
 test("changing the results path invalidates prior validation", () => {

@@ -2,8 +2,8 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,14 @@ const TOR_MODE_MANUAL_SOCKS: &str = "manual-socks";
 struct RunnerState {
     running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// Fingerprint of the run configuration that LAST passed validation, or
+    /// `None` when no validation currently stands. Start Load Test recomputes
+    /// the fingerprint of the configuration it is about to launch and refuses
+    /// to run unless it matches this — a backend-independent guarantee that the
+    /// run started is the run the operator validated (see
+    /// [`run_config_fingerprint`]). Cleared at the start of every validation so
+    /// a failed re-validation leaves nothing to start against.
+    validated_fingerprint: Arc<Mutex<Option<String>>>,
 }
 
 // Cleared on every worker exit path — normal return or a panic inside the
@@ -91,6 +99,21 @@ impl CommandError {
             category: "INVALID_LIFECYCLE_TRANSITION".to_owned(),
             context: None,
             message: "a load test is already running".to_owned(),
+        }
+    }
+
+    /// Start Load Test was invoked with a configuration that does not match the
+    /// one that last passed validation (or with no validation standing at all).
+    /// Fail closed: the operator must re-run Validate Inputs so the numbers they
+    /// confirm are exactly the numbers that run.
+    fn config_changed() -> Self {
+        Self {
+            code: "LOAD_TESTER_RUN_CONFIGURATION_CHANGED".to_owned(),
+            category: "INVALID_LIFECYCLE_TRANSITION".to_owned(),
+            context: None,
+            message:
+                "the run configuration changed since it was validated; re-run Validate Inputs before starting"
+                    .to_owned(),
         }
     }
 
@@ -354,20 +377,33 @@ async fn test_tor(request: TorExecutableRequest) -> Result<TestTorResult, Comman
 
 #[tauri::command]
 async fn validate_load_test(
+    state: State<'_, RunnerState>,
     request: LoadTestRequest,
 ) -> Result<LoadDriverValidationSummary, CommandError> {
+    // Any validation that previously stood is void until this one succeeds, so
+    // a failed (or in-progress) re-validation can never leave a stale
+    // fingerprint that Start would accept.
+    clear_validated_fingerprint(&state);
     // Static Tor policy check FIRST, before touching disk. Fail closed on
     // ambiguous Tor mode and invalid executables. NEVER spawns Tor here.
     prevalidate_tor_selection(&request)?;
     // Durable per-host results evidence is mandatory: reject a missing or
     // unusable results destination during offline validation too.
     validate_results_destination(&request)?;
+    // Compute the fingerprint from the SAME request that is being validated, so
+    // Start can later confirm byte-for-byte that it is launching this exact
+    // configuration (see `run_config_fingerprint`).
+    let fingerprint = run_config_fingerprint(&request);
     let config = load_config_for_validation(&request)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let summary = tauri::async_runtime::spawn_blocking(move || {
         validate_load_driver_inputs(&config).map_err(CommandError::from_harness)
     })
     .await
-    .map_err(|_| CommandError::from_harness("validation worker failed".to_owned()))?
+    .map_err(|_| CommandError::from_harness("validation worker failed".to_owned()))??;
+    // Record the configuration that just passed. Start Load Test will refuse to
+    // run anything whose fingerprint differs from this.
+    store_validated_fingerprint(&state, fingerprint);
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -382,6 +418,15 @@ async fn start_load_test(
     // Independent of the frontend: a Run Test without a usable results
     // destination is rejected here even if the frontend gate was bypassed.
     validate_results_destination(&request)?;
+    // Backend-independent count/selection integrity: the configuration being
+    // started MUST match the one that last passed validation. If it differs in
+    // any run-affecting field — including the requested `count` and
+    // `start_index` — or if no validation currently stands, fail closed before
+    // Tor is touched or any voter runs. This binds VALIDATE (S,N) → START
+    // (S,N) at the boundary even if a frontend gate were bypassed.
+    if !validated_fingerprint_matches(&state, &run_config_fingerprint(&request)) {
+        return Err(CommandError::config_changed());
+    }
 
     if state.running.swap(true, Ordering::SeqCst) {
         return Err(CommandError::running());
@@ -692,6 +737,95 @@ fn build_run_config(
             .clone()
             .unwrap_or_else(|| "gui-load-test".to_owned()),
     })
+}
+
+/// Canonical, deterministic, secret-free fingerprint of the run-affecting
+/// configuration. Serialized with a fixed field order so the SAME request
+/// always yields the SAME string.
+///
+/// Deliberately excluded:
+///   * `passphrase` — a secret that must never enter a comparable/persisted
+///     token (and unrelated to WHICH voters run);
+///   * `run_id` — regenerated on every invoke (validate and start each stamp
+///     their own), so it is not part of the run's identity.
+///
+/// Everything that changes WHICH voters this host submits is included: the
+/// election artifacts, the credential directory, the Tor selection (normalized
+/// by mode exactly as the frontend transmits it), the results destination, the
+/// candidate rotation, and the exact-selection levers `count` and
+/// `start_index`. Because `count` is part of the fingerprint, a requested-count
+/// change between Validate and Start can never slip through the Start gate.
+fn run_config_fingerprint(request: &LoadTestRequest) -> String {
+    #[derive(Serialize)]
+    struct RunConfigFingerprintV1<'a> {
+        manifest_path: &'a str,
+        registry_path: &'a str,
+        candidate_path: &'a str,
+        voter_public_bundle_path: &'a str,
+        credentials_dir: &'a str,
+        tor_mode: &'a str,
+        tor_exe: Option<&'a str>,
+        tor_socks: Option<&'a str>,
+        results_path: &'a str,
+        choice: &'a str,
+        count: Option<usize>,
+        start_index: usize,
+    }
+
+    // Normalize the transport fields by mode so an unused field can never
+    // perturb the fingerprint: managed carries only the executable, manual
+    // SOCKS only the endpoint. This mirrors how the frontend builds the payload.
+    let (tor_exe, tor_socks) = match request.tor_mode.as_str() {
+        mode if mode == TOR_MODE_MANAGED => (request.tor_exe.as_deref(), None),
+        mode if mode == TOR_MODE_MANUAL_SOCKS => (None, request.tor_socks.as_deref()),
+        _ => (request.tor_exe.as_deref(), request.tor_socks.as_deref()),
+    };
+
+    let fingerprint = RunConfigFingerprintV1 {
+        manifest_path: &request.manifest_path,
+        registry_path: &request.registry_path,
+        candidate_path: &request.candidate_path,
+        voter_public_bundle_path: &request.voter_public_bundle_path,
+        credentials_dir: &request.credentials_dir,
+        tor_mode: &request.tor_mode,
+        tor_exe,
+        tor_socks,
+        results_path: &request.results_path,
+        choice: &request.choice,
+        count: request.count,
+        start_index: request.start_index,
+    };
+    // Serialization of this fixed struct of strings/usize/Option is infallible;
+    // the fallback keeps the function total without a panic in a command path.
+    serde_json::to_string(&fingerprint)
+        .unwrap_or_else(|_| "LOAD_TESTER_FINGERPRINT_SERIALIZATION_FAILED".to_owned())
+}
+
+/// Clears any standing validated fingerprint. Called at the start of every
+/// validation so a failed (or superseded) validation cannot leave a stale
+/// fingerprint that Start would accept.
+fn clear_validated_fingerprint(state: &RunnerState) {
+    if let Ok(mut guard) = state.validated_fingerprint.lock() {
+        *guard = None;
+    }
+}
+
+/// Records the fingerprint of the configuration that just passed validation.
+fn store_validated_fingerprint(state: &RunnerState, fingerprint: String) {
+    if let Ok(mut guard) = state.validated_fingerprint.lock() {
+        *guard = Some(fingerprint);
+    }
+}
+
+/// True only when a validation currently stands AND its fingerprint equals the
+/// one supplied. A poisoned lock or an absent validation both return false, so
+/// the caller fails closed.
+fn validated_fingerprint_matches(state: &RunnerState, fingerprint: &str) -> bool {
+    state
+        .validated_fingerprint
+        .lock()
+        .map(|guard| guard.as_deref() == Some(fingerprint))
+        .unwrap_or(false)
 }
 
 fn cohort_result(summary: CohortSummary, elapsed_ms: u128) -> CohortResult {
@@ -1012,5 +1146,137 @@ mod tests {
                 "managed-Tor metadata leaked a secret marker: {marker}"
             );
         }
+    }
+
+    /// A managed request with the exact 100-voter physical-test shape builds a
+    /// LoadDriverConfig whose `count` and `start_index` are the operator-entered
+    /// values, verbatim. This is the backend half of the count-integrity value
+    /// flow: whatever `count` the payload carries is exactly what the driver
+    /// selects against — nothing recomputes it from a detected/remaining total.
+    #[test]
+    fn build_run_config_preserves_requested_count_and_start_index() {
+        let mut request = sample_request("secret", TOR_MODE_MANAGED);
+        request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        request.count = Some(100);
+        request.start_index = 1;
+        let socks = SocketAddr::from(([127, 0, 0, 1], 9050));
+        let config = build_run_config(&request, socks).expect("config builds");
+        assert_eq!(config.count, Some(100), "requested count must survive verbatim");
+        assert_eq!(config.start_index, 1, "first local index must survive verbatim");
+
+        // The second physical run: start at local credential 90, count 11.
+        request.count = Some(11);
+        request.start_index = 90;
+        let config = build_run_config(&request, socks).expect("config builds");
+        assert_eq!(config.count, Some(11));
+        assert_eq!(config.start_index, 90);
+    }
+
+    /// The fingerprint that binds Validate → Start ignores the credential
+    /// passphrase and the per-run id: neither changes WHICH voters run, and the
+    /// passphrase is a secret. Two requests differing only in those fields must
+    /// fingerprint identically, and the passphrase must never appear inside it.
+    #[test]
+    fn run_config_fingerprint_ignores_passphrase_and_run_id() {
+        let mut a = sample_request("passphrase-one", TOR_MODE_MANAGED);
+        a.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        a.run_id = Some("gui-1000".to_owned());
+        let mut b = a.clone();
+        b.passphrase = "totally-different-passphrase".to_owned();
+        b.run_id = Some("gui-2000".to_owned());
+        assert_eq!(
+            run_config_fingerprint(&a),
+            run_config_fingerprint(&b),
+            "passphrase / run id must not affect the run fingerprint"
+        );
+        assert!(
+            !run_config_fingerprint(&a).contains("passphrase-one"),
+            "the fingerprint must never embed the passphrase"
+        );
+    }
+
+    /// The requested count is part of the fingerprint, so a validate-at-100 /
+    /// start-at-89 mismatch (the exact physical incident) produces DIFFERENT
+    /// fingerprints and would be rejected at the Start boundary. The first local
+    /// index is likewise part of the fingerprint.
+    #[test]
+    fn run_config_fingerprint_changes_when_count_or_start_index_changes() {
+        let mut validated = sample_request("secret", TOR_MODE_MANAGED);
+        validated.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        validated.count = Some(100);
+        validated.start_index = 1;
+
+        let mut started = validated.clone();
+        started.count = Some(89);
+        assert_ne!(
+            run_config_fingerprint(&validated),
+            run_config_fingerprint(&started),
+            "a count change must change the fingerprint"
+        );
+
+        let mut moved = validated.clone();
+        moved.start_index = 90;
+        assert_ne!(
+            run_config_fingerprint(&validated),
+            run_config_fingerprint(&moved),
+            "a start-index change must change the fingerprint"
+        );
+    }
+
+    /// Other run-affecting fields also change the fingerprint, so no run
+    /// artifact can be swapped between Validate and Start unnoticed.
+    #[test]
+    fn run_config_fingerprint_changes_on_other_run_affecting_fields() {
+        let base = {
+            let mut request = sample_request("secret", TOR_MODE_MANAGED);
+            request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+            request
+        };
+        let baseline = run_config_fingerprint(&base);
+
+        let mutate = |apply: &dyn Fn(&mut LoadTestRequest)| {
+            let mut request = base.clone();
+            apply(&mut request);
+            run_config_fingerprint(&request)
+        };
+
+        assert_ne!(baseline, mutate(&|r| r.credentials_dir = "other-voters".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.manifest_path = "other-manifest.cbor".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.registry_path = "other-registry.cbor".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.candidate_path = "other-candidates.cbor".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.voter_public_bundle_path = "other-bundle.cbor".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.results_path = "other-results.json".to_owned()));
+        assert_ne!(baseline, mutate(&|r| r.choice = "all:42".to_owned()));
+    }
+
+    /// The Start-boundary gate fails closed when no validation stands and opens
+    /// only for the exact fingerprint that was stored — and a fresh validation
+    /// (clear → store) rebinds it to the new configuration.
+    #[test]
+    fn validated_fingerprint_gate_is_fail_closed_and_exact() {
+        let state = RunnerState::default();
+        let request = {
+            let mut request = sample_request("secret", TOR_MODE_MANAGED);
+            request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+            request.count = Some(100);
+            request
+        };
+        let fingerprint = run_config_fingerprint(&request);
+
+        // No validation has run: Start must be refused.
+        assert!(!validated_fingerprint_matches(&state, &fingerprint));
+
+        // After a successful validation stores it, the exact fingerprint opens
+        // the gate and any other fingerprint stays closed.
+        store_validated_fingerprint(&state, fingerprint.clone());
+        assert!(validated_fingerprint_matches(&state, &fingerprint));
+        let mut changed = request.clone();
+        changed.count = Some(89);
+        assert!(!validated_fingerprint_matches(&state, &run_config_fingerprint(&changed)));
+
+        // A new validation attempt clears the standing fingerprint first, so a
+        // failed re-validation leaves nothing for Start to accept.
+        clear_validated_fingerprint(&state);
+        assert!(!validated_fingerprint_matches(&state, &fingerprint));
     }
 }

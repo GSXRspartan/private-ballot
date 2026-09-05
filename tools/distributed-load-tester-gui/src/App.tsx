@@ -10,6 +10,7 @@ import {
   TorMode,
   TorStatus,
   VOTES_DELIVERED_LABEL,
+  buildLoadTestRequest,
   canStartLoadTest,
   canStopRun,
   formatDuration,
@@ -18,6 +19,7 @@ import {
   isValidationCurrent,
   nextStateAfterStopRequest,
   passphraseMismatch,
+  runConfigKey,
   progressCompleted,
   progressElapsed,
   progressTotal,
@@ -402,30 +404,19 @@ export default function App() {
       await call<void>("stop_after_current_voter");
     });
 
+  // Both Validate Inputs and Start Load Test build their payload here, so the
+  // requested count/start index the operator entered are transmitted verbatim
+  // and identically by both calls — the count can never be recomputed or
+  // reinterpreted between validate and start.
   function runRequest() {
-    return {
-      manifestPath: run.manifestPath,
-      registryPath: run.registryPath,
-      candidatePath: run.candidatePath,
-      voterPublicBundlePath: run.voterPublicBundlePath,
-      credentialsDir: run.credentialsDir,
-      passphrase: run.passphrase,
-      torMode: run.torMode,
-      torExe: run.torMode === "managed" ? run.torExe : null,
-      torSocks: run.torMode === "manual-socks" ? run.torSocks : null,
-      resultsPath: run.resultsPath,
-      choice: run.choice,
-      count: run.count,
-      startIndex: run.startIndex,
-      runId: `gui-${Date.now()}`,
-    };
+    return buildLoadTestRequest(run, `gui-${Date.now()}`);
   }
 
   // Frontend-only snapshot key for validation staleness. Never sent to the
   // backend and never persisted; it only ever compares form state to the form
   // state that passed validation.
   function runFormKey(form: RunForm): string {
-    return JSON.stringify(form);
+    return runConfigKey(form);
   }
 
   const validated = isValidationCurrent(validatedKey, runFormKey(run));
@@ -693,7 +684,26 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   return (
     <label className="field">
       <span>{label}</span>
-      <input type="number" min={1} value={value} onChange={(event) => onChange(Number(event.currentTarget.value))} />
+      <input
+        type="number"
+        min={1}
+        value={value}
+        // A focused <input type="number"> silently steps its value when the
+        // wheel scrolls over it or Up/Down is pressed. On a long form these are
+        // both easy to trigger by accident while scrolling to the next control
+        // — an incidental scroll can turn an entered 100 into 89 with no visible
+        // edit. These are run-affecting counts (requested voter count, first
+        // local credential), so both accidental stepping vectors are neutralised:
+        // the wheel drops focus instead of changing the value, and vertical
+        // arrows are ignored. Typing (the intended entry path) is unaffected.
+        onWheel={(event) => event.currentTarget.blur()}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+            event.preventDefault();
+          }
+        }}
+        onChange={(event) => onChange(Number(event.currentTarget.value))}
+      />
     </label>
   );
 }
