@@ -37,15 +37,16 @@ use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
     GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
-    ensure_voter_election_status_directory_v1, read_issued_status_generation_v1,
+    ensure_voter_election_status_directory_v1, private_intake_inbox_directory_v1,
+    read_accepted_package_digests_v1, read_issued_status_generation_v1,
     reserve_next_status_generation_v1,
 };
 use tari_cc_private_ballot_transport_gateway::{
     GatewayReceiverKeyV1, LoadedOrganizerPrivateBundleV1, OpaqueEnvelopeCollectorV1,
     OrganizerCollectorServiceLoopV1, TransportElectionBindingV1, ThreadSafeCollectorHandlerV1,
-    TransportGatewaySimulatorV1, generate_transport_authority_material_v1,
-    load_organizer_private_bundle_v1, provision_organizer_transport_bundles_v1,
-    validate_intake_startup_v1,
+    TransportGatewaySimulatorV1, finalized_transport_archive_binding_from_accepted_digests_v1,
+    generate_transport_authority_material_v1, load_organizer_private_bundle_v1,
+    provision_organizer_transport_bundles_v1, validate_intake_startup_v1,
 };
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
@@ -272,6 +273,102 @@ pub(crate) fn organizer_private_bundle_dir(
     manifest_hash_hex: &str,
 ) -> Result<PathBuf, CommandError> {
     Ok(election_transport_root(app, manifest_hash_hex)?.join("organizer-private"))
+}
+
+/// Error for a durable transport archive-binding recovery that hit ambiguous or
+/// internally inconsistent authoritative state. It is an integrity failure, not
+/// a capability limitation: authoritative durable state exists but could not be
+/// turned into a finalized binding safely, so the caller must fail closed rather
+/// than fabricate one.
+fn binding_recovery_unavailable() -> CommandError {
+    CommandError::new(
+        "GUI_TRANSPORT_ARCHIVE_BINDING_UNAVAILABLE",
+        "ARCHIVE_INTEGRITY",
+        "the durable private transport history could not produce a finalized archive binding",
+    )
+}
+
+/// Deterministically recovers the authoritative finalized transport archive
+/// binding for one election from DURABLE state alone — the signed, election-
+/// scoped organizer descriptor plus the content-addressed private-intake inbox —
+/// with NO running intake worker.
+///
+/// This is the restart-safe / close-reopen recovery for the archive-binding
+/// lifecycle. The collector's in-memory batch state is ephemeral, but the
+/// descriptor is persisted and the inbox holds exactly the accepted canonical
+/// packages (content-addressed by the same `BallotPackageV1` digest a live
+/// finalize seals). Because sealing happens only at finalize (a single final
+/// batch), the reconstructed binding is byte-identical to a live finalize over
+/// the same accepted set.
+///
+/// Fails closed on ambiguity and NEVER invents evidence:
+///   * no durable descriptor for this election -> `Ok(None)` (no authoritative
+///     transport was ever provisioned; the archive command reports REQUIRED);
+///   * a persisted descriptor that does not bind THIS election -> rejected;
+///   * an inbox package that does not match its content-address -> rejected by
+///     `read_accepted_package_digests_v1`;
+///   * an empty inbox while the authoritative session recorded accepted ballots
+///     -> rejected (never silently produce a binding over an empty set).
+///
+/// The `app_data_root`-based core keeps this unit-testable without a Tauri
+/// runtime; [`recover_finalized_transport_binding_from_durable_state`] wraps it
+/// with the live [`AppHandle`].
+pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
+    app_data_root: &Path,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    let private_dir =
+        election_transport_subpath(app_data_root, manifest_hash_hex)?.join("organizer-private");
+    // Absent / unreadable bundle => no authoritative transport for this election.
+    let Ok(bundle) = load_organizer_private_bundle_v1(&private_dir) else {
+        return Ok(None);
+    };
+    // Defense in depth: the persisted, signed descriptor must bind THIS election.
+    // (The path is already election-scoped, and the archive writer independently
+    // rejects a mismatched binding, so this is a redundant early fail-closed.)
+    if to_hex_lower_v1(bundle.descriptor.manifest_hash().as_bytes()) != manifest_hash_hex {
+        return Err(binding_recovery_unavailable());
+    }
+    let inbox_dir = private_intake_inbox_directory_v1(app_data_root, manifest_hash_hex)
+        .map_err(|_| binding_recovery_unavailable())?;
+    let digests =
+        read_accepted_package_digests_v1(&inbox_dir).map_err(|_| binding_recovery_unavailable())?;
+    if digests.is_empty() {
+        // An authoritative accepted tally with no durable accepted packages is
+        // internally inconsistent: fail closed, never invent a binding.
+        if authoritative_accepted_count > 0 {
+            return Err(binding_recovery_unavailable());
+        }
+        return Ok(None);
+    }
+    finalized_transport_archive_binding_from_accepted_digests_v1(&bundle.descriptor, &digests)
+        .map_err(|_| binding_recovery_unavailable())
+}
+
+/// [`AppHandle`] wrapper around
+/// [`recover_finalized_transport_binding_from_durable_state_under`].
+pub(crate) fn recover_finalized_transport_binding_from_durable_state(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    let app_data_root = app_data_root(app)?;
+    recover_finalized_transport_binding_from_durable_state_under(
+        &app_data_root,
+        manifest_hash_hex,
+        authoritative_accepted_count,
+    )
+}
+
+/// Lowercase hex of a byte slice (no allocation-heavy dependencies).
+fn to_hex_lower_v1(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 /// Ensures `dir` is an app-owned real directory (no symlink/reparse redirect).
@@ -1742,5 +1839,143 @@ mod tests {
         assert_eq!(fence.state(), ElectionLifecycleStateV1::Open);
         assert_eq!(fence.generation(), 6);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -------------------------------------------------------------------------
+    // Durable transport archive-binding recovery (Blocker B): reconstruct the
+    // authoritative finalized binding from durable state alone (signed
+    // election-scoped descriptor + content-addressed private-intake inbox), with
+    // NO running intake worker. Fully offline; no Tor, no network.
+    // -------------------------------------------------------------------------
+
+    use tari_cc_private_ballot_gui_core::ballot_package_digest_hex_v1;
+
+    /// Bytes of `VALID_HASH` — a valid 32-byte manifest hash whose lowercase hex
+    /// is exactly `VALID_HASH`, so a provisioned descriptor binds this election.
+    const VALID_HASH_BYTES: [u8; 32] = [
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99,
+    ];
+    const RECOVERY_TEST_ONION: &str =
+        "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
+
+    fn temp_app_data_root(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "tari-organizer-binding-recovery-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&base).expect("temp app-data root");
+        base
+    }
+
+    /// Provisions a real signed organizer descriptor bundle for `VALID_HASH`
+    /// under `app_data_root` (no Tor: the onion hostname is supplied directly).
+    fn provision_election_descriptor(app_data_root: &Path) {
+        let root = election_transport_subpath(app_data_root, VALID_HASH).expect("election root");
+        let paths = TransportPaths::under(&root);
+        std::fs::create_dir_all(&paths.organizer_private_dir).expect("private dir");
+        std::fs::create_dir_all(paths.voter_bundle_path.parent().expect("parent")).expect("bundle parent");
+        let binding = TransportElectionBindingV1 {
+            election_id: b"recovery-test-election".to_vec(),
+            manifest_hash: VALID_HASH_BYTES,
+        };
+        let material =
+            generate_transport_authority_material_v1("test-root".to_owned()).expect("material");
+        provision_organizer_transport_bundles_v1(
+            &paths.organizer_private_dir,
+            &paths.voter_bundle_path,
+            &material,
+            &binding,
+            RECOVERY_TEST_ONION.to_owned(),
+            &root.join("tor-data"),
+            &paths.hidden_service_dir,
+        )
+        .expect("provision bundle");
+    }
+
+    /// Writes `count` synthetic accepted packages into the durable inbox,
+    /// content-addressed exactly as the collector would.
+    fn seed_inbox_packages(app_data_root: &Path, count: usize) {
+        let inbox = private_intake_inbox_directory_v1(app_data_root, VALID_HASH).expect("inbox path");
+        std::fs::create_dir_all(&inbox).expect("inbox dir");
+        for index in 0..count {
+            let bytes = format!("recovery-package-{index}").into_bytes();
+            let digest_hex = ballot_package_digest_hex_v1(&bytes);
+            std::fs::write(inbox.join(format!("{digest_hex}.package")), &bytes).expect("write pkg");
+        }
+    }
+
+    #[test]
+    fn durable_recovery_missing_descriptor_is_none() {
+        // No provisioned transport for this election => no authoritative binding
+        // provenance. The archive command reports REQUIRED (a capability limit),
+        // never a fabricated binding.
+        let root = temp_app_data_root("missing-descriptor");
+        let recovered = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 0)
+            .expect("recovery must not error when nothing is provisioned");
+        assert!(recovered.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_reconstructs_binding_from_inbox() {
+        // The forward + recovery invariant: a provisioned election with a durable
+        // content-addressed inbox reconstructs the authoritative finalized binding
+        // deterministically, with NO running intake worker.
+        let root = temp_app_data_root("reconstruct");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 7);
+        let binding = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 7)
+            .expect("recovery succeeds")
+            .expect("a non-empty inbox yields a binding");
+        assert_eq!(binding.manifest_hash().as_bytes(), &VALID_HASH_BYTES);
+        let accepted: u64 = binding
+            .batches()
+            .iter()
+            .map(|batch| batch.accepted_unique_count())
+            .sum();
+        assert_eq!(accepted, 7, "the binding must cover every durable accepted package");
+
+        // Determinism: a second recovery over the same durable state is identical.
+        let again = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 7)
+            .expect("second recovery succeeds")
+            .expect("still a binding");
+        assert_eq!(binding, again, "recovery is deterministic across calls");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_empty_inbox_with_accepted_count_fails_closed() {
+        // Internally inconsistent authoritative state: the session recorded
+        // accepted ballots but the durable inbox is empty. Never invent a binding.
+        let root = temp_app_data_root("empty-inbox");
+        provision_election_descriptor(&root);
+        let inbox = private_intake_inbox_directory_v1(&root, VALID_HASH).expect("inbox path");
+        std::fs::create_dir_all(&inbox).expect("empty inbox dir");
+        let result = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 5);
+        assert!(result.is_err(), "an empty inbox with accepted>0 must fail closed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_rejects_tampered_inbox_package() {
+        // On-disk tampering: a package file whose bytes do not match its
+        // content-address digest must fail closed (never reach the binding math).
+        let root = temp_app_data_root("tampered");
+        provision_election_descriptor(&root);
+        let inbox = private_intake_inbox_directory_v1(&root, VALID_HASH).expect("inbox path");
+        std::fs::create_dir_all(&inbox).expect("inbox dir");
+        // A well-formed digest filename whose content hashes to something else.
+        let honest = b"honest-bytes".to_vec();
+        let name = format!("{}.package", ballot_package_digest_hex_v1(&honest));
+        std::fs::write(inbox.join(name), b"TAMPERED-DIFFERENT-BYTES").expect("write tampered");
+        let result = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 1);
+        assert!(result.is_err(), "a tampered inbox package must fail closed");
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -1204,6 +1204,10 @@ pub(crate) fn test_configured_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `super` only imports `SocketAddr`; the port-reservation regression test
+    // rebinds a reserved loopback port, so bring `TcpListener` into the test
+    // scope explicitly. Test-only: no production behavior changes.
+    use std::net::TcpListener;
 
     const HASH_A: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
     const HASH_B: &str = "0000000000000000000000000000000000000000000000000000000000000000";

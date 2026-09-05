@@ -349,6 +349,83 @@ pub fn ingest_private_intake_inbox_into_session_v1(
     Ok(summary)
 }
 
+/// Reads the DURABLE accepted-package digest set for one election inbox, with no
+/// session and no mutation. Every file is fully read and its content is re-hashed
+/// under the `BallotPackageV1` domain and checked against its content-address
+/// filename — the SAME digest a live gateway seals into a transport batch — so a
+/// tampered or corrupted file fails closed. Returns the digests sorted for a
+/// deterministic, arrival-order-free result.
+///
+/// This is the durable source for restart-safe transport-archive-binding
+/// recovery: the accepted set here is exactly what a live finalize would have
+/// sealed. A missing inbox is a valid empty result (nothing accepted yet), never
+/// an error.
+pub fn read_accepted_package_digests_v1(inbox_dir: &Path) -> Result<Vec<[u8; 32]>, GuiCoreError> {
+    match fs::symlink_metadata(inbox_dir) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
+                return Err(unsafe_inbox_path());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(_) => return Err(GuiCoreError::io_failure("private-intake-inbox")),
+    }
+
+    let mut filenames: Vec<String> = Vec::new();
+    let mut inspected = 0_usize;
+    for entry in
+        fs::read_dir(inbox_dir).map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?
+    {
+        let entry = entry.map_err(|_| GuiCoreError::io_failure("private-intake-inbox"))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if parse_inbox_package_filename(&name).is_none() {
+            continue;
+        }
+        inspected = inspected.checked_add(1).ok_or_else(too_many_inbox_files)?;
+        if inspected > MAX_PRIVATE_INTAKE_INBOX_FILES_V1 {
+            return Err(too_many_inbox_files());
+        }
+        filenames.push(name);
+    }
+
+    let mut digests: Vec<[u8; 32]> = Vec::with_capacity(filenames.len());
+    for name in filenames {
+        // Safe: only names that parsed above are collected.
+        let digest_hex = parse_inbox_package_filename(&name)
+            .ok_or_else(|| GuiCoreError::io_failure("private-intake-inbox"))?
+            .to_owned();
+        let expected = inbox_digest_from_filename(&digest_hex).ok_or_else(|| {
+            GuiCoreError::new(
+                "GUI_PRIVATE_INTAKE_INBOX_INVALID_FILENAME",
+                GuiErrorCategory::InvalidInput,
+                Some("private-intake-inbox"),
+                "an inbox package filename is not a canonical digest",
+            )
+        })?;
+        let path = inbox_dir.join(&name);
+        let (package_bytes, _identity) = read_bounded_package_file(&path)?;
+        // Integrity: the file content MUST hash to the digest in its name.
+        if ballot_package_digest_hex_v1(&package_bytes) != digest_hex {
+            return Err(GuiCoreError::new(
+                "GUI_PRIVATE_INTAKE_INBOX_DIGEST_MISMATCH",
+                GuiErrorCategory::ArchiveIntegrity,
+                Some("private-intake-inbox"),
+                "an inbox package file does not match its content-address digest",
+            ));
+        }
+        digests.push(expected.into_bytes());
+    }
+    // Content-addressed names are unique, but sort + dedup defensively so the
+    // recovered binding is deterministic and never double-counts.
+    digests.sort_unstable();
+    digests.dedup();
+    Ok(digests)
+}
+
 fn update_sync_summary(
     summary: &mut GuiPrivateIntakeSyncSummaryV1,
     result: GuiBallotIntakeResultV1,
@@ -518,4 +595,70 @@ pub(crate) fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(windows))]
 pub(crate) fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+
+    fn temp_inbox(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "tari-inbox-digest-reader-{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&base).expect("temp inbox");
+        base
+    }
+
+    #[test]
+    fn read_accepted_digests_missing_inbox_is_empty() {
+        let missing = std::env::temp_dir().join(format!(
+            "tari-inbox-absent-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let digests = read_accepted_package_digests_v1(&missing).expect("missing is not an error");
+        assert!(digests.is_empty());
+    }
+
+    #[test]
+    fn read_accepted_digests_returns_the_content_addressed_set() {
+        let inbox = temp_inbox("set");
+        let mut expected: Vec<[u8; 32]> = Vec::new();
+        for index in 0..4_u32 {
+            let bytes = format!("inbox-package-{index}").into_bytes();
+            append_accepted_ballot_package_to_inbox_v1(&inbox, &bytes).expect("append");
+            let hex = ballot_package_digest_hex_v1(&bytes);
+            let mut digest = [0_u8; 32];
+            for (i, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+                digest[i] = (hex_nibble(pair[0]).unwrap() << 4) | hex_nibble(pair[1]).unwrap();
+            }
+            expected.push(digest);
+        }
+        expected.sort_unstable();
+        let digests = read_accepted_package_digests_v1(&inbox).expect("read");
+        assert_eq!(digests, expected, "every accepted package digest is returned");
+        fs::remove_dir_all(&inbox).ok();
+    }
+
+    #[test]
+    fn read_accepted_digests_rejects_a_tampered_file() {
+        let inbox = temp_inbox("tampered");
+        // A well-formed content-address filename whose bytes hash to something else.
+        let honest = b"honest".to_vec();
+        let name = format!("{}{}", ballot_package_digest_hex_v1(&honest), INBOX_PACKAGE_FILE_SUFFIX);
+        fs::write(inbox.join(name), b"tampered-bytes").expect("write tampered");
+        let result = read_accepted_package_digests_v1(&inbox);
+        assert!(result.is_err(), "a content-address mismatch must fail closed");
+        fs::remove_dir_all(&inbox).ok();
+    }
 }

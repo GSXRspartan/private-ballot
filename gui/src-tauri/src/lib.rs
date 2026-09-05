@@ -2156,11 +2156,31 @@ async fn write_finalized_archive(
     run_blocking_command(move || {
         let state = app.state::<AppState>();
         state.ensure_organizer_authority()?;
-        let (session, transport_binding) = state.with_session(|session| {
-            let transport_binding =
-                finalized_transport_binding_for_active_intake(state.inner(), session)?;
-            Ok((session.transactional_clone(), transport_binding))
-        })?;
+        let (session, live_binding, manifest_hash_hex, accepted_count) =
+            state.with_session(|session| {
+                let live_binding =
+                    finalized_transport_binding_for_active_intake(state.inner(), session)?;
+                let manifest_hash_hex = session.summary().manifest_hash_hex;
+                let accepted_count = session.accepted_count() as u64;
+                Ok((
+                    session.transactional_clone(),
+                    live_binding,
+                    manifest_hash_hex,
+                    accepted_count,
+                ))
+            })?;
+        // If no LIVE intake binding is available (the app was closed and
+        // reopened, the intake worker was stopped, or the election finalized in a
+        // prior run) recover the authoritative finalized binding deterministically
+        // from durable state — the signed election-scoped descriptor plus the
+        // content-addressed private-intake inbox. This is restart-safe by
+        // construction and never fabricates a binding; it fails closed on
+        // ambiguity and the archive writer still independently rejects a binding
+        // that does not belong to the active election.
+        let transport_binding = match live_binding {
+            Some(binding) => Some(binding),
+            None => durable_recovered_transport_binding(&app, &manifest_hash_hex, accepted_count)?,
+        };
         // Refuse before any filesystem write when an anchor-eligible archive was
         // requested but no authoritative binding exists in this build/workflow.
         require_finalized_transport_binding(
@@ -2233,6 +2253,31 @@ async fn verify_transport_archive_anchor(
         )?)
     })
     .await
+}
+
+/// Recovers the authoritative finalized transport binding for the active
+/// election from DURABLE state when no LIVE intake binding is available (app
+/// reopened, intake stopped, or the election finalized in a prior run). Under a
+/// build without managed-Tor there is no transport-binding provenance, so this
+/// is always `None`.
+fn durable_recovered_transport_binding(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    accepted_count: u64,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        organizer_tor_intake::recover_finalized_transport_binding_from_durable_state(
+            app,
+            manifest_hash_hex,
+            accepted_count,
+        )
+    }
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = (app, manifest_hash_hex, accepted_count);
+        Ok(None)
+    }
 }
 
 fn finalized_transport_binding_for_active_intake(

@@ -152,6 +152,7 @@ pub use private_intake_inbox::{
     PRIVATE_INTAKE_INBOX_DIRECTORY_NAME, append_accepted_ballot_package_to_inbox_v1,
     ballot_package_digest_hex_v1, ensure_private_intake_inbox_directory_v1,
     ingest_private_intake_inbox_into_session_v1, private_intake_inbox_directory_v1,
+    read_accepted_package_digests_v1,
 };
 pub use production_transport_authority_config::{
     PRODUCTION_TRANSPORT_AUTHORITY_FILENAME_V1, PRODUCTION_TRANSPORT_AUTHORITY_SCHEMA_V1,

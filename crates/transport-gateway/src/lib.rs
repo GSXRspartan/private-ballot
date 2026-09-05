@@ -1031,6 +1031,21 @@ impl TransportGatewaySimulatorV1 {
         Some(batch)
     }
 
+    /// Seeds `pending_digests` from a DURABLE recovery source (the durable
+    /// content-addressed private-intake inbox), for reconstructing a finalized
+    /// transport archive binding OFFLINE — after the collector worker has
+    /// stopped or the app was closed and reopened — without a live intake.
+    ///
+    /// This is the ONLY entry point that populates the gateway other than the
+    /// live `deliver` path. It is deliberately narrow: it just records the
+    /// already-authoritative accepted package digests as pending so the shared
+    /// [`Self::seal_pending_batch`] + [`Self::transport_archive_binding`] math
+    /// produces the SAME binding a live finalize would have. `seal_pending_batch`
+    /// sorts and de-duplicates, so the supplied order is irrelevant.
+    pub fn seed_pending_digests_for_recovery(&mut self, digests: &[[u8; 32]]) {
+        self.pending_digests = digests.to_vec();
+    }
+
     /// Public deterministic commitment over the set of sealed roots. This does
     /// not claim an Ootle anchor; anchoring is an operator-side later action.
     #[must_use]
@@ -1309,6 +1324,41 @@ fn unpad_authenticated_payload(padded: &[u8], expected: usize) -> Result<Vec<u8>
     Ok(padded[4..4 + length].to_vec())
 }
 
+/// Deterministically reconstructs the finalized transport archive binding for
+/// an election from its DURABLE authoritative accepted-package digest set, with
+/// no running collector.
+///
+/// This is the restart-safe recovery for the archive-binding lifecycle: the
+/// live collector's in-memory batch state is ephemeral, but the durable
+/// content-addressed private-intake inbox holds exactly the accepted canonical
+/// packages, whose `BallotPackageV1` digests are the same digests a live
+/// finalize seals (see `ballot_package_digest_hex_v1`). Because sealing happens
+/// ONLY at finalize (a single final batch), the binding produced here is
+/// byte-identical to a live finalize over the same accepted set.
+///
+/// Fails closed by construction: an empty digest set yields `Ok(None)` (there
+/// is nothing to bind), and a set exceeding the durable bound is rejected. The
+/// caller MUST have verified each digest against its content-addressed durable
+/// file before calling this (the inbox reader re-hashes every file), so no
+/// unverified or fabricated digest can enter the binding.
+pub fn finalized_transport_archive_binding_from_accepted_digests_v1(
+    descriptor: &TransportDescriptorV1,
+    accepted_digests: &[[u8; 32]],
+) -> Result<Option<TransportArchiveBindingV1>, TransportError> {
+    if accepted_digests.is_empty() {
+        return Ok(None);
+    }
+    if accepted_digests.len() > MAX_DURABLE_PENDING {
+        return Err(TransportError::Unavailable);
+    }
+    let mut gateway = TransportGatewaySimulatorV1::default();
+    gateway.seed_pending_digests_for_recovery(accepted_digests);
+    // A final close seals the entire accepted set into one batch (sorted,
+    // de-duplicated) exactly as the live finalize does.
+    gateway.seal_pending_batch(descriptor.batch().accepted_unique_floor, true);
+    gateway.transport_archive_binding(descriptor)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1340,6 +1390,54 @@ mod tests {
             &signing,
         )
         .expect("test descriptor")
+    }
+
+    #[test]
+    fn recovery_from_accepted_digests_is_none_when_empty() {
+        let binding =
+            finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor(), &[])
+                .expect("empty set is not an error");
+        assert!(binding.is_none(), "nothing accepted => nothing to bind");
+    }
+
+    #[test]
+    fn recovery_from_accepted_digests_rejects_over_bound_set() {
+        let digests = vec![[0_u8; 32]; MAX_DURABLE_PENDING + 1];
+        assert!(
+            finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor(), &digests)
+                .is_err(),
+            "a set beyond the durable bound must be rejected",
+        );
+    }
+
+    #[test]
+    fn recovery_from_accepted_digests_reconstructs_single_final_batch() {
+        let digests: Vec<[u8; 32]> = (0..5_u8).map(|index| [index + 1; 32]).collect();
+        let binding =
+            finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor(), &digests)
+                .expect("recovery succeeds")
+                .expect("a non-empty set yields a binding");
+        assert_eq!(binding.batches().len(), 1, "finalize seals ONE final batch");
+        assert_eq!(binding.batches()[0].accepted_unique_count(), 5);
+        assert_eq!(binding.manifest_hash(), descriptor().manifest_hash());
+    }
+
+    #[test]
+    fn recovery_from_accepted_digests_is_order_independent_and_dedups() {
+        let ordered: Vec<[u8; 32]> = (0..4_u8).map(|index| [index + 1; 32]).collect();
+        let mut shuffled = ordered.clone();
+        shuffled.reverse();
+        // A duplicate must not double-count (content-addressed accepted set).
+        shuffled.push(ordered[0]);
+        let a = finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor(), &ordered)
+            .expect("a ok")
+            .expect("a some");
+        let b =
+            finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor(), &shuffled)
+                .expect("b ok")
+                .expect("b some");
+        assert_eq!(a, b, "the binding is a deterministic function of the accepted SET");
+        assert_eq!(a.batches()[0].accepted_unique_count(), 4);
     }
 
     fn persisted_gateway() -> TransportGatewaySimulatorV1 {
