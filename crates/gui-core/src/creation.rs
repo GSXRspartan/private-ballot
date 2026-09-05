@@ -427,9 +427,20 @@ impl GuiElectionDraftV1 {
         Ok(())
     }
 
-    /// Sets the election basics: the election identifier (text) and the
-    /// governance source revision. The proof suite is fixed to the production
-    /// Triptych suite and is not selectable by the organizer.
+    /// Sets the election basics: the election identifier (text), the ballot
+    /// question, and — optionally — the governance source revision. The proof
+    /// suite is fixed to the production Triptych suite and is not selectable
+    /// by the organizer.
+    ///
+    /// The governance source revision belongs to the wizard's Step 2
+    /// ("Governance source"), not Step 1 ("Basics"). Accept an empty string
+    /// here so the organizer can advance past Basics before choosing a
+    /// revision; when the caller does supply a non-empty revision (for
+    /// example, when returning to Basics after already recording one on Step
+    /// 2), validate and record it exactly as before. An empty string leaves
+    /// any previously recorded revision intact so a round trip through Basics
+    /// does not silently clear Step 2 state. Freeze still requires a
+    /// governance source revision via [`Self::missing_fields`].
     pub fn set_basics(
         &mut self,
         election_id_text: String,
@@ -439,10 +450,12 @@ impl GuiElectionDraftV1 {
         self.reject_if_frozen()?;
         let id_bytes = election_id_text.into_bytes();
         ElectionId::new(id_bytes.clone()).map_err(|error| wrap(&error, "basics"))?;
-        validate_governance_revision(&governance_source_revision)?;
+        if !governance_source_revision.trim().is_empty() {
+            validate_governance_revision(&governance_source_revision)?;
+            self.governance_source_revision = Some(governance_source_revision);
+        }
         self.election_id = Some(id_bytes);
         self.proposal_question = Some(proposal_question);
-        self.governance_source_revision = Some(governance_source_revision);
         Ok(())
     }
 

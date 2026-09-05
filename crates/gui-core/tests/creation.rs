@@ -214,6 +214,189 @@ fn preview_is_complete_when_proposal_question_is_valid() {
     assert!(preview.manifest_hash_hex.is_some());
 }
 
+// ------------------------------------------- Basics vs. governance-source split
+//
+// The wizard's Step 1 ("Basics") collects the election identifier and ballot
+// question. The governance source revision belongs to Step 2 ("Governance
+// source"). `set_basics` therefore accepts an empty revision so the organizer
+// can advance past Step 1; freeze still refuses to run without one.
+
+#[test]
+fn set_basics_accepts_empty_governance_revision_and_leaves_it_unset() {
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Should the creation test election pass?".to_owned(),
+            String::new(),
+        ),
+        "basics must advance without a governance source revision",
+    );
+
+    let preview = draft.preview();
+    assert_eq!(
+        preview.election_id_text.as_deref(),
+        Some("creation-test-election")
+    );
+    assert_eq!(
+        preview.proposal_question.as_deref(),
+        Some("Should the creation test election pass?")
+    );
+    // No synthetic placeholder: the revision is genuinely unset for Step 2.
+    assert_eq!(preview.governance_source_revision, None);
+    assert!(!preview.complete);
+    assert!(
+        preview
+            .missing
+            .iter()
+            .any(|field| *field == "governance_source_revision"),
+        "preview must still report governance_source_revision as missing"
+    );
+}
+
+#[test]
+fn set_basics_accepts_whitespace_only_governance_revision_without_storing_it() {
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Should the creation test election pass?".to_owned(),
+            "   \t\n".to_owned(),
+        ),
+        "basics must advance when the caller passes whitespace-only revision",
+    );
+    let preview = draft.preview();
+    assert_eq!(preview.governance_source_revision, None);
+}
+
+#[test]
+fn set_basics_with_empty_revision_preserves_a_previously_recorded_revision() {
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Question 1?".to_owned(),
+            "creation-rev-1".to_owned(),
+        ),
+        "seed a governance revision through set_basics",
+    );
+    // Simulates returning to Basics with an empty revision field (Step 2 has
+    // already been visited): the previously recorded revision must survive.
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Question 2?".to_owned(),
+            String::new(),
+        ),
+        "revisiting Basics must not clear governance source",
+    );
+    let preview = draft.preview();
+    assert_eq!(
+        preview.governance_source_revision.as_deref(),
+        Some("creation-rev-1")
+    );
+    assert_eq!(preview.proposal_question.as_deref(), Some("Question 2?"));
+}
+
+#[test]
+fn set_basics_still_validates_a_non_empty_governance_revision() {
+    let mut draft = GuiElectionDraftV1::new();
+    // A pure-whitespace revision is treated as unset above; a huge revision
+    // must still trip the existing protocol size limit.
+    let oversized = "x".repeat(4096);
+    let error = err(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Question?".to_owned(),
+            oversized,
+        ),
+        "oversized revision must still be rejected",
+    );
+    assert_eq!(error.code(), "PROTOCOL_LIMIT_EXCEEDED");
+}
+
+#[test]
+fn governance_source_revision_can_be_set_after_basics() {
+    let mut draft = GuiElectionDraftV1::new();
+    ok(
+        draft.set_basics(
+            "creation-test-election".to_owned(),
+            "Question?".to_owned(),
+            String::new(),
+        ),
+        "advance past Basics without a revision",
+    );
+    ok(
+        draft.set_governance_source_revision("creation-rev-2".to_owned()),
+        "Step 2 records the governance source revision",
+    );
+    let preview = draft.preview();
+    assert_eq!(
+        preview.governance_source_revision.as_deref(),
+        Some("creation-rev-2")
+    );
+    assert_eq!(
+        preview.election_id_text.as_deref(),
+        Some("creation-test-election")
+    );
+}
+
+#[test]
+fn freeze_still_rejects_a_draft_missing_governance_source_revision() {
+    let mut draft = complete_draft();
+    // `complete_draft` seeds a revision; explicitly re-doing Basics with an
+    // empty revision must NOT clear it (proven above), so exercise the raw
+    // missing-fields path by building a fresh draft that never records one.
+    let mut bare = GuiElectionDraftV1::new();
+    ok(
+        bare.set_basics(
+            "creation-test-election".to_owned(),
+            "Question?".to_owned(),
+            String::new(),
+        ),
+        "basics accepts empty revision",
+    );
+    ok(bare.set_rules(1, 2, true), "rules");
+    ok(bare.set_voters(voter_hexs()), "voters");
+    ok(bare.set_options(options()), "options");
+    ok(
+        bare.set_presentation(GuiBallotPresentationType::Candidate),
+        "presentation",
+    );
+    let error = err(bare.freeze(), "freeze must refuse without a revision");
+    assert_eq!(error.code(), "GUI_DRAFT_INCOMPLETE");
+    // The pre-existing complete-draft path (with a revision) still freezes.
+    ok(draft.freeze(), "complete draft with a revision still freezes");
+}
+
+#[test]
+fn ballot_measure_and_candidate_presentations_freeze_when_revision_present() {
+    for presentation in [
+        GuiBallotPresentationType::BallotMeasure,
+        GuiBallotPresentationType::Candidate,
+        GuiBallotPresentationType::GovernanceProposal,
+    ] {
+        let mut draft = GuiElectionDraftV1::new();
+        ok(
+            draft.set_basics(
+                "creation-test-election".to_owned(),
+                "Question?".to_owned(),
+                String::new(),
+            ),
+            "basics",
+        );
+        ok(
+            draft.set_governance_source_revision("creation-rev-3".to_owned()),
+            "revision",
+        );
+        ok(draft.set_rules(1, 2, true), "rules");
+        ok(draft.set_voters(voter_hexs()), "voters");
+        ok(draft.set_options(options()), "options");
+        ok(draft.set_presentation(presentation), "presentation");
+        ok(draft.freeze(), "freeze must succeed across presentations");
+    }
+}
+
 #[test]
 fn unsupported_proof_suite_is_not_exposed() {
     let mut draft = complete_draft();
