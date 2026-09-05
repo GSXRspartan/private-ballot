@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "load-tester",
+  "description": "Allows file and folder selection for the standalone load tester. No shell execution, arbitrary process launch, telemetry, or remote service permission is granted.",
+  "windows": ["main"],
+  "permissions": ["dialog:allow-open", "dialog:allow-save"]
+}

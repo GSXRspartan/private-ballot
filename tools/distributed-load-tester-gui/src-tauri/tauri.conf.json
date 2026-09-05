@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Private Ballot Load Tester",
+  "version": "0.1.0",
+  "identifier": "app.privateballot.loadtester",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1421",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Private Ballot Load Tester • TEST TOOL",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 920,
+        "minHeight": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; style-src 'self'; font-src 'self'; script-src 'self'",
+      "devCsp": "default-src 'self' http://localhost:1421; connect-src ipc: http://ipc.localhost http://localhost:1421 ws://localhost:1421; img-src 'self' data: http://localhost:1421; style-src 'self' 'unsafe-inline' http://localhost:1421; font-src 'self' http://localhost:1421; script-src 'self' http://localhost:1421"
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "DeveloperTool",
+    "shortDescription": "Standalone distributed load tester for Private Ballot test elections",
+    "longDescription": "Developer and security testing utility for generating simulated independent voter credentials, partitioning them across machines, and submitting through the existing Private Ballot distributed harness.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

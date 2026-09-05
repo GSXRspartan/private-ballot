@@ -22,6 +22,7 @@ tari-cc-private-ballot-crypto = { path = "../crypto", features = ["test-only-sui
 tari-cc-private-ballot-registry = { path = "../registry" }
 tari-cc-private-ballot-tally = { path = "../tally" }
 tari-cc-private-ballot-verifier = { path = "../verifier" }
+tempfile = "3.24.0"
 
 [lints]
 workspace = true

@@ -1,0 +1,27 @@
+[package]
+name = "private-ballot-load-tester-gui"
+version = "0.1.0"
+description = "Standalone Private Ballot distributed load tester"
+edition = "2024"
+rust-version = "1.97"
+publish = false
+
+[workspace]
+
+[lib]
+name = "private_ballot_load_tester_gui_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
+tempfile = "3.24.0"
+tari-cc-private-ballot-cli = { path = "../../../crates/cli" }
+tari-cc-private-ballot-transport-network = { path = "../../../crates/transport-network" }
+tari-cc-private-ballot-transport-gateway = { path = "../../../crates/transport-gateway", features = ["managed-tor"] }
