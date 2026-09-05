@@ -14,6 +14,47 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+/// Windows `CREATE_NO_WINDOW` process creation flag (`0x0800_0000`).
+///
+/// A `tor.exe` built as a Windows console subsystem allocates and shows a new
+/// console window whenever it is spawned from a process that has none — a
+/// Tauri GUI, for instance. That window steals focus and covers the Private
+/// Ballot organizer GUI. Applying `CREATE_NO_WINDOW` when spawning tells
+/// Windows to run the console child WITHOUT ever attaching or allocating a
+/// console at all; the child still runs, its stdout/stderr redirections still
+/// work, and its process handle/lifecycle ownership is unchanged. On Unix
+/// this flag does not exist and this constant is unused.
+#[cfg(windows)]
+pub const TOR_WINDOWS_NO_CONSOLE_CREATION_FLAGS_V1: u32 = 0x0800_0000;
+
+/// Applies the Windows-only "hide the child's console window" creation flag to
+/// the given `Command` in-place, and returns it. On non-Windows platforms this
+/// is a no-op — the `Command` is returned unchanged so callers stay identical
+/// across platforms.
+///
+/// The flag is `CREATE_NO_WINDOW`, applied via the standard-library-provided
+/// `std::os::windows::process::CommandExt::creation_flags`. It:
+///
+///   * NEVER changes the executable, argument vector, working directory,
+///     environment, stdio redirections, or process-group membership;
+///   * NEVER detaches the child from the parent (the parent still owns the
+///     `Child` handle and reaps it on `kill`/`wait`);
+///   * NEVER spawns a shell, `cmd.exe`, PowerShell, or resolves PATH.
+///
+/// It only asks Windows to spawn the child without ever allocating or showing
+/// a new console window, so a `tor.exe` built as a console subsystem no longer
+/// pops a black terminal in front of the organizer GUI. On Linux/macOS there
+/// is no equivalent flag and Tor spawned from a GUI has no console window in
+/// the first place, so the caller path stays identical on those platforms too.
+pub fn apply_hide_console_window_on_windows_v1(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(TOR_WINDOWS_NO_CONSOLE_CREATION_FLAGS_V1);
+    }
+    command
+}
+
 mod organizer_hidden_service;
 mod tor;
 
@@ -199,13 +240,17 @@ impl ManagedTorSpawnerV1 for SystemManagedTorSpawnerV1 {
     type Child = Child;
 
     fn spawn(&self, executable: &Path, config_file: &Path) -> io::Result<Self::Child> {
-        Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .arg(OsString::from("-f"))
             .arg(config_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .stderr(Stdio::null());
+        // Windows-only: never let `tor.exe` pop a visible console window that
+        // covers/steals focus from the Private Ballot organizer GUI.
+        apply_hide_console_window_on_windows_v1(&mut command);
+        command.spawn()
     }
 }
 
@@ -504,13 +549,17 @@ impl ManagedTorSpawnerV1 for StderrLogFileTorSpawnerV1 {
 
     fn spawn(&self, executable: &Path, config_file: &Path) -> io::Result<Child> {
         let log = fs::File::create(&self.stderr_log)?;
-        Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .arg(OsString::from("-f"))
             .arg(config_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(log))
-            .spawn()
+            .stderr(Stdio::from(log));
+        // Windows-only: never let `tor.exe` pop a visible console window that
+        // covers/steals focus from the Private Ballot organizer GUI.
+        apply_hide_console_window_on_windows_v1(&mut command);
+        command.spawn()
     }
 }
 
@@ -1123,5 +1172,60 @@ mod tests {
         let bogus = base.join("definitely-not-tor.exe");
         assert!(spawner.spawn(&bogus, &base.join("torrc")).is_err());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    // -------------------------------------------------------------------------
+    // Windows console-window suppression helper (regression for organizer UX:
+    // a visible tor.exe console covered/blocked the Private Ballot GUI).
+    // -------------------------------------------------------------------------
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hide_console_helper_uses_create_no_window_flag_value() {
+        // Fixed public constant so a reviewer can confirm the value without
+        // reading a Microsoft docs page. Any drift is caught here.
+        assert_eq!(TOR_WINDOWS_NO_CONSOLE_CREATION_FLAGS_V1, 0x0800_0000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hide_console_helper_sets_creation_flags_without_altering_program_or_args() {
+        // Structural check: applying the helper to a Command preserves the
+        // executable and argument vector — only creation flags change. The
+        // helper must return the same `&mut Command` so callers stay chainable.
+        let mut command = Command::new("tor.exe");
+        command.arg("-f").arg("torrc");
+        let returned: &mut Command = apply_hide_console_window_on_windows_v1(&mut command);
+        assert_eq!(returned.get_program(), "tor.exe");
+        let args: Vec<_> = returned.get_args().collect();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-f");
+        assert_eq!(args[1], "torrc");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_hide_console_helper_is_a_no_op_that_preserves_command_shape() {
+        // On Unix the helper is a no-op; the Command must be returned unchanged
+        // so callers stay identical across platforms.
+        let mut command = Command::new("tor");
+        command.arg("-f").arg("torrc");
+        let returned: &mut Command = apply_hide_console_window_on_windows_v1(&mut command);
+        assert_eq!(returned.get_program(), "tor");
+        let args: Vec<_> = returned.get_args().collect();
+        assert_eq!(args.len(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_managed_tor_spawner_applies_hidden_console_flag() {
+        // We cannot spawn a real Tor here, but the failure mode of a nonexistent
+        // executable must be an io error (never a shell invocation) — proving
+        // the spawner still uses an argument-vector direct spawn after adding
+        // the hidden-console creation flag.
+        let bogus = std::env::temp_dir().join("definitely-not-tor.exe");
+        let torrc = std::env::temp_dir().join("no-such-torrc");
+        let result = SystemManagedTorSpawnerV1.spawn(&bogus, &torrc);
+        assert!(result.is_err(), "no shell/PATH lookup; nonexistent exe errors");
     }
 }

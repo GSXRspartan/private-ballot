@@ -32,8 +32,8 @@ use serde::Serialize;
 use tari_cc_private_ballot_transport_network::{
     ManagedTorChildV1, ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1,
     ManagedTorSpawnerV1, StderrLogFileTorSpawnerV1, SystemManagedTorReadinessProbeV1,
-    TorSocksPrivateReleaseCarrierV1, create_fresh_run_directory_v1, reserve_loopback_socks_port_v1,
-    validate_tor_executable_v1,
+    TorSocksPrivateReleaseCarrierV1, apply_hide_console_window_on_windows_v1,
+    create_fresh_run_directory_v1, reserve_loopback_socks_port_v1, validate_tor_executable_v1,
 };
 
 /// Bounded startup budget for a managed load-driver Tor child. Matches the
@@ -294,13 +294,16 @@ pub fn start_managed_tor_session(
 /// outcome.
 pub fn capture_tor_version_v1(executable: &Path) -> Option<String> {
     use std::io::Read;
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // Windows-only: `tor --version` is a console subsystem executable, so a
+    // GUI-parented spawn would flash a console window before exiting. Hide it.
+    apply_hide_console_window_on_windows_v1(&mut command);
+    let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
