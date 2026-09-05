@@ -25,8 +25,9 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::SigningKey;
 use tari_cc_private_ballot_cli::{
     ONION_REACHABILITY_PREFLIGHT_BUDGET_V1, ONION_REACHABILITY_PREFLIGHT_INTERVAL_V1,
+    PRE_SEND_ONION_RECOVERY_BUDGET_V1, PRE_SEND_ONION_RECOVERY_INTERVAL_V1,
     classify_private_transport_failure_v1, map_release_failure_code_v1,
-    run_onion_reachability_preflight_v1,
+    run_onion_reachability_preflight_v1, run_pre_send_onion_recovery_v1,
 };
 use tari_cc_private_ballot_gui_core::{
     BatchPolicyV1, PaddingPolicyV1, TransportDescriptorV1, TransportRoutePolicyV1,
@@ -416,3 +417,235 @@ fn windows_hide_console_flag_value_is_pinned() {
 // an error string containing that classification and never touches a voter
 // credential. Both are covered by `preflight_returns_reachable_*` and
 // `preflight_fails_closed_*` above.
+
+// -------------------------------------------------------------------------
+// PART D — per-voter PRE-SEND onion reachability recovery (mid-run transient
+// transport; the voter-0077 pattern). Every scenario runs against a
+// deterministic loopback fake SOCKS5 server; no Tor, internet, or DNS.
+//
+// The whole point of these tests is the application-byte boundary: the
+// recovery loop retries ONLY connection establishment (SOCKS connect /
+// handshake / onion CONNECT + immediate close) and MUST send zero application
+// bytes, even across multiple retries, and MUST honour cancellation promptly.
+// -------------------------------------------------------------------------
+
+/// A fake SOCKS5 server that serves a SEQUENCE of scripted connections (one per
+/// accepted client) so a retry loop can be exercised deterministically: e.g.
+/// [handshake-fail, success] proves an establishment failure is retried and
+/// then proceeds, while capturing every post-CONNECT byte across ALL
+/// connections to prove the probe never submits an application byte.
+struct FakeSocksSequence {
+    addr: SocketAddr,
+    handle: Option<JoinHandle<CapturedWire>>,
+}
+
+impl FakeSocksSequence {
+    fn start(scripts: Vec<FakeSocksScript>) -> Self {
+        let listener =
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind fake seq");
+        let addr = listener.local_addr().expect("addr");
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
+            let mut capture = CapturedWire::default();
+            for script in scripts {
+                serve_one_connection(&listener, script, &mut capture);
+            }
+            capture
+        });
+        let _ = ready_rx.recv();
+        Self {
+            addr,
+            handle: Some(handle),
+        }
+    }
+
+    fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    fn join(mut self) -> CapturedWire {
+        self.handle.take().expect("handle").join().expect("thread")
+    }
+}
+
+/// Serves exactly ONE connection with `script`, appending any post-CONNECT
+/// bytes it observes into `capture`. Mirrors [`serve`] but accumulates across a
+/// sequence of connections.
+fn serve_one_connection(listener: &TcpListener, script: FakeSocksScript, capture: &mut CapturedWire) {
+    let Ok((mut stream, _)) = listener.accept() else {
+        return;
+    };
+    let mut header = [0u8; 2];
+    if stream.read_exact(&mut header).is_err() {
+        return;
+    }
+    let mut methods = vec![0u8; usize::from(header[1])];
+    if stream.read_exact(&mut methods).is_err() {
+        return;
+    }
+    if stream.write_all(&script.method_reply).is_err() || script.stop_after_method {
+        return;
+    }
+    let mut head = [0u8; 4];
+    if stream.read_exact(&mut head).is_err() {
+        return;
+    }
+    if head[3] == 0x03 {
+        let mut len = [0u8; 1];
+        let _ = stream.read_exact(&mut len);
+        let mut host = vec![0u8; usize::from(len[0])];
+        let _ = stream.read_exact(&mut host);
+    }
+    let mut port = [0u8; 2];
+    let _ = stream.read_exact(&mut port);
+    let _ = stream.write_all(&script.connect_reply);
+    // Capture anything sent AFTER CONNECT — proof the probe sent zero app bytes.
+    let _ = stream.set_read_timeout(Some(script.hold_after_connect));
+    let mut chunk = [0u8; 512];
+    while let Ok(read) = stream.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        capture.post_connect_bytes.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[test]
+fn pre_send_recovery_is_reachable_immediately_and_sends_zero_application_bytes() {
+    let server = FakeSocks::start(FakeSocksScript::success());
+    let addr = server.addr();
+    let outcome = run_pre_send_onion_recovery_v1(
+        addr,
+        &descriptor_for_managed_tor(),
+        &fast_timeouts(),
+        Duration::from_secs(2),
+        Duration::from_millis(50),
+        None,
+    );
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::Reachable);
+    let capture = server.join();
+    assert!(
+        capture.post_connect_bytes.is_empty(),
+        "pre-send recovery must send zero application bytes (captured: {:?})",
+        capture.post_connect_bytes
+    );
+}
+
+#[test]
+fn pre_send_recovery_retries_establishment_then_reaches_and_sends_zero_bytes() {
+    // First connection fails the SOCKS handshake (a transient establishment
+    // failure before ANY application byte); the loop retries and the second
+    // connection succeeds. This proves a handshake/establishment failure is
+    // retriable before app bytes, that eventual success proceeds, and that zero
+    // application bytes are emitted across BOTH attempts.
+    let server = FakeSocksSequence::start(vec![
+        FakeSocksScript::bad_method_reply(),
+        FakeSocksScript::success(),
+    ]);
+    let addr = server.addr();
+    let outcome = run_pre_send_onion_recovery_v1(
+        addr,
+        &descriptor_for_managed_tor(),
+        &fast_timeouts(),
+        Duration::from_secs(3),
+        Duration::from_millis(25),
+        None,
+    );
+    assert_eq!(
+        outcome,
+        OnionReachabilityOutcomeV1::Reachable,
+        "recovery must retry the transient establishment failure and then reach the onion"
+    );
+    let capture = server.join();
+    assert!(
+        capture.post_connect_bytes.is_empty(),
+        "no application byte may be sent during establishment retries (captured: {:?})",
+        capture.post_connect_bytes
+    );
+}
+
+#[test]
+fn pre_send_recovery_retries_onion_connect_failure_then_reaches() {
+    // The onion CONNECT is refused on the first attempt (Tor could not reach the
+    // hidden service yet) then succeeds. Proves an ONION_CONNECT failure is
+    // retriable before any application byte.
+    let server = FakeSocksSequence::start(vec![
+        FakeSocksScript::connect_refused(),
+        FakeSocksScript::success(),
+    ]);
+    let addr = server.addr();
+    let outcome = run_pre_send_onion_recovery_v1(
+        addr,
+        &descriptor_for_managed_tor(),
+        &fast_timeouts(),
+        Duration::from_secs(3),
+        Duration::from_millis(25),
+        None,
+    );
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::Reachable);
+    let capture = server.join();
+    assert!(capture.post_connect_bytes.is_empty());
+}
+
+#[test]
+fn pre_send_recovery_socks_connect_failure_is_bounded_and_terminal() {
+    // The SOCKS port never answers: the recovery retries within the bounded
+    // budget and returns a deterministic terminal classification (no hang, and
+    // never the meaningless PENDING). This is the pre-send failure the driver
+    // records with zero ballot bytes emitted.
+    let addr = closed_loopback_addr();
+    let start = Instant::now();
+    let outcome = run_pre_send_onion_recovery_v1(
+        addr,
+        &descriptor_for_managed_tor(),
+        &TorCarrierTimeoutsV1 {
+            socks_connect: Duration::from_millis(50),
+            socks_handshake: Duration::from_millis(50),
+            http_write: Duration::from_millis(50),
+            http_response: Duration::from_millis(50),
+        },
+        Duration::from_millis(300),
+        Duration::from_millis(25),
+        None,
+    );
+    let elapsed = start.elapsed();
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::SocksConnectFailed);
+    assert_eq!(outcome.code(), "SOCKS_CONNECT_FAILED");
+    assert!(
+        elapsed <= Duration::from_millis(1_500),
+        "pre-send recovery exceeded its bounded budget: {elapsed:?}"
+    );
+}
+
+#[test]
+fn pre_send_recovery_cancellation_interrupts_the_wait_promptly() {
+    // A generous budget (10s) that WOULD keep retrying, but the operator stop is
+    // already set: the loop must return promptly at the top-of-iteration cancel
+    // check instead of waiting out the budget. It sent zero application bytes.
+    let addr = closed_loopback_addr();
+    let cancel = || true;
+    let start = Instant::now();
+    let outcome = run_pre_send_onion_recovery_v1(
+        addr,
+        &descriptor_for_managed_tor(),
+        &fast_timeouts(),
+        Duration::from_secs(10),
+        Duration::from_millis(500),
+        Some(&cancel),
+    );
+    let elapsed = start.elapsed();
+    assert_ne!(outcome, OnionReachabilityOutcomeV1::Reachable);
+    assert!(
+        elapsed <= Duration::from_millis(300),
+        "cancellation must interrupt the pre-send wait promptly, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn pre_send_recovery_constants_are_bounded_and_positive() {
+    assert!(PRE_SEND_ONION_RECOVERY_BUDGET_V1 > Duration::ZERO);
+    assert!(PRE_SEND_ONION_RECOVERY_BUDGET_V1 <= Duration::from_secs(300));
+    assert!(PRE_SEND_ONION_RECOVERY_INTERVAL_V1 > Duration::ZERO);
+    assert!(PRE_SEND_ONION_RECOVERY_INTERVAL_V1 <= Duration::from_secs(5));
+}

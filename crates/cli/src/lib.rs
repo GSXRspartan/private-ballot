@@ -1255,6 +1255,88 @@ pub fn run_load_driver_with_control(
         proof_total += proof_started.elapsed();
         proofs_successfully_generated += 1;
 
+        // Pre-send onion reachability recovery (mid-run transient transport;
+        // the voter-0077 pattern). The ballot is prepared but NOT yet released.
+        // Ride out a transient onion-establishment blip with the SAME
+        // non-mutating, zero-application-byte probe the startup preflight uses,
+        // BEFORE the carrier is invoked exactly once below. This retries ONLY
+        // connection ESTABLISHMENT (SOCKS connect / handshake / onion CONNECT +
+        // immediate close) — it emits no ballot byte and never re-invokes the
+        // carrier, so it can neither duplicate a vote nor resend after an
+        // unknown delivery outcome.
+        let recovery = run_pre_send_onion_recovery_v1(
+            config.tor_socks,
+            &bundle.descriptor,
+            &TorCarrierTimeoutsV1::default(),
+            PRE_SEND_ONION_RECOVERY_BUDGET_V1,
+            PRE_SEND_ONION_RECOVERY_INTERVAL_V1,
+            control.cancel,
+        );
+        if control
+            .cancel
+            .as_ref()
+            .map(|probe| probe())
+            .unwrap_or(false)
+        {
+            // Operator stopped during the pre-send wait. No ballot byte has left
+            // the client for this voter (the carrier was never invoked), so
+            // stopping here is safe and prompt — nothing to reconcile.
+            terminal_state = LoadDriverTerminalStateV1::Stopped;
+            break;
+        }
+        if !matches!(recovery, OnionReachabilityOutcomeV1::Reachable) {
+            // Bounded budget exhausted while the onion stayed unreachable. Zero
+            // ballot bytes were emitted (the carrier was never invoked), so
+            // there is no duplicate risk and nothing to resend. Record a
+            // deterministic, sanitized PRE-SEND transport failure and fail this
+            // voter closed, exactly like the post-carrier transport bucket.
+            submission_attempts += 1;
+            failed_submissions += 1;
+            failures.push(LoadDriverFailureV1 {
+                credential_file: display_path.clone(),
+                stage: "PRIVATE_TRANSPORT_UNAVAILABLE",
+                code: recovery.code().to_owned(),
+            });
+            completed_voters += 1;
+            if !record_voter_boundary(
+                control,
+                config,
+                total_voters,
+                completed_voters,
+                successful_submissions,
+                receipt_verification_failures,
+                failed_submissions,
+                &display_path,
+                started,
+                &make_running_report(
+                    config,
+                    total_voters,
+                    credentials_loaded,
+                    duplicate_credentials_detected,
+                    proofs_successfully_generated,
+                    proof_generation_failures,
+                    submission_attempts,
+                    successful_submissions,
+                    failed_submissions,
+                    receipts_received,
+                    receipts_successfully_verified,
+                    receipt_verification_failures,
+                    started,
+                    proof_total,
+                    submission_total,
+                    &expected,
+                    &observed,
+                    &failures,
+                    completed_voters,
+                ),
+                &mut failures,
+            ) {
+                terminal_state = LoadDriverTerminalStateV1::Failed;
+                break;
+            }
+            continue;
+        }
+
         let submission_started = Instant::now();
         submission_attempts += 1;
         match voter.release_prepared_ballot_via_private_transport(
@@ -1653,6 +1735,23 @@ pub const ONION_REACHABILITY_PREFLIGHT_BUDGET_V1: Duration = Duration::from_secs
 /// the loopback SOCKS listener while Tor is still bootstrapping.
 pub const ONION_REACHABILITY_PREFLIGHT_INTERVAL_V1: Duration = Duration::from_millis(500);
 
+/// Bounded budget for the PER-VOTER pre-send onion reachability recovery.
+///
+/// The startup preflight only gates voter #1. A long-running managed-Tor load
+/// test can still hit a TRANSIENT mid-run onion-establishment blip (a circuit
+/// or hidden-service rendezvous being briefly rebuilt) — the exact
+/// `PRIVATE_TRANSPORT_UNAVAILABLE` that stranded voter-0077 in the 100-voter
+/// qualification while 99 neighbours succeeded. This budget lets the driver
+/// ride out such a blip with the SAME non-mutating, zero-application-byte probe
+/// BEFORE it invokes the carrier once, and is bounded so a genuinely
+/// unreachable ballot office fails that voter closed instead of hanging the
+/// cohort.
+pub const PRE_SEND_ONION_RECOVERY_BUDGET_V1: Duration = Duration::from_secs(60);
+
+/// Backoff between consecutive pre-send onion reachability probes. Short so a
+/// rapidly recovering circuit is picked up promptly.
+pub const PRE_SEND_ONION_RECOVERY_INTERVAL_V1: Duration = Duration::from_millis(500);
+
 /// Bounded retry loop around [`probe_onion_reachability_v1`]. Returns the
 /// classification of the last attempt: `Reachable` on the first success or
 /// the terminal failure classification when the budget is exhausted.
@@ -1671,6 +1770,60 @@ pub fn run_onion_reachability_preflight_v1(
     let deadline = Instant::now() + budget;
     let mut last = OnionReachabilityOutcomeV1::SocksConnectFailed;
     loop {
+        match probe_onion_reachability_v1(socks_addr, descriptor, timeouts) {
+            Ok(OnionReachabilityOutcomeV1::Reachable) => {
+                return OnionReachabilityOutcomeV1::Reachable;
+            }
+            Ok(outcome) => last = outcome,
+            // A structural probe error (invalid descriptor / non-loopback
+            // endpoint) is not a transient race: report the last classifier.
+            Err(_) => return last,
+        }
+        if Instant::now() >= deadline {
+            return last;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Bounded, cancellation-aware, NON-MUTATING pre-send onion reachability
+/// recovery for a SINGLE voter, run AFTER the ballot is prepared but BEFORE the
+/// carrier is invoked.
+///
+/// It retries the same zero-application-byte [`probe_onion_reachability_v1`] the
+/// startup preflight uses until the descriptor onion is reachable, the bounded
+/// `budget` elapses, or the operator stops the run. It exists solely to ride
+/// out a TRANSIENT mid-run onion-establishment blip (the voter-0077 pattern)
+/// before the ballot is delivered exactly once by the carrier.
+///
+/// SAFETY — the application-byte boundary is explicit here: every retry is the
+/// non-mutating probe (SOCKS connect + handshake + onion CONNECT + immediate
+/// close), so it sends ZERO ballot/application bytes, consumes no credential,
+/// and produces no receipt. It NEVER invokes the carrier and NEVER retries a
+/// delivery: once the carrier is called (by the caller, once) any application
+/// byte may have been written, and that outcome is owned by the fail-closed
+/// release boundary — this function can neither resend nor duplicate a ballot.
+///
+/// Cancellation is checked at the top of every iteration so an operator stop
+/// interrupts the wait promptly; the returned classification on cancel/timeout
+/// is the last observed non-reachable outcome (`SOCKS_CONNECT_FAILED` /
+/// `SOCKS_HANDSHAKE_FAILED` / `ONION_CONNECT_FAILED`).
+pub fn run_pre_send_onion_recovery_v1(
+    socks_addr: SocketAddr,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+    budget: Duration,
+    interval: Duration,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> OnionReachabilityOutcomeV1 {
+    let cancelled = || cancel.map(|probe| probe()).unwrap_or(false);
+    let deadline = Instant::now() + budget;
+    let mut last = OnionReachabilityOutcomeV1::SocksConnectFailed;
+    loop {
+        // Prompt cancellation: never start another probe once a stop was asked.
+        if cancelled() {
+            return last;
+        }
         match probe_onion_reachability_v1(socks_addr, descriptor, timeouts) {
             Ok(OnionReachabilityOutcomeV1::Reachable) => {
                 return OnionReachabilityOutcomeV1::Reachable;
