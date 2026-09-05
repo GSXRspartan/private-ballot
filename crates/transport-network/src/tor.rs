@@ -313,6 +313,141 @@ fn deliver_over_tor(
     http_post_opaque_envelope(&mut stream, onion_host, envelope, timeouts)
 }
 
+/// Outcome of a bounded, non-mutating onion reachability probe. Every variant
+/// is a deterministic sanitized classification suitable for preserved
+/// qualification evidence: it names WHERE in the managed-Tor startup the check
+/// failed, never a raw OS error string, never a local path, never a secret.
+///
+/// This exists so a load-driver failure such as "PRIVATE_TRANSPORT_UNAVAILABLE
+/// / PENDING" (the coarse voter-facing bucket) can be refined at the boundary
+/// where the run actually fails — one distinct code per real cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnionReachabilityOutcomeV1 {
+    /// Full SOCKS5 CONNECT to the descriptor's onion succeeded. The circuit
+    /// and hidden-service rendezvous are usable. No bytes were sent.
+    Reachable,
+    /// The loopback SOCKS TCP connect itself failed (Tor SOCKS port not
+    /// listening or firewalled). This is stricter than "SOCKS not ready" —
+    /// the TCP handshake did not even complete.
+    SocksConnectFailed,
+    /// SOCKS5 method negotiation (`05 01 00` → `05 00`) failed on the
+    /// established SOCKS TCP connection. Tor is running but the SOCKS
+    /// listener is not answering correctly yet.
+    SocksHandshakeFailed,
+    /// SOCKS5 CONNECT to the onion returned a non-success reply (the SOCKS
+    /// listener answered, but Tor could not reach the hidden service — this
+    /// is the startup-race pattern for voter #1).
+    OnionConnectFailed,
+}
+
+impl OnionReachabilityOutcomeV1 {
+    /// Stable uppercase classification string suitable for the load-driver
+    /// failure `code` field and preserved qualification evidence. It never
+    /// contains a path, a secret, or a raw OS message.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Reachable => "ONION_REACHABLE",
+            Self::SocksConnectFailed => "SOCKS_CONNECT_FAILED",
+            Self::SocksHandshakeFailed => "SOCKS_HANDSHAKE_FAILED",
+            Self::OnionConnectFailed => "ONION_CONNECT_FAILED",
+        }
+    }
+}
+
+/// Non-mutating onion reachability probe.
+///
+/// Performs one SOCKS5 CONNECT to the descriptor's Tor v3 onion service through
+/// the local managed SOCKS proxy, then IMMEDIATELY closes the connection —
+/// exactly the wire handshake the carrier does, minus every byte that could
+/// count as a ballot submission. It:
+///
+///   * sends ZERO application bytes (no HTTP request, no envelope, nothing);
+///   * never consumes a voter credential;
+///   * never causes a receipt to be produced;
+///   * never mutates election, cast-lock, or organizer state;
+///   * cannot create duplicate-vote risk (no ballot is constructed);
+///   * has the SAME loopback-only and descriptor-bound guarantees as the
+///     carrier — it uses the same descriptor to derive the onion route.
+///
+/// It is intended as a bounded startup gate for the first voter after managed
+/// Tor reports SOCKS-ready: the SOCKS listener can be answering while the Tor
+/// circuit for a specific `.onion` has not converged yet, which is the exact
+/// voter-0001 failure pattern observed in the 500-voter run.
+pub fn probe_onion_reachability_v1(
+    socks_addr: SocketAddr,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
+    validate_loopback_socket_addr_v1(socks_addr)?;
+    let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
+
+    // Stage 1: TCP connect to the SOCKS proxy.
+    let mut stream = match TcpStream::connect_timeout(&socks_addr, timeouts.socks_connect) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(OnionReachabilityOutcomeV1::SocksConnectFailed),
+    };
+    if stream.set_read_timeout(Some(timeouts.socks_handshake)).is_err()
+        || stream.set_write_timeout(Some(timeouts.socks_handshake)).is_err()
+    {
+        return Ok(OnionReachabilityOutcomeV1::SocksHandshakeFailed);
+    }
+
+    // Stage 2: SOCKS5 method negotiation.
+    if socks5_negotiate_no_auth(&mut stream).is_err() {
+        return Ok(OnionReachabilityOutcomeV1::SocksHandshakeFailed);
+    }
+
+    // Stage 3: SOCKS5 CONNECT to the descriptor onion, ATYP = DOMAINNAME.
+    let host_bytes = onion_host.as_bytes();
+    let host_len = u8::try_from(host_bytes.len())
+        .map_err(|_| PrivateTransportNetworkErrorV1::InvalidConfiguration)?;
+    let mut request = Vec::with_capacity(4 + 1 + host_bytes.len() + 2);
+    request.push(SOCKS_VERSION);
+    request.push(SOCKS_CMD_CONNECT);
+    request.push(SOCKS_RESERVED);
+    request.push(SOCKS_ATYP_DOMAINNAME);
+    request.push(host_len);
+    request.extend_from_slice(host_bytes);
+    request.extend_from_slice(&onion_port.to_be_bytes());
+    if write_all(&mut stream, &request).is_err() {
+        return Ok(OnionReachabilityOutcomeV1::OnionConnectFailed);
+    }
+    let mut head = [0u8; 4];
+    if read_exact(&mut stream, &mut head).is_err()
+        || head[0] != SOCKS_VERSION
+        || head[1] != SOCKS_REP_SUCCEEDED
+        || head[2] != SOCKS_RESERVED
+    {
+        return Ok(OnionReachabilityOutcomeV1::OnionConnectFailed);
+    }
+    // Drain the BND.ADDR/BND.PORT of the reply so the socket teardown is clean;
+    // ignore parse failures (a well-formed reply must still consume them).
+    match head[3] {
+        SOCKS_ATYP_IPV4 => {
+            let mut addr = [0u8; 4];
+            let _ = read_exact(&mut stream, &mut addr);
+        }
+        SOCKS_ATYP_IPV6 => {
+            let mut addr = [0u8; 16];
+            let _ = read_exact(&mut stream, &mut addr);
+        }
+        SOCKS_ATYP_DOMAINNAME => {
+            let mut len = [0u8; 1];
+            if read_exact(&mut stream, &mut len).is_ok() {
+                let mut addr = vec![0u8; usize::from(len[0])];
+                let _ = read_exact(&mut stream, &mut addr);
+            }
+        }
+        _ => return Ok(OnionReachabilityOutcomeV1::OnionConnectFailed),
+    }
+    let mut port = [0u8; 2];
+    let _ = read_exact(&mut stream, &mut port);
+    // Explicit drop is documentation: we send NO application bytes.
+    drop(stream);
+    Ok(OnionReachabilityOutcomeV1::Reachable)
+}
+
 /// Fetches one authenticated election-status statement from the ballot office
 /// over the managed Tor SOCKS route derived from the verified descriptor.
 ///

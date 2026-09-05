@@ -24,8 +24,9 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_protocol::ManifestHash;
 use tari_cc_private_ballot_transport_network::{
-    ManagedTorReadinessProbeV1, ONION_VIRTUAL_PORT_V1, SystemManagedTorReadinessProbeV1,
-    TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    ManagedTorReadinessProbeV1, ONION_VIRTUAL_PORT_V1, OnionReachabilityOutcomeV1,
+    SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    probe_onion_reachability_v1,
 };
 
 const TEST_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
@@ -589,4 +590,119 @@ fn readiness_rejects_non_loopback_endpoint() {
 fn success_connect_reply_is_well_formed() {
     assert_eq!(success_connect_reply()[0], 0x05);
     assert_eq!(success_connect_reply()[1], 0x00);
+}
+
+// =========================================================================
+// Onion reachability probe: non-mutating startup gate for the load driver.
+// =========================================================================
+
+/// Wire captures for a "connect succeeded" probe scenario so the test can
+/// assert the probe reached SOCKS5 CONNECT and then stopped (no HTTP request).
+fn reachability_success_config() -> FakeSocks5Config {
+    FakeSocks5Config {
+        method_reply: vec![0x05, 0x00],
+        stop_after_method: false,
+        connect_reply: success_connect_reply(),
+        // The probe closes immediately after CONNECT; the fake server's HTTP
+        // stage is never reached (nothing arrives to be "responded to"). This
+        // behavior body is unused: `read_http_request` will read zero bytes
+        // when the client's side of the stream closes.
+        stop_after_connect: false,
+        behavior: fake_socks::HttpBehavior::Respond(Vec::new()),
+    }
+}
+
+#[test]
+fn reachability_probe_reports_reachable_after_successful_socks_connect_and_sends_no_http() {
+    let server = FakeSocks5Server::start(reachability_success_config());
+    let addr = server.addr();
+    let outcome = probe_onion_reachability_v1(addr, &tor_descriptor(), &fast_timeouts())
+        .expect("probe returns a classification");
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::Reachable);
+    let capture = server.join();
+    // The probe MUST have negotiated SOCKS + issued CONNECT for the exact
+    // onion hostname, exactly like the carrier does.
+    assert_eq!(capture.connect_request[3], 0x03, "ATYP = DOMAINNAME");
+    let host = &capture.connect_request[5..5 + TEST_ONION.len()];
+    assert_eq!(host, TEST_ONION.as_bytes());
+    // …and must NOT have sent any HTTP request bytes: a probe cannot become a
+    // ballot submission.
+    assert!(
+        capture.http_request.is_empty(),
+        "probe must send zero HTTP bytes (captured: {:?})",
+        capture.http_request
+    );
+}
+
+#[test]
+fn reachability_probe_reports_socks_connect_failed_when_port_closed() {
+    let addr = closed_loopback_addr();
+    let outcome = probe_onion_reachability_v1(addr, &tor_descriptor(), &fast_timeouts())
+        .expect("probe returns a classification");
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::SocksConnectFailed);
+    assert_eq!(outcome.code(), "SOCKS_CONNECT_FAILED");
+}
+
+#[test]
+fn reachability_probe_reports_socks_handshake_failed_when_method_reply_is_wrong() {
+    let config = FakeSocks5Config {
+        method_reply: vec![0x04, 0x00],
+        stop_after_method: true,
+        connect_reply: Vec::new(),
+        stop_after_connect: true,
+        behavior: fake_socks::HttpBehavior::Respond(Vec::new()),
+    };
+    let server = FakeSocks5Server::start(config);
+    let addr = server.addr();
+    let outcome = probe_onion_reachability_v1(addr, &tor_descriptor(), &fast_timeouts())
+        .expect("probe returns a classification");
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::SocksHandshakeFailed);
+    assert_eq!(outcome.code(), "SOCKS_HANDSHAKE_FAILED");
+    let _ = server.join();
+}
+
+#[test]
+fn reachability_probe_reports_onion_connect_failed_when_connect_reply_is_error() {
+    // SOCKS5 REP = 0x05 (Connection refused). The onion cannot be reached.
+    let config = FakeSocks5Config {
+        method_reply: vec![0x05, 0x00],
+        stop_after_method: false,
+        connect_reply: vec![0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+        stop_after_connect: true,
+        behavior: fake_socks::HttpBehavior::Respond(Vec::new()),
+    };
+    let server = FakeSocks5Server::start(config);
+    let addr = server.addr();
+    let outcome = probe_onion_reachability_v1(addr, &tor_descriptor(), &fast_timeouts())
+        .expect("probe returns a classification");
+    assert_eq!(outcome, OnionReachabilityOutcomeV1::OnionConnectFailed);
+    assert_eq!(outcome.code(), "ONION_CONNECT_FAILED");
+    let _ = server.join();
+}
+
+#[test]
+fn reachability_probe_rejects_non_loopback_socks_endpoint() {
+    // Structural fail-closed: a non-loopback SOCKS endpoint is refused with
+    // an error (never a false "reachable" result).
+    let addr = SocketAddr::from((Ipv4Addr::new(10, 1, 2, 3), 9050));
+    assert!(probe_onion_reachability_v1(addr, &tor_descriptor(), &fast_timeouts()).is_err());
+}
+
+#[test]
+fn reachability_probe_codes_are_stable_uppercase_strings() {
+    // Preserved qualification evidence never records raw OS text; every
+    // variant has a stable uppercase classification.
+    for outcome in [
+        OnionReachabilityOutcomeV1::Reachable,
+        OnionReachabilityOutcomeV1::SocksConnectFailed,
+        OnionReachabilityOutcomeV1::SocksHandshakeFailed,
+        OnionReachabilityOutcomeV1::OnionConnectFailed,
+    ] {
+        let code = outcome.code();
+        assert!(!code.is_empty());
+        assert!(
+            code.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+            "{code}"
+        );
+    }
 }

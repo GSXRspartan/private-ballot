@@ -21,7 +21,8 @@ use tari_cc_private_ballot_registry::{
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
-    TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    OnionReachabilityOutcomeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    probe_onion_reachability_v1,
 };
 
 pub mod managed_tor;
@@ -839,6 +840,41 @@ pub fn run_load_driver_with_control(
     fs::create_dir_all(&cast_locks_dir).map_err(|_| "could not create cast-lock dir".to_owned())?;
     fs::create_dir_all(&staging_dir).map_err(|_| "could not create staging dir".to_owned())?;
 
+    // Managed-Tor onion reachability preflight (BEFORE the first voter).
+    //
+    // SOCKS5 no-auth readiness from `SystemManagedTorReadinessProbeV1` only
+    // proves the LOCAL Tor SOCKS listener answers the greeting. The Tor
+    // circuit for the election's specific `.onion` may still be converging,
+    // which is what stranded voter-0001 in the 500-voter run as
+    // `PRIVATE_TRANSPORT_UNAVAILABLE / PENDING`. This bounded probe closes
+    // that gap without submitting any ballot: it performs SOCKS5 CONNECT to
+    // the descriptor's onion, immediately closes the socket, and RETRIES the
+    // classifier until the reachability outcome is `Reachable` or the bounded
+    // budget elapses. No ballot bytes, no HTTP request, no credential, no
+    // receipt — pure connect/handshake, exactly like the readiness probe.
+    let onion_preflight = run_onion_reachability_preflight_v1(
+        config.tor_socks,
+        &bundle.descriptor,
+        &TorCarrierTimeoutsV1::default(),
+        ONION_REACHABILITY_PREFLIGHT_BUDGET_V1,
+        ONION_REACHABILITY_PREFLIGHT_INTERVAL_V1,
+    );
+    if !matches!(
+        onion_preflight,
+        OnionReachabilityOutcomeV1::Reachable
+    ) {
+        // Fail closed BEFORE any voter is touched. This is the same fail-closed
+        // shape the driver already uses for a bad artifact or credential
+        // partition — no ballot bytes are constructed and no credential is
+        // consumed. The bounded classification (SOCKS_CONNECT_FAILED,
+        // SOCKS_HANDSHAKE_FAILED, ONION_CONNECT_FAILED) is preserved as
+        // qualification evidence so the operator sees WHERE startup stalled.
+        return Err(format!(
+            "managed Tor onion reachability preflight failed ({code}); no voter was submitted",
+            code = onion_preflight.code(),
+        ));
+    }
+
     let mut loaded_public_keys = HashSet::new();
     let mut duplicate_credentials_detected = 0;
     let mut credentials_loaded = 0;
@@ -1245,10 +1281,23 @@ pub fn run_load_driver_with_control(
                     receipts_received += 1;
                     receipt_verification_failures += 1;
                 }
+                let stage = result.diagnostic_stage.unwrap_or("submission");
+                // Replace the near-useless `PENDING` code that used to be
+                // persisted for every `PRIVATE_TRANSPORT_UNAVAILABLE` bucket
+                // failure with a deterministic sanitized classification derived
+                // from a fresh non-mutating re-probe of the managed Tor
+                // carrier. Every other diagnostic stage is already a specific
+                // code (RECEIPT_SIGNATURE_INVALID, RECEIPT_PARSE_FAILED, …)
+                // and passes through unchanged.
+                let code = map_release_failure_code_v1(
+                    stage,
+                    config.tor_socks,
+                    &bundle.descriptor,
+                );
                 failures.push(LoadDriverFailureV1 {
                     credential_file: display_path.clone(),
-                    stage: result.diagnostic_stage.unwrap_or("submission"),
-                    code: result.receipt_state.to_owned(),
+                    stage,
+                    code,
                 });
             }
             Err(error) => {
@@ -1585,6 +1634,108 @@ pub fn detect_duplicate_container_headers(paths: &[PathBuf]) -> Result<usize, St
         }
     }
     Ok(duplicates)
+}
+
+/// Total wall-clock budget for the managed-Tor onion reachability preflight.
+///
+/// This is a per-run gate that runs ONCE before voter #1 and never during
+/// steady-state submission. The budget is generous enough for a cold-started
+/// Tor to converge on the election's `.onion` circuit (Tor guides finish
+/// bootstrap, then the hidden-service descriptor is fetched from the HSDir
+/// ring, then a rendezvous circuit is built), and bounded so a truly
+/// unreachable ballot office still fails closed instead of hanging the run.
+pub const ONION_REACHABILITY_PREFLIGHT_BUDGET_V1: Duration = Duration::from_secs(90);
+
+/// How long to wait between consecutive onion reachability probes.
+///
+/// A short sleep amortises the retry cost against the SOCKS handshake budget
+/// so a rapidly converging circuit is picked up promptly, without hammering
+/// the loopback SOCKS listener while Tor is still bootstrapping.
+pub const ONION_REACHABILITY_PREFLIGHT_INTERVAL_V1: Duration = Duration::from_millis(500);
+
+/// Bounded retry loop around [`probe_onion_reachability_v1`]. Returns the
+/// classification of the last attempt: `Reachable` on the first success or
+/// the terminal failure classification when the budget is exhausted.
+///
+/// The probe is non-mutating — no ballot bytes, no credential, no receipt —
+/// so retrying it repeatedly is safe. It exists solely to let the SOCKS
+/// listener's ONE onion circuit converge before voter #1 attempts a real
+/// submission; every subsequent voter reuses the same warmed carrier.
+pub fn run_onion_reachability_preflight_v1(
+    socks_addr: SocketAddr,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+    budget: Duration,
+    interval: Duration,
+) -> OnionReachabilityOutcomeV1 {
+    let deadline = Instant::now() + budget;
+    let mut last = OnionReachabilityOutcomeV1::SocksConnectFailed;
+    loop {
+        match probe_onion_reachability_v1(socks_addr, descriptor, timeouts) {
+            Ok(OnionReachabilityOutcomeV1::Reachable) => {
+                return OnionReachabilityOutcomeV1::Reachable;
+            }
+            Ok(outcome) => last = outcome,
+            // A structural probe error (invalid descriptor / non-loopback
+            // endpoint) is not a transient race: report the last classifier.
+            Err(_) => return last,
+        }
+        if Instant::now() >= deadline {
+            return last;
+        }
+        std::thread::sleep(interval);
+    }
+}
+
+/// Classifies a `diagnostic_stage="PRIVATE_TRANSPORT_UNAVAILABLE"` failure into
+/// a deterministic sanitized code by re-probing the managed Tor SOCKS carrier
+/// AT FAILURE TIME. The re-probe is the same non-mutating onion reachability
+/// probe used by the pre-voter preflight, so it consumes no credential, sends
+/// no envelope, and produces no receipt.
+///
+/// Falls back to the coarse `PRIVATE_TRANSPORT_UNAVAILABLE` label when the
+/// re-probe reports reachable (the transient window has already closed by the
+/// time the classifier runs).
+pub fn classify_private_transport_failure_v1(
+    socks_addr: SocketAddr,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+) -> &'static str {
+    let outcome = probe_onion_reachability_v1(
+        socks_addr,
+        descriptor,
+        &TorCarrierTimeoutsV1::default(),
+    )
+    .unwrap_or(OnionReachabilityOutcomeV1::SocksConnectFailed);
+    match outcome {
+        OnionReachabilityOutcomeV1::Reachable => "PRIVATE_TRANSPORT_UNAVAILABLE",
+        OnionReachabilityOutcomeV1::SocksConnectFailed => "SOCKS_CONNECT_FAILED",
+        OnionReachabilityOutcomeV1::SocksHandshakeFailed => "SOCKS_HANDSHAKE_FAILED",
+        OnionReachabilityOutcomeV1::OnionConnectFailed => "ONION_CONNECT_FAILED",
+    }
+}
+
+/// Maps a coarse `diagnostic_stage` produced by
+/// `release_prepared_ballot_via_private_transport` to a deterministic
+/// sanitized failure `code` for the persisted load-driver report.
+///
+/// The stage is authoritative for WHERE in the release lifecycle the failure
+/// happened (private-transport carrier, receipt verification, promotion,
+/// …); the code refines the "transport unavailable" bucket at the boundary
+/// where the driver actually observes the failure so future preserved
+/// evidence never records a meaningless `PENDING` again.
+pub fn map_release_failure_code_v1(
+    diagnostic_stage: &str,
+    socks_addr: SocketAddr,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+) -> String {
+    match diagnostic_stage {
+        "PRIVATE_TRANSPORT_UNAVAILABLE" => {
+            classify_private_transport_failure_v1(socks_addr, descriptor).to_owned()
+        }
+        // Every other stage is already a specific, safe classification
+        // (`RECEIPT_SIGNATURE_INVALID`, `RECEIPT_PARSE_FAILED`, …).
+        other => other.to_owned(),
+    }
 }
 
 fn failure(path: String, stage: &'static str, code: &str) -> LoadDriverFailureV1 {
