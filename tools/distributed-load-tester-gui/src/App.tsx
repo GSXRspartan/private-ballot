@@ -15,6 +15,7 @@ import {
   formatDuration,
   isStopping,
   isTorReadyForRun,
+  isValidationCurrent,
   nextStateAfterStopRequest,
   passphraseMismatch,
   progressCompleted,
@@ -142,11 +143,12 @@ export default function App() {
   const [run, setRun] = useState<RunForm>(initialRun);
   const [partitionDetected, setPartitionDetected] = useState(0);
   const [runState, setRunState] = useState<RunState>("IDLE");
-  const [validated, setValidated] = useState(false);
+  const [validatedKey, setValidatedKey] = useState<string | null>(null);
   const [progress, setProgress] = useState<LoadProgress | null>(null);
   const [resultsPath, setResultsPath] = useState("");
   const [summary, setSummary] = useState<SummaryLine[]>([]);
   const [error, setError] = useState("");
+  const [loadWarning, setLoadWarning] = useState("");
   const [busy, setBusy] = useState(false);
   const [torStatus, setTorStatus] = useState<TorStatus>("NOT_SELECTED");
   const [torDetail, setTorDetail] = useState<string>("");
@@ -182,6 +184,18 @@ export default function App() {
     let unlisten: VoidFunction | null = null;
     void listen<TorStatusEvent>("load-status", (event) => {
       setTorRuntime(event.payload);
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: VoidFunction | null = null;
+    void listen<string>("load-warning", (event) => {
+      setLoadWarning(event.payload);
     }).then((dispose) => {
       unlisten = dispose;
     });
@@ -238,12 +252,10 @@ export default function App() {
   }
 
   function updateRun(next: Partial<RunForm>) {
-    setValidated(false);
     setRun((current) => ({ ...current, ...next }));
   }
 
   function updateTorMode(mode: TorMode) {
-    setValidated(false);
     setTorStatus(mode === "managed" && run.torExe ? "SELECTED" : "NOT_SELECTED");
     setTorDetail("");
     setRun((current) => ({ ...current, torMode: mode }));
@@ -301,7 +313,6 @@ export default function App() {
     if (typeof picked !== "string") {
       return;
     }
-    setValidated(false);
     setRun((current) => ({ ...current, torExe: picked }));
     setTorStatus("VALIDATING");
     setTorDetail("");
@@ -344,12 +355,15 @@ export default function App() {
       const result = await call<Record<string, string | number>>("validate_load_test", {
         request: runRequest(),
       });
-      setValidated(true);
+      // Validation is pinned to the exact form snapshot that passed; any later
+      // edit (including the results path) invalidates it via key comparison.
+      setValidatedKey(runFormKey(run));
       setRunState("VALIDATED");
       setResultSummary([
         { label: "Test voter credentials detected", value: (result.credentialCount ?? result.credential_count) as number },
         { label: "Voters this computer will submit", value: (result.requestedVoterCount ?? result.requested_voter_count) as number },
-        { label: "First voter", value: (result.startIndex ?? result.start_index) as number },
+        { label: "Credentials selected for this run", value: (result.selectedVoterCount ?? result.selected_voter_count) as number },
+        { label: "First local credential", value: (result.startIndex ?? result.start_index) as number },
         { label: "Tor mode", value: run.torMode === "managed" ? "Managed" : "Advanced — existing local SOCKS" },
         { label: "Candidate rotation", value: result.choice === "round-robin" ? "Rotate evenly through candidates" : (result.choice as string) },
       ]);
@@ -360,6 +374,7 @@ export default function App() {
     runAction(async () => {
       setRunState("RUNNING");
       setProgress(null);
+      setLoadWarning("");
       setTorRuntime({ stage: "STARTING_TOR" });
       const report = await call<Record<string, string | number>>("start_load_test", {
         request: runRequest(),
@@ -406,6 +421,14 @@ export default function App() {
     };
   }
 
+  // Frontend-only snapshot key for validation staleness. Never sent to the
+  // backend and never persisted; it only ever compares form state to the form
+  // state that passed validation.
+  function runFormKey(form: RunForm): string {
+    return JSON.stringify(form);
+  }
+
+  const validated = isValidationCurrent(validatedKey, runFormKey(run));
   const torReady = isTorReadyForRun(run.torMode, torStatus);
 
   const readiness: ChecklistItem[] = [
@@ -431,7 +454,7 @@ export default function App() {
     },
   ];
 
-  const canStart = canStartLoadTest(runState, validated) && torReady;
+  const canStart = canStartLoadTest(runState, validated, run.resultsPath) && torReady;
 
   return (
     <main className="shell">
@@ -535,6 +558,9 @@ export default function App() {
           <section className="notice">
             Votes are submitted one at a time. All simulated voters on this computer share this Tor instance. This test does not simulate independent Tor users.
           </section>
+          <section className="notice">
+            "First local credential" counts within THIS computer's credential folder: 1 is the first credential file it contains. A folder copied from global voters 251–500 runs as local voters 1–250. The organizer still sees the correct global voters.
+          </section>
           <div className="grid">
             <PathField label="Election setup file" help="Expected filename: election-manifest.cbor" value={run.manifestPath} onPick={() => chooseFile((v) => updateRun({ manifestPath: v }))} />
             <PathField label="Eligible voter list" help="Expected filename: voter-registry.cbor" value={run.registryPath} onPick={() => chooseFile((v) => updateRun({ registryPath: v }))} />
@@ -545,7 +571,7 @@ export default function App() {
             <PasswordField label="Credential password" value={run.passphrase} onChange={(v) => updateRun({ passphrase: v })} />
             <ReadOnlyField label="Choice strategy" value="Rotate evenly through candidates" help="Backend value: round-robin" />
             <NumberField label="How many voters should this computer submit?" value={run.count} onChange={(v) => updateRun({ count: v })} />
-            <NumberField label="First voter to submit" value={run.startIndex} onChange={(v) => updateRun({ startIndex: v })} />
+            <NumberField label="First local credential to submit (1 = first file in this folder)" value={run.startIndex} onChange={(v) => updateRun({ startIndex: v })} />
           </div>
 
           <section className="torPanel">
@@ -600,6 +626,7 @@ export default function App() {
               Stopping after current voter… The voter currently generating or submitting is allowed to finish safely. The run ends when the backend confirms it stopped.
             </section>
           )}
+          {loadWarning && <section className="notice warn">{loadWarning}</section>}
           {torRuntime && runState === "RUNNING" && (
             <section className="notice">
               {torRuntime.stage === "STARTING_TOR" && "Starting Tor…"}

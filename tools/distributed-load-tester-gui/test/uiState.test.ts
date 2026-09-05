@@ -8,6 +8,7 @@ import {
   formatDuration,
   isStopping,
   isTorReadyForRun,
+  isValidationCurrent,
   nextStateAfterStopRequest,
   passphraseMismatch,
   secretFreeProgressText,
@@ -16,10 +17,35 @@ import {
   torStatusLabel,
 } from "../src/model.ts";
 
+const RESULTS_PATH = "C:\\runs\\desktop\\distributed-load-results.json";
+
+test("run test is gated until a results path is selected", () => {
+  // Fully validated but no results destination: Run Test must stay disabled —
+  // durable per-host evidence is mandatory.
+  assert.equal(canStartLoadTest("VALIDATED", true, ""), false);
+  assert.equal(canStartLoadTest("VALIDATED", true, "   "), false);
+  assert.equal(canStartLoadTest("FAILED", true, ""), false);
+  assert.equal(canStartLoadTest("STOPPED", true, ""), false);
+  // A selected results path unblocks Start (with validation and Tor ready).
+  assert.equal(canStartLoadTest("VALIDATED", true, RESULTS_PATH), true);
+});
+
+test("changing the results path invalidates prior validation", () => {
+  const formKey = (resultsPath: string) => JSON.stringify({ resultsPath });
+  // Validation recorded for the original path...
+  const validatedKey = formKey("C:\\runs\\a\\results.json");
+  // ...is current only while the form is unchanged.
+  assert.equal(isValidationCurrent(validatedKey, formKey("C:\\runs\\a\\results.json")), true);
+  // Any change to the results path (or any other field) produces a different
+  // key, so stale validation can never enable Start.
+  assert.equal(isValidationCurrent(validatedKey, formKey("C:\\runs\\b\\results.json")), false);
+  assert.equal(isValidationCurrent(null, formKey("C:\\runs\\a\\results.json")), false);
+});
+
 test("initial start remains disabled until validation succeeds", () => {
-  assert.equal(canStartLoadTest("IDLE", false), false);
-  assert.equal(canStartLoadTest("VALIDATED", true), true);
-  assert.equal(canStartLoadTest("RUNNING", true), false);
+  assert.equal(canStartLoadTest("IDLE", false, RESULTS_PATH), false);
+  assert.equal(canStartLoadTest("VALIDATED", true, RESULTS_PATH), true);
+  assert.equal(canStartLoadTest("RUNNING", true, RESULTS_PATH), false);
 });
 
 test("a stop request moves a running run into STOPPING and nothing else changes", () => {
@@ -38,7 +64,7 @@ test("a failed start restores a recoverable FAILED state and re-enables Start", 
   assert.equal(stateAfterFailedAction("RUNNING"), "FAILED");
   assert.equal(stateAfterFailedAction("STOPPING"), "FAILED");
   // FAILED is recoverable: Start is re-enabled once inputs are validated.
-  assert.equal(canStartLoadTest("FAILED", true), true);
+  assert.equal(canStartLoadTest("FAILED", true, RESULTS_PATH), true);
 });
 
 test("a late failure never clobbers an already-terminal outcome", () => {
@@ -49,7 +75,7 @@ test("a late failure never clobbers an already-terminal outcome", () => {
 });
 
 test("start stays disabled and stop is non-actionable while stopping", () => {
-  assert.equal(canStartLoadTest("STOPPING", true), false);
+  assert.equal(canStartLoadTest("STOPPING", true, RESULTS_PATH), false);
   assert.equal(canStopRun("STOPPING"), false);
   assert.equal(canStopRun("RUNNING"), true);
 });

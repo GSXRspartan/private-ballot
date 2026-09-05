@@ -17,7 +17,7 @@ use tari_cc_private_ballot_cli::{
     DISTRIBUTED_LOAD_MAX_REGISTRY_MEMBERS, LoadDriverConfig, LoadDriverProgressV1,
     LoadDriverRunControl, LoadDriverValidationSummary, PartitionSummary, credential_count,
     generate_distributed_cohort, partition_credentials_with_summary, run_load_driver_with_control,
-    validate_load_driver_inputs,
+    validate_load_driver_inputs, validate_results_output_path,
 };
 use tari_cc_private_ballot_transport_network::validate_tor_executable_v1;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -359,6 +359,9 @@ async fn validate_load_test(
     // Static Tor policy check FIRST, before touching disk. Fail closed on
     // ambiguous Tor mode and invalid executables. NEVER spawns Tor here.
     prevalidate_tor_selection(&request)?;
+    // Durable per-host results evidence is mandatory: reject a missing or
+    // unusable results destination during offline validation too.
+    validate_results_destination(&request)?;
     let config = load_config_for_validation(&request)?;
     tauri::async_runtime::spawn_blocking(move || {
         validate_load_driver_inputs(&config).map_err(CommandError::from_harness)
@@ -376,6 +379,9 @@ async fn start_load_test(
     // Re-run static Tor validation on Start too — an operator could change
     // the field between Validate and Start, so we never rely on prior state.
     prevalidate_tor_selection(&request)?;
+    // Independent of the frontend: a Run Test without a usable results
+    // destination is rejected here even if the frontend gate was bypassed.
+    validate_results_destination(&request)?;
 
     if state.running.swap(true, Ordering::SeqCst) {
         return Err(CommandError::running());
@@ -502,7 +508,19 @@ async fn start_load_test(
             elapsed_ms,
         };
         let meta_path = managed_tor_metadata_path(&results_path);
-        let _ = write_metadata_file(&meta_path, &metadata);
+        if let Err(metadata_error) = write_metadata_file(&meta_path, &metadata) {
+            // Secondary evidence, never the election authority: a metadata
+            // sidecar failure is surfaced explicitly as a warning but must NOT
+            // alter the submission result (no re-send, no false failure of the
+            // ballots themselves). The message is a fixed safe string — no
+            // paths, no secrets.
+            let _ = app.emit(
+                "load-warning",
+                format!(
+                    "the managed-Tor evidence file could not be written ({metadata_error}); the load-test results report itself is unaffected"
+                ),
+            );
+        }
 
         outcome.map_err(CommandError::from_harness)
     })
@@ -517,6 +535,14 @@ async fn start_load_test(
 #[tauri::command]
 fn stop_after_current_voter(state: State<'_, RunnerState>) {
     state.cancel.store(true, Ordering::SeqCst);
+}
+
+/// Durable results evidence is mandatory for Run Test: the results path must
+/// be non-empty and its destination usable. Shared by validate and start so
+/// the frontend can never talk the backend into an evidence-less run.
+fn validate_results_destination(request: &LoadTestRequest) -> Result<(), CommandError> {
+    validate_results_output_path(Path::new(&request.results_path))
+        .map_err(CommandError::invalid)
 }
 
 fn validate_passphrase_confirmation(
@@ -802,6 +828,61 @@ mod tests {
             start_index: 1,
             run_id: None,
         }
+    }
+
+    #[test]
+    fn empty_results_path_is_rejected() {
+        let mut request = sample_request("secret", TOR_MODE_MANAGED);
+        request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        request.results_path = String::new();
+        let error = validate_results_destination(&request).expect_err("empty must be rejected");
+        assert_eq!(error.code, "LOAD_TESTER_INVALID_INPUT");
+        let rendered = serde_json::to_string(&error).expect("error serializes");
+        assert!(rendered.contains("results output path"));
+    }
+
+    #[test]
+    fn results_path_pointing_at_a_directory_is_rejected() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let mut request = sample_request("secret", TOR_MODE_MANAGED);
+        request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        request.results_path = scratch.path().to_string_lossy().into_owned();
+        let error = validate_results_destination(&request).expect_err("directory must be rejected");
+        assert_eq!(error.code, "LOAD_TESTER_INVALID_INPUT");
+    }
+
+    #[test]
+    fn results_path_with_unusable_parent_is_rejected() {
+        // Parent exists as a REGULAR FILE: the atomic replace can never commit
+        // there, so start must fail closed before any voter runs.
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let parent_file = scratch.path().join("not-a-dir");
+        std::fs::write(&parent_file, b"regular file").expect("write parent file");
+        let mut request = sample_request("secret", TOR_MODE_MANAGED);
+        request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        request.results_path =
+            parent_file.join("results.json").to_string_lossy().into_owned();
+        let error = validate_results_destination(&request).expect_err("unusable parent must be rejected");
+        assert_eq!(error.code, "LOAD_TESTER_INVALID_INPUT");
+        let rendered = serde_json::to_string(&error).expect("error serializes");
+        assert!(
+            !rendered.contains(parent_file.to_string_lossy().as_ref()),
+            "results destination errors must not leak operator paths"
+        );
+    }
+
+    #[test]
+    fn usable_results_path_is_accepted() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let mut request = sample_request("secret", TOR_MODE_MANAGED);
+        request.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+        request.results_path =
+            scratch.path().join("nested").join("results.json").to_string_lossy().into_owned();
+        validate_results_destination(&request).expect("usable destination must be accepted");
+        assert!(
+            scratch.path().join("nested").is_dir(),
+            "validation may create the missing parent directory"
+        );
     }
 
     #[test]

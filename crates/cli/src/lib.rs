@@ -421,20 +421,23 @@ pub struct DistributedLoadReportV1 {
     /// How many of the requested voters were never reached because the run
     /// stopped (cooperative Stop After Current Voter) or failed early.
     pub remaining_voters: usize,
-    /// Which terminal state produced this report. `COMPLETE` = every requested
-    /// voter reached a submission attempt boundary; `STOPPED` = the operator
-    /// asked the run to stop after the currently-active voter finished;
-    /// `FAILED` = the driver could not proceed (setup, transport, or a fatal
+    /// Which state produced this report. `RUNNING` = the run is still active
+    /// (mid-run incremental snapshot); `COMPLETE` = every requested voter
+    /// reached a submission attempt boundary; `STOPPED` = the operator asked
+    /// the run to stop after the currently-active voter finished; `FAILED` =
+    /// the driver could not proceed (setup, transport, persistence, or a fatal
     /// error before/after some voters).
     pub terminal_state: LoadDriverTerminalStateV1,
 }
 
-/// Terminal state of a load-driver run. Serialized as a plain uppercase
+/// Run state of a load-driver report. Serialized as a plain uppercase
 /// string so the report JSON stays operator-readable and matches the labels
-/// the GUI already renders.
+/// the GUI already renders. Mid-run incremental snapshots are always `RUNNING`
+/// — a partial snapshot must never be mistakable for a finished run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum LoadDriverTerminalStateV1 {
+    Running,
     Complete,
     Stopped,
     Failed,
@@ -469,6 +472,10 @@ pub struct LoadDriverProgressV1 {
 pub struct LoadDriverValidationSummary {
     pub credential_count: usize,
     pub requested_voter_count: usize,
+    /// How many credential files the driver would actually select with the
+    /// requested start index/count. Validation fails closed unless this
+    /// equals `requested_voter_count`.
+    pub selected_voter_count: usize,
     pub start_index: usize,
     pub tor_socks: String,
     pub choice: String,
@@ -664,26 +671,73 @@ pub fn validate_load_driver_inputs(
     let _ = &artifacts;
     let _ = &bundle;
     let credential_count = credential_count(&config.credentials_dir)?;
-    let requested = config
-        .count
-        .unwrap_or(credential_count.saturating_sub(config.start_index.saturating_sub(1)));
-    if requested == 0 {
-        return Err(
-            "no test voter credentials selected for this run (adjust start-index or count)"
-                .to_owned(),
-        );
-    }
     let choice = match &config.choice {
         ChoiceDistribution::RoundRobin => "round-robin".to_owned(),
         ChoiceDistribution::All { candidate_id_hex } => format!("all:{candidate_id_hex}"),
     };
+    validate_results_output_path(&config.results_path)?;
+    let selected = ensure_exact_selection(config)?;
+    let requested = config.count.unwrap_or(selected.len());
     Ok(LoadDriverValidationSummary {
         credential_count,
         requested_voter_count: requested,
+        selected_voter_count: selected.len(),
         start_index: config.start_index,
         tor_socks: config.tor_socks.to_string(),
         choice,
     })
+}
+
+/// Validates the results output destination WITHOUT writing the report file:
+/// the path must be non-empty, must not be an existing directory, and its
+/// parent directory must be creatable/existing so the atomic replace can
+/// commit there. Used by offline validation and by the driver's pre-run gate.
+pub fn validate_results_output_path(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("results output path is required".to_owned());
+    }
+    if path.is_dir() {
+        return Err("results output path must be a file, not a directory".to_owned());
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).map_err(|_| {
+                "results output folder could not be created; choose a writable location".to_owned()
+            })?;
+            if !parent.is_dir() {
+                return Err("results output folder is not a usable directory".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The driver's exact-selection invariant: IF a requested voter count N is
+/// given, THEN exactly N credential files must be selected before the first
+/// voter runs. A copied partition directory is indexed LOCALLY by the files it
+/// contains (a partition holding global voters 251–500 runs with local start
+/// index 1), so a selection that skips past the local files is an operator
+/// input error and must fail closed — never a partial run that still reports
+/// COMPLETE.
+fn ensure_exact_selection(config: &LoadDriverConfig) -> Result<Vec<PathBuf>, String> {
+    let selected =
+        select_credential_paths(&config.credentials_dir, config.start_index, config.count)?;
+    if let Some(requested) = config.count {
+        if selected.len() != requested {
+            return Err(format!(
+                "requested {requested} voters but only {} credentials are available from this directory at local start index {}; a copied partition directory is indexed locally, so start at 1",
+                selected.len(),
+                config.start_index
+            ));
+        }
+    }
+    if selected.is_empty() {
+        return Err(format!(
+            "no test voter credentials were selected from the credentials directory (local start index {}); a copied partition directory is indexed locally, so start at 1",
+            config.start_index
+        ));
+    }
+    Ok(selected)
 }
 
 pub fn validate_load_driver_config(config: &LoadDriverConfig) -> Result<(), String> {
@@ -744,6 +798,18 @@ pub fn run_load_driver_with_control(
     control: &mut LoadDriverRunControl<'_>,
 ) -> Result<DistributedLoadReportV1, String> {
     validate_load_driver_config(config)?;
+    // Exact-selection invariant FIRST: if the requested count cannot be
+    // satisfied exactly from the credentials directory, fail closed before any
+    // election artifact is loaded, before Tor starts, and before any voter is
+    // touched. A copied partition directory is indexed locally, so a global
+    // start index that skips past the local files is rejected here.
+    let selected_paths = ensure_exact_selection(config)?;
+    // Persisting the authoritative per-host results is part of the run
+    // contract: fail closed BEFORE the first voter when incremental
+    // persistence was requested but the results destination is unusable.
+    if control.persist_incremental {
+        validate_results_output_path(&config.results_path)?;
+    }
     let started = Instant::now();
     let artifacts = GuiElectionArtifactsV1::from_paths(
         &config.manifest_path,
@@ -764,8 +830,6 @@ pub fn run_load_driver_with_control(
     let mut carrier =
         TorSocksPrivateReleaseCarrierV1::new(config.tor_socks, TorCarrierTimeoutsV1::default())
             .map_err(|error| format!("tor carrier config failed: {error}"))?;
-    let selected_paths =
-        select_credential_paths(&config.credentials_dir, config.start_index, config.count)?;
     let state_dir = config
         .state_dir
         .clone()
@@ -793,7 +857,11 @@ pub fn run_load_driver_with_control(
     let mut failures = Vec::new();
 
     let total_voters = selected_paths.len();
-    let mut terminal_state = LoadDriverTerminalStateV1::Complete;
+    // The run is RUNNING until the loop exhausts every selected voter (→
+    // COMPLETE) or a break path downgrades the state (STOPPED / FAILED). This
+    // makes a final COMPLETE structurally impossible unless every requested
+    // voter reached its completion boundary.
+    let mut terminal_state = LoadDriverTerminalStateV1::Running;
     let mut completed_voters: usize = 0;
 
     for (offset, path) in selected_paths.iter().enumerate() {
@@ -823,7 +891,7 @@ pub fn run_load_driver_with_control(
                     error.code(),
                 ));
                 completed_voters += 1;
-                emit_progress_and_persist(
+                if !record_voter_boundary(
                     control,
                     config,
                     total_voters,
@@ -833,7 +901,6 @@ pub fn run_load_driver_with_control(
                     failed_submissions,
                     &display_path,
                     started,
-                    None,
                     &make_running_report(
                         config,
                         total_voters,
@@ -855,7 +922,11 @@ pub fn run_load_driver_with_control(
                         &failures,
                         completed_voters,
                     ),
-                );
+                    &mut failures,
+                ) {
+                    terminal_state = LoadDriverTerminalStateV1::Failed;
+                    break;
+                }
                 continue;
             }
         };
@@ -868,7 +939,7 @@ pub fn run_load_driver_with_control(
                 code: "DUPLICATE_CREDENTIAL".to_owned(),
             });
             completed_voters += 1;
-            emit_progress_and_persist(
+            if !record_voter_boundary(
                 control,
                 config,
                 total_voters,
@@ -878,7 +949,6 @@ pub fn run_load_driver_with_control(
                 failed_submissions,
                 &display_path,
                 started,
-                None,
                 &make_running_report(
                     config,
                     total_voters,
@@ -900,7 +970,11 @@ pub fn run_load_driver_with_control(
                     &failures,
                     completed_voters,
                 ),
-            );
+                &mut failures,
+            ) {
+                terminal_state = LoadDriverTerminalStateV1::Failed;
+                break;
+            }
             continue;
         }
         let credential = match container.decrypt(passphrase) {
@@ -912,7 +986,7 @@ pub fn run_load_driver_with_control(
                     error.code(),
                 ));
                 completed_voters += 1;
-                emit_progress_and_persist(
+                if !record_voter_boundary(
                     control,
                     config,
                     total_voters,
@@ -922,7 +996,6 @@ pub fn run_load_driver_with_control(
                     failed_submissions,
                     &display_path,
                     started,
-                    None,
                     &make_running_report(
                         config,
                         total_voters,
@@ -944,7 +1017,11 @@ pub fn run_load_driver_with_control(
                         &failures,
                         completed_voters,
                     ),
-                );
+                    &mut failures,
+                ) {
+                    terminal_state = LoadDriverTerminalStateV1::Failed;
+                    break;
+                }
                 continue;
             }
         };
@@ -964,7 +1041,7 @@ pub fn run_load_driver_with_control(
                     error.code(),
                 ));
                 completed_voters += 1;
-                emit_progress_and_persist(
+                if !record_voter_boundary(
                     control,
                     config,
                     total_voters,
@@ -974,7 +1051,6 @@ pub fn run_load_driver_with_control(
                     failed_submissions,
                     &display_path,
                     started,
-                    None,
                     &make_running_report(
                         config,
                         total_voters,
@@ -996,7 +1072,11 @@ pub fn run_load_driver_with_control(
                         &failures,
                         completed_voters,
                     ),
-                );
+                    &mut failures,
+                ) {
+                    terminal_state = LoadDriverTerminalStateV1::Failed;
+                    break;
+                }
                 continue;
             }
         };
@@ -1007,7 +1087,7 @@ pub fn run_load_driver_with_control(
                 code: "CREDENTIAL_NOT_ELIGIBLE".to_owned(),
             });
             completed_voters += 1;
-            emit_progress_and_persist(
+            if !record_voter_boundary(
                 control,
                 config,
                 total_voters,
@@ -1017,7 +1097,6 @@ pub fn run_load_driver_with_control(
                 failed_submissions,
                 &display_path,
                 started,
-                None,
                 &make_running_report(
                     config,
                     total_voters,
@@ -1039,7 +1118,11 @@ pub fn run_load_driver_with_control(
                     &failures,
                     completed_voters,
                 ),
-            );
+                &mut failures,
+            ) {
+                terminal_state = LoadDriverTerminalStateV1::Failed;
+                break;
+            }
             continue;
         }
         if let Err(error) = voter.set_selection(
@@ -1050,7 +1133,7 @@ pub fn run_load_driver_with_control(
         ) {
             failures.push(failure(display_path.clone(), "selection", error.code()));
             completed_voters += 1;
-            emit_progress_and_persist(
+            if !record_voter_boundary(
                 control,
                 config,
                 total_voters,
@@ -1060,7 +1143,6 @@ pub fn run_load_driver_with_control(
                 failed_submissions,
                 &display_path,
                 started,
-                None,
                 &make_running_report(
                     config,
                     total_voters,
@@ -1082,7 +1164,11 @@ pub fn run_load_driver_with_control(
                     &failures,
                     completed_voters,
                 ),
-            );
+                &mut failures,
+            ) {
+                terminal_state = LoadDriverTerminalStateV1::Failed;
+                break;
+            }
             continue;
         }
 
@@ -1092,7 +1178,7 @@ pub fn run_load_driver_with_control(
             proof_generation_failures += 1;
             failures.push(failure(display_path.clone(), "proof", error.code()));
             completed_voters += 1;
-            emit_progress_and_persist(
+            if !record_voter_boundary(
                 control,
                 config,
                 total_voters,
@@ -1102,7 +1188,6 @@ pub fn run_load_driver_with_control(
                 failed_submissions,
                 &display_path,
                 started,
-                None,
                 &make_running_report(
                     config,
                     total_voters,
@@ -1124,7 +1209,11 @@ pub fn run_load_driver_with_control(
                     &failures,
                     completed_voters,
                 ),
-            );
+                &mut failures,
+            ) {
+                terminal_state = LoadDriverTerminalStateV1::Failed;
+                break;
+            }
             continue;
         }
         proof_total += proof_started.elapsed();
@@ -1169,7 +1258,7 @@ pub fn run_load_driver_with_control(
             }
         }
         completed_voters += 1;
-        emit_progress_and_persist(
+        if !record_voter_boundary(
             control,
             config,
             total_voters,
@@ -1179,7 +1268,6 @@ pub fn run_load_driver_with_control(
             failed_submissions,
             &display_path,
             started,
-            None,
             &make_running_report(
                 config,
                 total_voters,
@@ -1201,11 +1289,15 @@ pub fn run_load_driver_with_control(
                 &failures,
                 completed_voters,
             ),
-        );
+            &mut failures,
+        ) {
+            terminal_state = LoadDriverTerminalStateV1::Failed;
+            break;
+        }
     }
 
     let remaining_voters = total_voters.saturating_sub(completed_voters);
-    let report = DistributedLoadReportV1 {
+    let mut report = DistributedLoadReportV1 {
         report_type: "TARI_CC_PRIVATE_BALLOT_DISTRIBUTED_LOAD_REPORT_V1",
         host_run_id: config.host_run_id.clone(),
         requested_voter_count: total_voters,
@@ -1232,10 +1324,31 @@ pub fn run_load_driver_with_control(
         remaining_voters,
         terminal_state,
     };
+    // Downgrade RUNNING → COMPLETE only when the loop exhausted every selected
+    // voter. Break paths (cooperative stop, persistence failure) already set
+    // their own state, so COMPLETE here proves completed_voters == requested.
+    if report.terminal_state == LoadDriverTerminalStateV1::Running
+        && report.completed_voters == report.requested_voter_count
+    {
+        report.terminal_state = LoadDriverTerminalStateV1::Complete;
+    } else if report.terminal_state == LoadDriverTerminalStateV1::Running {
+        report.terminal_state = LoadDriverTerminalStateV1::Failed;
+        report.failures.push(results_persist_failure());
+    }
     // Persist the terminal report (atomic replace) if the caller asked for
     // incremental persistence — mid-run writes went to the results path, and
-    // the last write is the authoritative terminal one.
-    if control.persist_incremental {
+    // the last write is the authoritative terminal one. A terminal persistence
+    // failure is NEVER silently swallowed: it downgrades the reported state to
+    // FAILED so a missing local evidence file can never masquerade as a
+    // successful COMPLETE, without touching already-submitted voter truth.
+    if control.persist_incremental && atomic_replace_json(&config.results_path, &report).is_err() {
+        if report.terminal_state != LoadDriverTerminalStateV1::Failed {
+            report.terminal_state = LoadDriverTerminalStateV1::Failed;
+            report.failures.push(results_persist_failure());
+        }
+        // One best-effort corrected write so the on-disk snapshot matches the
+        // returned FAILED report if the failure was transient. No submission
+        // is retried and no new voter is started by this write.
         let _ = atomic_replace_json(&config.results_path, &report);
     }
     // Fire the final progress event with the terminal state so subscribers
@@ -1249,15 +1362,15 @@ pub fn run_load_driver_with_control(
         receipt_verification_failures,
         failed_submissions,
         started,
-        terminal_state,
+        report.terminal_state,
     );
     Ok(report)
 }
 
 /// Helper: build a full report snapshot mid-run for progress persistence.
-/// Same fields as the final report; terminal_state is `Complete` for a
-/// snapshot (the driver has not stopped yet) — callers can override before
-/// persisting.
+/// Same fields as the final report; terminal_state is always `RUNNING` so a
+/// partial snapshot can never be mistaken for a finished run. The final
+/// terminal report is built separately with COMPLETE / STOPPED / FAILED.
 #[allow(clippy::too_many_arguments)]
 fn make_running_report(
     config: &LoadDriverConfig,
@@ -1305,12 +1418,30 @@ fn make_running_report(
         failures: failures.to_vec(),
         completed_voters,
         remaining_voters: total_voters.saturating_sub(completed_voters),
-        terminal_state: LoadDriverTerminalStateV1::Complete,
+        terminal_state: LoadDriverTerminalStateV1::Running,
     }
 }
 
+/// The failure record used when the authoritative per-host results JSON cannot
+/// be persisted. The message and code are fixed constants: they never embed
+/// filesystem paths, passphrases, credentials, or any other secret material.
+fn results_persist_failure() -> LoadDriverFailureV1 {
+    LoadDriverFailureV1 {
+        credential_file: String::new(),
+        stage: "results-persist",
+        code: "RESULTS_PERSIST_FAILED".to_owned(),
+    }
+}
+
+/// Records one voter's completion boundary: persists the RUNNING snapshot and
+/// emits progress. Returns false when the authoritative results persistence
+/// FAILED — the caller must stop before beginning another voter so local
+/// evidence can never silently diverge from organizer truth. The voter that
+/// just finished is already counted (its submission outcome is preserved); a
+/// persistence failure never "un-submits" it and never triggers a retry that
+/// could double-submit.
 #[allow(clippy::too_many_arguments)]
-fn emit_progress_and_persist(
+fn record_voter_boundary(
     control: &mut LoadDriverRunControl<'_>,
     config: &LoadDriverConfig,
     total_voters: usize,
@@ -1320,11 +1451,14 @@ fn emit_progress_and_persist(
     failed: usize,
     current_credential_file: &str,
     started: Instant,
-    terminal: Option<LoadDriverTerminalStateV1>,
     running_report: &DistributedLoadReportV1,
-) {
-    if control.persist_incremental {
-        let _ = atomic_replace_json(&config.results_path, running_report);
+    failures: &mut Vec<LoadDriverFailureV1>,
+) -> bool {
+    if control.persist_incremental
+        && atomic_replace_json(&config.results_path, running_report).is_err()
+    {
+        failures.push(results_persist_failure());
+        return false;
     }
     if let Some(progress) = control.progress.as_deref_mut() {
         let elapsed_ms = started.elapsed().as_millis();
@@ -1350,9 +1484,10 @@ fn emit_progress_and_persist(
             elapsed_ms,
             average_ms_per_completed_voter: average,
             estimated_remaining_ms,
-            terminal_state: terminal,
+            terminal_state: None,
         });
     }
+    true
 }
 
 fn emit_progress_final(
@@ -1800,6 +1935,341 @@ mod tests {
         ] {
             assert!(!lower.contains(marker), "report leaked marker {marker}");
         }
+    }
+
+    /// F3 — every state serializes as the operator-readable uppercase label,
+    /// including the new RUNNING snapshot state.
+    #[test]
+    fn terminal_state_serialization_covers_running_snapshot_state() {
+        assert_eq!(
+            serde_json::to_string(&LoadDriverTerminalStateV1::Running).unwrap(),
+            "\"RUNNING\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadDriverTerminalStateV1::Complete).unwrap(),
+            "\"COMPLETE\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadDriverTerminalStateV1::Stopped).unwrap(),
+            "\"STOPPED\""
+        );
+        assert_eq!(
+            serde_json::to_string(&LoadDriverTerminalStateV1::Failed).unwrap(),
+            "\"FAILED\""
+        );
+    }
+
+    /// F3 — a mid-run snapshot is always RUNNING, never a false COMPLETE, and
+    /// its counts stay mutually consistent (87 of 250 → remaining 163).
+    #[test]
+    fn running_snapshot_state_is_running_with_consistent_counts() {
+        let config = LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: PathBuf::from("."),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path: PathBuf::from("results.json"),
+            state_dir: None,
+            count: Some(250),
+            start_index: 1,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "host-a".to_owned(),
+        };
+        let snapshot = make_running_report(
+            &config,
+            250,
+            87,
+            0,
+            80,
+            7,
+            87,
+            80,
+            7,
+            80,
+            80,
+            0,
+            Instant::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            &CountAccumulator::default(),
+            &CountAccumulator::default(),
+            &[],
+            87,
+        );
+        assert_eq!(snapshot.terminal_state, LoadDriverTerminalStateV1::Running);
+        assert_eq!(snapshot.completed_voters, 87);
+        assert_eq!(snapshot.remaining_voters, 163);
+        assert_eq!(snapshot.requested_voter_count, 250);
+        // No underflow: saturating subtraction keeps the invariant.
+        let over = make_running_report(
+            &config,
+            250,
+            251,
+            0,
+            251,
+            0,
+            251,
+            251,
+            0,
+            251,
+            251,
+            0,
+            Instant::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            &CountAccumulator::default(),
+            &CountAccumulator::default(),
+            &[],
+            251,
+        );
+        assert_eq!(over.remaining_voters, 0);
+        // The serialized snapshot must carry the RUNNING label.
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(
+            json.contains("\"RUNNING\""),
+            "snapshot must serialize RUNNING"
+        );
+        assert!(
+            !json.contains("\"COMPLETE\""),
+            "snapshot must not claim COMPLETE"
+        );
+    }
+
+    /// F1 — atomic persistence succeeds on a usable destination and round-trips.
+    #[test]
+    fn atomic_replace_json_round_trips_on_usable_destination() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let path = scratch.path().join("nested").join("results.json");
+        let config = LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: PathBuf::from("."),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path: path.clone(),
+            state_dir: None,
+            count: Some(1),
+            start_index: 1,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "host-a".to_owned(),
+        };
+        let snapshot = make_running_report(
+            &config,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Instant::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            &CountAccumulator::default(),
+            &CountAccumulator::default(),
+            &[],
+            0,
+        );
+        atomic_replace_json(&path, &snapshot).expect("persistence succeeds");
+        let bytes = fs::read(&path).expect("report exists on disk");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(text.contains("\"RUNNING\""));
+        // No sibling temp file is left behind by a successful replace.
+        let tmp = scratch.path().join("nested").join("results.json.tmp");
+        assert!(!tmp.exists(), "atomic replace must not leak its .tmp file");
+    }
+
+    /// F1 — persistence failure modes are deterministic and fail closed: a
+    /// parent that is a regular file, and a destination that is a directory.
+    #[test]
+    fn atomic_replace_json_fails_closed_on_unusable_destinations() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let parent_file = scratch.path().join("not-a-dir");
+        fs::write(&parent_file, b"regular file").expect("write parent file");
+        let config = LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: PathBuf::from("."),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path: PathBuf::new(),
+            state_dir: None,
+            count: Some(1),
+            start_index: 1,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "host-a".to_owned(),
+        };
+        let snapshot = make_running_report(
+            &config,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Instant::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            &CountAccumulator::default(),
+            &CountAccumulator::default(),
+            &[],
+            0,
+        );
+        let mut config = config;
+        config.results_path = parent_file.join("results.json");
+        assert!(
+            atomic_replace_json(&config.results_path, &snapshot).is_err(),
+            "parent-is-a-file must fail"
+        );
+        let destination_dir = scratch.path().join("results-dir");
+        fs::create_dir_all(&destination_dir).expect("create dir");
+        assert!(
+            atomic_replace_json(&destination_dir, &snapshot).is_err(),
+            "destination-is-a-directory must fail"
+        );
+    }
+
+    /// F1 — a persistence failure at the voter boundary is surfaced, never
+    /// silently ignored, and never leaks the results path or any secret.
+    #[test]
+    fn record_voter_boundary_surfaces_persistence_failure_without_leaking() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let parent_file = scratch.path().join("not-a-dir");
+        fs::write(&parent_file, b"regular file").expect("write parent file");
+        let results_path = parent_file.join("results.json");
+        let config = LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: PathBuf::from("."),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path,
+            state_dir: None,
+            count: Some(2),
+            start_index: 1,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "host-a".to_owned(),
+        };
+        let mut progress_events: Vec<LoadDriverProgressV1> = Vec::new();
+        let mut progress = |event: LoadDriverProgressV1| progress_events.push(event);
+        let mut control = LoadDriverRunControl {
+            progress: Some(&mut progress),
+            cancel: None,
+            persist_incremental: true,
+        };
+        let snapshot = make_running_report(
+            &config,
+            2,
+            1,
+            0,
+            1,
+            0,
+            1,
+            1,
+            0,
+            1,
+            1,
+            0,
+            Instant::now(),
+            Duration::ZERO,
+            Duration::ZERO,
+            &CountAccumulator::default(),
+            &CountAccumulator::default(),
+            &[],
+            1,
+        );
+        let mut failures = Vec::new();
+        let continued = record_voter_boundary(
+            &mut control,
+            &config,
+            2,
+            1,
+            1,
+            0,
+            0,
+            "voter-0001.tcbcred",
+            Instant::now(),
+            &snapshot,
+            &mut failures,
+        );
+        // The boundary reports failure so the driver stops before the next voter.
+        assert!(!continued, "persistence failure must stop the run");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].stage, "results-persist");
+        assert_eq!(failures[0].code, "RESULTS_PERSIST_FAILED");
+        // The voter that completed is still truthfully counted.
+        assert_eq!(snapshot.completed_voters, 1);
+        // No secret or operator path may appear in the failure record.
+        let rendered = format!("{} {}", failures[0].stage, failures[0].code);
+        let lower = rendered.to_lowercase();
+        for marker in [
+            "passphrase",
+            "secret",
+            "scalar",
+            "not-a-dir",
+            "results.json",
+        ] {
+            assert!(
+                !lower.contains(marker),
+                "persistence failure leaked {marker}"
+            );
+        }
+    }
+
+    /// F1 — an unusable results destination is rejected by offline validation
+    /// before any network activity or Tor startup.
+    #[test]
+    fn validate_rejects_missing_and_unusable_results_paths() {
+        let scratch = tempfile::tempdir().expect("scratch dir");
+        let mut config = LoadDriverConfig {
+            manifest_path: PathBuf::from("."),
+            registry_path: PathBuf::from("."),
+            candidate_path: PathBuf::from("."),
+            voter_public_bundle_path: PathBuf::from("."),
+            credentials_dir: PathBuf::from("."),
+            tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            results_path: PathBuf::new(),
+            state_dir: None,
+            count: Some(1),
+            start_index: 1,
+            concurrency: 1,
+            choice: ChoiceDistribution::RoundRobin,
+            passphrase_env: DEFAULT_PASSPHRASE_ENV.to_owned(),
+            host_run_id: "test".to_owned(),
+        };
+        let error = validate_results_output_path(&config.results_path)
+            .expect_err("empty results path must be rejected");
+        assert!(error.contains("required"), "{error}");
+        config.results_path = scratch.path().to_path_buf();
+        assert!(validate_results_output_path(&config.results_path).is_err());
+        let parent_file = scratch.path().join("not-a-dir");
+        fs::write(&parent_file, b"regular file").expect("write parent file");
+        config.results_path = parent_file.join("results.json");
+        assert!(validate_results_output_path(&config.results_path).is_err());
+        config.results_path = scratch.path().join("ok").join("results.json");
+        validate_results_output_path(&config.results_path).expect("usable path accepted");
     }
 
     #[test]

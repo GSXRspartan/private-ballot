@@ -48,8 +48,8 @@ fn managed_tor_bootstrap_and_shutdown_smoke() {
 
     let startup = ManagedTorStartupConfigV1::new(tor_exe.clone(), scratch.path().to_path_buf());
     let start = Instant::now();
-    let mut session =
-        start_managed_tor_session(&startup).expect("managed-Tor session must start and reach SOCKS readiness");
+    let mut session = start_managed_tor_session(&startup)
+        .expect("managed-Tor session must start and reach SOCKS readiness");
     let elapsed = start.elapsed();
     eprintln!(
         "managed Tor ready on {} after {} ms ({})",

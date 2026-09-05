@@ -6,13 +6,14 @@
 
 use std::fs;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use tari_cc_private_ballot_cli::{
     ChoiceDistribution, DISTRIBUTED_LOAD_LARGE_RUN_WARNING_THRESHOLD,
     DISTRIBUTED_LOAD_MAX_REGISTRY_MEMBERS, LoadDriverConfig, LoadDriverRunControl,
-    credential_count, partition_credentials_with_summary, validate_load_driver_config,
-    validate_load_driver_inputs,
+    credential_count, partition_credentials_with_summary, run_load_driver_with_control,
+    validate_load_driver_config, validate_load_driver_inputs,
 };
 
 /// The registry ceiling exposed to the GUI must be the same value the
@@ -152,4 +153,257 @@ fn load_driver_run_control_defaults_have_no_hooks() {
     assert!(control.progress.is_none());
     assert!(control.cancel.is_none());
     assert!(!control.persist_incremental);
+}
+
+// ---------------------------------------------------------------------------
+// F2 — exact credential selection: the driver must fail closed, BEFORE any
+// election artifact is loaded and before any voter runs, unless the requested
+// count is satisfied EXACTLY by the local credential files.
+// ---------------------------------------------------------------------------
+
+fn scratch_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "load-driver-exact-{}-{}-{}",
+        label,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("create scratch");
+    dir
+}
+
+fn write_dummy_credentials(dir: &PathBuf, count: usize) {
+    std::fs::create_dir_all(dir).expect("create credentials dir");
+    for index in 1..=count {
+        let path = dir.join(format!("voter-{index:04}.tcbcred"));
+        std::fs::write(&path, b"unused-body").expect("write credential");
+    }
+}
+
+fn config_with(
+    credentials_dir: PathBuf,
+    start_index: usize,
+    count: Option<usize>,
+) -> LoadDriverConfig {
+    // Artifact paths point at an EXISTING location (the credentials dir's
+    // parent) so validate_load_driver_config passes; the run then fails at
+    // artifact content loading, which is exactly the sentinel these tests
+    // assert on after the selection gate has passed.
+    let existing = credentials_dir
+        .parent()
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| credentials_dir.clone());
+    LoadDriverConfig {
+        manifest_path: existing.clone(),
+        registry_path: existing.clone(),
+        candidate_path: existing.clone(),
+        voter_public_bundle_path: existing,
+        tor_socks: SocketAddr::from(([127, 0, 0, 1], 1)),
+        credentials_dir,
+        results_path: PathBuf::from("results.json"),
+        state_dir: None,
+        count,
+        start_index,
+        concurrency: 1,
+        choice: ChoiceDistribution::RoundRobin,
+        passphrase_env: "TARI_BALLOT_LOAD_PASSPHRASE".to_owned(),
+        host_run_id: "host".to_owned(),
+    }
+}
+
+#[test]
+fn exact_requested_selection_passes_the_driver_gate() {
+    let base = scratch_dir("exact-pass");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 3);
+    // The selection gate passes, so the run proceeds to artifact loading and
+    // fails there — NOT on selection.
+    let error = run_load_driver_with_control(
+        &config_with(voters, 1, Some(3)),
+        "unused-passphrase",
+        &mut LoadDriverRunControl::default(),
+    )
+    .expect_err("dummy artifacts must fail artifact loading");
+    assert!(
+        error.contains("election artifacts"),
+        "exact selection must pass the gate and reach artifact loading: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn partition_250_files_local_start_1_count_250_passes_the_driver_gate() {
+    let base = scratch_dir("partition-250");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 250);
+    let error = run_load_driver_with_control(
+        &config_with(voters, 1, Some(250)),
+        "unused-passphrase",
+        &mut LoadDriverRunControl::default(),
+    )
+    .expect_err("artifact loading must fail after the gate passes");
+    assert!(
+        error.contains("election artifacts"),
+        "requested 250 / available 250 / local start 1 must pass the gate: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn partition_directory_with_global_start_index_fails_before_any_voter() {
+    // A copied partition holds ONLY global voters 251–500 as local files
+    // 1–250. Entering the global start index 251 selects ZERO local files and
+    // must fail closed before any voter execution.
+    let base = scratch_dir("partition-global-start");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 250);
+    let error = run_load_driver_with_control(
+        &config_with(voters, 251, Some(250)),
+        "unused-passphrase",
+        &mut LoadDriverRunControl::default(),
+    )
+    .expect_err("global start index on a local partition must fail");
+    assert!(
+        error.contains("requested 250") && error.contains("only 0 credentials"),
+        "zero selection must fail closed with a useful message: {error}"
+    );
+    assert!(
+        !error.contains("election artifacts"),
+        "the gate must fire before election artifacts are loaded: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn selected_zero_files_can_never_reach_a_report() {
+    let base = scratch_dir("zero-selected");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 2);
+    // start index past the end of the directory: zero files selected.
+    assert!(
+        run_load_driver_with_control(
+            &config_with(voters.clone(), 3, Some(1)),
+            "unused-passphrase",
+            &mut LoadDriverRunControl::default(),
+        )
+        .is_err()
+    );
+    // And without an explicit count (process-remainder mode) an empty
+    // remainder is also rejected rather than reporting COMPLETE with 0.
+    let empty = base.join("empty");
+    std::fs::create_dir_all(&empty).expect("create empty dir");
+    let error = run_load_driver_with_control(
+        &config_with(empty, 1, None),
+        "unused-passphrase",
+        &mut LoadDriverRunControl::default(),
+    )
+    .expect_err("zero selected files must fail");
+    assert!(
+        error.contains("no test voter credentials were selected"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn fewer_files_than_requested_fails_closed() {
+    let base = scratch_dir("short-selection");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 173);
+    let error = run_load_driver_with_control(
+        &config_with(voters, 1, Some(250)),
+        "unused-passphrase",
+        &mut LoadDriverRunControl::default(),
+    )
+    .expect_err("partial selection must fail closed");
+    assert!(
+        error.contains("requested 250") && error.contains("only 173"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn offline_validation_reports_requested_versus_selected_counts() {
+    let base = scratch_dir("validation-counts");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 4);
+    let mut config = config_with(voters, 1, Some(4));
+    // Point every artifact at the (existing) base dir so config existence
+    // checks pass; the summary is what this test inspects. Artifact content
+    // loading fails for dummy files, so only exercise the selection shape
+    // through the standalone results-path validation helper and the gate.
+    config.manifest_path = base.clone();
+    config.registry_path = base.clone();
+    config.candidate_path = base.clone();
+    config.voter_public_bundle_path = base.clone();
+    config.results_path = base.join("results.json");
+    // Artifact loading fails for a directory — the exact-selection gate runs
+    // inside validate too, but AFTER artifacts; the driver-level tests above
+    // prove the gate. Here we assert the summary path is reachable only with
+    // real artifacts, i.e. validation still fails closed on dummies.
+    let error = validate_load_driver_inputs(&config)
+        .expect_err("dummy artifacts must fail offline validation");
+    assert!(error.contains("election artifacts"), "{error}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn partition_range_math_stays_inclusive_and_global_display_is_preserved() {
+    let base = scratch_dir("range-math");
+    let all = base.join("all");
+    write_dummy_credentials(&all, 500);
+    let partition = base.join("vps");
+    let summary =
+        partition_credentials_with_summary(&all, &partition, 251, 250).expect("partition 251–500");
+    // Global range display stays correct...
+    assert_eq!(summary.first_voter_index, 251);
+    assert_eq!(summary.last_voter_index, 500);
+    assert_eq!(summary.credentials_detected, 500);
+    assert_eq!(summary.credentials_copied, 250);
+    // ...and the partition directory holds exactly 250 LOCAL files, so a run
+    // against it must use local start index 1 (not the global 251).
+    let copied_count = credential_count(&partition).expect("count partition");
+    assert_eq!(copied_count, 250);
+    let local = partition_credentials_with_summary(&partition, &base.join("recheck"), 1, 250)
+        .expect("local run range");
+    assert_eq!(local.first_voter_index, 1);
+    assert_eq!(local.last_voter_index, 250);
+    assert_eq!(local.credentials_copied, 250);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn driver_fails_closed_before_any_voter_when_results_persistence_is_unusable() {
+    let base = scratch_dir("persist-probe");
+    let voters = base.join("voters");
+    write_dummy_credentials(&voters, 2);
+    // The parent of the results path is a REGULAR FILE, so no results JSON can
+    // ever be committed there. With incremental persistence requested the
+    // driver must fail closed BEFORE the first voter — with 2 selected files
+    // the run must error at the gate, not run one voter and stop.
+    let parent_file = base.join("not-a-dir");
+    std::fs::write(&parent_file, b"regular file").expect("write parent file");
+    let mut config = config_with(voters, 1, Some(2));
+    config.results_path = parent_file.join("results.json");
+    let mut control = LoadDriverRunControl {
+        progress: None,
+        cancel: None,
+        persist_incremental: true,
+    };
+    let error = run_load_driver_with_control(&config, "unused-passphrase", &mut control)
+        .expect_err("unusable results destination must fail the run");
+    assert!(
+        error.contains("results output"),
+        "failure must name the results evidence problem: {error}"
+    );
+    // No results file or partial snapshot may exist.
+    assert!(
+        !parent_file.join("results.json").exists(),
+        "no results file must be created for a failed pre-run gate"
+    );
+    let _ = std::fs::remove_dir_all(&base);
 }

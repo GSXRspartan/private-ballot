@@ -51,16 +51,37 @@ export interface LoadProgress {
   averageMsPerCompletedVoter?: number;
   estimated_remaining_ms?: number | null;
   estimatedRemainingMs?: number | null;
-  terminal_state?: "COMPLETE" | "STOPPED" | "FAILED" | null;
-  terminalState?: "COMPLETE" | "STOPPED" | "FAILED" | null;
+  terminal_state?: "RUNNING" | "COMPLETE" | "STOPPED" | "FAILED" | null;
+  terminalState?: "RUNNING" | "COMPLETE" | "STOPPED" | "FAILED" | null;
 }
 
 export function shouldWarnLargeRun(voterCount: number): boolean {
   return voterCount >= LARGE_RUN_WARNING_THRESHOLD;
 }
 
-export function canStartLoadTest(runState: RunState, validated: boolean): boolean {
-  return validated && (runState === "VALIDATED" || runState === "COMPLETE" || runState === "STOPPED" || runState === "FAILED");
+export function canStartLoadTest(
+  runState: RunState,
+  validated: boolean,
+  resultsPath: string,
+): boolean {
+  // Durable per-host results evidence is mandatory: Run Test stays disabled
+  // until a results JSON destination has been selected, even when every other
+  // input has been validated.
+  return (
+    validated &&
+    resultsPath.trim().length > 0 &&
+    (runState === "VALIDATED" || runState === "COMPLETE" || runState === "STOPPED" || runState === "FAILED")
+  );
+}
+
+// Validation staleness is derived by comparing the form snapshot that was
+// validated against the CURRENT form. Any field change — including the results
+// path — produces a different key, so stale validation can never enable Start.
+export function isValidationCurrent(
+  validatedKey: string | null,
+  currentKey: string,
+): boolean {
+  return validatedKey !== null && validatedKey === currentKey;
 }
 
 // A stop request is cooperative: the in-flight voter is allowed to finish before
