@@ -46,6 +46,25 @@ Voters create an encrypted credential file, give the organizer only the
 public enrollment key, load the issued election package, choose a route,
 cast once, and keep their receipt and credential private.
 
+## Governance source workflow (BLAKE3 pin)
+
+An election is bound to a governance source document (the text that defines
+what is being voted on). To pin it during **Create election → Governance
+source**:
+
+1. Select the source document.
+2. Click **"Use this document digest as the pin"**. The app computes the
+   document's BLAKE3 digest and binds it as the election's
+   `governance_source_revision` pin.
+3. **Do not modify the source document afterward.** Any change alters its
+   BLAKE3 digest and will no longer match the pin.
+4. **Keep the exact same source document.** When final archive verification
+   requires it, you provide the same file so the verifier can confirm it
+   still matches the bound pin.
+
+The pin is a commitment, not a copy: the archive records the digest, and
+verification re-hashes the document you supply and compares it to the pin.
+
 ## External requirements (not bundled)
 
 Private Ballot is a self-contained desktop app for the parts of the
@@ -61,7 +80,15 @@ the installer does **not** ship:
 - **Tari Ootle `walletd`** (v0.39.2 on Esmeralda) — required only if you
   want to publish an optional public anchor. Voters do not need walletd
   and do not need tTARI. The app talks to walletd on loopback at
-  `http://127.0.0.1:5100/json_rpc`.
+  `http://127.0.0.1:5100/json_rpc`. No wallet API key is stored in this
+  repository.
+
+  After the wallet submits an Ootle anchor, receipt verification may remain
+  in a **Polling** state for roughly a minute while walletd/the indexer
+  observes the accepted transaction. **Do not resubmit the anchor** just
+  because the receipt is still polling — wait briefly and use **Check
+  receipt** again. Re-checking only re-polls the indexer; it never contacts
+  walletd again.
 - **tTARI** — Esmeralda testnet TARI, only for the organizer publishing
   an anchor, only enough to cover the transaction fee.
 
@@ -81,6 +108,23 @@ setup guide for organizers, voters, and developers.
 - `tools/`, `scripts/`, `fuzz/` - developer/auditor tooling.
 - `third_party/tari-triptych/` - vendored Triptych implementation,
   licensed under BSD-3-Clause.
+
+## Private Ballot Load Tester — TEST / DEVELOPER TOOL
+
+The `tools/distributed-load-tester-gui/` app is the **Private Ballot Load
+Tester — a TEST / DEVELOPER tool. It is NOT normal voter software** and must
+never be used to cast real ballots. It exists to drive synthetic voters at
+scale over managed Tor for developers and auditors.
+
+Its synthetic option choices are **deterministic and reproducible**
+(round-robin: voter *i* picks option `i % option_count`). This means:
+
+- If the voter count is **evenly divisible** by the option count, the
+  synthetic tally is an **intentional exact tie**. For four options,
+  100 voters → **25 / 25 / 25 / 25**.
+- For exactly one option to lead, choose a voter count where
+  `voter_count % option_count == 1`. For four options,
+  101 voters → **26 / 25 / 25 / 25**.
 
 ## Build And Test
 
@@ -115,25 +159,62 @@ The generated `.exe`, `.msi`, `.wasm`, and checksum files are release
 assets. They should be attached to a GitHub Release only after provenance
 and checksums are recorded.
 
-## Qualified platforms
+## Qualification and platform status
 
-- **Windows 11 x64** — currently qualified; the scale-qualification harness
-  has passed at 100 voters and been run at additional scales during
-  release preparation (see
-  [docs/development/load-testing/](docs/development/load-testing/) and
-  `scale-qualification-results/` for recorded runs).
-- **Ubuntu Linux 24.04 LTS x64** — currently qualified for the desktop
-  shell. Full test suites (frontend 871/0, gui-core 616/0, managed-Tor
-  transport 69/0, transport-network 68/0) and the production Tauri
-  release build (`.deb`, `.rpm`, `.AppImage`) all pass; see
-  [docs/release/licenses/LINUX_NATIVE_DEPENDENCIES.md](docs/release/licenses/LINUX_NATIVE_DEPENDENCIES.md)
-  and the Linux section of [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md)
-  for install/build notes. The `managed-tor` production transport is
-  enabled by default in the Linux release.
-- **macOS** — not yet qualified. The code is cross-platform by
-  construction (the Tauri 2 shell and every Rust crate build on macOS),
-  but a real release build and per-platform test pass have not been
-  performed for the alpha. Qualification is planned.
+Qualification numbers below reflect the v0.1.0 release pass.
+
+**Windows 11 x64 — physically end-to-end qualified.** A final fresh physical
+election ran completely: 100 eligible voters, 100 selected, 100 submission
+attempts, 100 successful deliveries, 100 verified receipts, 0 submission
+failures, 0 rejected receipts; the organizer accepted 100 and rejected 0; the
+tally was computed, the election finalized, the canonical archive written and
+**independently verified**, and a Tari Ootle V2 anchor was prepared, accepted
+by the wallet, receipt-verified, and **published on-chain**. An earlier
+finalized 100-voter election whose archive failed after a GUI restart was
+recovered and archived with the durable transport-binding recovery path. The
+full test matrix passed on Windows (Rust toolchain
+`1.97.1-x86_64-pc-windows-msvc`):
+
+- Organizer frontend: 871 passed / 0 failed
+- Organizer root workspace (Rust): 1849 passed / 0 failed / 14 ignored
+- Organizer `gui/src-tauri`: 86 passed / 0 failed
+- Load Tester frontend: 24 passed / 0 failed
+- Load Tester `src-tauri`: 20 passed / 0 failed
+
+An earlier historical distributed test across multiple physical hosts requested
+500 ballots with 499 accepted, 0 rejected, and 1 recorded pre-submission
+private-transport failure (do not read this as 500/500); startup readiness,
+count integrity, and safe pre-send onion recovery were subsequently hardened
+and independently reviewed.
+
+**Linux (Ubuntu 22.04.5 LTS x64) — core Rust and both frontends build; desktop
+bundle not produced on this host.** In this release pass, from a fresh clone of
+the release source: the root Rust workspace `cargo check` passed, and
+`cargo test` was 1838 passed / 8 failed / 14 ignored. **All 8 failures are
+Linux test-fixture/environment portability gaps, not protocol or security
+regressions** — 7 are cases where the Unix `tor` binary validator correctly
+requires the executable bit but the (Windows-authored) test fixtures create a
+fake `tor` file without `chmod +x`, and 2 assert Windows-style path suffixes /
+`/tmp` canonicalization. Both frontends install, type-check, and **build**
+(`vite build`) on Linux; their Node test runner needs Node ≥ 22.6 for
+`--experimental-strip-types` and could not execute under this host's Node
+20.20.2 (they pass on Windows Node 24). The Tauri desktop shell was **not**
+built on this host: the GTK/WebKit development packages
+(`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
+`libayatana-appindicator3-dev`) are not installed and could not be provisioned
+non-interactively, so no `.deb`/`.rpm`/`.AppImage` was produced in this pass.
+See [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md) for the Linux dependency
+list needed to build the desktop shell.
+
+**macOS — hosted qualification workflow prepared; execution pending GitHub
+push.** A GitHub Actions workflow
+([.github/workflows/macos-qualification.yml](.github/workflows/macos-qualification.yml))
+builds both applications on `macos-14` (arm64) and `macos-13` (x86_64),
+runs the Rust and frontend tests, and uploads unsigned/unnotarized `.dmg`
+artifacts. It requires no signing secrets, no wallet, and no private data. It
+has not yet run (no repository has been pushed); macOS runtime is therefore
+**not** claimed as qualified in this release. macOS `.dmg` builds are unsigned
+and not notarized unless signing is configured later.
 
 ## Verification
 
