@@ -40,6 +40,18 @@ zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 curve25519-dalek-v4 = { package = "curve25519-dalek", version = "=4.1.3", default-features = false, features = ["alloc"] }
 tari-cc-private-ballot-ootle-anchor-app = { path = "../ootle-anchor-app", features = ["test-support"] }
+# Enable THIS crate's own `test-support` feature for its test targets only, so
+# the ordinary `cargo test -p gui-core` invocation activates the per-test
+# terminal-index override in `finish_live_step` and never falls back to the real
+# per-user anchor state (`%LOCALAPPDATA%\...\anchor-state\terminal-index-v1`).
+# Without this the override is `#[cfg(feature = "test-support")]`-gated off under
+# the default test invocation, making live_anchor_publish tests non-hermetic
+# (they could collide with stale developer state or each other via the
+# fail-closed ANCHOR_PUBLISH_TERMINAL_INDEX_CONFLICT guard). Resolver "3" keeps
+# dev-dependency features isolated: normal `cargo build -p gui-core` and the
+# production GUI/Tauri build that depends on gui-core are still compiled WITHOUT
+# `test-support`, so production terminal-index behavior is unchanged.
+tari-cc-private-ballot-gui-core = { path = ".", features = ["test-support"] }
 
 [lints]
 workspace = true

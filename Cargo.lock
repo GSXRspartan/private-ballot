@@ -3224,6 +3224,7 @@ dependencies = [
  "tari-cc-private-ballot-archive",
  "tari-cc-private-ballot-ballot",
  "tari-cc-private-ballot-crypto",
+ "tari-cc-private-ballot-gui-core",
  "tari-cc-private-ballot-ootle-anchor-adapter",
  "tari-cc-private-ballot-ootle-anchor-app",
  "tari-cc-private-ballot-ootle-anchor-lifecycle-orchestrator",

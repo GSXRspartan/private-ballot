@@ -288,6 +288,22 @@ fn binding_recovery_unavailable() -> CommandError {
     )
 }
 
+/// Fail-closed error for the durable-integrity gate: the recovered
+/// content-addressed accepted-package set does not match the authoritative
+/// accepted tally the archive workflow supplied. A DISTINCT code from
+/// [`binding_recovery_unavailable`] so operators and diagnostics can tell a
+/// partially-lost / internally-inconsistent durable inbox apart from a
+/// descriptor that simply could not seal. Deterministic and sanitized: it names
+/// the class of inconsistency without leaking any package bytes, secret, count,
+/// or path.
+fn binding_recovery_count_mismatch() -> CommandError {
+    CommandError::new(
+        "GUI_TRANSPORT_ARCHIVE_BINDING_COUNT_MISMATCH",
+        "ARCHIVE_INTEGRITY",
+        "the durable accepted-package set does not match the authoritative accepted count",
+    )
+}
+
 /// Deterministically recovers the authoritative finalized transport archive
 /// binding for one election from DURABLE state alone — the signed, election-
 /// scoped organizer descriptor plus the content-addressed private-intake inbox —
@@ -308,7 +324,12 @@ fn binding_recovery_unavailable() -> CommandError {
 ///   * an inbox package that does not match its content-address -> rejected by
 ///     `read_accepted_package_digests_v1`;
 ///   * an empty inbox while the authoritative session recorded accepted ballots
-///     -> rejected (never silently produce a binding over an empty set).
+///     -> rejected (never silently produce a binding over an empty set);
+///   * a recovered unique accepted-package count that does not EQUAL the
+///     authoritative accepted tally supplied by the archive workflow -> rejected
+///     BEFORE any canonical archive is written (a partially-lost durable inbox
+///     must never seal a smaller-but-valid binding that only the later anchor
+///     gate would catch).
 ///
 /// The `app_data_root`-based core keeps this unit-testable without a Tauri
 /// runtime; [`recover_finalized_transport_binding_from_durable_state`] wraps it
@@ -341,6 +362,22 @@ pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
             return Err(binding_recovery_unavailable());
         }
         return Ok(None);
+    }
+    // Durable-integrity gate (fail-closed, BEFORE any canonical archive write):
+    // the recovered content-addressed accepted set MUST exactly match the
+    // authoritative accepted tally the archive workflow supplied
+    // (`session.accepted_count()` at the call site). A partially-lost durable
+    // inbox — e.g. authoritative accepted = 100 but only 99 surviving package
+    // digests — would otherwise seal a smaller-but-valid binding that ONLY the
+    // later Ootle anchor-config gate would reject, after the canonical archive
+    // was already written. Refuse here and never fabricate the missing package,
+    // alter the tally, or mutate the inbox. `read_accepted_package_digests_v1`
+    // already re-hashed, sorted, and de-duplicated by content address, so this
+    // length is the UNIQUE accepted-package count and compares like-for-like
+    // with the authoritative unique accepted tally (`ledger.len()`). The
+    // `usize -> u64` widening is lossless on every supported target.
+    if digests.len() as u64 != authoritative_accepted_count {
+        return Err(binding_recovery_count_mismatch());
     }
     finalized_transport_archive_binding_from_accepted_digests_v1(&bundle.descriptor, &digests)
         .map_err(|_| binding_recovery_unavailable())
@@ -1976,6 +2013,187 @@ mod tests {
         std::fs::write(inbox.join(name), b"TAMPERED-DIFFERENT-BYTES").expect("write tampered");
         let result = recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 1);
         assert!(result.is_err(), "a tampered inbox package must fail closed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Provisions a signed organizer descriptor under the `VALID_HASH` transport
+    /// path whose INTERNAL binding commits to a DIFFERENT election manifest hash,
+    /// so durable recovery for `VALID_HASH` loads a descriptor that does not bind
+    /// this election (exercises the wrong-election fail-closed branch).
+    fn provision_wrong_election_descriptor(app_data_root: &Path, foreign_manifest: [u8; 32]) {
+        let root = election_transport_subpath(app_data_root, VALID_HASH).expect("election root");
+        let paths = TransportPaths::under(&root);
+        std::fs::create_dir_all(&paths.organizer_private_dir).expect("private dir");
+        std::fs::create_dir_all(paths.voter_bundle_path.parent().expect("parent"))
+            .expect("bundle parent");
+        let binding = TransportElectionBindingV1 {
+            election_id: b"wrong-election".to_vec(),
+            manifest_hash: foreign_manifest,
+        };
+        let material =
+            generate_transport_authority_material_v1("test-root".to_owned()).expect("material");
+        provision_organizer_transport_bundles_v1(
+            &paths.organizer_private_dir,
+            &paths.voter_bundle_path,
+            &material,
+            &binding,
+            RECOVERY_TEST_ONION.to_owned(),
+            &root.join("tor-data"),
+            &paths.hidden_service_dir,
+        )
+        .expect("provision wrong-election bundle");
+    }
+
+    #[test]
+    fn durable_recovery_matching_count_100_succeeds() {
+        // Authoritative accepted = 100 and recovered packages = 100: the durable
+        // integrity gate passes and the authoritative binding is reconstructed.
+        let root = temp_app_data_root("match-100");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 100);
+        let binding =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 100)
+                .expect("recovery succeeds when counts agree")
+                .expect("a full inbox yields a binding");
+        let accepted: u64 = binding
+            .batches()
+            .iter()
+            .map(|batch| batch.accepted_unique_count())
+            .sum();
+        assert_eq!(accepted, 100, "the binding must cover every durable accepted package");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_undercount_100_vs_99_fails_closed() {
+        // Partially-lost durable inbox: authoritative accepted = 100 but only 99
+        // package digests survive. Recovery MUST fail closed BEFORE sealing so no
+        // smaller-but-valid canonical archive can be written; the specific
+        // count-mismatch code proves the durable-integrity gate fired (not the
+        // generic seal-unavailable path).
+        let root = temp_app_data_root("under-100-99");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 99);
+        let error =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 100)
+                .expect_err("99 recovered vs 100 authoritative must fail closed");
+        assert_eq!(error.code, "GUI_TRANSPORT_ARCHIVE_BINDING_COUNT_MISMATCH");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_overcount_99_vs_100_fails_closed() {
+        // The inverse inconsistency: authoritative accepted = 99 but 100 durable
+        // package digests are present. Recovery MUST also fail closed — the
+        // recovered set must EQUAL the authoritative tally, never merely bound it.
+        let root = temp_app_data_root("over-99-100");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 100);
+        let error =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 99)
+                .expect_err("100 recovered vs 99 authoritative must fail closed");
+        assert_eq!(error.code, "GUI_TRANSPORT_ARCHIVE_BINDING_COUNT_MISMATCH");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_zero_accepted_zero_packages_is_none() {
+        // Preserved intended semantics: no accepted ballots and an empty durable
+        // inbox is a valid "nothing to bind" result (Ok(None)), never an error and
+        // never a fabricated binding. The count gate is not reached (empty inbox).
+        let root = temp_app_data_root("zero-zero");
+        provision_election_descriptor(&root);
+        let inbox = private_intake_inbox_directory_v1(&root, VALID_HASH).expect("inbox path");
+        std::fs::create_dir_all(&inbox).expect("empty inbox dir");
+        let recovered =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 0)
+                .expect("zero accepted with an empty inbox is not an error");
+        assert!(recovered.is_none(), "nothing accepted => nothing to bind");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_positive_accepted_zero_packages_still_fails_closed() {
+        // Existing fail-closed behavior is preserved by the count gate's sibling
+        // empty-inbox branch: authoritative accepted > 0 with zero durable
+        // packages must never produce a binding.
+        let root = temp_app_data_root("positive-zero");
+        provision_election_descriptor(&root);
+        let inbox = private_intake_inbox_directory_v1(&root, VALID_HASH).expect("inbox path");
+        std::fs::create_dir_all(&inbox).expect("empty inbox dir");
+        let result =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 100);
+        assert!(result.is_err(), "accepted>0 with an empty inbox must fail closed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_count_mismatch_precedes_archive_seal() {
+        // Evidence for "the mismatch is caught BEFORE canonical archive creation":
+        // the recovery function is the fail-closed gate the archive-write path
+        // depends on, and on a count mismatch it returns the COUNT_MISMATCH code
+        // WITHOUT ever calling the seal primitive
+        // (`finalized_transport_archive_binding_from_accepted_digests_v1`) that a
+        // successful binding would flow into. Because the canonical archive is
+        // only written by the caller AFTER a successful binding is returned, a
+        // COUNT_MISMATCH error means no archive-eligible binding — and therefore
+        // no canonical archive file — can be produced.
+        let root = temp_app_data_root("precede-seal");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 5);
+        let error =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 6)
+                .expect_err("a count mismatch must fail closed before sealing");
+        assert_eq!(
+            error.code, "GUI_TRANSPORT_ARCHIVE_BINDING_COUNT_MISMATCH",
+            "the gate must fire before the seal, not report a generic seal failure",
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_wrong_election_descriptor_fails_closed() {
+        // Defense in depth preserved: a persisted descriptor that does not bind
+        // THIS election is rejected, independent of the accepted-count gate.
+        let mut foreign = VALID_HASH_BYTES;
+        foreign[0] ^= 0xff; // any manifest hash distinct from VALID_HASH
+        let root = temp_app_data_root("wrong-election");
+        provision_wrong_election_descriptor(&root, foreign);
+        seed_inbox_packages(&root, 3);
+        let result =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 3);
+        assert!(result.is_err(), "a wrong-election descriptor must fail closed");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn durable_recovery_matches_shared_finalize_when_counts_agree() {
+        // Equivalence: when the count gate passes, recovery seals the SAME binding
+        // the shared finalize primitive produces over the identical durably-read
+        // accepted digest set (the same primitive proven digest-equivalent to a
+        // live gateway finalize). The integrity gate is transparent on the
+        // matching path — it only adds a fail-closed guard, never divergence.
+        let root = temp_app_data_root("equiv-finalize");
+        provision_election_descriptor(&root);
+        seed_inbox_packages(&root, 4);
+        let recovered =
+            recover_finalized_transport_binding_from_durable_state_under(&root, VALID_HASH, 4)
+                .expect("recovery succeeds")
+                .expect("a non-empty inbox yields a binding");
+        // Reconstruct the expected binding directly from the same durable inputs.
+        let private_dir = election_transport_subpath(&root, VALID_HASH)
+            .expect("election root")
+            .join("organizer-private");
+        let bundle = load_organizer_private_bundle_v1(&private_dir).expect("bundle loads");
+        let inbox = private_intake_inbox_directory_v1(&root, VALID_HASH).expect("inbox path");
+        let digests = read_accepted_package_digests_v1(&inbox).expect("digests read");
+        let direct = finalized_transport_archive_binding_from_accepted_digests_v1(
+            &bundle.descriptor,
+            &digests,
+        )
+        .expect("shared finalize succeeds")
+        .expect("a non-empty set yields a binding");
+        assert_eq!(recovered, direct, "recovery must equal the shared live-finalize binding");
         std::fs::remove_dir_all(&root).ok();
     }
 }
