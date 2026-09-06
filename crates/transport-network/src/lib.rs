@@ -18,12 +18,13 @@ use std::time::Duration;
 ///
 /// A `tor.exe` built as a Windows console subsystem allocates and shows a new
 /// console window whenever it is spawned from a process that has none — a
-/// Tauri GUI, for instance. That window steals focus and covers the Private
-/// Ballot organizer GUI. Applying `CREATE_NO_WINDOW` when spawning tells
-/// Windows to run the console child WITHOUT ever attaching or allocating a
-/// console at all; the child still runs, its stdout/stderr redirections still
-/// work, and its process handle/lifecycle ownership is unchanged. On Unix
-/// this flag does not exist and this constant is unused.
+/// Tauri GUI, for instance (the Private Ballot organizer GUI or the load
+/// tester GUI). That window steals focus and covers the GUI. Applying
+/// `CREATE_NO_WINDOW` when spawning tells Windows to run the console child
+/// WITHOUT ever attaching or allocating a console at all; the child still
+/// runs, its stdout/stderr redirections still work, and its process
+/// handle/lifecycle ownership is unchanged. On Unix this flag does not exist
+/// and this constant is unused.
 #[cfg(windows)]
 pub const TOR_WINDOWS_NO_CONSOLE_CREATION_FLAGS_V1: u32 = 0x0800_0000;
 
@@ -43,9 +44,10 @@ pub const TOR_WINDOWS_NO_CONSOLE_CREATION_FLAGS_V1: u32 = 0x0800_0000;
 ///
 /// It only asks Windows to spawn the child without ever allocating or showing
 /// a new console window, so a `tor.exe` built as a console subsystem no longer
-/// pops a black terminal in front of the organizer GUI. On Linux/macOS there
-/// is no equivalent flag and Tor spawned from a GUI has no console window in
-/// the first place, so the caller path stays identical on those platforms too.
+/// pops a black terminal in front of the organizer or load tester GUI. On
+/// Linux/macOS there is no equivalent flag and Tor spawned from a GUI has no
+/// console window in the first place, so the caller path stays identical on
+/// those platforms too.
 pub fn apply_hide_console_window_on_windows_v1(command: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
@@ -64,10 +66,10 @@ pub use organizer_hidden_service::{
 };
 pub use tor::{
     ELECTION_STATUS_HTTP_PATH_V1, ONION_VIRTUAL_PORT_V1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1,
-    OPAQUE_ENVELOPE_HTTP_PATH_V1, StrictHeaderErrorV1, SystemManagedTorReadinessProbeV1,
-    TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1, fetch_election_status_over_tor,
-    parse_strict_content_length_v1, parse_strict_header_line_v1, validate_loopback_socket_addr_v1,
-    validate_onion_hostname_v1,
+    OPAQUE_ENVELOPE_HTTP_PATH_V1, OnionReachabilityOutcomeV1, StrictHeaderErrorV1,
+    SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    fetch_election_status_over_tor, parse_strict_content_length_v1, parse_strict_header_line_v1,
+    probe_onion_reachability_v1, validate_loopback_socket_addr_v1, validate_onion_hostname_v1,
 };
 
 pub const OPAQUE_ENVELOPE_CONTENT_TYPE_V1: &str =
@@ -248,7 +250,7 @@ impl ManagedTorSpawnerV1 for SystemManagedTorSpawnerV1 {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         // Windows-only: never let `tor.exe` pop a visible console window that
-        // covers/steals focus from the Private Ballot organizer GUI.
+        // covers/steals focus from the load tester or organizer GUI.
         apply_hide_console_window_on_windows_v1(&mut command);
         command.spawn()
     }
@@ -557,7 +559,7 @@ impl ManagedTorSpawnerV1 for StderrLogFileTorSpawnerV1 {
             .stdout(Stdio::null())
             .stderr(Stdio::from(log));
         // Windows-only: never let `tor.exe` pop a visible console window that
-        // covers/steals focus from the Private Ballot organizer GUI.
+        // covers/steals focus from the load tester or organizer GUI.
         apply_hide_console_window_on_windows_v1(&mut command);
         command.spawn()
     }
@@ -1155,28 +1157,9 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn stderr_log_spawner_uses_argument_vector_without_a_shell() {
-        // Structural check: the spawner writes the child's stderr to the
-        // requested FILE path. Spawning a real binary is skipped; instead we
-        // verify the request shape via the spawn failure path (nonexistent exe
-        // yields an io error, never a shell invocation).
-        let base = std::env::temp_dir().join(format!(
-            "tari-transport-network-spawner-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&base);
-        let spawner = StderrLogFileTorSpawnerV1 {
-            stderr_log: base.join("tor-stderr.log"),
-        };
-        let bogus = base.join("definitely-not-tor.exe");
-        assert!(spawner.spawn(&bogus, &base.join("torrc")).is_err());
-        let _ = fs::remove_dir_all(&base);
-    }
-
     // -------------------------------------------------------------------------
-    // Windows console-window suppression helper (regression for organizer UX:
-    // a visible tor.exe console covered/blocked the Private Ballot GUI).
+    // Windows console-window suppression helper (regression for organizer and
+    // Load Tester UX: a visible tor.exe console covered/blocked the GUI).
     // -------------------------------------------------------------------------
 
     #[cfg(windows)]
@@ -1191,8 +1174,11 @@ mod tests {
     #[test]
     fn windows_hide_console_helper_sets_creation_flags_without_altering_program_or_args() {
         // Structural check: applying the helper to a Command preserves the
-        // executable and argument vector — only creation flags change. The
-        // helper must return the same `&mut Command` so callers stay chainable.
+        // executable, argument vector, and stdio choices — only creation flags
+        // change. `Command::get_creation_flags` is not stable, so we verify
+        // via the observable side effect that the helper returns the same
+        // `&mut Command` and Command inspection APIs still see the unchanged
+        // program and args.
         let mut command = Command::new("tor.exe");
         command.arg("-f").arg("torrc");
         let returned: &mut Command = apply_hide_console_window_on_windows_v1(&mut command);
@@ -1220,12 +1206,31 @@ mod tests {
     #[test]
     fn system_managed_tor_spawner_applies_hidden_console_flag() {
         // We cannot spawn a real Tor here, but the failure mode of a nonexistent
-        // executable must be an io error (never a shell invocation) — proving
-        // the spawner still uses an argument-vector direct spawn after adding
-        // the hidden-console creation flag.
+        // executable must be an io error (never a shell invocation) — mirroring
+        // the existing stderr-log spawner argument-vector check but exercising
+        // the newly wired hidden-console spawner path.
         let bogus = std::env::temp_dir().join("definitely-not-tor.exe");
         let torrc = std::env::temp_dir().join("no-such-torrc");
         let result = SystemManagedTorSpawnerV1.spawn(&bogus, &torrc);
         assert!(result.is_err(), "no shell/PATH lookup; nonexistent exe errors");
+    }
+
+    #[test]
+    fn stderr_log_spawner_uses_argument_vector_without_a_shell() {
+        // Structural check: the spawner writes the child's stderr to the
+        // requested FILE path. Spawning a real binary is skipped; instead we
+        // verify the request shape via the spawn failure path (nonexistent exe
+        // yields an io error, never a shell invocation).
+        let base = std::env::temp_dir().join(format!(
+            "tari-transport-network-spawner-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let spawner = StderrLogFileTorSpawnerV1 {
+            stderr_log: base.join("tor-stderr.log"),
+        };
+        let bogus = base.join("definitely-not-tor.exe");
+        assert!(spawner.spawn(&bogus, &base.join("torrc")).is_err());
+        let _ = fs::remove_dir_all(&base);
     }
 }

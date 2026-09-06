@@ -16,12 +16,14 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 
 [dev-dependencies]
+ed25519-dalek = { version = "=3.0.0", default-features = false }
 tari-cc-private-ballot-archive = { path = "../archive" }
 tari-cc-private-ballot-ballot = { path = "../ballot" }
 tari-cc-private-ballot-crypto = { path = "../crypto", features = ["test-only-suites"] }
 tari-cc-private-ballot-registry = { path = "../registry" }
 tari-cc-private-ballot-tally = { path = "../tally" }
 tari-cc-private-ballot-verifier = { path = "../verifier" }
+tempfile = "3.24.0"
 
 [lints]
 workspace = true

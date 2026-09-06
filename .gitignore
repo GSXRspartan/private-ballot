@@ -74,3 +74,12 @@ Thumbs.db
 *.wasm
 *.sha256
 *.blake3
+
+# Standalone distributed load tester GUI build artifacts (separate Tauri workspace)
+/tools/distributed-load-tester-gui/node_modules/
+/tools/distributed-load-tester-gui/dist/
+/tools/distributed-load-tester-gui/src-tauri/target/
+/tools/distributed-load-tester-gui/src-tauri/gen/
+# The detached load-tester Tauri crate tracks its lockfile for reproducible
+# --locked builds (overrides the blanket Cargo.lock rule above).
+!/tools/distributed-load-tester-gui/src-tauri/Cargo.lock
