@@ -1,0 +1,151 @@
+name: macOS Qualification Build
+
+# Independent Open-Source Project — Private Ballot v0.1.0
+#
+# Hosted macOS qualification build for the Private Ballot Organizer GUI and the
+# Private Ballot Load Tester GUI. This workflow builds UNSIGNED / UNNOTARIZED
+# application bundles for qualification only. It requires:
+#   - NO Apple code-signing or notarization secrets
+#   - NO Tari walletd credentials or tTARI
+#   - NO private election data or voter credentials
+#
+# Trigger it manually from the Actions tab (workflow_dispatch) after pushing the
+# repository, or let it run automatically when a v* tag is pushed.
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+# Prevent concurrent duplicate qualification runs for the same ref.
+concurrency:
+  group: macos-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  macos-qualification:
+    name: macOS ${{ matrix.arch }} build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14 # Apple Silicon (arm64)
+            arch: aarch64
+            rust_target: aarch64-apple-darwin
+          - runner: macos-13 # Intel (x86_64)
+            arch: x86_64
+            rust_target: x86_64-apple-darwin
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.97.1 (${{ matrix.rust_target }})
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct caches per architecture and per Tauri crate lockfile.
+          key: macos-${{ matrix.arch }}
+          workspaces: |
+            .
+            gui/src-tauri
+            tools/distributed-load-tester-gui/src-tauri
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # ---- Workspace Rust checks (no wallet, no network, no private data) ----
+      - name: Cargo check (root workspace)
+        run: cargo check --workspace --target ${{ matrix.rust_target }}
+
+      - name: Cargo test (root workspace)
+        run: cargo test --workspace --target ${{ matrix.rust_target }}
+
+      # ---- Organizer GUI (gui/) ----
+      - name: Organizer frontend install
+        working-directory: gui
+        run: npm ci
+
+      - name: Organizer frontend typecheck + test
+        working-directory: gui
+        run: |
+          npx tsc --noEmit
+          npm test
+
+      - name: Organizer Tauri release build (unsigned)
+        working-directory: gui
+        # No signing identity is configured; Tauri produces an unsigned,
+        # unnotarized .app/.dmg suitable for qualification only.
+        env:
+          APPLE_SIGNING_IDENTITY: ""
+        run: npm run tauri build -- --target ${{ matrix.rust_target }}
+
+      # ---- Load Tester GUI (tools/distributed-load-tester-gui/) ----
+      - name: Load Tester frontend install
+        working-directory: tools/distributed-load-tester-gui
+        run: npm ci
+
+      - name: Load Tester frontend typecheck + test
+        working-directory: tools/distributed-load-tester-gui
+        run: |
+          npx tsc --noEmit
+          npm test
+
+      - name: Load Tester Tauri release build (unsigned)
+        working-directory: tools/distributed-load-tester-gui
+        env:
+          APPLE_SIGNING_IDENTITY: ""
+        run: npm run tauri build -- --target ${{ matrix.rust_target }}
+
+      # ---- Collect artifacts ----
+      - name: Stage macOS artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p macos-artifacts
+          # Organizer bundles
+          find "gui/src-tauri/target/${{ matrix.rust_target }}/release/bundle" \
+            \( -name "*.dmg" -o -name "*.app" \) -maxdepth 3 -print0 2>/dev/null |
+            while IFS= read -r -d '' p; do
+              cp -R "$p" macos-artifacts/ || true
+            done
+          # Load Tester bundles
+          find "tools/distributed-load-tester-gui/src-tauri/target/${{ matrix.rust_target }}/release/bundle" \
+            \( -name "*.dmg" -o -name "*.app" \) -maxdepth 3 -print0 2>/dev/null |
+            while IFS= read -r -d '' p; do
+              cp -R "$p" macos-artifacts/ || true
+            done
+          echo "---- staged macOS artifacts ----"
+          ls -la macos-artifacts || true
+
+      - name: Compute SHA-256 checksums
+        working-directory: macos-artifacts
+        run: |
+          set -euo pipefail
+          # .app bundles are directories; checksum only the .dmg installers.
+          shopt -s nullglob
+          if compgen -G "*.dmg" > /dev/null; then
+            shasum -a 256 *.dmg | tee SHA256SUMS-macos-${{ matrix.arch }}.txt
+          else
+            echo "No .dmg produced for ${{ matrix.arch }}" | tee SHA256SUMS-macos-${{ matrix.arch }}.txt
+          fi
+
+      - name: Upload macOS qualification artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-ballot-macos-${{ matrix.arch }}
+          path: |
+            macos-artifacts/*.dmg
+            macos-artifacts/SHA256SUMS-macos-${{ matrix.arch }}.txt
+          if-no-files-found: warn
+          retention-days: 14
