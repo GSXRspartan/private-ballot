@@ -996,10 +996,22 @@ mod tests {
     // Shared Tor executable validation policy (ONE policy for GUI + CLI).
     // -------------------------------------------------------------------------
 
+    /// Writes a regular file that represents a VALID Tor executable fixture.
+    /// On Unix the production validator requires an exec bit (`0o111`), so the
+    /// fixture is marked executable there; Windows has no mode bit and needs
+    /// none. This keeps `validate_tor_executable_v1` strict while giving the
+    /// test a genuine Unix executable rather than relaxing validation.
     fn write_regular_file(base: &Path, name: &str) -> PathBuf {
         fs::create_dir_all(base).expect("test base dir");
         let path = base.join(name);
         fs::write(&path, b"not-a-real-tor-binary").expect("write regular file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).expect("set exec bit");
+        }
         path
     }
 
