@@ -3,7 +3,7 @@ name: macOS Qualification Build
 # Independent Open-Source Project — Private Ballot v0.1.0
 #
 # Hosted macOS qualification build for the Private Ballot Organizer GUI and the
-# Private Ballot Load Tester GUI. This workflow builds UNSIGNED / UNNOTARIZED
+# Private Ballot Load Tester GUI. This workflow builds AD-HOC SIGNED, UNNOTARIZED
 # application bundles for qualification only. It requires:
 #   - NO Apple code-signing or notarization secrets
 #   - NO Tari walletd credentials or tTARI
@@ -83,12 +83,14 @@ jobs:
           npx tsc --noEmit
           npm test
 
-      - name: Organizer Tauri release build (unsigned)
+      - name: Organizer Tauri release build (ad-hoc signed)
         working-directory: gui
-        # No signing identity is configured; Tauri produces an unsigned,
-        # unnotarized .app/.dmg suitable for qualification only.
+        # The pseudo-identity "-" tells Tauri to ad-hoc sign on macOS: no Apple
+        # Developer ID certificate and no keychain identity are required. The
+        # resulting .app/.dmg is ad-hoc signed and unnotarized (users must still
+        # approve it in Privacy & Security), suitable for qualification only.
         env:
-          APPLE_SIGNING_IDENTITY: ""
+          APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri build -- --target ${{ matrix.rust_target }}
 
       # ---- Load Tester GUI (tools/distributed-load-tester-gui/) ----
@@ -102,10 +104,12 @@ jobs:
           npx tsc --noEmit
           npm test
 
-      - name: Load Tester Tauri release build (unsigned)
+      - name: Load Tester Tauri release build (ad-hoc signed)
         working-directory: tools/distributed-load-tester-gui
+        # Ad-hoc signed via the "-" pseudo-identity (no Apple certificate or
+        # keychain identity required); unnotarized, for qualification only.
         env:
-          APPLE_SIGNING_IDENTITY: ""
+          APPLE_SIGNING_IDENTITY: "-"
         run: npm run tauri build -- --target ${{ matrix.rust_target }}
 
       # ---- Collect artifacts ----
