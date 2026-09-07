@@ -184,8 +184,17 @@ fn release_crypto_perf_benchmark() {
     } else {
         "RELEASE"
     };
-    let avx2 = std::arch::is_x86_feature_detected!("avx2");
-    let avx512f = std::arch::is_x86_feature_detected!("avx512f");
+    // curve25519-dalek's AVX backends are x86/x86_64-only. The detection macro
+    // itself does not compile on other architectures (e.g. aarch64-apple-darwin),
+    // so exclude it at COMPILE time rather than at runtime. On non-x86 targets the
+    // AVX backends are simply not applicable.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    let (avx2, avx512f) = (
+        std::arch::is_x86_feature_detected!("avx2"),
+        std::arch::is_x86_feature_detected!("avx512f"),
+    );
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    let (avx2, avx512f) = (false, false);
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(0);

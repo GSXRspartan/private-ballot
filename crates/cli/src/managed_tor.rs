@@ -30,11 +30,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tari_cc_private_ballot_transport_network::{
-    ManagedTorChildV1, ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1,
-    ManagedTorSpawnerV1, StderrLogFileTorSpawnerV1, SystemManagedTorReadinessProbeV1,
-    TorSocksPrivateReleaseCarrierV1, apply_hide_console_window_on_windows_v1,
-    create_fresh_run_directory_v1, reserve_loopback_socks_port_v1, validate_tor_executable_v1,
+    ManagedTorChildV1, ManagedTorConfigV1, ManagedTorControllerV1, StderrLogFileTorSpawnerV1,
+    SystemManagedTorReadinessProbeV1, TorSocksPrivateReleaseCarrierV1,
+    apply_hide_console_window_on_windows_v1, create_fresh_run_directory_v1,
+    reserve_loopback_socks_port_v1, validate_tor_executable_v1,
 };
+// The seam traits are only referenced by the seam-driven start (which is
+// `#[cfg(test)]`) and the tests themselves; importing them unconditionally
+// warns as unused in non-test builds on every platform.
+#[cfg(test)]
+use tari_cc_private_ballot_transport_network::{ManagedTorReadinessProbeV1, ManagedTorSpawnerV1};
 
 /// Bounded startup budget for a managed load-driver Tor child. Matches the
 /// qualified production voter-side startup budget.
@@ -429,6 +434,22 @@ mod tests {
         dir
     }
 
+    /// Writes fake Tor executable bytes and, on Unix, marks the file executable
+    /// so the fixture satisfies the SAME production `validate_tor_executable_v1`
+    /// (which requires an exec bit on Unix). Windows has no mode bit and needs
+    /// none. This keeps the production validator strict while making the test
+    /// fixture a genuine Unix executable — it never relaxes validation.
+    fn write_fake_tor_executable(path: &Path) {
+        std::fs::write(path, b"not-a-real-tor").expect("write fake tor executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("set exec bit");
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Mode resolution: ambiguity rejection, validation, no clearnet fallback.
     // ---------------------------------------------------------------------
@@ -503,7 +524,7 @@ mod tests {
         let base = unique_test_dir("valid-exe");
         std::fs::create_dir_all(&base).expect("base");
         let exe = base.join("tor.exe");
-        std::fs::write(&exe, b"not-a-real-tor").expect("write");
+        write_fake_tor_executable(&exe);
         let mode = resolve_tor_endpoint_mode_v1(Some(exe.as_path()), None).expect("valid exe");
         assert_eq!(mode, TorEndpointModeV1::Managed { tor_exe: exe });
         let _ = std::fs::remove_dir_all(&base);
@@ -519,7 +540,7 @@ mod tests {
         let base = unique_test_dir(label);
         std::fs::create_dir_all(&base).expect("base");
         let exe = base.join("tor.exe");
-        std::fs::write(&exe, b"not-a-real-tor").expect("write");
+        write_fake_tor_executable(&exe);
         exe
     }
 
@@ -663,7 +684,7 @@ mod tests {
         let base = unique_test_dir("config");
         std::fs::create_dir_all(&base).expect("base");
         let exe = base.join("tor.exe");
-        std::fs::write(&exe, b"not-a-real-tor").expect("write");
+        write_fake_tor_executable(&exe);
         let run_dir = base.join("run-x");
         std::fs::create_dir_all(&run_dir).expect("run dir");
         let startup = ManagedTorStartupConfigV1::new(exe, base.clone());
@@ -713,11 +734,21 @@ mod tests {
 
     #[test]
     fn runtime_and_metadata_paths_derive_from_results_without_sharing_state() {
-        let results = PathBuf::from("C:\\runs\\desktop\\results.json");
+        // Build the results path from components so it is a genuine
+        // multi-component path on EVERY platform. A backslash string literal is
+        // only a separator on Windows; on Unix it would be one opaque file name,
+        // which defeats the component-aware `ends_with` below.
+        let parent = PathBuf::from("runs").join("desktop");
+        let results = parent.join("results.json");
         let runtime = managed_runtime_base_for_results(&results);
         let metadata = managed_tor_metadata_path(&results);
+        // Component-aware comparisons (Path::ends_with matches whole path
+        // components, and parent() proves the derivation stays a sibling of the
+        // results file) rather than raw-string shape assumptions.
         assert!(runtime.ends_with("results.managed-tor-runtime"));
         assert!(metadata.ends_with("results.managed-tor-metadata.json"));
+        assert_eq!(runtime.parent(), Some(parent.as_path()));
+        assert_eq!(metadata.parent(), Some(parent.as_path()));
         assert_ne!(runtime, metadata);
     }
 
