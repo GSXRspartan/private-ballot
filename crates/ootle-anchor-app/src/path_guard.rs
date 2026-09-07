@@ -251,6 +251,15 @@ mod tests {
         let root = temp_root("traversal");
         let archive = root.join("archive");
         std::fs::create_dir_all(&archive).expect("archive dir");
+        // The `..` intermediate must exist on disk for the traversal to be a
+        // genuine, resolvable path on every platform. Windows collapses `..`
+        // lexically before touching the filesystem, so a non-existent
+        // `elsewhere` still resolves there; Unix `stat` resolves components
+        // left-to-right and would fail on a missing `elsewhere`, which is a
+        // property of the OS write path, not of the containment rule. Creating
+        // the directory exercises the SAME security property portably: a lexical
+        // parent traversal that resolves BACK INTO the archive is within.
+        std::fs::create_dir_all(root.join("elsewhere")).expect("elsewhere dir");
         // `<root>/elsewhere/../archive/anchor.cbor` normalizes back inside.
         let sneaky = root
             .join("elsewhere")
