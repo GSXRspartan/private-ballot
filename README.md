@@ -20,6 +20,10 @@ licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the
 machine-readable reports under
 [docs/release/licenses/](docs/release/licenses/).
 
+![Private Ballot home screen showing a finalized election marked Verified with an Anchored · Verified Tari Ootle anchor, 100 accepted and 0 rejected](docs/images/release-v0.1.0/01-home-verified-anchored.png)
+
+*Final 100-voter release qualification: verified election, independently verified archive, and confirmed Tari Ootle V2 anchor.*
+
 ## Privacy Model
 
 The app separates three ideas that are easy to blur:
@@ -181,6 +185,10 @@ full test matrix passed on Windows (Rust toolchain
 - Load Tester frontend: 24 passed / 0 failed
 - Load Tester `src-tauri`: 20 passed / 0 failed
 
+![Private Ballot Load Tester after the final run: managed Tor ready, 100 attempted, 100 delivered, 0 submission failures, 0 organizer rejections, 0 remaining](docs/images/release-v0.1.0/02-load-tester-100-of-100.png)
+
+*Final 100-voter release qualification driven by the standalone Load Tester over the real managed-Tor transport and Tari Triptych proof path, using distinct simulated voter credentials — 100 delivered, zero submission failures, zero organizer rejections.*
+
 An earlier historical distributed test across multiple physical hosts requested
 500 ballots with 499 accepted, 0 rejected, and 1 recorded pre-submission
 private-transport failure (do not read this as 500/500); startup readiness,
@@ -234,9 +242,30 @@ V1 anchor evidence, and verify V2 public-summary evidence. Historical V1
 verification compatibility remains intentionally supported; V1 publishing
 UX is not part of the normal alpha workflow.
 
+![Verification screen showing ARCHIVE VERIFIED with the tally recomputed and archive files verified, and the Tari Ootle anchor marked Anchored · Verified](docs/images/release-v0.1.0/04-archive-ootle-verified.png)
+
+*Independent verification: ARCHIVE VERIFIED with the tally recomputed and every archive file verified, and the Tari Ootle V2 anchor Anchored · Verified via receipt, summary, and digest checks.*
+
+![Final tally screen showing a deterministic 25/25/25/25 result across four options with 100 accepted ballots and a finalized canonical archive](docs/images/release-v0.1.0/03-tally-final-archive.png)
+
+*Deterministic 25/25/25/25 qualification tally over 100 accepted ballots, with the finalized canonical archive produced and independently verified.*
+
 See [docs/INDEPENDENT_VECTOR_VERIFIER.md](docs/INDEPENDENT_VECTOR_VERIFIER.md),
 [docs/CONTROLLED_ALPHA_RUNBOOK.md](docs/CONTROLLED_ALPHA_RUNBOOK.md), and
 [templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md](templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md).
+
+The optional Tari Ootle V2 anchor commits a canonical public aggregate payload —
+a public aggregate digest and scalar summary only, never individual votes:
+
+![Canonical public aggregate payload for the optional Tari Ootle V2 anchor, including frozen protocol identifiers such as TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_V2](docs/images/release-v0.1.0/05-ootle-canonical-payload.png)
+
+*The canonical public aggregate payload committed by the optional Tari Ootle V2 anchor.*
+
+> **Note on frozen identifiers.** Some V2 protocol/schema identifiers retain the
+> historical `TARI_CC_PRIVATE_BALLOT` prefix (for example,
+> `TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_V2`). They are frozen compatibility
+> identifiers, not current product branding, and are intentionally preserved for
+> protocol interoperability.
 
 ## Security
 
