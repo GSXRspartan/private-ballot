@@ -224,15 +224,17 @@ These are successful Linux builds and automated test runs (under WSL); Windows
 11 x64 remains the fully qualified physical end-user runtime path (the physical
 end-to-end election above).
 
-**macOS — hosted qualification workflow prepared; execution pending GitHub
-push.** A GitHub Actions workflow
+**macOS — hosted GitHub Actions qualification passed (both architectures).**
+The macOS qualification workflow
 ([.github/workflows/macos-qualification.yml](.github/workflows/macos-qualification.yml))
-builds both applications on `macos-14` (arm64) and `macos-13` (x86_64),
-runs the Rust and frontend tests, and uploads unsigned/unnotarized `.dmg`
-artifacts. It requires no signing secrets, no wallet, and no private data. It
-has not yet run (no repository has been pushed); macOS runtime is therefore
-**not** claimed as qualified in this release. macOS `.dmg` builds are unsigned
-and not notarized unless signing is configured later.
+completed successfully on GitHub-hosted runners for both Apple Silicon /
+aarch64 (`macos-14`) and Intel / x86_64 (`macos-13`). Both the Organizer and
+the standalone Load Tester built and packaged successfully, producing four
+macOS `.dmg` artifacts (see `SHA256SUMS.txt`). The macOS DMGs are **ad-hoc
+signed and unnotarized** — they are not Apple Developer ID signed and not
+Apple-notarized, so users may need to approve the app through macOS **Privacy
+& Security** on first launch. No physical macOS election was performed;
+Windows 11 x64 remains the primary physical end-to-end qualification target.
 
 ## Verification
 
