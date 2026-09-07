@@ -187,24 +187,34 @@ private-transport failure (do not read this as 500/500); startup readiness,
 count integrity, and safe pre-send onion recovery were subsequently hardened
 and independently reviewed.
 
-**Linux (Ubuntu 22.04.5 LTS x64) — core Rust and both frontends build; desktop
-bundle not produced on this host.** In this release pass, from a fresh clone of
-the release source: the root Rust workspace `cargo check` passed, and
-`cargo test` was 1838 passed / 8 failed / 14 ignored. **All 8 failures are
-Linux test-fixture/environment portability gaps, not protocol or security
-regressions** — 7 are cases where the Unix `tor` binary validator correctly
-requires the executable bit but the (Windows-authored) test fixtures create a
-fake `tor` file without `chmod +x`, and 2 assert Windows-style path suffixes /
-`/tmp` canonicalization. Both frontends install, type-check, and **build**
-(`vite build`) on Linux; their Node test runner needs Node ≥ 22.6 for
-`--experimental-strip-types` and could not execute under this host's Node
-20.20.2 (they pass on Windows Node 24). The Tauri desktop shell was **not**
-built on this host: the GTK/WebKit development packages
-(`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
-`libayatana-appindicator3-dev`) are not installed and could not be provisioned
-non-interactively, so no `.deb`/`.rpm`/`.AppImage` was produced in this pass.
+**Linux (Ubuntu 22.04.5 LTS x64) — built, tested, and packaged.** In this
+release pass, from a fresh clone of the release source (Node v24.20.0, npm
+11.19.0, Rust 1.97.1):
+
+- Organizer frontend: 871 passed / 0 failed; type-check and production build
+  (`vite build`) passed.
+- Load Tester frontend: 24 passed / 0 failed; type-check and build passed.
+- Root Rust workspace: `cargo check --workspace --all-targets` exit 0;
+  `cargo test --workspace` was 1838 passed / 8 failed / 14 ignored.
+
+**All 8 Rust failures were individually verified as Linux test-fixture/platform
+portability issues, not protocol or security regressions** — 6 are cases where
+the Unix `tor` binary validator correctly requires the executable bit but the
+(Windows-authored) test fixtures create a fake `tor` file without `chmod +x`,
+and 2 assert Windows-style path suffixes / `/tmp` canonicalization. The Node
+test runner now executes on Node 24 (the earlier Node-20 `--experimental-strip-types`
+limitation no longer applies).
+
+The Tauri desktop shell was built for both applications with the GTK/WebKit
+development packages (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
+`libayatana-appindicator3-dev`) present. Each application produced Linux desktop
+bundles in `.deb`, `.rpm`, and `.AppImage` formats (six Linux artifacts total).
 See [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md) for the Linux dependency
 list needed to build the desktop shell.
+
+These are successful Linux builds and automated test runs (under WSL); Windows
+11 x64 remains the fully qualified physical end-user runtime path (the physical
+end-to-end election above).
 
 **macOS — hosted qualification workflow prepared; execution pending GitHub
 push.** A GitHub Actions workflow
