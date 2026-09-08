@@ -1,7 +1,8 @@
-import { Component, useCallback, useState } from "react";
+import { Component, useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import { AppFrame, NavSection } from "./components/AppFrame";
+import { resetMainContentScroll } from "./navigation/scrollReset";
 import { Notice } from "./components/ui";
 import { About } from "./screens/About";
 import { Anchor } from "./screens/Anchor";
@@ -72,6 +73,18 @@ export default function App() {
     },
     [dismissError],
   );
+
+  // The application shell — including the #main-content vertical scroll
+  // container — stays mounted while screens change. Without an explicit
+  // reset, the previous screen's scroll offset is clamped against the next
+  // (possibly much shorter) screen, so navigation could start mid-page
+  // (reported on macOS: Settings seemed to show only the bottom Developer
+  // diagnostics card while the other cards were rendered above the viewport).
+  // Only an active-SECTION change resets the scroll; ordinary state updates
+  // on a screen never do. Kept synchronous: no timers or animation frames.
+  useEffect(() => {
+    resetMainContentScroll();
+  }, [section]);
 
   return (
     <AppFrame section={section} onNavigate={navigate}>
