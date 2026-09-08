@@ -36,6 +36,7 @@ function runForm(overrides: Partial<RunConfigInput> = {}): RunConfigInput {
     torMode: "managed",
     torExe: "C:\\tor\\tor.exe",
     torSocks: "127.0.0.1:9050",
+    torRemoteSocks: "192.168.1.50:9050",
     resultsPath: RESULTS_PATH,
     choice: "round-robin",
     count: 100,
@@ -83,6 +84,13 @@ test("start payload nulls the transport field that does not match the Tor mode",
   const manual = buildLoadTestRequest(runForm({ torMode: "manual-socks" }), "gui-1");
   assert.equal(manual.torSocks, "127.0.0.1:9050");
   assert.equal(manual.torExe, null);
+  assert.equal(manual.torRemoteSocks, null);
+  // Remote SOCKS carries only the remote endpoint; the other transport fields
+  // are nulled so an unused field can never reach the backend.
+  const remote = buildLoadTestRequest(runForm({ torMode: "remote-socks" }), "gui-1");
+  assert.equal(remote.torRemoteSocks, "192.168.1.50:9050");
+  assert.equal(remote.torExe, null);
+  assert.equal(remote.torSocks, null);
 });
 
 test("validate and start build byte-identical payloads apart from the run id", () => {

@@ -155,6 +155,27 @@ the installer does **not** ship:
 See [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md) for a step-by-step
 setup guide for organizers, voters, and developers.
 
+## Tor transport modes
+
+Ballots are submitted only over Tor onion services. The client reaches the
+organizer onion through a SOCKS5 proxy in one of two explicit modes:
+
+- **Managed Local Tor** — the default and recommended mode. Private Ballot
+  starts, owns, and stops a local Tor process with a loopback SOCKS listener.
+  Normal voters use this; there is no port, torrc, or data directory to set up.
+- **Remote SOCKS proxy** — an advanced, opt-in mode for operators who already
+  run Tor elsewhere. Private Ballot uses an **externally managed** SOCKS proxy
+  (`host:port`) and does **not** start, stop, or verify that Tor daemon. Plain
+  SOCKS is unencrypted between the app and the proxy, so this mode is intended
+  only for a **trusted LAN, VPN, or tunnelled (e.g. SSH-forwarded) endpoint** —
+  never an arbitrary Internet-exposed proxy. There is **no clearnet fallback**
+  and `.onion` is still resolved only inside Tor; a proxy or onion failure fails
+  closed. Remote SOCKS is voter/client **outbound** transport only — the
+  organizer intake onion service still requires a locally managed Tor.
+
+See [docs/SECURITY_MODEL.md](docs/SECURITY_MODEL.md) §8 for the full trust
+boundary of each mode.
+
 ## Repository Layout
 
 - `crates/` - Rust protocol, archive, verifier, transport, GUI-core,

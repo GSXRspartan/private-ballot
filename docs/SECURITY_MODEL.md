@@ -75,12 +75,47 @@ authority; the app fails closed if the required binding is not provisioned.
 
 ## 8. Tor / private intake
 
-Ballot submission is carried over Tor onion services managed in-process by
-the app. The organizer runs an intake hidden service; each voter's client uses
-its own SOCKS port. The Tor executable is user-selected on first run and its
-absolute path is validated (real regular file, no symlinks or reparse points,
-no control characters) every time it is spawned. Public source contains **no
-developer-machine Tor path** in the allowlist.
+Ballot submission is carried over Tor onion services. The organizer runs an
+intake hidden service (always a locally managed Tor process — a SOCKS proxy
+cannot host an onion service). Each voter's client reaches that onion through a
+SOCKS5 proxy in one of two explicit transport modes.
+
+### 8a. Managed Local Tor (default, recommended)
+
+The app starts, owns, and stops a local Tor process with a loopback SOCKS
+listener. The Tor executable is user-selected on first run and its absolute
+path is validated (real regular file, no symlinks or reparse points, no control
+characters) every time it is spawned. Public source contains **no
+developer-machine Tor path** in the allowlist. The SOCKS endpoint is required to
+be an IP loopback address; a non-loopback endpoint is rejected in this mode.
+
+### 8b. Remote SOCKS Tor (advanced, opt-in)
+
+An advanced mode lets the app use an **externally managed** Tor SOCKS proxy
+instead of starting Tor itself. The operator supplies a bare `host:port`
+endpoint (IPv4/IPv6/hostname). In this mode the app:
+
+- **does NOT** spawn, kill, validate, or otherwise own a Tor process, and makes
+  no claim about the remote daemon's identity, binary, version, lifecycle,
+  configuration, host security, or stream isolation — that daemon is out of the
+  app's trust boundary;
+- **does** validate the endpoint syntax, TCP connectivity, the SOCKS5 handshake,
+  and onion reachability *through* the proxy (a non-mutating readiness probe that
+  sends zero ballot bytes) before a submission is allowed;
+- routes the onion destination as a SOCKS5 `DOMAINNAME` literal exactly as the
+  managed mode does, so `.onion` is never resolved by the local OS resolver;
+- has **no clearnet fallback**: a proxy or onion failure fails closed.
+
+Plain SOCKS provides **no transport encryption between the app and the remote
+proxy**. Remote SOCKS is therefore intended only for a **trusted LAN, a VPN, an
+SSH-forwarded/tunnelled endpoint, or an otherwise protected link** — never an
+arbitrary Internet-exposed proxy. The app does not build SSH tunnels; the
+operator is responsible for protecting the app↔proxy link. Managed Local Tor
+remains the default and is unaffected by this mode; its loopback requirement is
+never relaxed to enable remote SOCKS.
+
+Remote SOCKS covers **voter/client outbound transport only**. Hosting the
+organizer intake onion service still requires a locally managed Tor.
 
 The transport model is documented in more detail in
 `docs/transport/PRIVATE_BALLOT_TRANSPORT_THREAT_MODEL_V1.md`. In particular,

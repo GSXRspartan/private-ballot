@@ -279,6 +279,19 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
   const [torExePath, setTorExePath] = useState(() => recallManagedTorConfig().torExePath);
   const [torDataDir, setTorDataDir] = useState("");
   const [voterBundlePath, setVoterBundlePath] = useState("");
+  // Advanced Tor transport mode. Default/recommended is managed-local (the app
+  // owns Tor). Remote-SOCKS is an opt-in advanced mode using an externally
+  // managed proxy — see the security note in the UI. These are GLOBAL non-secret
+  // preferences; the Rust shell re-validates the endpoint before it connects.
+  const [torMode, setTorMode] = useState<"managed-local" | "remote-socks">(
+    () => (recallManagedTorConfig().torMode === "remote-socks" ? "remote-socks" : "managed-local"),
+  );
+  const [remoteSocksHost, setRemoteSocksHost] = useState(
+    () => recallManagedTorConfig().remoteSocksHost,
+  );
+  const [remoteSocksPort, setRemoteSocksPort] = useState(
+    () => recallManagedTorConfig().remoteSocksPort || "9050",
+  );
   // Pre-release recovery: when a ballot-office connection is already configured
   // but the private connection is stopped (e.g. it was configured with a bundle
   // bound to the WRONG election), the voter can deliberately re-open the
@@ -378,6 +391,10 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     setTorExePath(remembered.torExePath);
     setTorDataDir(remembered.torDataDir);
     setVoterBundlePath(remembered.voterBundlePath);
+    // Restore the GLOBAL transport-mode preference and remote endpoint.
+    setTorMode(remembered.torMode === "remote-socks" ? "remote-socks" : "managed-local");
+    setRemoteSocksHost(remembered.remoteSocksHost);
+    setRemoteSocksPort(remembered.remoteSocksPort || "9050");
   }, [electionManifestHashHex]);
 
   function commandErrorFromUnknown(err: unknown): GuiCommandError {
@@ -1099,6 +1116,30 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     }
   }
 
+  // The advanced remote-SOCKS argument for the configure call, or undefined for
+  // the default managed-local mode. The port is coerced to a number; a
+  // malformed value is sent as 0 so the Rust shell rejects it (fail closed).
+  function remoteConfigureArg(): { host: string; port: number } | undefined {
+    if (torMode !== "remote-socks") return undefined;
+    const port = /^\d{1,5}$/.test(remoteSocksPort.trim())
+      ? Number(remoteSocksPort.trim())
+      : 0;
+    return { host: remoteSocksHost.trim(), port };
+  }
+
+  // Persist the NON-SECRET configuration (paths + transport mode + endpoint).
+  function persistManagedTorConfig() {
+    rememberManagedTorConfig({
+      torExePath,
+      torDataDir,
+      voterBundlePath,
+      electionManifestHashHex,
+      torMode,
+      remoteSocksHost: remoteSocksHost.trim(),
+      remoteSocksPort: remoteSocksPort.trim(),
+    });
+  }
+
   async function onConfigureManagedTor() {
     setBusy(true);
     setError(null);
@@ -1106,14 +1147,34 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     try {
       // An empty data directory means "auto" — the backend derives an app-owned,
       // election-scoped directory the voter never has to choose.
-      const status = await api.configureManagedTor(torExePath, torDataDir, voterBundlePath);
-      // Remember only the NON-SECRET paths for the next run/navigation.
-      rememberManagedTorConfig({
+      const status = await api.configureManagedTor(
         torExePath,
         torDataDir,
         voterBundlePath,
-        electionManifestHashHex,
-      });
+        remoteConfigureArg(),
+      );
+      // Remember only the NON-SECRET configuration for the next run/navigation.
+      persistManagedTorConfig();
+      setManagedTorStatus(status);
+      setReconfiguring(false);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Advanced remote-SOCKS explicit connectivity/readiness test. Configures the
+  // remote endpoint (re-validated + bundle re-verified in Rust) then runs the
+  // zero-application-byte onion reachability probe. Sends NO ballot bytes.
+  async function onTestRemoteConnection() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
+      persistManagedTorConfig();
+      const status = await api.testRemoteTorConnection();
       setManagedTorStatus(status);
       setReconfiguring(false);
     } catch (err) {
@@ -1143,13 +1204,11 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     setPrivateError(null);
     try {
       // "" data dir → backend auto-derives the app-owned election-scoped dir.
-      await api.configureManagedTor(torExePath, "", voterBundlePath);
-      rememberManagedTorConfig({
-        torExePath,
-        torDataDir: "",
-        voterBundlePath,
-        electionManifestHashHex,
-      });
+      await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
+      persistManagedTorConfig();
+      // In managed-local mode `startManagedTor` spawns Tor; in remote-SOCKS mode
+      // it runs the explicit readiness check against the external proxy (no
+      // spawn). Either way a successful return means the transport is ready.
       const status = await api.startManagedTor();
       setManagedTorStatus(status);
       // A successful (re)connect replaces any prior configuration; leave the
@@ -1545,19 +1604,108 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                   to. A file from another election is still rejected.
                 </Notice>
               )}
-              <p className="form-hint">
-                Connecting privately runs Tor for you — there is no port, torrc, or
-                Tor data directory to set up. You only need the ballot-office
-                connection file for this election. Nothing is sent until you submit.
-              </p>
+              {/* Tor connection mode: managed local (default/recommended) vs the
+                  advanced remote SOCKS proxy. Normal users leave this on the
+                  recommended managed-local option. */}
+              <fieldset className="tor-mode-fieldset">
+                <legend>Tor connection</legend>
+                <label className="radio-row">
+                  <input
+                    type="radio"
+                    name="tor-mode"
+                    checked={torMode === "managed-local"}
+                    disabled={busy}
+                    onChange={() => setTorMode("managed-local")}
+                  />
+                  <span>
+                    <strong>Managed Local Tor</strong> — Recommended. Private Ballot starts and
+                    manages Tor locally.
+                  </span>
+                </label>
+                <label className="radio-row">
+                  <input
+                    type="radio"
+                    name="tor-mode"
+                    checked={torMode === "remote-socks"}
+                    disabled={busy}
+                    onChange={() => setTorMode("remote-socks")}
+                  />
+                  <span>
+                    <strong>Remote SOCKS proxy</strong> — Advanced. Use an externally managed Tor
+                    SOCKS proxy.
+                  </span>
+                </label>
+              </fieldset>
+
+              {torMode === "remote-socks" && (
+                <div className="config-stack">
+                  <Notice tone="warn">
+                    Remote SOCKS is intended for a trusted LAN, VPN, or tunnelled connection.
+                    Private Ballot does not manage or verify the remote Tor daemon, and the link
+                    between this app and the SOCKS proxy is not itself encrypted — use it only over
+                    a network you already trust. Onion traffic still goes only through Tor; there is
+                    no clearnet fallback.
+                  </Notice>
+                  <div className="form-row form-row--full">
+                    <label htmlFor="remote-socks-host">SOCKS host</label>
+                    <input
+                      id="remote-socks-host"
+                      type="text"
+                      value={remoteSocksHost}
+                      onChange={(e) => setRemoteSocksHost(e.target.value)}
+                      placeholder="127.0.0.1  or  tor.internal.example"
+                    />
+                  </div>
+                  <div className="form-row form-row--full">
+                    <label htmlFor="remote-socks-port">SOCKS port</label>
+                    <input
+                      id="remote-socks-port"
+                      type="text"
+                      inputMode="numeric"
+                      value={remoteSocksPort}
+                      onChange={(e) => setRemoteSocksPort(e.target.value)}
+                      placeholder="9050"
+                    />
+                  </div>
+                  <div className="field-list">
+                    <Field label="Status">
+                      {managedTorStatus?.tor_mode === "remote-socks" && managedTorStatus.configured
+                        ? managedTorStatus.socks_ready
+                          ? "Ready ✓"
+                          : "Failed / not reachable"
+                        : "Not checked"}
+                    </Field>
+                  </div>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={busy || !voterBundlePath || !remoteSocksHost.trim()}
+                      onClick={() => void onTestRemoteConnection()}
+                    >
+                      Test Tor Connection
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {torMode === "managed-local" && (
+                <p className="form-hint">
+                  Connecting privately runs Tor for you — there is no port, torrc, or
+                  Tor data directory to set up. You only need the ballot-office
+                  connection file for this election. Nothing is sent until you submit.
+                </p>
+              )}
               <div className="field-list">
-                <Field label="Tor installed">
-                  {voterTorStatus === null
-                    ? "Checking…"
-                    : voterTorStatus.tor_found
-                      ? "Found ✓"
-                      : "Not found"}
-                </Field>
+                {torMode === "managed-local" && (
+                  <Field label="Tor installed">
+                    {voterTorStatus === null
+                      ? "Checking…"
+                      : voterTorStatus.tor_found
+                        ? "Found ✓"
+                        : "Not found"}
+                  </Field>
+                )}
                 <Field label="Ballot office">
                   {!voterBundlePath
                     ? "Connection file required"
@@ -1567,7 +1715,7 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 </Field>
               </div>
 
-              {voterTorStatus !== null && !voterTorStatus.tor_found && (
+              {torMode === "managed-local" && voterTorStatus !== null && !voterTorStatus.tor_found && (
                 <>
                   <Notice tone="info">
                     Tor was not found automatically. Select a Tor executable once; the
@@ -1616,11 +1764,13 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                   disabled={
                     busy ||
                     !voterBundlePath ||
-                    !(voterTorStatus?.tor_found ?? false)
+                    (torMode === "managed-local"
+                      ? !(voterTorStatus?.tor_found ?? false)
+                      : !remoteSocksHost.trim())
                   }
                   onClick={() => void onConnectPrivately()}
                 >
-                  Connect privately
+                  {torMode === "remote-socks" ? "Connect via remote SOCKS" : "Connect privately"}
                 </button>
                 {reconfiguring && managedTorStatus?.configured && (
                   <button

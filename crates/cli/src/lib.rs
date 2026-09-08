@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde::Serialize;
 use tari_cc_private_ballot_gui_core::{
     DescriptorConsistencyStoreV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
-    GuiVoterCredentialOriginV1, GuiVoterEligibilityV1, GuiVoterSessionV1,
+    GuiVoterCredentialOriginV1, GuiVoterEligibilityV1, GuiVoterSessionV1, PrivateReleaseCarrierV1,
     TransportAuthorityRootSetV1, VoterCredentialContainerV1, VoterGovernanceCredentialV1,
     read_voter_credential_container_v1, write_voter_credential_container_v1,
 };
@@ -21,8 +21,9 @@ use tari_cc_private_ballot_registry::{
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
-    OnionReachabilityOutcomeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
-    probe_onion_reachability_v1,
+    OnionReachabilityOutcomeV1, RemoteSocksEndpointV1, RemoteTorSocksPrivateReleaseCarrierV1,
+    SocksProxyEndpointV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    probe_onion_reachability_endpoint_v1,
 };
 
 pub mod managed_tor;
@@ -130,9 +131,11 @@ fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
     // Exactly one Tor mode, resolved fail-closed BEFORE anything else runs.
     // Ambiguity (--tor-exe AND --tor-socks) and under-specification (neither)
     // are both rejected; there is no silent guess and no clearnet fallback.
+    let tor_remote_socks = parsed.optional_value("--tor-remote-socks")?;
     let tor_mode = managed_tor::resolve_tor_endpoint_mode_v1(
         parsed.optional_path("--tor-exe")?.as_deref(),
         parsed.optional_socket("--tor-socks")?,
+        tor_remote_socks.as_deref(),
     )?;
     let mut config = LoadDriverConfig {
         manifest_path: parsed.required_path("--manifest")?,
@@ -143,8 +146,16 @@ fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
         tor_socks: match &tor_mode {
             managed_tor::TorEndpointModeV1::ExistingSocks { socks_addr } => *socks_addr,
             // Managed mode replaces this placeholder with the freshly
-            // reserved loopback endpoint AFTER Tor is actually ready.
-            managed_tor::TorEndpointModeV1::Managed { .. } => SocketAddr::from(([127, 0, 0, 1], 0)),
+            // reserved loopback endpoint AFTER Tor is actually ready; remote
+            // mode never uses tor_socks at all (it routes through remote_socks).
+            managed_tor::TorEndpointModeV1::Managed { .. }
+            | managed_tor::TorEndpointModeV1::RemoteSocks { .. } => {
+                SocketAddr::from(([127, 0, 0, 1], 0))
+            }
+        },
+        remote_socks: match &tor_mode {
+            managed_tor::TorEndpointModeV1::RemoteSocks { endpoint } => Some(endpoint.clone()),
+            _ => None,
         },
         results_path: parsed.required_path("--results")?,
         state_dir: parsed.optional_path("--state-dir")?,
@@ -185,7 +196,7 @@ fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
                 "existing-socks",
                 started,
                 &report,
-                socks_addr,
+                socks_addr.to_string(),
                 None,
                 None,
                 None,
@@ -195,6 +206,29 @@ fn run_distributed_submit(args: Vec<String>) -> Result<(), String> {
         }
         managed_tor::TorEndpointModeV1::Managed { tor_exe } => {
             run_distributed_submit_managed(config, tor_exe, &passphrase)?;
+        }
+        managed_tor::TorEndpointModeV1::RemoteSocks { endpoint } => {
+            // MODE C — advanced remote SOCKS: the operator runs Tor elsewhere
+            // (trusted LAN/VPN/tunnel). This tool speaks SOCKS5 to that proxy
+            // and NEVER spawns, owns, or validates a Tor process. No clearnet
+            // fallback: a proxy/onion failure fails the run.
+            let started = SystemTime::now();
+            let socks_endpoint = endpoint.display();
+            let report = run_load_driver(&config, &passphrase)?;
+            write_json_report(&config.results_path, &report)?;
+            write_managed_tor_run_metadata(
+                &config,
+                "remote-socks",
+                started,
+                &report,
+                socks_endpoint,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            println!("Remote SOCKS endpoint: {}", endpoint.display());
+            print_report_summary(&report);
         }
     }
     Ok(())
@@ -298,7 +332,7 @@ fn write_managed_tor_run_metadata(
     tor_mode: &'static str,
     started: SystemTime,
     report: &DistributedLoadReportV1,
-    socks_addr: SocketAddr,
+    socks_endpoint: String,
     tor_executable_basename: Option<String>,
     tor_version: Option<String>,
     tor_run_directory_name: Option<String>,
@@ -312,7 +346,7 @@ fn write_managed_tor_run_metadata(
         tor_mode,
         started_utc: managed_tor::format_utc_timestamp(started),
         finished_utc: managed_tor::format_utc_timestamp(SystemTime::now()),
-        socks_endpoint: socks_addr.to_string(),
+        socks_endpoint,
         onion_hostname,
         tor_executable_basename,
         tor_version,
@@ -374,7 +408,14 @@ pub struct LoadDriverConfig {
     pub candidate_path: PathBuf,
     pub voter_public_bundle_path: PathBuf,
     pub credentials_dir: PathBuf,
+    /// Managed-local / existing-loopback SOCKS endpoint. Used only when
+    /// `remote_socks` is `None`. In remote-SOCKS mode this is an unused
+    /// placeholder and all outbound transport flows through `remote_socks`.
     pub tor_socks: SocketAddr,
+    /// Advanced remote-SOCKS mode: an externally-managed proxy endpoint. When
+    /// `Some`, the driver routes outbound voter traffic through this proxy and
+    /// NEVER spawns/owns a Tor process. `None` = managed-local/existing loopback.
+    pub remote_socks: Option<RemoteSocksEndpointV1>,
     pub results_path: PathBuf,
     pub state_dir: Option<PathBuf>,
     pub count: Option<usize>,
@@ -383,6 +424,25 @@ pub struct LoadDriverConfig {
     pub choice: ChoiceDistribution,
     pub passphrase_env: String,
     pub host_run_id: String,
+}
+
+impl LoadDriverConfig {
+    /// The validated SOCKS proxy target for this run's outbound transport:
+    /// the remote endpoint when configured, otherwise the loopback socket.
+    #[must_use]
+    pub fn socks_proxy(&self) -> SocksProxyEndpointV1 {
+        match &self.remote_socks {
+            Some(endpoint) => SocksProxyEndpointV1::Remote(endpoint.clone()),
+            None => SocksProxyEndpointV1::ManagedLoopback(self.tor_socks),
+        }
+    }
+
+    /// Display string for the configured outbound SOCKS endpoint (never secret),
+    /// used in run metadata/evidence.
+    #[must_use]
+    pub fn socks_endpoint_display(&self) -> String {
+        self.socks_proxy().display()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,7 +744,9 @@ pub fn validate_load_driver_inputs(
         requested_voter_count: requested,
         selected_voter_count: selected.len(),
         start_index: config.start_index,
-        tor_socks: config.tor_socks.to_string(),
+        // Loopback modes show the socket; remote mode shows the external
+        // endpoint (never the unused placeholder).
+        tor_socks: config.socks_endpoint_display(),
         choice,
     })
 }
@@ -828,9 +890,20 @@ pub fn run_load_driver_with_control(
         .map_err(|error| format!("voter public bundle failed: {error}"))?;
     let roots = TransportAuthorityRootSetV1::new(bundle.root);
     let mut consistency = DescriptorConsistencyStoreV1::default();
-    let mut carrier =
-        TorSocksPrivateReleaseCarrierV1::new(config.tor_socks, TorCarrierTimeoutsV1::default())
-            .map_err(|error| format!("tor carrier config failed: {error}"))?;
+    // The outbound SOCKS proxy target: remote when configured, else loopback.
+    let proxy = config.socks_proxy();
+    // Build the mode-appropriate release carrier. Both implement the SAME
+    // PrivateReleaseCarrierV1 boundary; remote never spawns/owns a Tor process.
+    let mut carrier: Box<dyn PrivateReleaseCarrierV1> = match &config.remote_socks {
+        Some(endpoint) => Box::new(RemoteTorSocksPrivateReleaseCarrierV1::new(
+            endpoint.clone(),
+            TorCarrierTimeoutsV1::default(),
+        )),
+        None => Box::new(
+            TorSocksPrivateReleaseCarrierV1::new(config.tor_socks, TorCarrierTimeoutsV1::default())
+                .map_err(|error| format!("tor carrier config failed: {error}"))?,
+        ),
+    };
     let state_dir = config
         .state_dir
         .clone()
@@ -852,8 +925,8 @@ pub fn run_load_driver_with_control(
     // classifier until the reachability outcome is `Reachable` or the bounded
     // budget elapses. No ballot bytes, no HTTP request, no credential, no
     // receipt — pure connect/handshake, exactly like the readiness probe.
-    let onion_preflight = run_onion_reachability_preflight_v1(
-        config.tor_socks,
+    let onion_preflight = run_onion_reachability_preflight_endpoint_v1(
+        &proxy,
         &bundle.descriptor,
         &TorCarrierTimeoutsV1::default(),
         ONION_REACHABILITY_PREFLIGHT_BUDGET_V1,
@@ -1264,8 +1337,8 @@ pub fn run_load_driver_with_control(
         // immediate close) — it emits no ballot byte and never re-invokes the
         // carrier, so it can neither duplicate a vote nor resend after an
         // unknown delivery outcome.
-        let recovery = run_pre_send_onion_recovery_v1(
-            config.tor_socks,
+        let recovery = run_pre_send_onion_recovery_endpoint_v1(
+            &proxy,
             &bundle.descriptor,
             &TorCarrierTimeoutsV1::default(),
             PRE_SEND_ONION_RECOVERY_BUDGET_V1,
@@ -1347,7 +1420,7 @@ pub fn run_load_driver_with_control(
             &mut consistency,
             &cast_locks_dir,
             &staging_dir,
-            &mut carrier,
+            carrier.as_mut(),
         ) {
             Ok(result) if result.released => {
                 submission_total += submission_started.elapsed();
@@ -1371,9 +1444,9 @@ pub fn run_load_driver_with_control(
                 // carrier. Every other diagnostic stage is already a specific
                 // code (RECEIPT_SIGNATURE_INVALID, RECEIPT_PARSE_FAILED, …)
                 // and passes through unchanged.
-                let code = map_release_failure_code_v1(
+                let code = map_release_failure_code_endpoint_v1(
                     stage,
-                    config.tor_socks,
+                    &proxy,
                     &bundle.descriptor,
                 );
                 failures.push(LoadDriverFailureV1 {
@@ -1767,16 +1840,35 @@ pub fn run_onion_reachability_preflight_v1(
     budget: Duration,
     interval: Duration,
 ) -> OnionReachabilityOutcomeV1 {
+    run_onion_reachability_preflight_endpoint_v1(
+        &SocksProxyEndpointV1::ManagedLoopback(socks_addr),
+        descriptor,
+        timeouts,
+        budget,
+        interval,
+    )
+}
+
+/// Endpoint-based core of [`run_onion_reachability_preflight_v1`], supporting
+/// BOTH managed-local (loopback) and remote-SOCKS outbound transport. The
+/// managed-local wrapper above preserves the historic `SocketAddr` API.
+pub fn run_onion_reachability_preflight_endpoint_v1(
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+    budget: Duration,
+    interval: Duration,
+) -> OnionReachabilityOutcomeV1 {
     let deadline = Instant::now() + budget;
     let mut last = OnionReachabilityOutcomeV1::SocksConnectFailed;
     loop {
-        match probe_onion_reachability_v1(socks_addr, descriptor, timeouts) {
+        match probe_onion_reachability_endpoint_v1(proxy, descriptor, timeouts) {
             Ok(OnionReachabilityOutcomeV1::Reachable) => {
                 return OnionReachabilityOutcomeV1::Reachable;
             }
             Ok(outcome) => last = outcome,
-            // A structural probe error (invalid descriptor / non-loopback
-            // endpoint) is not a transient race: report the last classifier.
+            // A structural probe error (invalid descriptor / invalid endpoint)
+            // is not a transient race: report the last classifier.
             Err(_) => return last,
         }
         if Instant::now() >= deadline {
@@ -1816,6 +1908,28 @@ pub fn run_pre_send_onion_recovery_v1(
     interval: Duration,
     cancel: Option<&dyn Fn() -> bool>,
 ) -> OnionReachabilityOutcomeV1 {
+    run_pre_send_onion_recovery_endpoint_v1(
+        &SocksProxyEndpointV1::ManagedLoopback(socks_addr),
+        descriptor,
+        timeouts,
+        budget,
+        interval,
+        cancel,
+    )
+}
+
+/// Endpoint-based core of [`run_pre_send_onion_recovery_v1`], supporting BOTH
+/// managed-local and remote-SOCKS transport. Same zero-application-byte,
+/// cancellation-aware, non-mutating recovery — it NEVER invokes the carrier and
+/// NEVER resends a delivery, in either mode.
+pub fn run_pre_send_onion_recovery_endpoint_v1(
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+    budget: Duration,
+    interval: Duration,
+    cancel: Option<&dyn Fn() -> bool>,
+) -> OnionReachabilityOutcomeV1 {
     let cancelled = || cancel.map(|probe| probe()).unwrap_or(false);
     let deadline = Instant::now() + budget;
     let mut last = OnionReachabilityOutcomeV1::SocksConnectFailed;
@@ -1824,13 +1938,13 @@ pub fn run_pre_send_onion_recovery_v1(
         if cancelled() {
             return last;
         }
-        match probe_onion_reachability_v1(socks_addr, descriptor, timeouts) {
+        match probe_onion_reachability_endpoint_v1(proxy, descriptor, timeouts) {
             Ok(OnionReachabilityOutcomeV1::Reachable) => {
                 return OnionReachabilityOutcomeV1::Reachable;
             }
             Ok(outcome) => last = outcome,
-            // A structural probe error (invalid descriptor / non-loopback
-            // endpoint) is not a transient race: report the last classifier.
+            // A structural probe error (invalid descriptor / invalid endpoint)
+            // is not a transient race: report the last classifier.
             Err(_) => return last,
         }
         if Instant::now() >= deadline {
@@ -1853,12 +1967,21 @@ pub fn classify_private_transport_failure_v1(
     socks_addr: SocketAddr,
     descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
 ) -> &'static str {
-    let outcome = probe_onion_reachability_v1(
-        socks_addr,
+    classify_private_transport_failure_endpoint_v1(
+        &SocksProxyEndpointV1::ManagedLoopback(socks_addr),
         descriptor,
-        &TorCarrierTimeoutsV1::default(),
     )
-    .unwrap_or(OnionReachabilityOutcomeV1::SocksConnectFailed);
+}
+
+/// Endpoint-based core of [`classify_private_transport_failure_v1`] for both
+/// transport modes.
+pub fn classify_private_transport_failure_endpoint_v1(
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+) -> &'static str {
+    let outcome =
+        probe_onion_reachability_endpoint_v1(proxy, descriptor, &TorCarrierTimeoutsV1::default())
+            .unwrap_or(OnionReachabilityOutcomeV1::SocksConnectFailed);
     match outcome {
         OnionReachabilityOutcomeV1::Reachable => "PRIVATE_TRANSPORT_UNAVAILABLE",
         OnionReachabilityOutcomeV1::SocksConnectFailed => "SOCKS_CONNECT_FAILED",
@@ -1881,9 +2004,22 @@ pub fn map_release_failure_code_v1(
     socks_addr: SocketAddr,
     descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
 ) -> String {
+    map_release_failure_code_endpoint_v1(
+        diagnostic_stage,
+        &SocksProxyEndpointV1::ManagedLoopback(socks_addr),
+        descriptor,
+    )
+}
+
+/// Endpoint-based core of [`map_release_failure_code_v1`] for both modes.
+pub fn map_release_failure_code_endpoint_v1(
+    diagnostic_stage: &str,
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &tari_cc_private_ballot_gui_core::TransportDescriptorV1,
+) -> String {
     match diagnostic_stage {
         "PRIVATE_TRANSPORT_UNAVAILABLE" => {
-            classify_private_transport_failure_v1(socks_addr, descriptor).to_owned()
+            classify_private_transport_failure_endpoint_v1(proxy, descriptor).to_owned()
         }
         // Every other stage is already a specific, safe classification
         // (`RECEIPT_SIGNATURE_INVALID`, `RECEIPT_PARSE_FAILED`, …).
@@ -2176,6 +2312,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: PathBuf::from("results.json"),
             state_dir: None,
             count: Some(1),
@@ -2274,6 +2411,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: PathBuf::from("results.json"),
             state_dir: None,
             count: Some(250),
@@ -2355,6 +2493,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: path.clone(),
             state_dir: None,
             count: Some(1),
@@ -2408,6 +2547,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: PathBuf::new(),
             state_dir: None,
             count: Some(1),
@@ -2467,6 +2607,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path,
             state_dir: None,
             count: Some(2),
@@ -2554,6 +2695,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: PathBuf::from("."),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: PathBuf::new(),
             state_dir: None,
             count: Some(1),
@@ -2627,6 +2769,7 @@ mod tests {
             voter_public_bundle_path: PathBuf::from("."),
             credentials_dir: credentials_dir.to_path_buf(),
             tor_socks: SocketAddr::from(([127, 0, 0, 1], 9050)),
+            remote_socks: None,
             results_path: PathBuf::from("results.json"),
             state_dir: None,
             count,

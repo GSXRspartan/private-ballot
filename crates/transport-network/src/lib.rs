@@ -58,18 +58,25 @@ pub fn apply_hide_console_window_on_windows_v1(command: &mut Command) -> &mut Co
 }
 
 mod organizer_hidden_service;
+mod remote_socks;
 mod tor;
 
 pub use organizer_hidden_service::{
     DiscoveryTimeoutV1, HostnameDiscoveryErrorV1, OrganizerHiddenServiceTorConfigV1,
     discover_organizer_onion_hostname_v1,
 };
+pub use remote_socks::{
+    RemoteSocksEndpointErrorV1, RemoteSocksEndpointV1, SocksProxyEndpointV1, TorTransportModeV1,
+};
 pub use tor::{
     ELECTION_STATUS_HTTP_PATH_V1, ONION_VIRTUAL_PORT_V1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1,
-    OPAQUE_ENVELOPE_HTTP_PATH_V1, OnionReachabilityOutcomeV1, StrictHeaderErrorV1,
-    SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
+    OPAQUE_ENVELOPE_HTTP_PATH_V1, OnionReachabilityOutcomeV1, RemoteTorReadinessOutcomeV1,
+    RemoteTorSocksPrivateReleaseCarrierV1, StrictHeaderErrorV1, SystemManagedTorReadinessProbeV1,
+    TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1, fetch_election_status_over_remote_tor,
     fetch_election_status_over_tor, parse_strict_content_length_v1, parse_strict_header_line_v1,
-    probe_onion_reachability_v1, validate_loopback_socket_addr_v1, validate_onion_hostname_v1,
+    probe_onion_reachability_endpoint_v1, probe_onion_reachability_v1,
+    probe_remote_onion_reachability_v1, validate_loopback_socket_addr_v1,
+    validate_onion_hostname_v1,
 };
 
 pub const OPAQUE_ENVELOPE_CONTENT_TYPE_V1: &str =

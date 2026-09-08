@@ -459,27 +459,35 @@ fn fetch_election_status_blocking(
     state: &AppState,
 ) -> Result<GuiElectionStatusImportResultV1, CommandError> {
     use tari_cc_private_ballot_transport_network::{
-        TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1, fetch_election_status_over_tor,
+        SocksProxyEndpointV1, TorCarrierTimeoutsV1, fetch_election_status_over_remote_tor,
+        fetch_election_status_over_tor,
     };
 
-    // Requires a CONFIGURED connection for this election. A running Tor child
-    // is not required up-front: the carrier fails bounded-and-truthfully when
-    // the route is unreachable, which the UI surfaces as "cannot reach".
-    let configured = crate::managed_tor::running_transport_endpoint(state)?;
-    let Some((socks_addr, descriptor)) = configured else {
+    // Requires a CONFIGURED connection for this election (either transport
+    // mode). A running Tor child is not required up-front: the fetch fails
+    // bounded-and-truthfully when the route is unreachable, which the UI
+    // surfaces as "cannot reach". The route derives from the verified
+    // descriptor's onion endpoints in both modes; there is no clearnet fallback.
+    let configured = crate::managed_tor::running_transport_proxy(state)?;
+    let Some((proxy, descriptor)) = configured else {
         return Err(CommandError::new(
             "GUI_ELECTION_STATUS_NO_PRIVATE_CONNECTION",
             "UNAVAILABLE",
             "configure the ballot-office private connection first, then check the signed election status",
         ));
     };
-    let carrier = TorSocksPrivateReleaseCarrierV1::new(socks_addr, TorCarrierTimeoutsV1::default())
-        .map_err(|_| status_unavailable())?;
-    let statement_bytes = fetch_election_status_over_tor(
-        carrier.socks_addr(),
-        &descriptor,
-        &TorCarrierTimeoutsV1::default(),
-    )
+    let statement_bytes = match proxy {
+        SocksProxyEndpointV1::ManagedLoopback(socks_addr) => fetch_election_status_over_tor(
+            socks_addr,
+            &descriptor,
+            &TorCarrierTimeoutsV1::default(),
+        ),
+        SocksProxyEndpointV1::Remote(endpoint) => fetch_election_status_over_remote_tor(
+            &endpoint,
+            &descriptor,
+            &TorCarrierTimeoutsV1::default(),
+        ),
+    }
     .map_err(|_| status_unavailable())?;
     if statement_bytes.len() > MAX_ELECTION_STATUS_STATEMENT_BYTES {
         return Err(status_unsafe_file());

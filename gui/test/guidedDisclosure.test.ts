@@ -597,6 +597,7 @@ describe("guided disclosure adds no backend surface", () => {
       "api.configureManagedTor(",
       "api.startManagedTor(",
       "api.stopManagedTor(",
+      "api.testRemoteTorConnection(",
       "api.voterTorStatus(",
       "api.importElectionStatusArtifact(",
       "api.fetchElectionStatusPrivate(",

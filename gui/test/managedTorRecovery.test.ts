@@ -359,8 +359,11 @@ describe("controlled-test transport configuration UX", () => {
   it("remembers only the non-secret paths across navigation/restart", () => {
     assert.match(vote, /recallManagedTorConfig\(/);
     assert.match(vote, /rememberManagedTorConfig\(\{/);
-    // The remember call binds the election-specific paths to the election.
-    assert.match(vote, /electionManifestHashHex,?\s*\}\)/);
+    // The remember call binds the election-specific paths to the election and
+    // also carries the (non-secret) transport mode + remote endpoint.
+    assert.match(vote, /electionManifestHashHex,/);
+    assert.match(vote, /torMode,/);
+    assert.match(vote, /remoteSocksHost:/);
   });
 
   it("stores no secret material in remembered config", () => {
@@ -369,15 +372,20 @@ describe("controlled-test transport configuration UX", () => {
       torDataDir: "C:/test/voter-tor",
       voterBundlePath: "C:/test/bundle.cbor",
       electionManifestHashHex: "aa".repeat(32),
+      torMode: "managed-local",
+      remoteSocksHost: "",
+      remoteSocksPort: "",
     });
     // rememberManagedTorConfig returns void; recall reads it back (or empty when
     // storage is unavailable under the test runner).
     assert.equal(stored, undefined);
     const recalled = recallManagedTorConfig();
     for (const key of Object.keys(recalled)) {
+      // Only NON-SECRET config keys: paths, election id, transport mode, and the
+      // (non-secret) remote SOCKS endpoint. Never a passphrase/credential/etc.
       assert.match(
         key,
-        /^(torExePath|torDataDir|voterBundlePath|electionManifestHashHex)$/,
+        /^(torExePath|torDataDir|voterBundlePath|electionManifestHashHex|torMode|remoteSocksHost|remoteSocksPort)$/,
       );
     }
   });
@@ -390,6 +398,9 @@ describe("controlled-test transport configuration UX", () => {
       torDataDir: "C:/test/A/voter-tor",
       voterBundlePath: "C:/test/A/bundle.cbor",
       electionManifestHashHex: electionA,
+      torMode: "managed-local",
+      remoteSocksHost: "",
+      remoteSocksPort: "",
     });
     // The runner may lack localStorage; only assert the same-election RESTORE
     // when the store actually round-trips. The cross-election CLEAR holds in
@@ -412,22 +423,76 @@ describe("controlled-test transport configuration UX", () => {
       torExePath: "C:/tools/tor.exe",
       torDataDir: "C:/test/voter-tor",
       voterBundlePath: "C:/test/bundle.cbor",
+      torMode: "remote-socks",
+      remoteSocksHost: "192.168.1.50",
+      remoteSocksPort: "9050",
       passphrase: "secret",
       nullifier: "deadbeef",
       selection: ["candidate-a"],
     });
     assert.deepEqual(Object.keys(cleaned).sort(), [
       "electionManifestHashHex",
+      "remoteSocksHost",
+      "remoteSocksPort",
       "torDataDir",
       "torExePath",
+      "torMode",
       "voterBundlePath",
     ]);
     assert.equal(cleaned.torExePath, "C:/tools/tor.exe");
+    // The transport mode + non-secret remote endpoint survive sanitization.
+    assert.equal(cleaned.torMode, "remote-socks");
+    assert.equal(cleaned.remoteSocksHost, "192.168.1.50");
+    assert.equal(cleaned.remoteSocksPort, "9050");
   });
 
-  it("uses full-width rows for the three long-path config fields", () => {
+  it("normalizes an unknown transport mode to managed-local and fails a bad port closed", () => {
+    // An unknown/legacy mode token must resolve to the recommended default,
+    // never silently to remote; a malformed persisted port is cleared so it
+    // fails closed on reload (the backend re-validates regardless).
+    const unknownMode = sanitizeManagedTorConfig({ torMode: "totally-bogus" });
+    assert.equal(unknownMode.torMode, "managed-local");
+    const badPort = sanitizeManagedTorConfig({
+      torMode: "remote-socks",
+      remoteSocksHost: "10.0.0.5",
+      remoteSocksPort: "not-a-port",
+    });
+    assert.equal(badPort.remoteSocksPort, "");
+    const outOfRange = sanitizeManagedTorConfig({ remoteSocksPort: "70000" });
+    assert.equal(outOfRange.remoteSocksPort, "");
+  });
+
+  it("offers the advanced remote SOCKS mode and its security note in the Vote UI", () => {
+    // The mode selector, remote host/port inputs, Test button, and the trusted-
+    // link security warning are all present in the connection card.
+    assert.match(vote, /Remote SOCKS proxy/);
+    assert.match(vote, /htmlFor="remote-socks-host"/);
+    assert.match(vote, /htmlFor="remote-socks-port"/);
+    assert.match(vote, /Test Tor Connection/);
+    assert.match(vote, /trusted LAN, VPN, or tunnelled/);
+    assert.match(vote, /testRemoteTorConnection/);
+  });
+
+  it("remote-SOCKS backend never spawns/owns a Tor process (process-ownership separation)", () => {
+    // The remote readiness/start path must not construct a managed controller
+    // or spawn Tor; it uses the remote onion reachability probe instead.
+    assert.match(managedTor, /remote_tor_readiness_check_blocking/);
+    assert.match(managedTor, /probe_remote_onion_reachability_v1/);
+    assert.match(managedTor, /RemoteTorSocksPrivateReleaseCarrierV1/);
+    // Remote mode resolves NO Tor executable and NO data directory (PathBuf::new),
+    // and start delegates to the readiness check instead of spawning.
+    assert.match(managedTor, /TorTransportModeV1::RemoteSocks => PathBuf::new\(\)/);
+    assert.match(
+      managedTor,
+      /if configured_tor_mode\(state\)\? == TorTransportModeV1::RemoteSocks/,
+    );
+  });
+
+  it("uses full-width rows for the long-path config fields", () => {
     const fullWidth = vote.match(/form-row form-row--full/g) ?? [];
-    assert.equal(fullWidth.length, 3, "tor.exe, bundle, and data-dir rows are full width");
+    // Three managed-mode long-path fields (tor.exe, bundle, data-dir) plus the
+    // two remote-SOCKS endpoint rows (host, port).
+    assert.equal(fullWidth.length, 5, "managed long-path rows plus remote host/port rows");
   });
 });
 

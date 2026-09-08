@@ -44,6 +44,18 @@ export interface ManagedTorConfigMemory {
   /** The election (manifest hash) the two election-specific paths belong to.
    *  Empty when unknown. */
   electionManifestHashHex: string;
+  /** Transport mode: "managed-local" (default) or "remote-socks". A GLOBAL
+   *  (non-election-bound) preference — the operator's chosen transport style.
+   *  Any unknown value is normalized to "managed-local" (fail safe to the
+   *  recommended process-owned mode). */
+  torMode: string;
+  /** Advanced remote-SOCKS proxy host (non-secret; a SOCKS endpoint is not a
+   *  credential). GLOBAL convenience like `torExePath`. */
+  remoteSocksHost: string;
+  /** Advanced remote-SOCKS proxy port as a string (non-secret). Empty when
+   *  unset. GLOBAL convenience. The Rust shell re-validates host:port before
+   *  anything connects. */
+  remoteSocksPort: string;
 }
 
 const EMPTY: ManagedTorConfigMemory = {
@@ -51,6 +63,9 @@ const EMPTY: ManagedTorConfigMemory = {
   torDataDir: "",
   voterBundlePath: "",
   electionManifestHashHex: "",
+  torMode: "managed-local",
+  remoteSocksHost: "",
+  remoteSocksPort: "",
 };
 
 const STORAGE_KEY = "tari-private-ballot.managed-tor-config";
@@ -67,11 +82,25 @@ function field(raw: Record<string, unknown>, key: string): string {
 export function sanitizeManagedTorConfig(raw: unknown): ManagedTorConfigMemory {
   if (raw === null || typeof raw !== "object") return { ...EMPTY };
   const record = raw as Record<string, unknown>;
+  // Normalize the mode to the two known tokens; anything else (or absent) is
+  // the recommended managed-local default — never silently remote.
+  const rawMode = field(record, "torMode");
+  const torMode = rawMode === "remote-socks" ? "remote-socks" : "managed-local";
+  // Only keep digit-only ports within range; anything else clears to "" so a
+  // malformed persisted port fails closed (the backend re-validates regardless).
+  const rawPort = field(record, "remoteSocksPort");
+  const remoteSocksPort =
+    /^\d{1,5}$/.test(rawPort) && Number(rawPort) >= 1 && Number(rawPort) <= 65535
+      ? rawPort
+      : "";
   return {
     torExePath: field(record, "torExePath"),
     torDataDir: field(record, "torDataDir"),
     voterBundlePath: field(record, "voterBundlePath"),
     electionManifestHashHex: field(record, "electionManifestHashHex"),
+    torMode,
+    remoteSocksHost: field(record, "remoteSocksHost"),
+    remoteSocksPort,
   };
 }
 
@@ -109,13 +138,17 @@ export function recallManagedTorConfig(
     if (sameElection) {
       return { ...stored, electionManifestHashHex: currentManifestHashHex };
     }
-    // Different (or unknown) election: keep the global tor.exe, drop the
-    // election-specific paths so they are never reused across elections.
+    // Different (or unknown) election: keep the GLOBAL preferences (tor.exe,
+    // transport mode, remote endpoint), drop the election-specific paths so they
+    // are never reused across elections.
     return {
       torExePath: stored.torExePath,
       torDataDir: "",
       voterBundlePath: "",
       electionManifestHashHex: currentManifestHashHex,
+      torMode: stored.torMode,
+      remoteSocksHost: stored.remoteSocksHost,
+      remoteSocksPort: stored.remoteSocksPort,
     };
   } catch {
     return { ...EMPTY };

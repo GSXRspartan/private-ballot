@@ -137,7 +137,7 @@ describe("connection setup reuses existing backend calls", () => {
       vote.indexOf("async function onConnectPrivately"),
       vote.indexOf("async function onBrowseTorExe"),
     );
-    assert.match(connect, /api\.configureManagedTor\(torExePath, "", voterBundlePath\)/);
+    assert.match(connect, /api\.configureManagedTor\(torExePath, "", voterBundlePath, remoteConfigureArg\(\)\)/);
     assert.match(connect, /await api\.startManagedTor\(\)/);
     assert.match(client, /"configure_managed_tor"/);
     assert.match(client, /"start_managed_tor"/);
@@ -174,7 +174,8 @@ describe("lifecycle authority invariants remain intact", () => {
       statusCommands.indexOf("pub async fn fetch_election_status_private"),
       statusCommands.length,
     );
-    assert.match(fetchFn, /running_transport_endpoint/);
+    // Both transport modes flow through the shared proxy accessor.
+    assert.match(fetchFn, /running_transport_proxy/);
     assert.match(fetchFn, /GUI_ELECTION_STATUS_NO_PRIVATE_CONNECTION/);
   });
 

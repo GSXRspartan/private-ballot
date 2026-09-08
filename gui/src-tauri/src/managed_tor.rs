@@ -34,8 +34,9 @@ use tari_cc_private_ballot_gui_core::{
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
     ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1, ManagedTorSpawnerV1,
+    RemoteSocksEndpointV1, RemoteTorReadinessOutcomeV1, RemoteTorSocksPrivateReleaseCarrierV1,
     SystemManagedTorReadinessProbeV1, TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1,
-    evaluate_managed_tor_readiness_v1,
+    TorTransportModeV1, evaluate_managed_tor_readiness_v1, probe_remote_onion_reachability_v1,
 };
 use tauri::{AppHandle, Manager};
 
@@ -246,6 +247,10 @@ const STATUS_SOCKS_HANDSHAKE: Duration = Duration::from_secs(3);
 
 /// The voter-side managed-Tor test runtime state.
 pub(crate) struct ManagedTorState {
+    /// Which transport mode this configuration uses. `ManagedLocal` owns a Tor
+    /// process (via `controller`); `RemoteSocks` never spawns/owns a process
+    /// and uses `remote_endpoint` instead.
+    mode: TorTransportModeV1,
     controller: Option<ManagedTorControllerV1<Child>>,
     descriptor: TransportDescriptorV1,
     roots: TransportAuthorityRootSetV1,
@@ -258,6 +263,14 @@ pub(crate) struct ManagedTorState {
     tor_exe_path: PathBuf,
     tor_data_dir: PathBuf,
     socks_port: u16,
+    /// Advanced remote-SOCKS mode: the validated externally-managed proxy
+    /// endpoint. `None` in managed-local mode.
+    remote_endpoint: Option<RemoteSocksEndpointV1>,
+    /// Advanced remote-SOCKS mode: whether the LAST explicit readiness check
+    /// against `remote_endpoint` reported the organizer onion reachable. This
+    /// is cleared whenever the endpoint changes so a stale "ready" can never be
+    /// reused for a different endpoint (fail closed on reconfigure).
+    remote_last_ready: bool,
 }
 
 pub(crate) fn configured_transport_descriptor(
@@ -301,6 +314,32 @@ pub(crate) fn configured_transport_root_anchor(
 pub(crate) fn running_transport_endpoint(
     state: &AppState,
 ) -> Result<Option<(std::net::SocketAddr, TransportDescriptorV1)>, CommandError> {
+    // Managed-local only: the loopback SocketAddr is meaningful only when this
+    // application owns the Tor process. Remote-SOCKS callers use
+    // `running_transport_proxy` instead.
+    match running_transport_proxy(state)? {
+        Some((
+            tari_cc_private_ballot_transport_network::SocksProxyEndpointV1::ManagedLoopback(addr),
+            descriptor,
+        )) => Ok(Some((addr, descriptor))),
+        _ => Ok(None),
+    }
+}
+
+/// The currently configured private-transport PROXY for THIS election:
+/// `(proxy endpoint, verified descriptor)` for BOTH transport modes. `None`
+/// unless a bundle bound to the ACTIVE election has been configured. Shares the
+/// same lock-ordering discipline as [`running_transport_endpoint`].
+pub(crate) fn running_transport_proxy(
+    state: &AppState,
+) -> Result<
+    Option<(
+        tari_cc_private_ballot_transport_network::SocksProxyEndpointV1,
+        TransportDescriptorV1,
+    )>,
+    CommandError,
+> {
+    use tari_cc_private_ballot_transport_network::SocksProxyEndpointV1;
     // 1. Snapshot the managed-Tor side alone, then DROP the guard before any
     //    other lock is touched.
     let snapshot = {
@@ -309,14 +348,23 @@ pub(crate) fn running_transport_endpoint(
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         managed.as_ref().map(|m| {
-            (
-                m.socks_addr,
-                m.descriptor.clone(),
-                m.descriptor.manifest_hash(),
-            )
+            let proxy = match m.mode {
+                TorTransportModeV1::ManagedLocal => {
+                    SocksProxyEndpointV1::ManagedLoopback(m.socks_addr)
+                }
+                TorTransportModeV1::RemoteSocks => {
+                    // A configured remote state always carries a valid endpoint.
+                    SocksProxyEndpointV1::Remote(
+                        m.remote_endpoint
+                            .clone()
+                            .expect("remote mode has a validated endpoint"),
+                    )
+                }
+            };
+            (proxy, m.descriptor.clone(), m.descriptor.manifest_hash())
         })
     };
-    let Some((socks_addr, descriptor, manifest_hash)) = snapshot else {
+    let Some((proxy, descriptor, manifest_hash)) = snapshot else {
         return Ok(None);
     };
     // 2. Separate, non-overlapping session lock for the binding comparison.
@@ -333,18 +381,33 @@ pub(crate) fn running_transport_endpoint(
     if !descriptor_matches_session {
         return Ok(None);
     }
-    Ok(Some((socks_addr, descriptor)))
+    Ok(Some((proxy, descriptor)))
 }
 
 /// Serializable runtime configuration supplied by the user.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagedTorConfigInputV1 {
-    /// Absolute path to an already-installed tor.exe.
+    /// Absolute path to an already-installed tor.exe. Used only in the default
+    /// managed-local mode (ignored in remote-SOCKS mode).
     pub tor_exe_path: String,
     /// Absolute path to the voter Tor data/config directory (outside the repo).
+    /// Managed-local only (ignored in remote-SOCKS mode).
     pub voter_tor_data_dir: String,
-    /// Absolute path to the voter-public transport bundle file.
+    /// Absolute path to the voter-public transport bundle file. Required in
+    /// BOTH modes — the verified descriptor is what binds the onion destination.
     pub voter_public_bundle_path: String,
+    /// Transport mode token: `"managed-local"` (default/recommended) or
+    /// `"remote-socks"` (advanced). Absent/legacy resolves to managed-local.
+    #[serde(default)]
+    pub tor_mode: Option<String>,
+    /// Advanced remote-SOCKS mode: the externally-managed SOCKS proxy host
+    /// (IPv4/IPv6/hostname). Ignored in managed-local mode.
+    #[serde(default)]
+    pub remote_socks_host: Option<String>,
+    /// Advanced remote-SOCKS mode: the SOCKS proxy port. Ignored in
+    /// managed-local mode.
+    #[serde(default)]
+    pub remote_socks_port: Option<u16>,
 }
 
 /// Serializable status of the managed-Tor test transport.
@@ -356,6 +419,9 @@ pub struct ManagedTorStatusV1 {
     pub socks_addr: Option<String>,
     pub onion_hostname: Option<String>,
     pub descriptor_fingerprint: Option<String>,
+    /// Stable transport-mode token (`"managed-local"` / `"remote-socks"`) so
+    /// the UI can render the correct controls and security note.
+    pub tor_mode: &'static str,
     pub message: &'static str,
 }
 
@@ -368,6 +434,7 @@ impl Default for ManagedTorStatusV1 {
             socks_addr: None,
             onion_hostname: None,
             descriptor_fingerprint: None,
+            tor_mode: TorTransportModeV1::ManagedLocal.as_token(),
             message: "Managed Tor test transport is not configured.",
         }
     }
@@ -418,23 +485,75 @@ fn voter_tor_data_dir(app: &AppHandle, manifest_hash_hex: &str) -> Result<PathBu
     voter_tor_data_subpath(&app_data_root, manifest_hash_hex)
 }
 
-/// Configures the voter test transport: validates the tor.exe path, loads and
-/// verifies the voter-public transport bundle, and confirms the descriptor
-/// matches the currently loaded election. No Tor process is started here.
+/// Parses the requested transport mode and, for remote-SOCKS mode, the operator
+/// endpoint. Managed-local is the default (absent/legacy/unknown token). Remote
+/// mode requires a syntactically valid host:port; a malformed endpoint fails
+/// closed here with a specific error before any state is touched.
+fn resolve_requested_tor_mode(
+    input: &ManagedTorConfigInputV1,
+) -> Result<(TorTransportModeV1, Option<RemoteSocksEndpointV1>), CommandError> {
+    let mode = TorTransportModeV1::from_token_or_default(
+        input.tor_mode.as_deref().unwrap_or("").trim(),
+    );
+    match mode {
+        TorTransportModeV1::ManagedLocal => Ok((mode, None)),
+        TorTransportModeV1::RemoteSocks => {
+            let host = input.remote_socks_host.as_deref().unwrap_or("").trim();
+            let port = input.remote_socks_port.unwrap_or(0);
+            if host.is_empty() {
+                return Err(CommandError::new(
+                    "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                    "INVALID_INPUT",
+                    "enter the remote SOCKS proxy host for the advanced remote Tor mode",
+                ));
+            }
+            let endpoint = RemoteSocksEndpointV1::from_parts(host, port).map_err(|error| {
+                CommandError::new(
+                    "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                    "INVALID_INPUT",
+                    // Bounded, endpoint-shape guidance only — never echoes the raw value.
+                    match error {
+                        tari_cc_private_ballot_transport_network::RemoteSocksEndpointErrorV1::InvalidPort => {
+                            "the remote SOCKS port must be a number between 1 and 65535"
+                        }
+                        _ => "the remote SOCKS endpoint must be a bare host:port (no scheme, path, or credentials)",
+                    },
+                )
+            })?;
+            Ok((mode, Some(endpoint)))
+        }
+    }
+}
+
+/// Configures the voter test transport. In BOTH modes it loads and verifies the
+/// voter-public transport bundle and confirms the descriptor matches the loaded
+/// election. Managed-local additionally validates a `tor.exe` and prepares an
+/// app-owned Tor data directory; remote-SOCKS instead validates the operator's
+/// externally-managed SOCKS endpoint and never touches a Tor process. No Tor
+/// process is started here in either mode.
 #[tauri::command]
 pub fn configure_managed_tor(
     input: ManagedTorConfigInputV1,
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<ManagedTorStatusV1, CommandError> {
-    // Tor executable: an empty path means "auto-detect" — resolve from the
-    // reviewed allowlist (or a remembered/selected path when provided). The
+    let (mode, remote_endpoint) = resolve_requested_tor_mode(&input)?;
+
+    // Tor executable: managed-local only. An empty path means "auto-detect" —
+    // resolve from the reviewed allowlist (or a remembered/selected path). The
     // resolver re-validates (absolute, real regular file, no reparse/control).
-    let tor_exe = resolve_tor_executable(if input.tor_exe_path.trim().is_empty() {
-        None
-    } else {
-        Some(input.tor_exe_path.as_str())
-    })?;
+    // In remote-SOCKS mode NO executable is resolved or validated: the remote
+    // Tor daemon is externally managed and must never be treated as owned.
+    let tor_exe = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            resolve_tor_executable(if input.tor_exe_path.trim().is_empty() {
+                None
+            } else {
+                Some(input.tor_exe_path.as_str())
+            })?
+        }
+        TorTransportModeV1::RemoteSocks => PathBuf::new(),
+    };
     let bundle_path = PathBuf::from(&input.voter_public_bundle_path);
     if !bundle_path.is_absolute() {
         return Err(CommandError::new(
@@ -473,22 +592,28 @@ pub fn configure_managed_tor(
         ));
     }
 
-    // Voter Tor data directory: an empty path means "auto" — an app-owned,
-    // election-scoped directory the voter never has to choose. A supplied path is
-    // still honoured (absolute) for advanced/manual use.
+    // Voter Tor data directory (managed-local only): an empty path means "auto"
+    // — an app-owned, election-scoped directory the voter never has to choose.
+    // A supplied path is still honoured (absolute) for advanced/manual use.
+    // Remote-SOCKS mode owns no Tor process and therefore no data directory.
     let manifest_hash_hex = session.summary().manifest_hash_hex;
-    let tor_data_dir = if input.voter_tor_data_dir.trim().is_empty() {
-        voter_tor_data_dir(&app, &manifest_hash_hex)?
-    } else {
-        let dir = PathBuf::from(&input.voter_tor_data_dir);
-        if !dir.is_absolute() {
-            return Err(CommandError::new(
-                "GUI_TOR_DATA_DIR_NOT_ABSOLUTE",
-                "INVALID_INPUT",
-                "the voter Tor data directory must be an absolute path",
-            ));
+    let tor_data_dir = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            if input.voter_tor_data_dir.trim().is_empty() {
+                voter_tor_data_dir(&app, &manifest_hash_hex)?
+            } else {
+                let dir = PathBuf::from(&input.voter_tor_data_dir);
+                if !dir.is_absolute() {
+                    return Err(CommandError::new(
+                        "GUI_TOR_DATA_DIR_NOT_ABSOLUTE",
+                        "INVALID_INPUT",
+                        "the voter Tor data directory must be an absolute path",
+                    ));
+                }
+                dir
+            }
         }
-        dir
+        TorTransportModeV1::RemoteSocks => PathBuf::new(),
     };
 
     // Verify the descriptor under the test root before accepting it.
@@ -524,14 +649,31 @@ pub fn configure_managed_tor(
         }
     };
 
-    std::fs::create_dir_all(&tor_data_dir).map_err(|_| CommandError::app_data_unavailable())?;
-    // Reserve a fresh loopback ephemeral SOCKS port now for a truthful initial
-    // endpoint; `start_managed_tor` re-reserves a fresh port on every (re)connect
-    // so a reconnect after a child exit never reuses a possibly-orphaned port.
-    let socks_port = reserve_loopback_socks_port()?;
-    let socks_addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
+    // Managed-local: create the app-owned data directory and reserve a fresh
+    // loopback SOCKS port. Remote-SOCKS: neither — the proxy is external.
+    let (socks_addr, socks_port, socks_display) = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            std::fs::create_dir_all(&tor_data_dir)
+                .map_err(|_| CommandError::app_data_unavailable())?;
+            let socks_port = reserve_loopback_socks_port()?;
+            let socks_addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
+            (socks_addr, socks_port, socks_addr.to_string())
+        }
+        TorTransportModeV1::RemoteSocks => {
+            // Placeholder loopback socket that is NEVER used on the remote path
+            // (all remote code paths route through `remote_endpoint`). The
+            // reported endpoint is the operator's remote proxy.
+            let endpoint = remote_endpoint.as_ref().expect("remote endpoint present");
+            (
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                0,
+                endpoint.display(),
+            )
+        }
+    };
 
     let managed_state = ManagedTorState {
+        mode,
         controller: None,
         descriptor: bundle.descriptor,
         roots,
@@ -541,6 +683,8 @@ pub fn configure_managed_tor(
         tor_exe_path: tor_exe,
         tor_data_dir,
         socks_port,
+        remote_endpoint,
+        remote_last_ready: false,
     };
     drop(session_guard);
     let mut managed = state
@@ -549,14 +693,23 @@ pub fn configure_managed_tor(
         .map_err(|_| CommandError::state_poisoned())?;
     *managed = Some(managed_state);
 
+    let message = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            "Managed Tor test transport configured. Start Tor to submit privately."
+        }
+        TorTransportModeV1::RemoteSocks => {
+            "Remote SOCKS transport configured. Test the connection, then submit privately."
+        }
+    };
     Ok(ManagedTorStatusV1 {
         configured: true,
         tor_running: false,
         socks_ready: false,
-        socks_addr: Some(socks_addr.to_string()),
+        socks_addr: Some(socks_display),
         onion_hostname,
         descriptor_fingerprint,
-        message: "Managed Tor test transport configured. Start Tor to submit privately.",
+        tor_mode: mode.as_token(),
+        message,
     })
 }
 
@@ -591,6 +744,13 @@ pub async fn start_managed_tor(app: AppHandle) -> Result<ManagedTorStatusV1, Com
 
 /// Blocking body of [`start_managed_tor`], run on the blocking thread pool.
 fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, CommandError> {
+    // Remote-SOCKS mode owns NO Tor process: there is nothing to spawn. "Start"
+    // in remote mode performs the explicit readiness check against the external
+    // proxy (proving the organizer onion is reachable through it) and records
+    // the result. It never spawns, kills, or validates a Tor binary.
+    if configured_tor_mode(state)? == TorTransportModeV1::RemoteSocks {
+        return remote_tor_readiness_check_blocking(state);
+    }
     // Reserve a FRESH loopback ephemeral SOCKS port for this (re)connect and
     // record it as authoritative BEFORE building the Tor config, so a reconnect
     // after a child exit never reuses a possibly-orphaned port.
@@ -697,8 +857,142 @@ fn start_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, Co
         socks_addr: Some(m.socks_addr.to_string()),
         onion_hostname: hostname,
         descriptor_fingerprint: fingerprint,
+        tor_mode: TorTransportModeV1::ManagedLocal.as_token(),
         message: "Managed Tor is ready. You may submit your ballot privately.",
     })
+}
+
+/// Bounded timeouts for the remote-SOCKS onion readiness check. A remote proxy
+/// can be a LAN/VPN hop, so these are a little more generous than the loopback
+/// preflight but still strictly bounded so a dead proxy cannot wedge the UI.
+fn remote_readiness_timeouts() -> TorCarrierTimeoutsV1 {
+    TorCarrierTimeoutsV1 {
+        socks_connect: Duration::from_secs(10),
+        socks_handshake: Duration::from_secs(15),
+        // The onion CONNECT can traverse a full Tor circuit; keep it bounded.
+        http_write: Duration::from_secs(20),
+        http_response: Duration::from_secs(30),
+    }
+}
+
+/// The currently configured transport mode, or a not-configured error.
+fn configured_tor_mode(state: &AppState) -> Result<TorTransportModeV1, CommandError> {
+    let managed = state
+        .managed_tor
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    managed.as_ref().map(|m| m.mode).ok_or_else(|| {
+        CommandError::new(
+            "GUI_TOR_TEST_NOT_CONFIGURED",
+            "INVALID_INPUT",
+            "configure the private connection first",
+        )
+    })
+}
+
+/// Runs the explicit remote-SOCKS onion readiness check (zero application
+/// bytes) against the configured external proxy and records the result so a
+/// later status poll and the submit preflight see a truthful, endpoint-scoped
+/// readiness. Never spawns, kills, or validates a Tor process. Runs the network
+/// probe OUTSIDE the managed-state lock.
+fn remote_tor_readiness_check_blocking(
+    state: &AppState,
+) -> Result<ManagedTorStatusV1, CommandError> {
+    // Snapshot the endpoint + descriptor, then DROP the lock before probing.
+    let (endpoint, descriptor) = {
+        let managed = state
+            .managed_tor
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let m = managed.as_ref().ok_or_else(|| {
+            CommandError::new(
+                "GUI_TOR_TEST_NOT_CONFIGURED",
+                "INVALID_INPUT",
+                "configure the private connection first",
+            )
+        })?;
+        let endpoint = m.remote_endpoint.clone().ok_or_else(|| {
+            CommandError::new(
+                "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                "INVALID_INPUT",
+                "the remote SOCKS endpoint is not configured",
+            )
+        })?;
+        (endpoint, m.descriptor.clone())
+    };
+    let outcome =
+        probe_remote_onion_reachability_v1(&endpoint, &descriptor, &remote_readiness_timeouts());
+    let ready = outcome.is_ready();
+
+    // Record the endpoint-scoped readiness under the lock (only if the endpoint
+    // is unchanged — a concurrent reconfigure must not be overwritten).
+    {
+        let mut managed = state
+            .managed_tor
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(m) = managed.as_mut() {
+            if m.remote_endpoint.as_ref() == Some(&endpoint) {
+                m.remote_last_ready = ready;
+            }
+        }
+    }
+
+    let hostname = descriptor.onion_endpoints().first().cloned();
+    let fingerprint = descriptor.fingerprint().ok().map(|fp| hex_lower(&fp));
+    let message = remote_readiness_message(outcome);
+    Ok(ManagedTorStatusV1 {
+        configured: true,
+        tor_running: ready,
+        socks_ready: ready,
+        socks_addr: Some(endpoint.display()),
+        onion_hostname: hostname,
+        descriptor_fingerprint: fingerprint,
+        tor_mode: TorTransportModeV1::RemoteSocks.as_token(),
+        message,
+    })
+}
+
+/// Bounded, safe user-facing message for a remote readiness outcome. Never
+/// leaks the endpoint or a raw OS error.
+const fn remote_readiness_message(outcome: RemoteTorReadinessOutcomeV1) -> &'static str {
+    match outcome {
+        RemoteTorReadinessOutcomeV1::Ready => {
+            "Remote SOCKS connection is ready. You may submit your ballot privately."
+        }
+        RemoteTorReadinessOutcomeV1::EndpointInvalid => {
+            "The remote SOCKS endpoint or election descriptor is invalid."
+        }
+        RemoteTorReadinessOutcomeV1::Unreachable => {
+            "The remote SOCKS proxy could not be reached. Check the host/port and that the proxy is running on the trusted network."
+        }
+        RemoteTorReadinessOutcomeV1::SocksHandshakeFailed => {
+            "The remote endpoint answered but is not a usable SOCKS5 proxy."
+        }
+        RemoteTorReadinessOutcomeV1::OnionUnreachable => {
+            "The remote proxy works but could not reach the ballot office onion service yet. Retry shortly."
+        }
+    }
+}
+
+/// Explicit remote-SOCKS connection test. Runs the non-mutating onion
+/// readiness probe through the external proxy and returns the resulting status
+/// (no ballot bytes, no process ownership). This backs the "Test Tor
+/// Connection" button in remote mode.
+#[tauri::command]
+pub async fn test_remote_tor_connection(app: AppHandle) -> Result<ManagedTorStatusV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        if configured_tor_mode(state.inner())? != TorTransportModeV1::RemoteSocks {
+            return Err(CommandError::new(
+                "GUI_TOR_MODE_MISMATCH",
+                "INVALID_INPUT",
+                "the connection test is only available in remote SOCKS mode",
+            ));
+        }
+        remote_tor_readiness_check_blocking(state.inner())
+    })
+    .await
 }
 
 /// Stops the managed voter Tor process (bounded). Only the child this
@@ -712,23 +1006,43 @@ pub async fn stop_managed_tor(app: AppHandle) -> Result<ManagedTorStatusV1, Comm
     .await
 }
 
-/// Blocking body of [`stop_managed_tor`], run on the blocking thread pool.
+/// Blocking body of [`stop_managed_tor`], run on the blocking thread pool. In
+/// remote-SOCKS mode there is NO owned process to stop; this only clears the
+/// cached readiness (the external proxy is never signalled).
 fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, CommandError> {
     let mut managed = state
         .managed_tor
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
+    let mode = managed
+        .as_ref()
+        .map(|m| m.mode)
+        .unwrap_or(TorTransportModeV1::ManagedLocal);
     if let Some(m) = managed.as_mut() {
         if let Some(controller) = m.controller.as_mut() {
             controller.shutdown();
         }
         m.controller = None;
+        // Remote mode: never touch the external proxy, only forget readiness.
+        m.remote_last_ready = false;
     }
+    let socks_addr = managed.as_ref().map(|m| match m.mode {
+        TorTransportModeV1::RemoteSocks => m
+            .remote_endpoint
+            .as_ref()
+            .map(RemoteSocksEndpointV1::display)
+            .unwrap_or_default(),
+        TorTransportModeV1::ManagedLocal => m.socks_addr.to_string(),
+    });
+    let message = match mode {
+        TorTransportModeV1::ManagedLocal => "Managed Tor stopped.",
+        TorTransportModeV1::RemoteSocks => "Remote SOCKS connection cleared.",
+    };
     Ok(ManagedTorStatusV1 {
         configured: managed.is_some(),
         tor_running: false,
         socks_ready: false,
-        socks_addr: managed.as_ref().map(|m| m.socks_addr.to_string()),
+        socks_addr,
         onion_hostname: managed
             .as_ref()
             .and_then(|m| m.descriptor.onion_endpoints().first().cloned()),
@@ -736,7 +1050,8 @@ fn stop_managed_tor_blocking(state: &AppState) -> Result<ManagedTorStatusV1, Com
             .as_ref()
             .and_then(|m| m.descriptor.fingerprint().ok())
             .map(|fp| hex_lower(&fp)),
-        message: "Managed Tor stopped.",
+        tor_mode: mode.as_token(),
+        message,
     })
 }
 
@@ -777,6 +1092,43 @@ pub async fn managed_tor_status(
 pub(crate) fn managed_tor_status_blocking(
     state: &AppState,
 ) -> Result<ManagedTorStatusV1, CommandError> {
+    // Remote-SOCKS mode: read-only status derived from the LAST explicit
+    // readiness check (recorded by Test/Start). It never probes the network on
+    // every poll (which would repeatedly hit the organizer onion) and never
+    // touches a process. `remote_last_ready` is cleared on reconfigure and on
+    // Stop, so a stale readiness can never survive an endpoint change.
+    {
+        let managed = state
+            .managed_tor
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        if let Some(m) = managed.as_ref() {
+            if m.mode == TorTransportModeV1::RemoteSocks {
+                let ready = m.remote_last_ready;
+                let endpoint_display = m
+                    .remote_endpoint
+                    .as_ref()
+                    .map(RemoteSocksEndpointV1::display);
+                let hostname = m.descriptor.onion_endpoints().first().cloned();
+                let fingerprint = m.descriptor.fingerprint().ok().map(|fp| hex_lower(&fp));
+                let message = if ready {
+                    "Remote SOCKS connection is ready. You may submit your ballot privately."
+                } else {
+                    "Remote SOCKS transport is configured. Test the connection, then submit privately."
+                };
+                return Ok(ManagedTorStatusV1 {
+                    configured: true,
+                    tor_running: ready,
+                    socks_ready: ready,
+                    socks_addr: endpoint_display,
+                    onion_hostname: hostname,
+                    descriptor_fingerprint: fingerprint,
+                    tor_mode: TorTransportModeV1::RemoteSocks.as_token(),
+                    message,
+                });
+            }
+        }
+    }
     let (descriptor, socks_addr, controller_present, child_alive) = {
         let mut managed = state
             .managed_tor
@@ -822,6 +1174,7 @@ pub(crate) fn managed_tor_status_blocking(
         socks_addr: Some(socks_addr.to_string()),
         onion_hostname: descriptor.onion_endpoints().first().cloned(),
         descriptor_fingerprint: descriptor.fingerprint().ok().map(|fp| hex_lower(&fp)),
+        tor_mode: TorTransportModeV1::ManagedLocal.as_token(),
         message,
     })
 }
@@ -845,45 +1198,11 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<GuiPrivateReleaseResultV1, CommandError> {
-    // 1. FRESH readiness preflight (BEFORE the release boundary). Controller
-    //    alive is checked under a brief lock (try_wait, no blocking); the SOCKS
-    //    probe runs OUTSIDE the managed-state lock so no mutex is held across
-    //    the bounded network probe.
-    let (descriptor, roots, socks_addr) = {
-        let mut managed = state
-            .managed_tor
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let m = managed.as_mut().ok_or_else(|| {
-            CommandError::new(
-                "GUI_TOR_TEST_NOT_CONFIGURED",
-                "INVALID_INPUT",
-                "configure the managed Tor test transport first",
-            )
-        })?;
-        let controller = m.controller.as_mut().ok_or_else(|| {
-            CommandError::new(
-                "GUI_TOR_NOT_RUNNING",
-                "UNAVAILABLE",
-                "start the managed Tor transport before submitting privately",
-            )
-        })?;
-        // A. owned Tor child has not exited (uses the controller health API).
-        controller.check_crash().map_err(|_| {
-            CommandError::new(
-                "GUI_TOR_NOT_RUNNING",
-                "UNAVAILABLE",
-                "the managed Tor process has exited; restart it before submitting privately",
-            )
-        })?;
-        (m.descriptor.clone(), m.roots.clone(), m.socks_addr)
-    };
-    // B. fresh SOCKS readiness succeeds NOW (not under the managed-state lock).
-    fresh_socks_readiness(
-        socks_addr,
-        PREFLIGHT_SOCKS_CONNECT,
-        PREFLIGHT_SOCKS_HANDSHAKE,
-    )?;
+    // 1. FRESH readiness preflight (BEFORE the release boundary), per mode, then
+    //    build the mode-appropriate carrier. In BOTH modes a failed preflight
+    //    fails closed: the release boundary is never entered, no durable PENDING
+    //    record is created, no bytes are staged, and the voter remains NotCast.
+    let (descriptor, roots, mut carrier) = private_release_preflight_and_carrier(state)?;
 
     // 2. Prepared ballot / NotCast checks + shared release boundary (unchanged).
     let (artifacts, lifecycle_state) = {
@@ -899,17 +1218,6 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
 
     let cast_locks_dir = cast_locks_directory(app)?;
     let staging_dir = staging_directory(app)?;
-
-    let mut carrier =
-        TorSocksPrivateReleaseCarrierV1::new(socks_addr, TorCarrierTimeoutsV1::default()).map_err(
-            |_| {
-                CommandError::new(
-                    "GUI_TOR_CONFIG_INVALID",
-                    "INVALID_INPUT",
-                    "the loopback SOCKS endpoint is invalid",
-                )
-            },
-        )?;
 
     // Move the consistency store out of managed state (it is not Clone); it is
     // returned after the release call. Default replaces it meanwhile.
@@ -960,7 +1268,7 @@ pub fn submit_prepared_voter_ballot_privately_via_managed_tor(
         &mut consistency,
         &cast_locks_dir,
         &staging_dir,
-        &mut carrier as &mut dyn tari_cc_private_ballot_gui_core::PrivateReleaseCarrierV1,
+        carrier.as_mut(),
     );
 
     // Return the consistency store to the managed state.
@@ -986,41 +1294,10 @@ pub fn retry_private_submission_via_managed_tor(
     app: &AppHandle,
     state: &AppState,
 ) -> Result<GuiPrivateReleaseResultV1, CommandError> {
-    // 1. FRESH readiness preflight (BEFORE the retry boundary). If Tor has
-    //    died, remain CastPending without invoking the carrier.
-    let (descriptor, roots, socks_addr) = {
-        let mut managed = state
-            .managed_tor
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        let m = managed.as_mut().ok_or_else(|| {
-            CommandError::new(
-                "GUI_TOR_TEST_NOT_CONFIGURED",
-                "INVALID_INPUT",
-                "configure the managed Tor test transport first",
-            )
-        })?;
-        let controller = m.controller.as_mut().ok_or_else(|| {
-            CommandError::new(
-                "GUI_TOR_NOT_RUNNING",
-                "UNAVAILABLE",
-                "start the managed Tor transport before retrying",
-            )
-        })?;
-        controller.check_crash().map_err(|_| {
-            CommandError::new(
-                "GUI_TOR_NOT_RUNNING",
-                "UNAVAILABLE",
-                "the managed Tor process has exited; restart it before retrying",
-            )
-        })?;
-        (m.descriptor.clone(), m.roots.clone(), m.socks_addr)
-    };
-    fresh_socks_readiness(
-        socks_addr,
-        PREFLIGHT_SOCKS_CONNECT,
-        PREFLIGHT_SOCKS_HANDSHAKE,
-    )?;
+    // 1. FRESH readiness preflight (BEFORE the retry boundary), per mode. If the
+    //    transport is not ready, remain CastPending without invoking the carrier
+    //    (the exact staged envelope is untouched; no resealing, no rollback).
+    let (descriptor, roots, mut carrier) = private_release_preflight_and_carrier(state)?;
 
     // 2. Shared retry boundary (unchanged): retransmit the EXACT staged bytes.
     let artifacts = {
@@ -1035,17 +1312,6 @@ pub fn retry_private_submission_via_managed_tor(
     };
 
     let cast_locks_dir = cast_locks_directory(app)?;
-
-    let mut carrier =
-        TorSocksPrivateReleaseCarrierV1::new(socks_addr, TorCarrierTimeoutsV1::default()).map_err(
-            |_| {
-                CommandError::new(
-                    "GUI_TOR_CONFIG_INVALID",
-                    "INVALID_INPUT",
-                    "the loopback SOCKS endpoint is invalid",
-                )
-            },
-        )?;
 
     let mut consistency = {
         let mut managed = state
@@ -1072,7 +1338,7 @@ pub fn retry_private_submission_via_managed_tor(
         &roots,
         &mut consistency,
         &cast_locks_dir,
-        &mut carrier as &mut dyn tari_cc_private_ballot_gui_core::PrivateReleaseCarrierV1,
+        carrier.as_mut(),
     );
 
     if let Ok(mut managed) = state.managed_tor.lock() {
@@ -1106,6 +1372,130 @@ fn cast_locks_directory(app: &AppHandle) -> Result<PathBuf, CommandError> {
     let cast_locks_dir = voter_cast_locks_directory_v1(&app_data_root);
     ensure_voter_cast_locks_directory_v1(&cast_locks_dir)?;
     Ok(cast_locks_dir)
+}
+
+/// Records the endpoint-scoped remote readiness, but ONLY while the configured
+/// endpoint is still the one that was probed — a concurrent reconfigure to a
+/// different endpoint must never inherit this result (fail closed on change).
+fn set_remote_last_ready(state: &AppState, endpoint: &RemoteSocksEndpointV1, ready: bool) {
+    if let Ok(mut managed) = state.managed_tor.lock() {
+        if let Some(m) = managed.as_mut() {
+            if m.remote_endpoint.as_ref() == Some(endpoint) {
+                m.remote_last_ready = ready;
+            }
+        }
+    }
+}
+
+/// Runs the mode-appropriate PRE-PENDING readiness preflight and builds the
+/// matching private-release carrier, shared by the submit and retry paths.
+///
+///   * Managed-local: verify the OWNED Tor child is still alive and the loopback
+///     SOCKS listener is ready NOW, then build the loopback carrier.
+///   * Remote-SOCKS: run the zero-application-byte onion reachability probe
+///     THROUGH the external proxy (recording the endpoint-scoped readiness), and
+///     only on success build the remote carrier. The remote daemon is never
+///     spawned, killed, or otherwise treated as an owned process.
+///
+/// A failed preflight fails closed in BOTH modes: the caller never enters the
+/// shared release/retry boundary, so no PENDING record is created (submit) and
+/// no CastPending is disturbed (retry).
+#[allow(clippy::type_complexity)]
+fn private_release_preflight_and_carrier(
+    state: &AppState,
+) -> Result<
+    (
+        TransportDescriptorV1,
+        TransportAuthorityRootSetV1,
+        Box<dyn tari_cc_private_ballot_gui_core::PrivateReleaseCarrierV1>,
+    ),
+    CommandError,
+> {
+    match configured_tor_mode(state)? {
+        TorTransportModeV1::ManagedLocal => {
+            let (descriptor, roots, socks_addr) = {
+                let mut managed = state
+                    .managed_tor
+                    .lock()
+                    .map_err(|_| CommandError::state_poisoned())?;
+                let m = managed.as_mut().ok_or_else(|| {
+                    CommandError::new(
+                        "GUI_TOR_TEST_NOT_CONFIGURED",
+                        "INVALID_INPUT",
+                        "configure the managed Tor test transport first",
+                    )
+                })?;
+                let controller = m.controller.as_mut().ok_or_else(|| {
+                    CommandError::new(
+                        "GUI_TOR_NOT_RUNNING",
+                        "UNAVAILABLE",
+                        "start the managed Tor transport before submitting privately",
+                    )
+                })?;
+                controller.check_crash().map_err(|_| {
+                    CommandError::new(
+                        "GUI_TOR_NOT_RUNNING",
+                        "UNAVAILABLE",
+                        "the managed Tor process has exited; restart it before submitting privately",
+                    )
+                })?;
+                (m.descriptor.clone(), m.roots.clone(), m.socks_addr)
+            };
+            fresh_socks_readiness(socks_addr, PREFLIGHT_SOCKS_CONNECT, PREFLIGHT_SOCKS_HANDSHAKE)?;
+            let carrier =
+                TorSocksPrivateReleaseCarrierV1::new(socks_addr, TorCarrierTimeoutsV1::default())
+                    .map_err(|_| {
+                        CommandError::new(
+                            "GUI_TOR_CONFIG_INVALID",
+                            "INVALID_INPUT",
+                            "the loopback SOCKS endpoint is invalid",
+                        )
+                    })?;
+            Ok((descriptor, roots, Box::new(carrier)))
+        }
+        TorTransportModeV1::RemoteSocks => {
+            let (descriptor, roots, endpoint) = {
+                let managed = state
+                    .managed_tor
+                    .lock()
+                    .map_err(|_| CommandError::state_poisoned())?;
+                let m = managed.as_ref().ok_or_else(|| {
+                    CommandError::new(
+                        "GUI_TOR_TEST_NOT_CONFIGURED",
+                        "INVALID_INPUT",
+                        "configure the private connection first",
+                    )
+                })?;
+                let endpoint = m.remote_endpoint.clone().ok_or_else(|| {
+                    CommandError::new(
+                        "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                        "INVALID_INPUT",
+                        "the remote SOCKS endpoint is not configured",
+                    )
+                })?;
+                (m.descriptor.clone(), m.roots.clone(), endpoint)
+            };
+            // Zero-application-byte onion reachability through the external proxy.
+            let outcome = probe_remote_onion_reachability_v1(
+                &endpoint,
+                &descriptor,
+                &remote_readiness_timeouts(),
+            );
+            set_remote_last_ready(state, &endpoint, outcome.is_ready());
+            if !outcome.is_ready() {
+                return Err(CommandError::new(
+                    "GUI_REMOTE_TOR_NOT_READY",
+                    "UNAVAILABLE",
+                    remote_readiness_message(outcome),
+                ));
+            }
+            let carrier = RemoteTorSocksPrivateReleaseCarrierV1::new(
+                endpoint,
+                TorCarrierTimeoutsV1::default(),
+            );
+            Ok((descriptor, roots, Box::new(carrier)))
+        }
+    }
 }
 
 /// Runs a fresh loopback SOCKS5 readiness probe and returns an error if the
@@ -1189,6 +1579,7 @@ pub(crate) fn test_configured_state(
     root_anchor: (String, [u8; 32]),
 ) -> ManagedTorState {
     ManagedTorState {
+        mode: TorTransportModeV1::ManagedLocal,
         controller: None,
         descriptor,
         roots,
@@ -1198,6 +1589,8 @@ pub(crate) fn test_configured_state(
         tor_exe_path: std::path::PathBuf::from("tor.exe"),
         tor_data_dir: std::path::PathBuf::from("tor-data"),
         socks_port: 19051,
+        remote_endpoint: None,
+        remote_last_ready: false,
     }
 }
 

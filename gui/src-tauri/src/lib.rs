@@ -5902,6 +5902,8 @@ pub fn run() {
             #[cfg(feature = "managed-tor")]
             managed_tor::retry_private_submission,
             #[cfg(feature = "managed-tor")]
+            managed_tor::test_remote_tor_connection,
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::organizer_tor_status,
             #[cfg(feature = "managed-tor")]
             organizer_tor_intake::start_private_intake,

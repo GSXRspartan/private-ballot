@@ -471,13 +471,25 @@ export const api = {
     torExePath: string,
     voterTorDataDir: string,
     voterPublicBundlePath: string,
+    // Advanced remote-SOCKS options. Omitted/undefined ⇒ default managed-local.
+    remote?: { host: string; port: number },
   ) =>
     call<ManagedTorStatusV1>("configure_managed_tor", {
-      input: { tor_exe_path: torExePath, voter_tor_data_dir: voterTorDataDir, voter_public_bundle_path: voterPublicBundlePath },
+      input: {
+        tor_exe_path: torExePath,
+        voter_tor_data_dir: voterTorDataDir,
+        voter_public_bundle_path: voterPublicBundlePath,
+        tor_mode: remote ? "remote-socks" : "managed-local",
+        remote_socks_host: remote ? remote.host : null,
+        remote_socks_port: remote ? remote.port : null,
+      },
     }),
   startManagedTor: () => call<ManagedTorStatusV1>("start_managed_tor"),
   stopManagedTor: () => call<ManagedTorStatusV1>("stop_managed_tor"),
   managedTorStatus: () => call<ManagedTorStatusV1>("managed_tor_status"),
+  // Advanced remote-SOCKS explicit connectivity/readiness test (no ballot bytes).
+  testRemoteTorConnection: () =>
+    call<ManagedTorStatusV1>("test_remote_tor_connection"),
   // Read-only voter Tor availability (allowlist or remembered/selected path).
   voterTorStatus: (torExePath?: string) =>
     call<VoterTorStatusV1>("voter_tor_status", {

@@ -30,8 +30,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tari_cc_private_ballot_transport_network::{
-    ManagedTorChildV1, ManagedTorConfigV1, ManagedTorControllerV1, StderrLogFileTorSpawnerV1,
-    SystemManagedTorReadinessProbeV1, TorSocksPrivateReleaseCarrierV1,
+    ManagedTorChildV1, ManagedTorConfigV1, ManagedTorControllerV1, RemoteSocksEndpointV1,
+    StderrLogFileTorSpawnerV1, SystemManagedTorReadinessProbeV1, TorSocksPrivateReleaseCarrierV1,
     apply_hide_console_window_on_windows_v1, create_fresh_run_directory_v1,
     reserve_loopback_socks_port_v1, validate_tor_executable_v1,
 };
@@ -94,48 +94,63 @@ pub enum TorEndpointModeV1 {
     /// MODE A — managed: the tool validates the operator-supplied executable
     /// and starts/stops an isolated Tor process itself.
     Managed { tor_exe: PathBuf },
-    /// MODE B — existing: an operator-run local Tor SOCKS listener (the exact
-    /// workflow of the prior physical 500-voter test).
+    /// MODE B — existing: an operator-run LOCAL Tor SOCKS listener (the exact
+    /// workflow of the prior physical 500-voter test). Loopback-only.
     ExistingSocks { socks_addr: SocketAddr },
+    /// MODE C — remote SOCKS (advanced): an EXTERNALLY MANAGED Tor SOCKS proxy
+    /// reached over a trusted LAN/VPN/tunnel. The tool never spawns, owns, or
+    /// validates a Tor process; it only speaks SOCKS5 to the given endpoint.
+    RemoteSocks { endpoint: RemoteSocksEndpointV1 },
 }
 
-/// Resolves the Tor endpoint mode from the two CLI inputs. Ambiguity is
-/// rejected (both supplied) rather than resolved by silent precedence.
+/// Resolves the Tor endpoint mode from the CLI inputs. Exactly one of the three
+/// modes may be selected; supplying more than one is rejected as ambiguous and
+/// supplying none is rejected as under-specified (fail closed — no guessing, no
+/// clearnet fallback).
 pub fn resolve_tor_endpoint_mode_v1(
     tor_exe: Option<&Path>,
     tor_socks: Option<SocketAddr>,
+    tor_remote_socks: Option<&str>,
 ) -> Result<TorEndpointModeV1, String> {
-    match (tor_exe, tor_socks) {
-        (Some(_), Some(_)) => Err(
-            "supply either --tor-exe (managed Tor) or --tor-socks (existing SOCKS listener), not both; refusing to guess"
+    let selected = usize::from(tor_exe.is_some())
+        + usize::from(tor_socks.is_some())
+        + usize::from(tor_remote_socks.is_some());
+    if selected > 1 {
+        return Err(
+            "supply exactly one of --tor-exe (managed Tor), --tor-socks (existing loopback SOCKS), or --tor-remote-socks (advanced remote SOCKS); refusing to guess"
                 .to_owned(),
-        ),
-        (None, None) => Err(
-            "supply --tor-exe (managed Tor) or --tor-socks (existing SOCKS listener)".to_owned(),
-        ),
-        (Some(tor_exe), None) => {
-            validate_tor_executable_v1(tor_exe)
-                .map_err(|error| format!("tor executable rejected: {error}"))?;
-            Ok(TorEndpointModeV1::Managed {
-                tor_exe: tor_exe.to_path_buf(),
-            })
-        }
-        (None, Some(socks_addr)) => {
-            // Fail closed on non-loopback endpoints: the carrier construction
-            // is the single shared loopback gate, so a LAN/public address can
-            // never become the submission route.
-            TorSocksPrivateReleaseCarrierV1::new(
-                socks_addr,
-                tari_cc_private_ballot_transport_network::TorCarrierTimeoutsV1::default(),
-            )
-            .map_err(|_| {
-                format!(
-                    "--tor-socks must be a loopback ip:port endpoint (got {socks_addr})"
-                )
-            })?;
-            Ok(TorEndpointModeV1::ExistingSocks { socks_addr })
-        }
+        );
     }
+    if let Some(tor_exe) = tor_exe {
+        validate_tor_executable_v1(tor_exe)
+            .map_err(|error| format!("tor executable rejected: {error}"))?;
+        return Ok(TorEndpointModeV1::Managed {
+            tor_exe: tor_exe.to_path_buf(),
+        });
+    }
+    if let Some(socks_addr) = tor_socks {
+        // Fail closed on non-loopback endpoints: the loopback carrier is the
+        // single shared loopback gate, so a LAN/public address can never become
+        // the submission route via the loopback mode. Use --tor-remote-socks for
+        // an intentional remote proxy.
+        TorSocksPrivateReleaseCarrierV1::new(
+            socks_addr,
+            tari_cc_private_ballot_transport_network::TorCarrierTimeoutsV1::default(),
+        )
+        .map_err(|_| {
+            format!("--tor-socks must be a loopback ip:port endpoint (got {socks_addr})")
+        })?;
+        return Ok(TorEndpointModeV1::ExistingSocks { socks_addr });
+    }
+    if let Some(raw) = tor_remote_socks {
+        let endpoint = RemoteSocksEndpointV1::parse(raw)
+            .map_err(|error| format!("--tor-remote-socks rejected: {error}"))?;
+        return Ok(TorEndpointModeV1::RemoteSocks { endpoint });
+    }
+    Err(
+        "supply one of --tor-exe (managed Tor), --tor-socks (existing loopback SOCKS), or --tor-remote-socks (advanced remote SOCKS)"
+            .to_owned(),
+    )
 }
 
 /// Locally-owned inputs for ONE managed-Tor load-driver start. The Tor
@@ -459,19 +474,31 @@ mod tests {
         let error = resolve_tor_endpoint_mode_v1(
             Some(Path::new("/tmp/tor")),
             Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            None,
         )
         .expect_err("both inputs must be ambiguous");
-        assert!(error.contains("not both"), "{error}");
+        assert!(error.contains("exactly one"), "{error}");
+    }
+
+    #[test]
+    fn three_way_ambiguity_is_rejected() {
+        let error = resolve_tor_endpoint_mode_v1(
+            None,
+            Some(SocketAddr::from(([127, 0, 0, 1], 9050))),
+            Some("192.168.1.50:9050"),
+        )
+        .expect_err("socks + remote-socks is ambiguous");
+        assert!(error.contains("exactly one"), "{error}");
     }
 
     #[test]
     fn neither_tor_input_is_rejected() {
-        assert!(resolve_tor_endpoint_mode_v1(None, None).is_err());
+        assert!(resolve_tor_endpoint_mode_v1(None, None, None).is_err());
     }
 
     #[test]
     fn relative_tor_executable_is_rejected() {
-        let error = resolve_tor_endpoint_mode_v1(Some(Path::new("tor.exe")), None)
+        let error = resolve_tor_endpoint_mode_v1(Some(Path::new("tor.exe")), None, None)
             .expect_err("relative must reject");
         assert!(error.contains("absolute"), "{error}");
     }
@@ -482,7 +509,7 @@ mod tests {
         let bogus = PathBuf::from(r"C:\definitely\not\here\tor.exe");
         #[cfg(not(windows))]
         let bogus = PathBuf::from("/definitely/not/here/tor");
-        let error = resolve_tor_endpoint_mode_v1(Some(bogus.as_path()), None)
+        let error = resolve_tor_endpoint_mode_v1(Some(bogus.as_path()), None, None)
             .expect_err("missing must reject");
         assert!(
             error.contains("not found") || error.contains("rejected"),
@@ -493,7 +520,7 @@ mod tests {
     #[test]
     fn existing_socks_mode_is_preserved_for_loopback_endpoints() {
         let mode =
-            resolve_tor_endpoint_mode_v1(None, Some(SocketAddr::from(([127, 0, 0, 1], 9050))))
+            resolve_tor_endpoint_mode_v1(None, Some(SocketAddr::from(([127, 0, 0, 1], 9050))), None)
                 .expect("loopback socks accepted");
         assert_eq!(
             mode,
@@ -505,7 +532,8 @@ mod tests {
 
     #[test]
     fn existing_socks_mode_rejects_non_loopback_endpoints() {
-        // No clearnet fallback: a LAN/public address can never be accepted.
+        // No clearnet fallback: a LAN/public address can never be accepted via
+        // the LOOPBACK mode (a deliberate remote proxy uses --tor-remote-socks).
         for addr in [
             SocketAddr::from(([10, 0, 0, 5], 9050)),
             SocketAddr::from(([203, 0, 113, 7], 9050)),
@@ -513,10 +541,30 @@ mod tests {
             SocketAddr::from(([127, 0, 0, 1], 0)),
         ] {
             assert!(
-                resolve_tor_endpoint_mode_v1(None, Some(addr)).is_err(),
+                resolve_tor_endpoint_mode_v1(None, Some(addr), None).is_err(),
                 "{addr}"
             );
         }
+    }
+
+    #[test]
+    fn remote_socks_mode_accepts_non_loopback_and_hostname_endpoints() {
+        // The ADVANCED remote mode intentionally allows LAN/VPN addresses and
+        // hostnames — this is the whole point of the mode.
+        for raw in ["192.168.1.50:9050", "10.0.0.12:9050", "tor.internal.example:9050"] {
+            let mode = resolve_tor_endpoint_mode_v1(None, None, Some(raw))
+                .unwrap_or_else(|error| panic!("{raw} accepted: {error}"));
+            match mode {
+                TorEndpointModeV1::RemoteSocks { endpoint } => {
+                    assert_eq!(endpoint.display(), raw);
+                }
+                other => panic!("expected RemoteSocks, got {other:?}"),
+            }
+        }
+        // A malformed remote endpoint fails closed.
+        assert!(resolve_tor_endpoint_mode_v1(None, None, Some("socks5://x:1")).is_err());
+        assert!(resolve_tor_endpoint_mode_v1(None, None, Some("host:0")).is_err());
+        assert!(resolve_tor_endpoint_mode_v1(None, None, Some(":9050")).is_err());
     }
 
     #[test]
@@ -525,7 +573,7 @@ mod tests {
         std::fs::create_dir_all(&base).expect("base");
         let exe = base.join("tor.exe");
         write_fake_tor_executable(&exe);
-        let mode = resolve_tor_endpoint_mode_v1(Some(exe.as_path()), None).expect("valid exe");
+        let mode = resolve_tor_endpoint_mode_v1(Some(exe.as_path()), None, None).expect("valid exe");
         assert_eq!(mode, TorEndpointModeV1::Managed { tor_exe: exe });
         let _ = std::fs::remove_dir_all(&base);
     }

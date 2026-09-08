@@ -1184,8 +1184,13 @@ export interface ManagedTorStatusV1 {
   socks_addr: string | null;
   onion_hostname: string | null;
   descriptor_fingerprint: string | null;
+  /** Stable transport-mode token: "managed-local" (default) or "remote-socks". */
+  tor_mode: string;
   message: string;
 }
+
+/** Explicit Tor transport mode selected in the voter GUI. */
+export type TorTransportMode = "managed-local" | "remote-socks";
 
 /** Read-only voter Tor availability probe result. */
 export interface VoterTorStatusV1 {

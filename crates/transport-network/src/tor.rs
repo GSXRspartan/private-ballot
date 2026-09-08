@@ -34,6 +34,7 @@ use tari_cc_private_ballot_gui_core::{
 };
 
 use crate::PrivateTransportNetworkErrorV1;
+use crate::remote_socks::{RemoteSocksEndpointV1, SocksProxyEndpointV1};
 
 /// The single collector endpoint path. Nothing else is served or requested.
 pub const OPAQUE_ENVELOPE_HTTP_PATH_V1: &str = "/v1/opaque-envelope";
@@ -379,11 +380,32 @@ pub fn probe_onion_reachability_v1(
     descriptor: &TransportDescriptorV1,
     timeouts: &TorCarrierTimeoutsV1,
 ) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
+    // Managed-local policy: loopback-only. Then delegate to the shared,
+    // endpoint-agnostic probe so managed-local and remote-SOCKS reachability
+    // checks cannot diverge in their onion-routing / zero-application-byte
+    // behaviour.
     validate_loopback_socket_addr_v1(socks_addr)?;
+    probe_onion_reachability_over_proxy(
+        &SocksProxyEndpointV1::ManagedLoopback(socks_addr),
+        descriptor,
+        timeouts,
+    )
+}
+
+/// The endpoint-AGNOSTIC onion reachability probe shared by managed-local and
+/// remote-SOCKS modes. It performs one SOCKS5 CONNECT to the descriptor's onion
+/// through the given proxy, immediately closes the socket, and sends ZERO
+/// application bytes. The proxy's own endpoint policy (loopback vs remote) is
+/// enforced by the caller before this runs.
+fn probe_onion_reachability_over_proxy(
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
     let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
 
     // Stage 1: TCP connect to the SOCKS proxy.
-    let mut stream = match TcpStream::connect_timeout(&socks_addr, timeouts.socks_connect) {
+    let mut stream = match proxy.connect(timeouts.socks_connect) {
         Ok(stream) => stream,
         Err(_) => return Ok(OnionReachabilityOutcomeV1::SocksConnectFailed),
     };
@@ -448,6 +470,21 @@ pub fn probe_onion_reachability_v1(
     Ok(OnionReachabilityOutcomeV1::Reachable)
 }
 
+/// Endpoint-agnostic onion reachability probe for callers that already hold a
+/// validated [`SocksProxyEndpointV1`] (e.g. the distributed load driver, which
+/// supports both managed-local and remote-SOCKS outbound transport). Validates
+/// the endpoint under its own policy, then performs the SAME zero-application-
+/// byte SOCKS5 CONNECT probe used by [`probe_onion_reachability_v1`]. There is
+/// no clearnet fallback.
+pub fn probe_onion_reachability_endpoint_v1(
+    proxy: &SocksProxyEndpointV1,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
+    proxy.validate()?;
+    probe_onion_reachability_over_proxy(proxy, descriptor, timeouts)
+}
+
 /// Fetches one authenticated election-status statement from the ballot office
 /// over the managed Tor SOCKS route derived from the verified descriptor.
 ///
@@ -462,6 +499,22 @@ pub fn fetch_election_status_over_tor(
 ) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
     let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
     let mut stream = socks5_connect_onion(socks_addr, onion_host, onion_port, timeouts)?;
+    http_get_election_status(&mut stream, onion_host, timeouts)
+}
+
+/// Remote-SOCKS variant of [`fetch_election_status_over_tor`]. Fetches the same
+/// public, credential-free election-status statement, but through an
+/// externally-managed remote SOCKS proxy. The onion route is still
+/// descriptor-derived and sent as a DOMAINNAME literal; there is no clearnet
+/// fallback and the remote daemon is never treated as owned.
+pub fn fetch_election_status_over_remote_tor(
+    endpoint: &RemoteSocksEndpointV1,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
+    let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
+    let mut stream = endpoint.connect(timeouts.socks_connect)?;
+    socks5_handshake_and_connect_onion_over_stream(&mut stream, onion_host, onion_port, timeouts)?;
     http_get_election_status(&mut stream, onion_host, timeouts)
 }
 
@@ -502,11 +555,36 @@ fn socks5_connect_onion(
     onion_port: u16,
     timeouts: &TorCarrierTimeoutsV1,
 ) -> Result<TcpStream, PrivateTransportNetworkErrorV1> {
+    // Managed-local policy: the SOCKS proxy MUST be a loopback socket, and the
+    // connect is a NUMERIC connect (no DNS whatsoever). This entry point is
+    // unchanged from the reviewed managed-Tor path.
     validate_loopback_socket_addr_v1(socks_addr)?;
-    validate_onion_hostname_v1(onion_host)?;
-
     let mut stream = TcpStream::connect_timeout(&socks_addr, timeouts.socks_connect)
         .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
+    socks5_handshake_and_connect_onion_over_stream(&mut stream, onion_host, onion_port, timeouts)?;
+    Ok(stream)
+}
+
+/// The endpoint-AGNOSTIC SOCKS5 negotiation + onion `CONNECT` performed over an
+/// ALREADY-ESTABLISHED TCP stream to a SOCKS proxy. Both the managed-local
+/// loopback path and the remote-SOCKS path call this identical helper, so the
+/// onion-routing guarantees can never diverge between the two modes:
+///
+///   * the onion hostname is strictly validated as a Tor v3 `.onion`;
+///   * it is sent to the proxy as a SOCKS5 `DOMAINNAME` (`ATYP = 0x03`)
+///     literal, so the `.onion` is NEVER resolved by the local OS resolver;
+///   * only SOCKS5 no-authentication is offered/required;
+///   * a non-success SOCKS reply is a hard error — there is no direct/clearnet
+///     fallback.
+///
+/// This sends ZERO application bytes; it establishes the tunnel only.
+fn socks5_handshake_and_connect_onion_over_stream(
+    stream: &mut TcpStream,
+    onion_host: &str,
+    onion_port: u16,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<(), PrivateTransportNetworkErrorV1> {
+    validate_onion_hostname_v1(onion_host)?;
     stream
         .set_read_timeout(Some(timeouts.socks_handshake))
         .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
@@ -514,7 +592,7 @@ fn socks5_connect_onion(
         .set_write_timeout(Some(timeouts.socks_handshake))
         .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)?;
 
-    socks5_negotiate_no_auth(&mut stream)?;
+    socks5_negotiate_no_auth(stream)?;
 
     // CONNECT: 05 01 00 03 <len> <literal onion host> <port big-endian>.
     let host_bytes = onion_host.as_bytes();
@@ -529,34 +607,34 @@ fn socks5_connect_onion(
     request.push(host_len);
     request.extend_from_slice(host_bytes);
     request.extend_from_slice(&onion_port.to_be_bytes());
-    write_all(&mut stream, &request)?;
+    write_all(stream, &request)?;
 
     // Reply: VER REP RSV ATYP <BND.ADDR> <BND.PORT>.
     let mut head = [0u8; 4];
-    read_exact(&mut stream, &mut head)?;
+    read_exact(stream, &mut head)?;
     if head[0] != SOCKS_VERSION || head[1] != SOCKS_REP_SUCCEEDED || head[2] != SOCKS_RESERVED {
         return Err(PrivateTransportNetworkErrorV1::PrivateTransportUnavailable);
     }
     match head[3] {
         SOCKS_ATYP_IPV4 => {
             let mut addr = [0u8; 4];
-            read_exact(&mut stream, &mut addr)?;
+            read_exact(stream, &mut addr)?;
         }
         SOCKS_ATYP_IPV6 => {
             let mut addr = [0u8; 16];
-            read_exact(&mut stream, &mut addr)?;
+            read_exact(stream, &mut addr)?;
         }
         SOCKS_ATYP_DOMAINNAME => {
             let mut len = [0u8; 1];
-            read_exact(&mut stream, &mut len)?;
+            read_exact(stream, &mut len)?;
             let mut addr = vec![0u8; usize::from(len[0])];
-            read_exact(&mut stream, &mut addr)?;
+            read_exact(stream, &mut addr)?;
         }
         _ => return Err(PrivateTransportNetworkErrorV1::PrivateTransportUnavailable),
     }
     let mut port = [0u8; 2];
-    read_exact(&mut stream, &mut port)?;
-    Ok(stream)
+    read_exact(stream, &mut port)?;
+    Ok(())
 }
 
 /// Writes the single strict HTTP/1.1 POST over an established Tor stream and
@@ -795,6 +873,149 @@ fn read_exact(
     stream
         .read_exact(buffer)
         .map_err(|_| PrivateTransportNetworkErrorV1::PrivateTransportUnavailable)
+}
+
+// =============================================================================
+// Remote SOCKS Tor (advanced/opt-in) — voter/client OUTBOUND transport only.
+//
+// These primitives speak SOCKS5 to an EXTERNALLY MANAGED Tor proxy. They never
+// spawn, validate, own, or stop a Tor process — the remote daemon's identity,
+// binary, version, lifecycle, and configuration are explicitly out of scope
+// (see `remote_socks.rs`). They reuse the SAME onion-CONNECT + HTTP wire code as
+// the managed-local carrier, so the onion-only routing and no-clearnet-fallback
+// guarantees are identical; the only difference is the proxy endpoint policy.
+// =============================================================================
+
+/// Bounded, deterministic classification of a REMOTE SOCKS readiness probe.
+/// Distinct from [`OnionReachabilityOutcomeV1`] so the advanced remote-mode UI
+/// can present remote-specific states with stable codes. Every variant is
+/// sanitized: never a path, secret, or raw OS message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteTorReadinessOutcomeV1 {
+    /// The remote proxy accepted a SOCKS5 CONNECT to the descriptor's onion.
+    /// No application bytes were sent.
+    Ready,
+    /// The endpoint or descriptor was invalid before any connection was made.
+    EndpointInvalid,
+    /// The TCP connection to the remote SOCKS proxy could not be established
+    /// (wrong host/port, proxy down, or blocked by the trusted-link boundary).
+    Unreachable,
+    /// The TCP connection succeeded but SOCKS5 no-auth negotiation failed — the
+    /// peer is reachable but is not a usable SOCKS5 proxy.
+    SocksHandshakeFailed,
+    /// SOCKS5 negotiated but the CONNECT to the descriptor's onion failed — the
+    /// proxy works, but Tor could not reach the hidden service.
+    OnionUnreachable,
+}
+
+impl RemoteTorReadinessOutcomeV1 {
+    /// Stable uppercase classification string for the UI and evidence.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Ready => "REMOTE_TOR_READY",
+            Self::EndpointInvalid => "REMOTE_TOR_ENDPOINT_INVALID",
+            Self::Unreachable => "REMOTE_TOR_UNREACHABLE",
+            Self::SocksHandshakeFailed => "REMOTE_TOR_SOCKS_HANDSHAKE_FAILED",
+            Self::OnionUnreachable => "REMOTE_TOR_ONION_UNREACHABLE",
+        }
+    }
+
+    /// Whether the remote transport is ready for a ballot submission.
+    #[must_use]
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Real private-release carrier that delivers an already-authenticated opaque
+/// envelope to a Tor v3 onion collector through an EXTERNALLY MANAGED remote
+/// SOCKS5 proxy.
+///
+/// Like the managed-local carrier, it holds NO ballot destination: the onion
+/// route is derived at delivery time from the verified descriptor, so route
+/// confusion is structurally impossible. It constructs no ballots, seals no
+/// HPKE, writes no state, never re-seals on retry, and has NO direct/clearnet
+/// fallback. It also never spawns or stops Tor — the proxy is not owned.
+#[derive(Debug, Clone)]
+pub struct RemoteTorSocksPrivateReleaseCarrierV1 {
+    endpoint: RemoteSocksEndpointV1,
+    timeouts: TorCarrierTimeoutsV1,
+}
+
+impl RemoteTorSocksPrivateReleaseCarrierV1 {
+    /// Builds a carrier for a validated remote SOCKS endpoint. Construction does
+    /// NOT connect, resolve, spawn, or probe anything.
+    #[must_use]
+    pub fn new(endpoint: RemoteSocksEndpointV1, timeouts: TorCarrierTimeoutsV1) -> Self {
+        Self { endpoint, timeouts }
+    }
+
+    /// The validated remote SOCKS endpoint this carrier targets.
+    #[must_use]
+    pub fn endpoint(&self) -> &RemoteSocksEndpointV1 {
+        &self.endpoint
+    }
+}
+
+impl PrivateReleaseCarrierV1 for RemoteTorSocksPrivateReleaseCarrierV1 {
+    fn deliver_opaque_envelope(
+        &mut self,
+        descriptor: &TransportDescriptorV1,
+        envelope: &[u8],
+    ) -> Result<Vec<u8>, GuiCoreError> {
+        deliver_over_remote_tor(&self.endpoint, descriptor, &self.timeouts, envelope)
+            .map_err(map_carrier_error)
+    }
+}
+
+/// The remote-SOCKS client wire flow. Exactly one path: derive the destination
+/// from the verified descriptor, connect to the REMOTE proxy, SOCKS5 CONNECT to
+/// the onion (DOMAINNAME literal — never DNS-resolved), then a single HTTP POST
+/// over that tunnel. No branch reconnects directly, uses clearnet, or targets a
+/// destination other than the descriptor's.
+fn deliver_over_remote_tor(
+    endpoint: &RemoteSocksEndpointV1,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+    envelope: &[u8],
+) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
+    if envelope.is_empty() || envelope.len() as u64 > MAX_STAGED_RELEASE_ENVELOPE_BYTES {
+        return Err(PrivateTransportNetworkErrorV1::InvalidOpaqueRequest);
+    }
+    // Bind the destination to the verified descriptor BEFORE any connect.
+    let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
+    let mut stream = endpoint.connect(timeouts.socks_connect)?;
+    socks5_handshake_and_connect_onion_over_stream(&mut stream, onion_host, onion_port, timeouts)?;
+    http_post_opaque_envelope(&mut stream, onion_host, envelope, timeouts)
+}
+
+/// Non-mutating REMOTE onion reachability probe. Same zero-application-byte
+/// handshake as [`probe_onion_reachability_v1`], but through a remote proxy and
+/// returning remote-specific classification. It sends no ballot bytes, consumes
+/// no credential, produces no receipt, and mutates no state.
+#[must_use]
+pub fn probe_remote_onion_reachability_v1(
+    endpoint: &RemoteSocksEndpointV1,
+    descriptor: &TransportDescriptorV1,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> RemoteTorReadinessOutcomeV1 {
+    let proxy = SocksProxyEndpointV1::Remote(endpoint.clone());
+    // A remote proxy endpoint is valid by construction; a descriptor problem is
+    // surfaced as EndpointInvalid (a configuration error, not a network state).
+    match probe_onion_reachability_over_proxy(&proxy, descriptor, timeouts) {
+        Ok(OnionReachabilityOutcomeV1::Reachable) => RemoteTorReadinessOutcomeV1::Ready,
+        Ok(OnionReachabilityOutcomeV1::SocksConnectFailed) => {
+            RemoteTorReadinessOutcomeV1::Unreachable
+        }
+        Ok(OnionReachabilityOutcomeV1::SocksHandshakeFailed) => {
+            RemoteTorReadinessOutcomeV1::SocksHandshakeFailed
+        }
+        Ok(OnionReachabilityOutcomeV1::OnionConnectFailed) => {
+            RemoteTorReadinessOutcomeV1::OnionUnreachable
+        }
+        Err(_) => RemoteTorReadinessOutcomeV1::EndpointInvalid,
+    }
 }
 
 #[cfg(test)]

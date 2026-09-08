@@ -32,8 +32,10 @@ describe("voter one-click Tor connect", () => {
 
   it("auto-derives the Tor data directory (passes an empty dir to the backend)", () => {
     // The one-click connect passes "" for the data dir so the backend derives an
-    // app-owned, election-scoped directory the voter never chooses.
-    assert.match(vote, /configureManagedTor\(torExePath, "", voterBundlePath\)/);
+    // app-owned, election-scoped directory the voter never chooses. The optional
+    // 4th argument carries the advanced remote-SOCKS endpoint (undefined in the
+    // default managed-local mode).
+    assert.match(vote, /configureManagedTor\(torExePath, "", voterBundlePath, remoteConfigureArg\(\)\)/);
   });
 
   it("keeps the manual tor.exe/data-dir inputs under Advanced only", () => {

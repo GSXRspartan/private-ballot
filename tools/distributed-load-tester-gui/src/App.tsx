@@ -62,6 +62,7 @@ interface RunForm {
   torMode: TorMode;
   torExe: string;
   torSocks: string;
+  torRemoteSocks: string;
   resultsPath: string;
   choice: string;
   count: number;
@@ -131,6 +132,7 @@ const initialRun: RunForm = {
   torMode: "managed",
   torExe: "",
   torSocks: DEFAULT_TOR_SOCKS,
+  torRemoteSocks: "",
   resultsPath: "",
   choice: "round-robin",
   count: 1,
@@ -366,7 +368,7 @@ export default function App() {
         { label: "Voters this computer will submit", value: (result.requestedVoterCount ?? result.requested_voter_count) as number },
         { label: "Credentials selected for this run", value: (result.selectedVoterCount ?? result.selected_voter_count) as number },
         { label: "First local credential", value: (result.startIndex ?? result.start_index) as number },
-        { label: "Tor mode", value: run.torMode === "managed" ? "Managed" : "Advanced — existing local SOCKS" },
+        { label: "Tor mode", value: torModeLabel(run.torMode) },
         { label: "Candidate rotation", value: result.choice === "round-robin" ? "Rotate evenly through candidates" : (result.choice as string) },
       ]);
       setTab("run");
@@ -435,7 +437,7 @@ export default function App() {
     },
     {
       label: run.torMode === "managed" ? "Tor executable ready" : "Tor SOCKS endpoint valid",
-      checked: torReady && (validated || run.torMode === "manual-socks"),
+      checked: torReady && (validated || run.torMode !== "managed"),
       detail: torDetail || (torReady ? "Selected." : "Required before Run Test."),
     },
     {
@@ -458,7 +460,7 @@ export default function App() {
         <div className="statusBox">
           <strong>Sequential safety mode</strong>
           <span>Concurrency: {shellInfo?.concurrency ?? 1}</span>
-          <span>Tor: {run.torMode === "managed" ? "Managed" : "Advanced SOCKS"}</span>
+          <span>Tor: {torModeLabel(run.torMode)}</span>
           <span>Status: {torStatusLabel(torStatus)}</span>
         </div>
       </header>
@@ -579,7 +581,11 @@ export default function App() {
               </label>
               <label className={`torModeChoice ${run.torMode === "manual-socks" ? "active" : ""}`}>
                 <input type="radio" name="torMode" value="manual-socks" checked={run.torMode === "manual-socks"} onChange={() => updateTorMode("manual-socks")} />
-                <span><strong>Advanced — use existing SOCKS</strong><small>Developer/debug only.</small></span>
+                <span><strong>Advanced — existing local SOCKS</strong><small>Developer/debug only (loopback).</small></span>
+              </label>
+              <label className={`torModeChoice ${run.torMode === "remote-socks" ? "active" : ""}`}>
+                <input type="radio" name="torMode" value="remote-socks" checked={run.torMode === "remote-socks"} onChange={() => updateTorMode("remote-socks")} />
+                <span><strong>Advanced — remote SOCKS proxy</strong><small>Externally managed Tor on a trusted LAN/VPN/tunnel.</small></span>
               </label>
             </div>
 
@@ -591,6 +597,17 @@ export default function App() {
             {run.torMode === "manual-socks" && (
               <div className="grid">
                 <TextField label="Tor SOCKS endpoint" value={run.torSocks} onChange={(v) => updateRun({ torSocks: v })} />
+              </div>
+            )}
+            {run.torMode === "remote-socks" && (
+              <div className="grid">
+                <TextField label="Remote SOCKS endpoint (host:port)" value={run.torRemoteSocks} onChange={(v) => updateRun({ torRemoteSocks: v })} />
+                <p className="hint">
+                  Remote SOCKS is intended for a trusted LAN, VPN, or tunnelled connection. The load
+                  tester does not start, stop, or verify the remote Tor daemon, and the link to the
+                  proxy is not itself encrypted — use it only over a network you already trust. Onion
+                  traffic still goes only through Tor; there is no clearnet fallback.
+                </p>
               </div>
             )}
 
@@ -650,6 +667,20 @@ export default function App() {
       )}
     </main>
   );
+}
+
+// Short, consistent label for the selected Tor transport mode.
+function torModeLabel(mode: TorMode): string {
+  switch (mode) {
+    case "managed":
+      return "Managed";
+    case "manual-socks":
+      return "Advanced — existing local SOCKS";
+    case "remote-socks":
+      return "Advanced — remote SOCKS proxy";
+    default:
+      return mode;
+  }
 }
 
 function readinessItem(label: string, value: string, validated: boolean, expectedFilename?: string): ChecklistItem {

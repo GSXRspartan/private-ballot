@@ -5,7 +5,7 @@ export const DEFAULT_TOR_SOCKS = "127.0.0.1:9050";
 // run, and the operator only picks the Tor executable. Manual SOCKS is the
 // advanced fallback for hosts already running a local Tor listener — used
 // for developer debugging and the earlier CLI/PowerShell physical topology.
-export type TorMode = "managed" | "manual-socks";
+export type TorMode = "managed" | "manual-socks" | "remote-socks";
 
 // Backend-facing Tor readiness pill state. Reused for both Test Tor and the
 // runtime Tor status surface so the run flow always presents the same
@@ -75,6 +75,9 @@ export interface RunConfigInput {
   torMode: TorMode;
   torExe: string;
   torSocks: string;
+  /** Advanced remote-SOCKS proxy host:port (LAN/VPN/tunnel). Used only when
+   *  torMode === "remote-socks". */
+  torRemoteSocks: string;
   resultsPath: string;
   choice: string;
   count: number;
@@ -96,6 +99,7 @@ export interface LoadTestRequestPayload {
   torMode: TorMode;
   torExe: string | null;
   torSocks: string | null;
+  torRemoteSocks: string | null;
   resultsPath: string;
   choice: string;
   count: number;
@@ -122,6 +126,7 @@ export function buildLoadTestRequest(
     torMode: form.torMode,
     torExe: form.torMode === "managed" ? form.torExe : null,
     torSocks: form.torMode === "manual-socks" ? form.torSocks : null,
+    torRemoteSocks: form.torMode === "remote-socks" ? form.torRemoteSocks : null,
     resultsPath: form.resultsPath,
     choice: form.choice,
     count: form.count,

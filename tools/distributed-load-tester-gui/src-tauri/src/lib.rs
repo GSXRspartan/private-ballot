@@ -19,7 +19,7 @@ use tari_cc_private_ballot_cli::{
     generate_distributed_cohort, partition_credentials_with_summary, run_load_driver_with_control,
     validate_load_driver_inputs, validate_results_output_path,
 };
-use tari_cc_private_ballot_transport_network::validate_tor_executable_v1;
+use tari_cc_private_ballot_transport_network::{RemoteSocksEndpointV1, validate_tor_executable_v1};
 use tauri::{AppHandle, Emitter, Manager, State};
 use zeroize::Zeroizing;
 
@@ -31,6 +31,10 @@ use zeroize::Zeroizing;
 /// match the frontend contract so a future rename never silently drifts.
 const TOR_MODE_MANAGED: &str = "managed";
 const TOR_MODE_MANUAL_SOCKS: &str = "manual-socks";
+/// Advanced remote-SOCKS mode: the operator runs Tor elsewhere (trusted
+/// LAN/VPN/tunnel) and supplies a `host:port` SOCKS endpoint. The tool never
+/// spawns or owns a Tor process in this mode.
+const TOR_MODE_REMOTE_SOCKS: &str = "remote-socks";
 
 #[derive(Default)]
 struct RunnerState {
@@ -187,9 +191,9 @@ struct LoadTestRequest {
     voter_public_bundle_path: String,
     credentials_dir: String,
     passphrase: String,
-    /// `managed` or `manual-socks`. Exactly one of `tor_exe` / `tor_socks`
-    /// must be populated to match, and the resolver rejects ambiguous
-    /// combinations rather than picking silently.
+    /// `managed`, `manual-socks`, or `remote-socks`. Exactly one of the
+    /// matching transport fields must be populated, and the resolver rejects
+    /// ambiguous combinations rather than picking silently.
     tor_mode: String,
     /// Absolute path to the operator-selected Tor executable when
     /// `tor_mode == "managed"`. Passed through the shared `validate_tor_
@@ -198,6 +202,11 @@ struct LoadTestRequest {
     /// Loopback `ip:port` of an already-running Tor SOCKS listener when
     /// `tor_mode == "manual-socks"`.
     tor_socks: Option<String>,
+    /// Externally-managed remote SOCKS proxy `host:port` when
+    /// `tor_mode == "remote-socks"` (advanced). May be a LAN/VPN address or a
+    /// hostname; re-validated by `RemoteSocksEndpointV1` before it is used.
+    #[serde(default)]
+    tor_remote_socks: Option<String>,
     results_path: String,
     choice: String,
     count: Option<usize>,
@@ -501,6 +510,20 @@ async fn start_load_test(
                 let _ = app.emit("load-status", TorStatusEvent::tor_ready(socks_addr));
                 (socks_addr, None, "existing_socks", None, None, None)
             }
+            mode if mode == TOR_MODE_REMOTE_SOCKS => {
+                // Advanced remote SOCKS: NO session is started — the operator's
+                // Tor daemon is external and never spawned/owned here. The
+                // endpoint is re-validated; outbound transport flows through
+                // `config.remote_socks` (set by build_run_config from the
+                // request). The placeholder socks_addr is unused for remote.
+                let endpoint = remote_socks_from_request(&request)?.ok_or_else(|| {
+                    CommandError::invalid("remote SOCKS mode requires a host:port endpoint")
+                })?;
+                let _ = endpoint;
+                let placeholder = SocketAddr::from(([127, 0, 0, 1], 0));
+                let _ = app.emit("load-status", TorStatusEvent::tor_ready(placeholder));
+                (placeholder, None, "remote_socks", None, None, None)
+            }
             other => {
                 return Err(CommandError::invalid(format!("unknown Tor mode: {other}")));
             }
@@ -544,7 +567,9 @@ async fn start_load_test(
             tor_mode: tor_mode_str,
             started_utc: format_utc_timestamp(started_utc),
             finished_utc: format_utc_timestamp(SystemTime::now()),
-            socks_endpoint: socks_addr.to_string(),
+            // Correct for all modes: loopback shows the addr, remote shows the
+            // externally-managed endpoint (never the unused placeholder).
+            socks_endpoint: config.socks_endpoint_display(),
             onion_hostname,
             tor_executable_basename: tor_exe_basename,
             tor_version,
@@ -661,10 +686,57 @@ fn prevalidate_tor_selection(request: &LoadTestRequest) -> Result<(), CommandErr
             })?;
             Ok(())
         }
+        mode if mode == TOR_MODE_REMOTE_SOCKS => {
+            // Advanced remote SOCKS: an externally-managed proxy host:port. Allow
+            // LAN/VPN addresses and hostnames; the endpoint is re-validated here
+            // (fail closed on malformed) and again in Rust before it connects.
+            let endpoint_str = request.tor_remote_socks.as_deref().ok_or_else(|| {
+                CommandError::invalid("remote SOCKS mode requires a host:port endpoint")
+            })?;
+            if endpoint_str.trim().is_empty() {
+                return Err(CommandError::invalid(
+                    "remote SOCKS mode requires a host:port endpoint",
+                ));
+            }
+            if request
+                .tor_exe
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+            {
+                return Err(CommandError::invalid(
+                    "supply either a Tor executable (managed) or a remote SOCKS endpoint (advanced) — not both",
+                ));
+            }
+            RemoteSocksEndpointV1::parse(endpoint_str.trim()).map_err(|error| {
+                CommandError::invalid(format!("remote SOCKS endpoint invalid: {error}"))
+            })?;
+            Ok(())
+        }
         other => Err(CommandError::invalid(format!(
-            "unknown Tor mode '{other}'; supply managed or manual-socks"
+            "unknown Tor mode '{other}'; supply managed, manual-socks, or remote-socks"
         ))),
     }
+}
+
+/// Parses the advanced remote-SOCKS endpoint from the request when (and only
+/// when) `tor_mode == "remote-socks"`. Returns `None` for the other modes, and
+/// a fail-closed error if the mode is remote but the endpoint is malformed.
+fn remote_socks_from_request(
+    request: &LoadTestRequest,
+) -> Result<Option<RemoteSocksEndpointV1>, CommandError> {
+    if request.tor_mode != TOR_MODE_REMOTE_SOCKS {
+        return Ok(None);
+    }
+    let raw = request
+        .tor_remote_socks
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| CommandError::invalid("remote SOCKS mode requires a host:port endpoint"))?;
+    let endpoint = RemoteSocksEndpointV1::parse(raw)
+        .map_err(|error| CommandError::invalid(format!("remote SOCKS endpoint invalid: {error}")))?;
+    Ok(Some(endpoint))
 }
 
 /// Builds a `LoadDriverConfig` suitable for `validate_load_driver_inputs`.
@@ -672,14 +744,17 @@ fn prevalidate_tor_selection(request: &LoadTestRequest) -> Result<(), CommandErr
 /// purposes — a loopback `127.0.0.1:1` — because managed mode has not yet
 /// spawned Tor when validate runs. The final `run_load_driver_with_control`
 /// call receives the REAL reserved port through `build_run_config` below.
+/// Remote-SOCKS mode carries its externally-managed endpoint through
+/// `remote_socks` (validate never opens it).
 fn load_config_for_validation(request: &LoadTestRequest) -> Result<LoadDriverConfig, CommandError> {
     if request.passphrase.is_empty() {
         return Err(CommandError::invalid("credential passphrase is required"));
     }
+    let remote_socks = remote_socks_from_request(request)?;
     // Prefer the actual manual SOCKS endpoint when provided; otherwise use a
-    // pinned loopback placeholder purely for syntactic parsing. Managed mode
-    // will replace this with a real reserved port at start time — validate
-    // never uses this endpoint for anything network-facing.
+    // pinned loopback placeholder purely for syntactic parsing. Managed and
+    // remote modes will replace/ignore this at start time — validate never uses
+    // this endpoint for anything network-facing.
     let tor_socks: SocketAddr = match request.tor_socks.as_deref() {
         Some(raw) if !raw.trim().is_empty() => raw.parse().map_err(|_| {
             CommandError::invalid("Tor SOCKS endpoint must be an ip:port socket address")
@@ -696,6 +771,7 @@ fn load_config_for_validation(request: &LoadTestRequest) -> Result<LoadDriverCon
         voter_public_bundle_path: PathBuf::from(&request.voter_public_bundle_path),
         credentials_dir: PathBuf::from(&request.credentials_dir),
         tor_socks,
+        remote_socks,
         results_path: PathBuf::from(&request.results_path),
         state_dir: None,
         count: request.count,
@@ -717,6 +793,7 @@ fn build_run_config(
     if request.passphrase.is_empty() {
         return Err(CommandError::invalid("credential passphrase is required"));
     }
+    let remote_socks = remote_socks_from_request(request)?;
     let choice = ChoiceDistribution::parse(&request.choice).map_err(CommandError::invalid)?;
     Ok(LoadDriverConfig {
         manifest_path: PathBuf::from(&request.manifest_path),
@@ -725,6 +802,7 @@ fn build_run_config(
         voter_public_bundle_path: PathBuf::from(&request.voter_public_bundle_path),
         credentials_dir: PathBuf::from(&request.credentials_dir),
         tor_socks,
+        remote_socks,
         results_path: PathBuf::from(&request.results_path),
         state_dir: None,
         count: request.count,
@@ -766,6 +844,7 @@ fn run_config_fingerprint(request: &LoadTestRequest) -> String {
         tor_mode: &'a str,
         tor_exe: Option<&'a str>,
         tor_socks: Option<&'a str>,
+        tor_remote_socks: Option<&'a str>,
         results_path: &'a str,
         choice: &'a str,
         count: Option<usize>,
@@ -774,11 +853,18 @@ fn run_config_fingerprint(request: &LoadTestRequest) -> String {
 
     // Normalize the transport fields by mode so an unused field can never
     // perturb the fingerprint: managed carries only the executable, manual
-    // SOCKS only the endpoint. This mirrors how the frontend builds the payload.
-    let (tor_exe, tor_socks) = match request.tor_mode.as_str() {
-        mode if mode == TOR_MODE_MANAGED => (request.tor_exe.as_deref(), None),
-        mode if mode == TOR_MODE_MANUAL_SOCKS => (None, request.tor_socks.as_deref()),
-        _ => (request.tor_exe.as_deref(), request.tor_socks.as_deref()),
+    // SOCKS only the loopback endpoint, and remote SOCKS only the remote
+    // endpoint. This mirrors how the frontend builds the payload and makes the
+    // transport MODE and ENDPOINT part of the run's identity (Validate→Start).
+    let (tor_exe, tor_socks, tor_remote_socks) = match request.tor_mode.as_str() {
+        mode if mode == TOR_MODE_MANAGED => (request.tor_exe.as_deref(), None, None),
+        mode if mode == TOR_MODE_MANUAL_SOCKS => (None, request.tor_socks.as_deref(), None),
+        mode if mode == TOR_MODE_REMOTE_SOCKS => (None, None, request.tor_remote_socks.as_deref()),
+        _ => (
+            request.tor_exe.as_deref(),
+            request.tor_socks.as_deref(),
+            request.tor_remote_socks.as_deref(),
+        ),
     };
 
     let fingerprint = RunConfigFingerprintV1 {
@@ -790,6 +876,7 @@ fn run_config_fingerprint(request: &LoadTestRequest) -> String {
         tor_mode: &request.tor_mode,
         tor_exe,
         tor_socks,
+        tor_remote_socks,
         results_path: &request.results_path,
         choice: &request.choice,
         count: request.count,
@@ -956,6 +1043,7 @@ mod tests {
             tor_mode: tor_mode.to_owned(),
             tor_exe: None,
             tor_socks: None,
+            tor_remote_socks: None,
             results_path: "results.json".to_owned(),
             choice: "round-robin".to_owned(),
             count: Some(1),
@@ -1045,6 +1133,60 @@ mod tests {
         request.tor_socks = Some("localhost:9050".to_owned());
         let error = prevalidate_tor_selection(&request).expect_err("hostnames are rejected");
         assert_eq!(error.code, "LOAD_TESTER_INVALID_INPUT");
+    }
+
+    #[test]
+    fn remote_socks_mode_accepts_lan_ip_and_hostname_endpoints() {
+        for endpoint in ["192.168.1.50:9050", "10.0.0.12:9050", "tor.internal.example:9050"] {
+            let mut request = sample_request("secret", TOR_MODE_REMOTE_SOCKS);
+            request.tor_remote_socks = Some(endpoint.to_owned());
+            prevalidate_tor_selection(&request)
+                .unwrap_or_else(|error| panic!("{endpoint} accepted: {}", error.message));
+            let config = build_run_config(&request, SocketAddr::from(([127, 0, 0, 1], 0)))
+                .expect("remote config builds");
+            assert_eq!(config.socks_endpoint_display(), endpoint);
+            assert!(config.remote_socks.is_some(), "remote endpoint threaded into config");
+        }
+    }
+
+    #[test]
+    fn remote_socks_mode_rejects_malformed_and_missing_endpoints() {
+        let mut request = sample_request("secret", TOR_MODE_REMOTE_SOCKS);
+        // Missing endpoint.
+        assert!(prevalidate_tor_selection(&request).is_err());
+        for bad in ["socks5://tor:9050", "tor:0", ":9050", "tor host:9050"] {
+            request.tor_remote_socks = Some(bad.to_owned());
+            assert!(
+                prevalidate_tor_selection(&request).is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn run_config_fingerprint_binds_transport_mode_and_remote_endpoint() {
+        // The transport MODE and the remote ENDPOINT are part of the run
+        // identity: changing either between Validate and Start changes the
+        // fingerprint (requirement: identity includes transport mode + endpoint).
+        let mut managed = sample_request("secret", TOR_MODE_MANAGED);
+        managed.tor_exe = Some(String::from("C:/absolute/tor.exe"));
+
+        let mut remote = sample_request("secret", TOR_MODE_REMOTE_SOCKS);
+        remote.tor_remote_socks = Some("192.168.1.50:9050".to_owned());
+
+        assert_ne!(
+            run_config_fingerprint(&managed),
+            run_config_fingerprint(&remote),
+            "a transport-mode change must change the fingerprint"
+        );
+
+        let mut remote_b = remote.clone();
+        remote_b.tor_remote_socks = Some("10.0.0.12:9050".to_owned());
+        assert_ne!(
+            run_config_fingerprint(&remote),
+            run_config_fingerprint(&remote_b),
+            "a remote-endpoint change must change the fingerprint"
+        );
     }
 
     #[test]
