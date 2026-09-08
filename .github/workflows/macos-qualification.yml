@@ -132,11 +132,45 @@ jobs:
           echo "---- staged macOS artifacts ----"
           ls -la macos-artifacts || true
 
+      # Normalize the release-facing DMG filenames BEFORE checksums are
+      # computed, so SHA256SUMS references exactly the names users download.
+      # Tauri emits product-name-derived names with spaces and its own arch
+      # token (aarch64 / x64); we rename to the canonical scheme documented in
+      # docs/release/RELEASE_ARTIFACT_NAMING.md. Internal bundle identifiers,
+      # product names, and executable names are intentionally left unchanged.
+      - name: Normalize macOS artifact filenames
+        working-directory: macos-artifacts
+        run: |
+          set -euo pipefail
+          arch="${{ matrix.arch }}" # aarch64 | x86_64
+          org_ver="$(node -p "require('${GITHUB_WORKSPACE}/gui/src-tauri/tauri.conf.json').version")"
+          lt_ver="$(node -p "require('${GITHUB_WORKSPACE}/tools/distributed-load-tester-gui/src-tauri/tauri.conf.json').version")"
+          shopt -s nullglob
+          for f in *.dmg; do
+            case "$f" in
+              # Load Tester must be matched first: its name also starts with
+              # "Private Ballot".
+              "Private Ballot Load Tester"*)
+                mv -v -- "$f" "private-ballot-load-tester-v${lt_ver}-macos-${arch}.dmg" ;;
+              "Private Ballot"*)
+                mv -v -- "$f" "private-ballot-v${org_ver}-macos-${arch}.dmg" ;;
+              private-ballot-*)
+                # Already normalized (idempotent re-run); leave as-is.
+                : ;;
+              *)
+                echo "Unexpected DMG name, refusing to guess: $f" >&2
+                exit 1 ;;
+            esac
+          done
+          echo "---- normalized macOS artifacts ----"
+          ls -la
+
       - name: Compute SHA-256 checksums
         working-directory: macos-artifacts
         run: |
           set -euo pipefail
           # .app bundles are directories; checksum only the .dmg installers.
+          # Runs AFTER filename normalization so the manifest matches downloads.
           shopt -s nullglob
           if compgen -G "*.dmg" > /dev/null; then
             shasum -a 256 *.dmg | tee SHA256SUMS-macos-${{ matrix.arch }}.txt

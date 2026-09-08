@@ -24,6 +24,62 @@ machine-readable reports under
 
 *Final 100-voter release qualification: verified election, independently verified archive, and confirmed Tari Ootle V2 anchor.*
 
+## Downloads and installation
+
+Release binaries are attached to each GitHub Release. Pick the download that
+matches your operating system **and** CPU architecture:
+
+| Operating system | CPU | Download token | Notes |
+| --- | --- | --- | --- |
+| Windows 10/11 | 64-bit (Intel/AMD) | `windows-x86_64` | `.msi` (installer) or `-setup.exe` (NSIS) |
+| Linux | 64-bit (Intel/AMD) | `linux-x86_64` | `.deb`, `.rpm`, or `.AppImage` |
+| macOS — Apple Silicon | M1/M2/M3/M4 (or later) | `macos-aarch64` | `.dmg` |
+| macOS — Intel | Intel Mac | `macos-x86_64` | `.dmg` |
+
+The **Organizer** app is named `private-ballot-...`; the separate **Load
+Tester** (a developer/test tool, not voter software) is named
+`private-ballot-load-tester-...`. From v0.1.1 onward, release filenames follow a
+single scheme — for example `private-ballot-v<VERSION>-windows-x86_64.msi` and
+`private-ballot-v<VERSION>-macos-aarch64.dmg`. The full naming scheme and the
+mapping from raw build outputs is documented in
+[docs/release/RELEASE_ARTIFACT_NAMING.md](docs/release/RELEASE_ARTIFACT_NAMING.md).
+(The published **v0.1.0** assets predate this scheme and keep their original
+names.)
+
+**Verify checksums before running any downloaded binary.** Each release
+includes a `SHA256SUMS` manifest listing the exact filenames you download.
+Compare the SHA-256 of your file against it:
+
+```powershell
+# Windows (PowerShell)
+Get-FileHash .\private-ballot-v0.1.1-windows-x86_64.msi -Algorithm SHA256
+```
+
+```bash
+# Linux / macOS
+shasum -a 256 private-ballot-v0.1.1-macos-aarch64.dmg
+```
+
+### macOS: ad-hoc signed, unnotarized builds
+
+The macOS `.dmg` builds are **ad-hoc signed and are NOT Apple Developer ID
+signed or Apple-notarized.** macOS Gatekeeper may block the first launch or show
+an "unidentified developer" warning. This is expected for ad-hoc-signed builds
+and **does not** mean the app has been independently certified by Apple — so
+verify the SHA-256 checksum above before you open it.
+
+To open a build you trust after verifying its checksum (current macOS steps):
+
+1. Double-click the app to try opening it normally.
+2. If macOS blocks it, open **System Settings**.
+3. Go to **Privacy & Security** and scroll down to the message about the
+   blocked app.
+4. Click **Open Anyway**.
+5. In the confirmation prompt, click **Open**.
+
+Do this only after you have verified the download's checksum. Do **not** disable
+Gatekeeper system-wide to run the app.
+
 ## Privacy Model
 
 The app separates three ideas that are easy to blur:
@@ -228,13 +284,15 @@ end-to-end election above).
 The macOS qualification workflow
 ([.github/workflows/macos-qualification.yml](.github/workflows/macos-qualification.yml))
 completed successfully on GitHub-hosted runners for both Apple Silicon /
-aarch64 (`macos-14`) and Intel / x86_64 (`macos-13`). Both the Organizer and
-the standalone Load Tester built and packaged successfully, producing four
-macOS `.dmg` artifacts (see `SHA256SUMS.txt`). The macOS DMGs are **ad-hoc
-signed and unnotarized** — they are not Apple Developer ID signed and not
-Apple-notarized, so users may need to approve the app through macOS **Privacy
-& Security** on first launch. No physical macOS election was performed;
-Windows 11 x64 remains the primary physical end-to-end qualification target.
+aarch64 (`macos-15`) and Intel / x86_64 (`macos-15-intel`). Both the Organizer
+and the standalone Load Tester built and packaged successfully, producing four
+macOS `.dmg` artifacts (see the per-architecture `SHA256SUMS` manifests). The
+macOS DMGs are **ad-hoc signed and unnotarized** — they are not Apple Developer
+ID signed and not Apple-notarized, so users may need to approve the app through
+macOS **Privacy & Security** on first launch (see
+[Downloads and installation](#downloads-and-installation) for the exact steps).
+No physical macOS election was performed; Windows 11 x64 remains the primary
+physical end-to-end qualification target.
 
 ## Verification
 
