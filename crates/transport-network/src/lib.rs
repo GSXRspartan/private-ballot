@@ -71,12 +71,13 @@ pub use remote_socks::{
 pub use tor::{
     ELECTION_STATUS_HTTP_PATH_V1, ONION_VIRTUAL_PORT_V1, OPAQUE_ENVELOPE_HTTP_CONTENT_TYPE_V1,
     OPAQUE_ENVELOPE_HTTP_PATH_V1, OnionReachabilityOutcomeV1, RemoteTorReadinessOutcomeV1,
-    RemoteTorSocksPrivateReleaseCarrierV1, StrictHeaderErrorV1, SystemManagedTorReadinessProbeV1,
+    RemoteTorSocksPrivateReleaseCarrierV1, SystemManagedTorReadinessProbeV1,
     TorCarrierTimeoutsV1, TorSocksPrivateReleaseCarrierV1, fetch_election_status_over_remote_tor,
-    fetch_election_status_over_tor, parse_strict_content_length_v1, parse_strict_header_line_v1,
+    fetch_election_status_over_remote_tor_onion, fetch_election_status_over_tor,
+    parse_strict_content_length_v1, parse_strict_header_line_v1,
     probe_onion_reachability_endpoint_v1, probe_onion_reachability_v1,
-    probe_remote_onion_reachability_v1, validate_loopback_socket_addr_v1,
-    validate_onion_hostname_v1,
+    probe_remote_onion_hostname_v1, probe_remote_onion_reachability_v1,
+    validate_loopback_socket_addr_v1, validate_onion_hostname_v1,
 };
 
 pub const OPAQUE_ENVELOPE_CONTENT_TYPE_V1: &str =

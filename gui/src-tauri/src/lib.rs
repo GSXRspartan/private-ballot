@@ -5908,6 +5908,8 @@ pub fn run() {
             #[cfg(feature = "managed-tor")]
             organizer_tor_intake::start_private_intake,
             #[cfg(feature = "managed-tor")]
+            organizer_tor_intake::test_remote_organizer_tor,
+            #[cfg(feature = "managed-tor")]
             organizer_tor_intake::stop_private_intake,
             #[cfg(feature = "managed-tor")]
             organizer_tor_intake::export_voter_transport_bundle,

@@ -32,7 +32,7 @@ use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
@@ -50,7 +50,10 @@ use tari_cc_private_ballot_transport_gateway::{
 };
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
-    discover_organizer_onion_hostname_v1,
+    RemoteSocksEndpointErrorV1, RemoteSocksEndpointV1, RemoteTorReadinessOutcomeV1,
+    TorCarrierTimeoutsV1, discover_organizer_onion_hostname_v1,
+    fetch_election_status_over_remote_tor_onion, probe_remote_onion_hostname_v1,
+    validate_onion_hostname_v1,
 };
 use tauri::{AppHandle, Manager};
 
@@ -76,11 +79,179 @@ const COLLECTOR_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Bounded collector shutdown join budget.
 const COLLECTOR_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Which Tor hosting mode the ORGANIZER intake uses. `ManagedLocal` is the
+/// default and recommended mode (this application starts, owns, and stops the
+/// local Tor process that hosts the hidden service); `ExternalRemote` is the
+/// advanced, opt-in mode (an EXTERNALLY managed Tor instance on another machine
+/// already hosts the organizer onion service — this application never spawns,
+/// owns, or stops it, and never creates a local hidden-service directory).
+///
+/// A missing/legacy persisted value resolves to [`Self::ManagedLocal`]; an
+/// unknown or malformed token also resolves to [`Self::ManagedLocal`] (fail
+/// SAFE toward the recommended, process-owned path — never silently toward the
+/// advanced remote path).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OrganizerTorModeV1 {
+    /// Default. The application owns the Tor process and the hidden-service
+    /// directory (existing managed-organizer-Tor behaviour).
+    #[default]
+    ManagedLocal,
+    /// Advanced/opt-in. The onion service is provisioned and hosted by an
+    /// externally managed Tor instance; this application only validates the
+    /// remote route and runs the collector it forwards to.
+    ExternalRemote,
+}
+
+impl OrganizerTorModeV1 {
+    /// Stable wire/persistence token, matching the repository's kebab-token
+    /// conventions (`TorTransportModeV1`).
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::ManagedLocal => "managed-local",
+            Self::ExternalRemote => "external-remote",
+        }
+    }
+
+    /// Parses a persisted/UI token. Unknown/empty/legacy values resolve to the
+    /// recommended managed-local default — never silently to remote.
+    #[must_use]
+    pub fn from_token_or_default(token: &str) -> Self {
+        match token {
+            "external-remote" => Self::ExternalRemote,
+            _ => Self::ManagedLocal,
+        }
+    }
+}
+
+/// Serializable external-remote intake configuration supplied by the operator
+/// (Advanced UI). All fields are non-secret: a SOCKS endpoint and a public
+/// onion hostname are not credentials.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoteOrganizerIntakeInputV1 {
+    /// Transport-mode token. Only `"external-remote"` selects remote hosting;
+    /// anything else resolves to managed-local (fail safe).
+    #[serde(default)]
+    pub tor_mode: Option<String>,
+    /// Externally managed Tor SOCKS proxy host (IPv4/IPv6/hostname).
+    #[serde(default)]
+    pub socks_host: Option<String>,
+    /// Externally managed Tor SOCKS proxy port (1..=65535).
+    #[serde(default)]
+    pub socks_port: Option<u16>,
+    /// The organizer onion hostname the EXTERNAL Tor instance hosts. It must be
+    /// a valid Tor v3 onion and MUST equal the signed descriptor onion.
+    #[serde(default)]
+    pub onion_hostname: Option<String>,
+    /// The fixed loopback collector port the remote Tor's `HiddenServicePort`
+    /// forwards to. Modeled explicitly because a remote operator must be able
+    /// to configure `HiddenServicePort 80 <this-host>:<port>` BEFORE intake
+    /// starts; the managed mode's ephemeral port is invisible to them.
+    #[serde(default)]
+    pub collector_port: Option<u16>,
+}
+
+/// A fully validated external-remote organizer intake configuration. Every
+/// field is re-validated here regardless of the frontend; a malformed value
+/// fails closed with a bounded, specific error before ANY state is touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteOrganizerIntakeConfigV1 {
+    /// Validated remote SOCKS endpoint (used ONLY for readiness probing —
+    /// never for hosting, and never treated as an owned process).
+    pub socks: RemoteSocksEndpointV1,
+    /// Validated Tor v3 organizer onion hostname.
+    pub onion_hostname: String,
+    /// Non-zero loopback collector port for the remote `HiddenServicePort`.
+    pub collector_port: u16,
+}
+
+impl RemoteOrganizerIntakeConfigV1 {
+    /// Parses and validates the operator input. Ordering: mode token first
+    /// (fail safe to managed-local), then each field with a bounded, specific
+    /// error that never echoes the raw value.
+    pub fn from_input(
+        input: &RemoteOrganizerIntakeInputV1,
+    ) -> Result<Option<Self>, CommandError> {
+        let mode = OrganizerTorModeV1::from_token_or_default(
+            input.tor_mode.as_deref().unwrap_or("").trim(),
+        );
+        if mode != OrganizerTorModeV1::ExternalRemote {
+            return Ok(None);
+        }
+        let host = input.socks_host.as_deref().unwrap_or("").trim();
+        let socks_port = input.socks_port.unwrap_or(0);
+        let endpoint = if host.is_empty() {
+            return Err(remote_config_error(
+                "enter the remote SOCKS proxy host for the external remote Tor mode",
+            ));
+        } else {
+            RemoteSocksEndpointV1::from_parts(host, socks_port).map_err(|error| {
+                remote_config_error(match error {
+                    RemoteSocksEndpointErrorV1::InvalidPort => {
+                        "the remote SOCKS port must be a number between 1 and 65535"
+                    }
+                    RemoteSocksEndpointErrorV1::EmptyHost => {
+                        "the remote SOCKS host must not be empty"
+                    }
+                    _ => {
+                        "the remote SOCKS endpoint must be a bare host:port (no scheme, path, or credentials)"
+                    }
+                })
+            })?
+        };
+        let onion = input.onion_hostname.as_deref().unwrap_or("").trim();
+        if onion.is_empty() {
+            return Err(remote_config_error(
+                "enter the organizer onion hostname hosted by the external Tor instance",
+            ));
+        }
+        // v3-only: the existing strict validator rejects non-v3 and malformed
+        // hostnames, exactly like every other onion route in the application.
+        validate_onion_hostname_v1(onion).map_err(|_| {
+            remote_config_error(
+                "the organizer onion hostname is not a valid Tor v3 onion address",
+            )
+        })?;
+        let collector_port = input.collector_port.unwrap_or(0);
+        if collector_port == 0 {
+            return Err(remote_config_error(
+                "enter the fixed loopback collector port (1-65535) the remote hidden service forwards to",
+            ));
+        }
+        Ok(Some(Self {
+            socks: endpoint,
+            onion_hostname: onion.to_owned(),
+            collector_port,
+        }))
+    }
+}
+
+/// Bounded, value-free error for a malformed remote intake configuration.
+fn remote_config_error(message: &'static str) -> CommandError {
+    CommandError::new("GUI_ORGANIZER_REMOTE_CONFIG_INVALID", "INVALID_INPUT", message)
+}
+
 /// The running organizer intake runtime state. Present only while intake is
 /// active; dropped/cleared on stop. The worker's session is intentionally NOT
 /// the authoritative GUI session.
+///
+/// Process-ownership separation: `tor_child` is `Some` ONLY in
+/// [`OrganizerTorModeV1::ManagedLocal`] (the app's own Tor child). In
+/// [`OrganizerTorModeV1::ExternalRemote`] it is always `None` — the externally
+/// managed daemon is NEVER spawned, signalled, reaped, or owned here.
 pub(crate) struct OrganizerIntakeState {
-    tor_child: Child,
+    /// The owned Tor child (managed-local mode only; `None` in external-remote
+    /// mode, where the external daemon is explicitly not owned).
+    tor_child: Option<Child>,
+    /// Which hosting mode this running intake uses.
+    mode: OrganizerTorModeV1,
+    /// External-remote configuration (mode-scoped endpoint + onion + collector
+    /// port). `None` in managed-local mode. Readiness is recorded ONLY against
+    /// this exact configuration.
+    remote: Option<RemoteOrganizerIntakeConfigV1>,
+    /// External-remote mode: whether the readiness check against the EXACT
+    /// `remote` configuration passed. Cleared on stop/reconfigure.
+    remote_last_ready: bool,
     service_loop: OrganizerCollectorServiceLoopV1,
     descriptor: TransportDescriptorV1,
     /// The election (manifest hash) this running intake is bound to.
@@ -194,6 +365,10 @@ pub struct OrganizerIntakeStatusV1 {
     pub failure_reason: Option<String>,
     /// Ballots this intake run has uniquely accepted (worker-side aggregate).
     pub accepted_ballots: u64,
+    /// Stable hosting-mode token of the RUNNING intake
+    /// (`"managed-local"` / `"external-remote"`). `"managed-local"` when no
+    /// intake is running (the recommended default mode).
+    pub tor_mode: &'static str,
     // ---- Served-vs-authoritative diagnostics (never secret) ----
     /// The lifecycle the RUNNING collector would sign into
     /// `GET /v1/election-status` answers right now (fence state). `None`
@@ -547,61 +722,90 @@ fn organizer_tor_status_blocking(
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
     let running = managed.as_mut();
-    let (intake_running, election_bound, ready, failed, failure_reason, accepted, diag, published) =
-        match running {
-            Some(m) => {
-                let same_election = bound
-                    .as_ref()
-                    .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
-                // AUTHORITATIVE RECONCILIATION HEARTBEAT: this read-only status
-                // command runs every few seconds while the ballot-office screen is
-                // open. Before reporting anything, converge the running collector's
-                // fence to the authoritative session lifecycle so a silently lost
-                // transition publication can never persist beyond one heartbeat.
-                // Same state is a lock-free no-op; only a real change touches the
-                // issuance ledger. No network, no Tor action, no clearnet.
-                if same_election && let Some(b) = bound.as_ref() {
-                    reconcile_intake_lifecycle(
-                        &m.manifest_hash_hex,
-                        &m.lifecycle_fence,
-                        b.lifecycle,
-                        status_dir.as_deref(),
-                    );
-                }
-                let child_alive = m
-                    .tor_child
+    let (
+        intake_running,
+        election_bound,
+        ready,
+        failed,
+        failure_reason,
+        accepted,
+        diag,
+        published,
+        tor_mode,
+    ) = match running {
+        Some(m) => {
+            let same_election = bound
+                .as_ref()
+                .is_some_and(|b| b.manifest_hash_hex == m.manifest_hash_hex);
+            // AUTHORITATIVE RECONCILIATION HEARTBEAT: this read-only status
+            // command runs every few seconds while the ballot-office screen is
+            // open. Before reporting anything, converge the running collector's
+            // fence to the authoritative session lifecycle so a silently lost
+            // transition publication can never persist beyond one heartbeat.
+            // Same state is a lock-free no-op; only a real change touches the
+            // issuance ledger. No network, no Tor action, no clearnet.
+            if same_election && let Some(b) = bound.as_ref() {
+                reconcile_intake_lifecycle(
+                    &m.manifest_hash_hex,
+                    &m.lifecycle_fence,
+                    b.lifecycle,
+                    status_dir.as_deref(),
+                );
+            }
+            let child_alive = m.tor_child.as_mut().is_some_and(|child| {
+                child
                     .try_wait()
                     .map(|status| status.is_none())
-                    .unwrap_or(false);
-                let worker_alive = m.service_loop.worker_is_alive();
-                let ready = same_election && child_alive && worker_alive;
-                // A recorded intake whose owned Tor child or collector worker has
-                // died is a bounded FAILED state — never an indefinite "starting".
-                let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
-                let failed = failure_reason.is_some();
-                let accepted = m.service_loop.accepted_unique_count();
-                let published = Some((m.lifecycle_fence.state(), m.lifecycle_fence.generation()));
-                let diag = Some((
-                    m.onion_hostname.clone(),
-                    descriptor_fingerprint_hex(&m.descriptor),
-                    m.collector_addr.to_string(),
-                    m.tor_data_dir.to_string_lossy().into_owned(),
-                    m.voter_bundle_path.to_string_lossy().into_owned(),
-                    m.durable_inbox_dir.to_string_lossy().into_owned(),
-                ));
-                (
-                    true,
-                    same_election,
-                    ready,
-                    failed,
-                    failure_reason,
-                    accepted,
-                    diag,
-                    published,
-                )
-            }
-            None => (false, false, false, false, None, 0, None, None),
-        };
+                    .unwrap_or(false)
+            });
+            let worker_alive = m.service_loop.worker_is_alive();
+            // Managed-local: ready requires the OWNED Tor child + worker.
+            // External-remote: there is NO owned child; ready requires the
+            // worker plus the recorded endpoint-scoped readiness result.
+            let owned_ready = match m.mode {
+                OrganizerTorModeV1::ManagedLocal => child_alive,
+                OrganizerTorModeV1::ExternalRemote => m.remote_last_ready,
+            };
+            let ready = same_election && owned_ready && worker_alive;
+            // A recorded intake whose owned Tor child or collector worker has
+            // died is a bounded FAILED state — never an indefinite "starting".
+            let failure_reason = intake_failure_reason(m, child_alive, worker_alive);
+            let failed = failure_reason.is_some();
+            let accepted = m.service_loop.accepted_unique_count();
+            let published = Some((m.lifecycle_fence.state(), m.lifecycle_fence.generation()));
+            let diag = Some((
+                m.onion_hostname.clone(),
+                descriptor_fingerprint_hex(&m.descriptor),
+                m.collector_addr.to_string(),
+                m.tor_data_dir.to_string_lossy().into_owned(),
+                m.voter_bundle_path.to_string_lossy().into_owned(),
+                m.durable_inbox_dir.to_string_lossy().into_owned(),
+            ));
+            let tor_mode = m.mode.as_token();
+            (
+                true,
+                same_election,
+                ready,
+                failed,
+                failure_reason,
+                accepted,
+                diag,
+                published,
+                tor_mode,
+            )
+        }
+        None => (
+            false,
+            false,
+            false,
+            false,
+            None,
+            0,
+            None,
+            None,
+            OrganizerTorModeV1::ManagedLocal.as_token(),
+        ),
+    };
 
     let message = status_message(
         tor_found,
@@ -619,6 +823,7 @@ fn organizer_tor_status_blocking(
         failed,
         failure_reason,
         accepted,
+        tor_mode,
         diag,
         published,
         bound.as_ref().map(|b| b.lifecycle),
@@ -635,6 +840,17 @@ fn intake_failure_reason(
     child_alive: bool,
     worker_alive: bool,
 ) -> Option<String> {
+    if child_alive && worker_alive {
+        return None;
+    }
+    // External-remote mode owns NO Tor child: a missing child is the NORMAL
+    // state there, so only a dead WORKER is a failure.
+    if m.mode == OrganizerTorModeV1::ExternalRemote {
+        if !worker_alive {
+            return Some("organizer-worker-exited".to_owned());
+        }
+        return None;
+    }
     if child_alive && worker_alive {
         return None;
     }
@@ -659,34 +875,63 @@ fn intake_failure_reason(
 #[tauri::command]
 pub async fn start_private_intake(
     tor_exe_path: Option<String>,
+    remote: Option<RemoteOrganizerIntakeInputV1>,
     app: AppHandle,
 ) -> Result<OrganizerIntakeStatusV1, CommandError> {
     crate::run_blocking_command(move || {
         let state = app.state::<AppState>();
-        start_private_intake_blocking(tor_exe_path, &app, state.inner())
+        start_private_intake_blocking(tor_exe_path, remote, &app, state.inner())
     })
     .await
 }
 
 /// Blocking body of [`start_private_intake`]: the multi-second Tor hidden-service
 /// bootstrap and hostname discovery run on the blocking thread pool so the main
-/// UI thread keeps pumping while intake comes up.
+/// UI thread keeps pumping while intake comes up (managed-local mode). In
+/// external-remote mode no Tor process is touched at all; the bounded remote
+/// readiness check runs on the same blocking pool instead.
 fn start_private_intake_blocking(
     tor_exe_path: Option<String>,
+    remote_input: Option<RemoteOrganizerIntakeInputV1>,
     app: &AppHandle,
     state: &AppState,
 ) -> Result<OrganizerIntakeStatusV1, CommandError> {
     // ORGANIZER-AUTHORITY GATE — before EVERYTHING (no Tor resolution, no
     // directory creation, no provisioning, no worker).
     state.ensure_organizer_authority()?;
-    let tor_executable = resolve_tor_executable(tor_exe_path.as_deref())?;
-    validate_tor_exe(&tor_executable)?;
+    // Parse the requested mode FIRST (fail closed on a malformed remote config)
+    // so a malformed remote request can never fall through to managed-local
+    // and silently spawn a Tor process.
+    let remote_config = match &remote_input {
+        Some(input) => RemoteOrganizerIntakeConfigV1::from_input(input)?,
+        None => None,
+    };
+    let requested_mode = if remote_config.is_some() {
+        OrganizerTorModeV1::ExternalRemote
+    } else {
+        OrganizerTorModeV1::ManagedLocal
+    };
+
+    // Managed-local only: the Tor executable is resolved and validated here.
+    // External-remote mode resolves and validates NO Tor binary: the remote
+    // daemon is externally managed and must never be treated as owned.
+    let tor_executable = match requested_mode {
+        OrganizerTorModeV1::ManagedLocal => {
+            let tor_executable = resolve_tor_executable(tor_exe_path.as_deref())?;
+            validate_tor_exe(&tor_executable)?;
+            Some(tor_executable)
+        }
+        OrganizerTorModeV1::ExternalRemote => None,
+    };
 
     let bound = bound_election(state)?;
 
     // If an intake is already recorded, resolve it into exactly one of:
-    //   * healthy + THIS election      → return its status (idempotent);
-    //   * healthy + a DIFFERENT election → require an explicit stop;
+    //   * healthy + THIS election + the SAME mode → return its status
+    //     (idempotent);
+    //   * healthy + a DIFFERENT election, or a DIFFERENT hosting mode →
+    //     require an explicit stop (a mode switch must never silently reuse or
+    //     tear down the other mode's runtime);
     //   * unhealthy (owned Tor child or worker died, e.g. after a hard-kill
     //     restart) → REAP it and fall through to a single fresh start, so one
     //     Start click recovers a failed intake without ever stacking a second
@@ -697,15 +942,30 @@ fn start_private_intake_blocking(
             .lock()
             .map_err(|_| CommandError::state_poisoned())?;
         if let Some(m) = managed.as_mut() {
-            let child_alive = m
-                .tor_child
-                .try_wait()
-                .map(|status| status.is_none())
-                .unwrap_or(false);
-            let healthy = child_alive && m.service_loop.worker_is_alive();
+            let child_alive = m.tor_child.as_mut().is_some_and(|child| {
+                child
+                    .try_wait()
+                    .map(|status| status.is_none())
+                    .unwrap_or(false)
+            });
+            let healthy = match m.mode {
+                OrganizerTorModeV1::ManagedLocal => {
+                    child_alive && m.service_loop.worker_is_alive()
+                }
+                OrganizerTorModeV1::ExternalRemote => {
+                    m.remote_last_ready && m.service_loop.worker_is_alive()
+                }
+            };
             if healthy {
                 if m.manifest_hash_hex == bound.manifest_hash_hex {
-                    return Ok(running_status(m, true, child_alive, bound.lifecycle));
+                    if m.mode == requested_mode {
+                        return Ok(running_status(m, true, child_alive, bound.lifecycle));
+                    }
+                    return Err(CommandError::new(
+                        "GUI_ORGANIZER_INTAKE_MODE_MISMATCH",
+                        "INVALID_LIFECYCLE_TRANSITION",
+                        "stop the running private intake before switching between managed-local and external-remote Tor hosting",
+                    ));
                 }
                 return Err(CommandError::new(
                     "GUI_ORGANIZER_INTAKE_OTHER_ELECTION",
@@ -722,8 +982,13 @@ fn start_private_intake_blocking(
     };
     if let Some(mut dead) = dead_intake {
         let _ = dead.service_loop.stop(COLLECTOR_STOP_TIMEOUT);
-        let _ = dead.tor_child.kill();
-        let _ = dead.tor_child.wait();
+        // Only an OWNED child (managed-local) is ever signalled. An
+        // external-remote intake has no child and the external daemon is left
+        // completely untouched.
+        if let Some(mut child) = dead.tor_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     // Build app-owned, election-scoped storage.
@@ -732,42 +997,127 @@ fn start_private_intake_blocking(
     let paths = TransportPaths::under(&root);
     ensure_app_owned_directory(&paths.organizer_private_dir)?;
 
-    // Provision transport on first use (writes descriptor + bundles; persistent
-    // hidden-service identity is created once and reused on later starts).
-    if !paths.is_provisioned() {
-        provision_transport(&tor_executable, &paths, &bound)?;
-    }
+    // Provision transport on first use (managed: persistent hidden-service
+    // identity is created once and reused on later starts; remote: the
+    // operator's externally provisioned onion hostname is signed in WITHOUT
+    // any Tor process).
+    match requested_mode {
+        OrganizerTorModeV1::ManagedLocal => {
+            let tor_executable = tor_executable.as_deref().ok_or_else(tor_start_failed)?;
+            if !paths.is_provisioned() {
+                provision_transport(tor_executable, &paths, &bound)?;
+            }
 
-    // Run the vetted intake orchestration; on success this returns the running
-    // state to store. The AUTHORITATIVE lifecycle at start seeds the admission
-    // fence so a FROZEN election never accepts ballots even if intake starts
-    // before voting opens.
-    let authoritative_lifecycle = {
-        let guard = state
-            .session
-            .lock()
-            .map_err(|_| CommandError::state_poisoned())?;
-        guard
-            .as_ref()
-            .map(|active| active.session.lifecycle_state_v1())
-            .unwrap_or(ElectionLifecycleStateV1::Frozen)
-    };
-    let running = start_intake_worker(
-        app,
-        &tor_executable,
-        &paths,
-        &bound,
-        authoritative_lifecycle,
-    )?;
-    // The worker was just confirmed alive (child liveness re-checked after
-    // discovery, worker liveness checked in step 9), so report it as running.
-    let status = running_status(&running, true, true, authoritative_lifecycle);
-    let mut managed = state
-        .organizer_intake
+            // Run the vetted intake orchestration; on success this returns the
+            // running state to store. The AUTHORITATIVE lifecycle at start seeds
+            // the admission fence so a FROZEN election never accepts ballots
+            // even if intake starts before voting opens.
+            let authoritative_lifecycle = authoritative_lifecycle_snapshot(state)?;
+            let running =
+                start_intake_worker(app, tor_executable, &paths, &bound, authoritative_lifecycle)?;
+            // The worker was just confirmed alive (child liveness re-checked after
+            // discovery, worker liveness checked in step 9), so report it as
+            // running.
+            let status = running_status(&running, true, true, authoritative_lifecycle);
+            let mut managed = state
+                .organizer_intake
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            *managed = Some(running);
+            Ok(status)
+        }
+        OrganizerTorModeV1::ExternalRemote => {
+            let config = remote_config.as_ref().ok_or_else(|| {
+                CommandError::new(
+                    "GUI_ORGANIZER_REMOTE_CONFIG_INVALID",
+                    "INVALID_INPUT",
+                    "the external-remote Tor configuration is missing",
+                )
+            })?;
+            if !paths.is_provisioned() {
+                // Provision WITHOUT any Tor process: the operator's externally
+                // provisioned onion hostname is what the descriptor signs.
+                provision_transport_remote(config, &paths, &bound)?;
+            }
+
+            let authoritative_lifecycle = authoritative_lifecycle_snapshot(state)?;
+            let running = start_remote_intake_worker(
+                app,
+                config,
+                &paths,
+                &bound,
+                authoritative_lifecycle,
+            )?;
+            let status = running_status(&running, true, true, authoritative_lifecycle);
+            let mut managed = state
+                .organizer_intake
+                .lock()
+                .map_err(|_| CommandError::state_poisoned())?;
+            *managed = Some(running);
+            Ok(status)
+        }
+    }
+}
+
+/// Snapshot of the authoritative lifecycle used to seed the admission fence.
+fn authoritative_lifecycle_snapshot(
+    state: &AppState,
+) -> Result<ElectionLifecycleStateV1, CommandError> {
+    let guard = state
+        .session
         .lock()
         .map_err(|_| CommandError::state_poisoned())?;
-    *managed = Some(running);
-    Ok(status)
+    Ok(guard
+        .as_ref()
+        .map(|active| active.session.lifecycle_state_v1())
+        .unwrap_or(ElectionLifecycleStateV1::Frozen))
+}
+
+/// Explicit external-remote connection test backing the Advanced UI "Test
+/// connection" button. Validates the operator configuration and runs ONLY the
+/// non-mutating, zero-application-byte SOCKS5 CONNECT probe to the literal
+/// organizer onion through the external proxy. No collector is started, no
+/// ballot bytes, no credential, no state mutation, and — critically — no Tor
+/// process is spawned, signalled, or otherwise owned.
+#[tauri::command]
+pub async fn test_remote_organizer_tor(
+    remote: RemoteOrganizerIntakeInputV1,
+) -> Result<OrganizerIntakeStatusV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let config = RemoteOrganizerIntakeConfigV1::from_input(&remote)?;
+        let config = config.ok_or_else(|| {
+            CommandError::new(
+                "GUI_ORGANIZER_REMOTE_CONFIG_INVALID",
+                "INVALID_INPUT",
+                "the connection test is only available in external-remote Tor mode",
+            )
+        })?;
+        let timeouts = remote_organizer_readiness_timeouts();
+        let outcome =
+            probe_remote_onion_hostname_v1(&config.socks, &config.onion_hostname, &timeouts);
+        Ok(OrganizerIntakeStatusV1 {
+            tor_found: true,
+            transport_provisioned: false,
+            intake_running: false,
+            election_bound: false,
+            ready: outcome.is_ready(),
+            failed: false,
+            failure_reason: None,
+            accepted_ballots: 0,
+            tor_mode: OrganizerTorModeV1::ExternalRemote.as_token(),
+            published_lifecycle: None,
+            status_generation: None,
+            authoritative_lifecycle: None,
+            onion_hostname: Some(config.onion_hostname),
+            descriptor_fingerprint: None,
+            collector_addr: None,
+            tor_data_dir: None,
+            voter_bundle_path: None,
+            durable_inbox_dir: None,
+            message: remote_organizer_readiness_message(outcome),
+        })
+    })
+    .await
 }
 
 /// Stops private ballot intake cleanly: bounded service-loop shutdown, reap the
@@ -802,11 +1152,15 @@ fn stop_private_intake_blocking(
     };
     if let Some(mut m) = taken {
         // Stop the collector worker first (no new requests serviced), then reap
-        // the owned Tor child. The hidden-service key material in
-        // hidden_service_dir is preserved for a later restart.
+        // the owned Tor child (managed-local ONLY). In external-remote mode
+        // there is no owned child and the external daemon is NEVER signalled —
+        // only the app-side collector stops and the endpoint-scoped readiness
+        // record is cleared.
         let _ = m.service_loop.stop(COLLECTOR_STOP_TIMEOUT);
-        let _ = m.tor_child.kill();
-        let _ = m.tor_child.wait();
+        if let Some(mut child) = m.tor_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
     // Recompute a fresh read-only status (no running worker now).
     organizer_tor_status_blocking(None, app, state)
@@ -824,8 +1178,13 @@ pub(crate) fn shutdown_intake_on_exit(state: &AppState) {
     };
     if let Some(mut m) = taken {
         let _ = m.service_loop.stop(COLLECTOR_STOP_TIMEOUT);
-        let _ = m.tor_child.kill();
-        let _ = m.tor_child.wait();
+        // Only an OWNED child (managed-local) is terminated. An external-remote
+        // intake has no child; the externally managed Tor daemon — and any
+        // remote infrastructure — is deliberately left untouched on shutdown.
+        if let Some(mut child) = m.tor_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -1012,9 +1371,337 @@ fn provision_transport(
     Ok(())
 }
 
-/// Starts the intake worker for an already-provisioned election. Mirrors
-/// `private-ballot-tor-test-intake` step-for-step with the SAME fail-closed
-/// ordering, calling only reviewed library functions.
+/// First-time transport provisioning for EXTERNAL-REMOTE mode: sign the
+/// descriptor against the operator's EXTERNALLY provisioned onion hostname and
+/// write both bundles. NO Tor process is started, no local hidden-service
+/// directory is created, and no SOCKS port is reserved — the onion identity is
+/// owned and hosted entirely by the external Tor instance.
+fn provision_transport_remote(
+    config: &RemoteOrganizerIntakeConfigV1,
+    paths: &TransportPaths,
+    bound: &BoundElection,
+) -> Result<(), CommandError> {
+    let binding = TransportElectionBindingV1 {
+        election_id: bound.election_id.clone(),
+        manifest_hash: bound.manifest_hash,
+    };
+    let material = generate_transport_authority_material_v1("test-root".to_owned()).map_err(|_| {
+        CommandError::new(
+            "GUI_ORGANIZER_MATERIAL_FAILED",
+            "INVALID_INPUT",
+            "the organizer transport authority material could not be generated",
+        )
+    })?;
+    provision_organizer_transport_bundles_v1(
+        &paths.organizer_private_dir,
+        &paths.voter_bundle_path,
+        &material,
+        &binding,
+        config.onion_hostname.clone(),
+        // Recorded as inert bundle metadata only (never validated or reused at
+        // runtime, exactly like the managed mode's metadata): the external
+        // remote daemon owns the real data directory and hidden-service dir.
+        &paths.tor_runs_base,
+        &paths.hidden_service_dir,
+    )
+    .map_err(|_| {
+        CommandError::new(
+            "GUI_ORGANIZER_PROVISION_FAILED",
+            "INVALID_INPUT",
+            "the organizer transport bundles could not be provisioned",
+        )
+    })?;
+    Ok(())
+}
+
+/// Shared intake service assembly for BOTH hosting modes: durable hand-off
+/// inbox, worker session, authoritative admission fence seed, collector
+/// handler, and service-loop start. Fails closed identically in both modes so
+/// no protocol or admission logic can diverge between them.
+///
+/// Returns the running service loop, the durable inbox directory, and the
+/// fence (for status publication). READY is only reported by callers AFTER the
+/// worker is confirmed alive here.
+fn start_collector_service_shared(
+    app: &AppHandle,
+    bound: &BoundElection,
+    bundle: &LoadedOrganizerPrivateBundleV1,
+    collector: OpaqueEnvelopeCollectorV1,
+    authoritative_lifecycle: ElectionLifecycleStateV1,
+) -> Result<
+    (
+        OrganizerCollectorServiceLoopV1,
+        PathBuf,
+        AuthoritativeLifecycleFenceV1,
+    ),
+    CommandError,
+> {
+    // App-owned, election-scoped durable hand-off inbox (manifest-hash path).
+    let durable_inbox_dir =
+        ensure_private_intake_inbox_directory_v1(&app_data_root(app)?, &bound.manifest_hash_hex)
+            .map_err(CommandError::from)?;
+
+    // Fresh intake worker session (NOT the authoritative GUI session).
+    let mut session =
+        GuiElectionSessionV1::new(bound.artifacts.clone()).map_err(CommandError::from)?;
+    session.open().map_err(CommandError::from)?;
+
+    // The AUTHORITATIVE lifecycle fence is initialized from the organizer GUI's
+    // current state, so a FROZEN election fences ballots immediately and status
+    // answers carry signed truth (never the worker session's own substrate
+    // state).
+    //
+    // ROOT-CAUSE FIX (two-computer physical failure,
+    // `lifecycle-auto-refresh-01`): the seed generation MUST be freshly
+    // RESERVED into the durable issuance ledger, never merely re-read from it.
+    // Reserving the seed writes it into the SAME ledger every publication and
+    // export continues, so every served statement carries a unique, strictly
+    // monotonic generation across restarts. A failed reservation degrades to
+    // the legacy read-only seed instead of blocking ballot-office startup
+    // (still monotonic within one run; the heartbeat reconciliation keeps
+    // healing state truth).
+    let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
+    let session_arc = Arc::new(Mutex::new(session));
+    let descriptor_arc = Arc::new(bundle.descriptor.clone());
+    let receiver_key_arc = reconstruct_receiver_key(bundle)?;
+    let receipt_key_arc = Arc::new(bundle.material.receipt_signing_key.clone());
+    let root_signing_key_arc = Arc::new(bundle.material.root_signing_key.clone());
+    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root(app)?)?;
+    let seed_generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
+        .unwrap_or_else(|_| {
+            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex).unwrap_or(0)
+        });
+    let lifecycle_fence =
+        AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, seed_generation);
+    let handler = ThreadSafeCollectorHandlerV1::new(
+        gateway,
+        descriptor_arc,
+        receiver_key_arc,
+        session_arc,
+        receipt_key_arc,
+        "organizer-receipt-key".to_owned(),
+    )
+    .with_accepted_package_inbox(durable_inbox_dir.clone())
+    .with_lifecycle_fence(lifecycle_fence.clone())
+    .with_election_status_signer(
+        root_signing_key_arc,
+        bundle.material.root.key_id().to_owned(),
+    );
+    let service_loop =
+        OrganizerCollectorServiceLoopV1::start(collector, handler, COLLECTOR_POLL_INTERVAL)
+            .map_err(|_| {
+                CommandError::new(
+                    "GUI_ORGANIZER_SERVICE_START_FAILED",
+                    "UNAVAILABLE",
+                    "the collector service loop could not be started",
+                )
+            })?;
+
+    // READY only after the worker is confirmed alive.
+    if !service_loop.worker_is_alive() {
+        let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
+        return Err(CommandError::new(
+            "GUI_ORGANIZER_WORKER_DEAD",
+            "UNAVAILABLE",
+            "the collector service worker exited immediately on start",
+        ));
+    }
+    Ok((service_loop, durable_inbox_dir, lifecycle_fence))
+}
+
+/// Starts the intake worker for an already-provisioned election in
+/// EXTERNAL-REMOTE mode. NO Tor process is spawned, validated, signalled, or
+/// owned: the operator's external Tor instance already hosts the onion service
+/// whose `HiddenServicePort` forwards to THIS machine's fixed loopback
+/// collector port. Readiness is endpoint-scoped: the remote SOCKS route is
+/// probed with ZERO application bytes and then one public, credential-free
+/// election-status GET; only that exact endpoint + onion combination passing
+/// both marks the run ready.
+fn start_remote_intake_worker(
+    app: &AppHandle,
+    config: &RemoteOrganizerIntakeConfigV1,
+    paths: &TransportPaths,
+    bound: &BoundElection,
+    authoritative_lifecycle: ElectionLifecycleStateV1,
+) -> Result<OrganizerIntakeState, CommandError> {
+    // 1. Load organizer private bundle and validate ALL bindings before any
+    //    network activity. No local hostname file exists in remote mode (the
+    //    hidden-service directory is external), so the persisted-hostname check
+    //    is skipped and replaced by the explicit descriptor-onion equality
+    //    gate below.
+    let bundle = load_organizer_private_bundle_v1(&paths.organizer_private_dir).map_err(|_| {
+        CommandError::new(
+            "GUI_ORGANIZER_BUNDLE_MALFORMED",
+            "INVALID_INPUT",
+            "the organizer transport bundle could not be loaded",
+        )
+    })?;
+    validate_intake_startup_v1(&bundle, &bound.artifacts, None).map_err(|_| {
+        CommandError::new(
+            "GUI_ORGANIZER_STARTUP_UNTRUSTED",
+            "BINDING_MISMATCH",
+            "the organizer transport bundle failed startup validation for this election",
+        )
+    })?;
+
+    // 1b. Fail-closed binding gate: the configured external onion MUST equal
+    //     the signed descriptor onion, so intake can never be pointed at (or
+    //     advertised as) a different onion than the one voters' bundles bind.
+    let descriptor_onion = bundle
+        .descriptor
+        .onion_endpoints()
+        .first()
+        .cloned()
+        .ok_or_else(|| {
+            CommandError::new(
+                "GUI_ORGANIZER_NO_ONION",
+                "BINDING_MISMATCH",
+                "the transport descriptor has no onion endpoint",
+            )
+        })?;
+    if descriptor_onion != config.onion_hostname {
+        return Err(CommandError::new(
+            "GUI_ORGANIZER_REMOTE_ONION_MISMATCH",
+            "BINDING_MISMATCH",
+            "the configured external onion hostname does not match this election's signed descriptor",
+        ));
+    }
+
+    // 2. Bind the loopback collector on the FIXED configured port — the port
+    //    the remote operator's `HiddenServicePort 80 <host>:<port>` targets.
+    //    A busy port is a bounded, specific failure (the operator must free it
+    //    or reconfigure the remote side); the application never silently picks
+    //    a different port in remote mode.
+    let collector =
+        OpaqueEnvelopeCollectorV1::bind_loopback_port(config.collector_port).map_err(|_| {
+            CommandError::new(
+                "GUI_ORGANIZER_REMOTE_COLLECTOR_BIND_FAILED",
+                "UNAVAILABLE",
+                "the loopback collector port could not be bound; another program may be using it",
+            )
+        })?;
+    let collector_addr = collector.local_addr().map_err(|_| {
+        CommandError::new(
+            "GUI_ORGANIZER_COLLECTOR_ADDR_FAILED",
+            "UNAVAILABLE",
+            "the loopback collector address could not be read",
+        )
+    })?;
+
+    // 3. Shared service assembly (inbox, worker session, fence, handler, loop).
+    let (service_loop, durable_inbox_dir, lifecycle_fence) = start_collector_service_shared(
+        app,
+        bound,
+        &bundle,
+        collector,
+        authoritative_lifecycle,
+    )?;
+
+    // 4. Endpoint-scoped remote readiness. First the zero-application-byte
+    //    SOCKS5 CONNECT probe to the literal onion through the external proxy;
+    //    then ONE public, credential-free election-status GET over the same
+    //    route (the minimum non-mutating organizer readiness check the protocol
+    //    supports). NO ballot application bytes, credential, or nullifier ever
+    //    leave during readiness. Any failure stops the just-started collector
+    //    and fails closed — the external Tor is left untouched.
+    let timeouts = remote_organizer_readiness_timeouts();
+    let outcome = probe_remote_onion_hostname_v1(&config.socks, &config.onion_hostname, &timeouts);
+    if !outcome.is_ready() {
+        let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
+        return Err(CommandError::new(
+            "GUI_ORGANIZER_REMOTE_NOT_READY",
+            "UNAVAILABLE",
+            remote_organizer_readiness_message(outcome),
+        ));
+    }
+    let status_fetch =
+        fetch_election_status_over_remote_tor_onion(&config.socks, &config.onion_hostname, &timeouts);
+    if status_fetch.is_err() {
+        let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
+        return Err(CommandError::new(
+            "GUI_ORGANIZER_REMOTE_NOT_READY",
+            "UNAVAILABLE",
+            "the external onion is reachable but the organizer intake did not answer the readiness status check yet; retry shortly",
+        ));
+    }
+
+    Ok(OrganizerIntakeState {
+        tor_child: None,
+        mode: OrganizerTorModeV1::ExternalRemote,
+        remote: Some(config.clone()),
+        remote_last_ready: true,
+        service_loop,
+        descriptor: bundle.descriptor.clone(),
+        manifest_hash_hex: bound.manifest_hash_hex.clone(),
+        collector_addr,
+        onion_hostname: config.onion_hostname.clone(),
+        // No local Tor runtime exists in remote mode: these managed-mode
+        // diagnostics are recorded as empty (never fabricated).
+        tor_data_dir: PathBuf::new(),
+        stderr_log: PathBuf::new(),
+        voter_bundle_path: paths.voter_bundle_path.clone(),
+        durable_inbox_dir,
+        lifecycle_fence,
+    })
+}
+
+/// Bounded timeouts for the external-remote readiness check. The SOCKS/onion
+/// path can traverse a full Tor circuit over a trusted network, so these are
+/// generous but strictly bounded so a dead proxy cannot wedge the UI.
+fn remote_organizer_readiness_timeouts() -> TorCarrierTimeoutsV1 {
+    TorCarrierTimeoutsV1 {
+        socks_connect: Duration::from_secs(10),
+        socks_handshake: Duration::from_secs(15),
+        http_write: Duration::from_secs(20),
+        http_response: Duration::from_secs(30),
+    }
+}
+
+/// Bounded, safe user-facing message for a remote organizer readiness outcome.
+/// Never leaks the endpoint, the onion hostname, or a raw OS error.
+const fn remote_organizer_readiness_message(outcome: RemoteTorReadinessOutcomeV1) -> &'static str {
+    match outcome {
+        RemoteTorReadinessOutcomeV1::Ready => {
+            "External remote Tor intake is ready."
+        }
+        RemoteTorReadinessOutcomeV1::EndpointInvalid => {
+            "The remote SOCKS endpoint or organizer onion hostname is invalid."
+        }
+        RemoteTorReadinessOutcomeV1::Unreachable => {
+            "The remote SOCKS proxy could not be reached. Check the host/port and that the proxy is running on the trusted network."
+        }
+        RemoteTorReadinessOutcomeV1::SocksHandshakeFailed => {
+            "The remote endpoint answered but is not a usable SOCKS5 proxy."
+        }
+        RemoteTorReadinessOutcomeV1::OnionUnreachable => {
+            "The remote proxy works but could not reach the organizer onion service yet. Retry shortly."
+        }
+    }
+}
+
+/// Terminates and reaps the OWNED managed-local Tor child when a startup step
+/// fails AFTER the child was spawned but BEFORE it is transferred into the
+/// persistent intake state. This upholds the managed-local lifecycle invariant
+/// — once the app owns a spawned Tor child, every post-spawn return path either
+/// transfers it into state or terminates and reaps it — so a post-spawn startup
+/// failure can never orphan a `tor.exe` that keeps publishing the hidden
+/// service with no handle left to stop it.
+///
+/// The ORIGINAL startup `error` is returned UNCHANGED (cleanup never masks the
+/// real cause), and cleanup is best-effort: a kill/wait that itself fails is
+/// ignored so this can never panic. Used ONLY in managed-local mode;
+/// external-remote mode owns no child and never calls this.
+fn reap_owned_tor_child_on_startup_error(child: &mut Child, error: CommandError) -> CommandError {
+    let _ = child.kill();
+    let _ = child.wait();
+    error
+}
+
+/// Starts the MANAGED-LOCAL intake worker for an already-provisioned election.
+/// Mirrors `private-ballot-tor-test-intake` step-for-step with the SAME
+/// fail-closed ordering, calling only reviewed library functions. This mode
+/// OWNS the Tor child: it is spawned here, liveness-checked, and reaped on
+/// stop/shutdown.
 fn start_intake_worker(
     app: &AppHandle,
     tor_executable: &Path,
@@ -1041,17 +1728,7 @@ fn start_intake_worker(
         },
     )?;
 
-    // 2. App-owned, election-scoped durable hand-off inbox (manifest-hash path).
-    let durable_inbox_dir =
-        ensure_private_intake_inbox_directory_v1(&app_data_root(app)?, &bound.manifest_hash_hex)
-            .map_err(CommandError::from)?;
-
-    // 3. Fresh intake worker session (NOT the authoritative GUI session).
-    let mut session =
-        GuiElectionSessionV1::new(bound.artifacts.clone()).map_err(CommandError::from)?;
-    session.open().map_err(CommandError::from)?;
-
-    // 4. Bind the loopback collector (bound but not yet serviced).
+    // 2. Bind the loopback collector (bound but not yet serviced).
     let collector = OpaqueEnvelopeCollectorV1::bind_loopback_port(0).map_err(|_| {
         CommandError::new(
             "GUI_ORGANIZER_COLLECTOR_BIND_FAILED",
@@ -1152,19 +1829,22 @@ fn start_intake_worker(
     }
 
     // 7. Fail-closed: runtime onion MUST equal the signed descriptor onion
-    // BEFORE any request can be serviced.
-    let descriptor_onion = bundle
-        .descriptor
-        .onion_endpoints()
-        .first()
-        .cloned()
-        .ok_or_else(|| {
-            CommandError::new(
-                "GUI_ORGANIZER_NO_ONION",
-                "BINDING_MISMATCH",
-                "the transport descriptor has no onion endpoint",
-            )
-        })?;
+    // BEFORE any request can be serviced. This runs AFTER the child is spawned,
+    // so a missing onion endpoint must reap the owned child (lifecycle
+    // invariant) rather than return with a live, unreferenced tor.exe.
+    let descriptor_onion = match bundle.descriptor.onion_endpoints().first().cloned() {
+        Some(onion) => onion,
+        None => {
+            return Err(reap_owned_tor_child_on_startup_error(
+                &mut child,
+                CommandError::new(
+                    "GUI_ORGANIZER_NO_ONION",
+                    "BINDING_MISMATCH",
+                    "the transport descriptor has no onion endpoint",
+                ),
+            ));
+        }
+    };
     if descriptor_onion != runtime_hostname {
         let _ = child.kill();
         let _ = child.wait();
@@ -1176,80 +1856,38 @@ fn start_intake_worker(
     }
 
     // 8. Only now start the collector service loop (first point a ballot could
-    // be accepted). Accepted canonical packages flow to the durable inbox.
-    // The AUTHORITATIVE lifecycle fence is initialized from the organizer
-    // GUI's current state, so a FROZEN election fences ballots immediately
-    // and status answers carry signed truth (never the worker session's own
-    // substrate state).
+    //    be accepted) via the SHARED service assembly, so managed-local and
+    //    external-remote modes use byte-identical admission/fence/receipt
+    //    logic. Accepted canonical packages flow to the durable inbox.
     //
-    // ROOT-CAUSE FIX (two-computer physical failure,
-    // `lifecycle-auto-refresh-01`): the seed generation MUST be freshly
-    // RESERVED into the durable issuance ledger, never merely re-read from it.
-    // Seeding at the raw ledger value N made the served startup FROZEN
-    // statement share generation N with the very next reserved transition
-    // (read+1 == N when nothing was exported between start and transition).
-    // Any voter that had already applied the signed FROZEN@N statement then
-    // rejected every signed OPEN@N statement as ConflictingGeneration —
-    // surviving organizer-intake restarts (the fence re-derived the same
-    // collision) and voter-connection restarts — while an OFFLINE export
-    // (which reserves strictly beyond the collision) still worked. Reserving
-    // the seed writes it into the SAME ledger every publication and export
-    // continues, so every served statement carries a unique, strictly
-    // monotonic generation across restarts. A failed reservation degrades to
-    // the legacy read-only seed instead of blocking ballot-office startup
-    // (still monotonic within one run; the heartbeat reconciliation keeps
-    // healing state truth).
-    let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
-    let session_arc = Arc::new(Mutex::new(session));
-    let descriptor_arc = Arc::new(bundle.descriptor.clone());
-    let receiver_key_arc = reconstruct_receiver_key(&bundle)?;
-    let receipt_key_arc = Arc::new(bundle.material.receipt_signing_key.clone());
-    let root_signing_key_arc = Arc::new(bundle.material.root_signing_key.clone());
-    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root(app)?)?;
-    let seed_generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
-        .unwrap_or_else(|_| {
-            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex).unwrap_or(0)
-        });
-    let lifecycle_fence =
-        AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, seed_generation);
-    let handler = ThreadSafeCollectorHandlerV1::new(
-        gateway,
-        descriptor_arc,
-        receiver_key_arc,
-        session_arc,
-        receipt_key_arc,
-        "organizer-receipt-key".to_owned(),
-    )
-    .with_accepted_package_inbox(durable_inbox_dir.clone())
-    .with_lifecycle_fence(lifecycle_fence.clone())
-    .with_election_status_signer(
-        root_signing_key_arc,
-        bundle.material.root.key_id().to_owned(),
-    );
-    let service_loop =
-        OrganizerCollectorServiceLoopV1::start(collector, handler, COLLECTOR_POLL_INTERVAL)
-            .map_err(|_| {
-                CommandError::new(
-                    "GUI_ORGANIZER_SERVICE_START_FAILED",
-                    "UNAVAILABLE",
-                    "the collector service loop could not be started",
-                )
-            })?;
-
-    // 9. READY only after the worker is confirmed alive.
-    if !service_loop.worker_is_alive() {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
-        return Err(CommandError::new(
-            "GUI_ORGANIZER_WORKER_DEAD",
-            "UNAVAILABLE",
-            "the collector service worker exited immediately on start",
-        ));
-    }
+    //    LIFECYCLE INVARIANT (managed-local): the owned Tor child is live from
+    //    the spawn above. Every startup return path after the spawn must either
+    //    TRANSFER the child into persistent intake state (the `Ok` arm below)
+    //    or TERMINATE and reap it. The shared assembly can fail AFTER the child
+    //    is live (inbox/status-dir I/O, worker-session open, service-loop start,
+    //    or an immediately dead worker), so reap the owned child here before
+    //    returning — otherwise an orphaned tor.exe would keep publishing the
+    //    hidden service with no handle left to stop it. The ORIGINAL startup
+    //    error is preserved as primary; cleanup never masks it and never
+    //    panics.
+    let (service_loop, durable_inbox_dir, lifecycle_fence) = match start_collector_service_shared(
+        app,
+        bound,
+        &bundle,
+        collector,
+        authoritative_lifecycle,
+    ) {
+        Ok(shared) => shared,
+        Err(error) => {
+            return Err(reap_owned_tor_child_on_startup_error(&mut child, error));
+        }
+    };
 
     Ok(OrganizerIntakeState {
-        tor_child: child,
+        tor_child: Some(child),
+        mode: OrganizerTorModeV1::ManagedLocal,
+        remote: None,
+        remote_last_ready: false,
         service_loop,
         descriptor: bundle.descriptor.clone(),
         manifest_hash_hex: bound.manifest_hash_hex.clone(),
@@ -1327,6 +1965,7 @@ fn running_status(
         failed,
         failure_reason,
         accepted_ballots: accepted,
+        tor_mode: m.mode.as_token(),
         published_lifecycle: Some(m.lifecycle_fence.state().as_str().to_owned()),
         status_generation: Some(m.lifecycle_fence.generation()),
         authoritative_lifecycle: Some(authoritative.as_str().to_owned()),
@@ -1356,6 +1995,7 @@ fn build_status(
     failed: bool,
     failure_reason: Option<String>,
     accepted: u64,
+    tor_mode: &'static str,
     diag: Option<(String, Option<String>, String, String, String, String)>,
     published: Option<(ElectionLifecycleStateV1, u64)>,
     authoritative: Option<ElectionLifecycleStateV1>,
@@ -1378,6 +2018,7 @@ fn build_status(
         failed,
         failure_reason,
         accepted_ballots: accepted,
+        tor_mode,
         published_lifecycle,
         status_generation,
         authoritative_lifecycle: authoritative.map(|state| state.as_str().to_owned()),
@@ -1446,6 +2087,336 @@ mod tests {
     use crate::managed_tor::ManagedTorStartFailureKind;
 
     const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    const VALID_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
+
+    fn remote_input(
+        mode: Option<&str>,
+        host: Option<&str>,
+        port: Option<u16>,
+        onion: Option<&str>,
+        collector: Option<u16>,
+    ) -> RemoteOrganizerIntakeInputV1 {
+        RemoteOrganizerIntakeInputV1 {
+            tor_mode: mode.map(str::to_owned),
+            socks_host: host.map(str::to_owned),
+            socks_port: port,
+            onion_hostname: onion.map(str::to_owned),
+            collector_port: collector,
+        }
+    }
+
+    #[test]
+    fn default_organizer_tor_mode_is_managed_local() {
+        assert_eq!(
+            OrganizerTorModeV1::default(),
+            OrganizerTorModeV1::ManagedLocal
+        );
+    }
+
+    #[test]
+    fn legacy_or_unknown_mode_token_resolves_to_managed_local() {
+        // A missing/legacy/unknown persisted value must resolve to the
+        // recommended managed-local mode, never silently to remote.
+        for token in ["", "managed-local", "remote", "unknown", "EXTERNAL", "true"] {
+            assert_eq!(
+                OrganizerTorModeV1::from_token_or_default(token),
+                OrganizerTorModeV1::ManagedLocal,
+                "token {token:?}"
+            );
+        }
+        assert_eq!(
+            OrganizerTorModeV1::from_token_or_default("external-remote"),
+            OrganizerTorModeV1::ExternalRemote
+        );
+        assert_eq!(
+            OrganizerTorModeV1::from_token_or_default(
+                OrganizerTorModeV1::ExternalRemote.as_token()
+            ),
+            OrganizerTorModeV1::ExternalRemote
+        );
+    }
+
+    #[test]
+    fn valid_remote_config_is_accepted_and_normalized() {
+        let config = RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some("192.168.1.50:9050".split(':').next().unwrap()),
+            Some(9050),
+            Some(VALID_ONION),
+            Some(18081),
+        ))
+        .expect("valid remote config")
+        .expect("remote mode selected");
+        assert_eq!(config.socks.host(), "192.168.1.50");
+        assert_eq!(config.socks.port(), 9050);
+        assert_eq!(config.onion_hostname, VALID_ONION);
+        assert_eq!(config.collector_port, 18081);
+        // A hostname endpoint is also accepted (trusted LAN/VPN naming).
+        let config = RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some("tor.internal.example"),
+            Some(9050),
+            Some(VALID_ONION),
+            Some(18081),
+        ))
+        .expect("hostname endpoint")
+        .expect("remote mode selected");
+        assert_eq!(config.socks.host(), "tor.internal.example");
+    }
+
+    #[test]
+    fn absent_or_non_remote_mode_resolves_to_no_remote_config() {
+        // Legacy/absent token → managed-local (no remote config), so nothing
+        // ever silently activates the advanced remote path.
+        for mode in [None, Some(""), Some("managed-local"), Some("bogus")] {
+            let parsed = RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+                mode,
+                Some("127.0.0.1"),
+                Some(9050),
+                Some(VALID_ONION),
+                Some(18081),
+            ))
+            .expect("parse ok");
+            assert!(parsed.is_none(), "mode {mode:?} must not select remote");
+        }
+    }
+
+    #[test]
+    fn malformed_remote_config_fails_closed() {
+        // Malformed SOCKS endpoint (scheme).
+        assert!(RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some("socks5://127.0.0.1"),
+            Some(9050),
+            Some(VALID_ONION),
+            Some(18081),
+        ))
+        .is_err());
+        // Port 0.
+        assert!(RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some("127.0.0.1"),
+            Some(0),
+            Some(VALID_ONION),
+            Some(18081),
+        ))
+        .is_err());
+        // Missing host.
+        assert!(RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some(""),
+            Some(9050),
+            Some(VALID_ONION),
+            Some(18081),
+        ))
+        .is_err());
+        // Non-v3 / invalid onion hostname.
+        for bad_onion in ["", "example.com", "foo.onion", "bad host.onion"] {
+            assert!(
+                RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+                    Some("external-remote"),
+                    Some("127.0.0.1"),
+                    Some(9050),
+                    Some(bad_onion),
+                    Some(18081),
+                ))
+                .is_err(),
+                "onion {bad_onion:?} must be rejected"
+            );
+        }
+        // Collector port 0 (the remote operator must target a real port).
+        assert!(RemoteOrganizerIntakeConfigV1::from_input(&remote_input(
+            Some("external-remote"),
+            Some("127.0.0.1"),
+            Some(9050),
+            Some(VALID_ONION),
+            Some(0),
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn remote_mode_owns_no_tor_process_and_no_hidden_service_directory() {
+        // Source-level ownership assertion: the remote code paths must contain
+        // NO process spawn, NO child kill, NO torrc generation, NO local
+        // hidden-service directory creation, and NO managed SOCKS port
+        // reservation. Scan ONLY the implementation (before the test module).
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        let remote_provision = code
+            .split("fn provision_transport_remote")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("remote provision body");
+        for forbidden in [
+            "spawn(",
+            "write_config",
+            "create_dir_all(&paths.hidden_service_dir)",
+            "create_dir_all(&paths.tor_runs_base)",
+            "fresh_run_directory",
+            "reserve_loopback",
+        ] {
+            assert!(
+                !remote_provision.contains(forbidden),
+                "remote provisioning must never {forbidden}"
+            );
+        }
+        let remote_worker = code
+            .split("fn start_remote_intake_worker")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("remote worker body");
+        for forbidden in [
+            "spawn(",
+            ".kill()",
+            "OrganizerHiddenServiceTorConfigV1",
+            "reserve_loopback",
+            "fresh_run_directory",
+        ] {
+            assert!(
+                !remote_worker.contains(forbidden),
+                "the remote worker must never {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_remote_daemon_is_never_signalled_on_stop_or_shutdown() {
+        // Stop and app-exit reap only an OWNED child (Option::take on the
+        // child handle, which is always None in external-remote mode).
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        assert!(
+            code.matches(".tor_child.take()").count() >= 3,
+            "every teardown path must take the OWNED child option, never signal external infrastructure"
+        );
+        // No global/name-based kill anywhere (existing invariant, re-asserted
+        // for the remote-mode changes).
+        for forbidden in ["taskkill", "Stop-Process", "pkill", "killall", "/IM "] {
+            assert!(!code.contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn remote_readiness_is_endpoint_scoped_and_zero_byte_first() {
+        // Readiness ordering inside the remote worker: bind gate → descriptor
+        // equality gate → zero-application-byte probe → public status GET, and
+        // only then a ready state.
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        let worker_start = code
+            .find("fn start_remote_intake_worker")
+            .expect("remote worker");
+        let worker = &code[worker_start..code
+            .find("fn remote_organizer_readiness_timeouts")
+            .expect("timeouts helper")];
+        let bind_gate = worker
+            .find("descriptor_onion != config.onion_hostname")
+            .expect("descriptor onion equality gate");
+        let probe = worker
+            .find("probe_remote_onion_hostname_v1")
+            .expect("zero-byte probe");
+        let status = worker
+            .find("fetch_election_status_over_remote_tor_onion")
+            .expect("status fetch");
+        assert!(bind_gate < probe && probe < status);
+        // The state stores readiness against the EXACT validated config only.
+        assert!(worker.contains("remote: Some(config.clone())"));
+        assert!(worker.contains("remote_last_ready: true"));
+    }
+
+    /// Spawns a real, long-lived OS child to stand in for the owned Tor process
+    /// in lifecycle tests. Portable: `ping` on Windows, `sleep` elsewhere. The
+    /// test always reaps it, so the long duration is never actually waited.
+    fn spawn_blocking_test_child() -> Child {
+        let mut command = if cfg!(windows) {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "30", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        command.spawn().expect("spawn long-lived stand-in child process")
+    }
+
+    // MED-1 regression: a managed-local startup failure that occurs AFTER the
+    // owned Tor child has spawned (e.g. durable-inbox/status-dir I/O failure,
+    // worker-session open failure, service-loop start failure, or an
+    // immediately dead worker surfaced by `start_collector_service_shared`)
+    // must TERMINATE and REAP the owned child before returning — never orphan a
+    // live `tor.exe`. Before the fix, the error arm dropped the live `Child`
+    // (which does NOT kill on drop) without the child ever being stored in
+    // intake state, so stop/shutdown could never recover it.
+    #[test]
+    fn managed_startup_error_after_spawn_reaps_owned_tor_child() {
+        let mut child = spawn_blocking_test_child();
+        // Sanity: the stand-in child is genuinely alive before cleanup.
+        assert!(
+            child
+                .try_wait()
+                .expect("try_wait before reap")
+                .is_none(),
+            "the stand-in owned child must be alive before the reap"
+        );
+
+        let original = CommandError::new(
+            "GUI_ORGANIZER_WORKER_DEAD",
+            "UNAVAILABLE",
+            "the collector service worker exited immediately on start",
+        );
+        let returned = reap_owned_tor_child_on_startup_error(&mut child, original.clone());
+
+        // 1. The ORIGINAL startup error is returned unchanged (cleanup never
+        //    masks or rewrites the real cause).
+        assert_eq!(returned, original);
+        // 2. The owned child has been terminated and reaped — not orphaned.
+        //    `wait()` inside the helper caches the exit status, so a follow-up
+        //    `try_wait()` observes a concrete exit rather than `None`.
+        assert!(
+            child
+                .try_wait()
+                .expect("try_wait after reap")
+                .is_some(),
+            "a post-spawn startup failure must terminate and reap the owned Tor child"
+        );
+    }
+
+    // Source-shape supplement to the behavioral test above: the managed-local
+    // worker's shared-assembly error arm must route through the owned-child
+    // reaper, and the only `Ok` arm transfers the child into intake state.
+    #[test]
+    fn managed_shared_assembly_error_arm_reaps_the_owned_child() {
+        let source = include_str!("organizer_tor_intake.rs");
+        let code = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation precedes the test module");
+        let worker_start = code
+            .find("fn start_intake_worker")
+            .expect("managed worker");
+        let worker = &code[worker_start..];
+        // The post-spawn shared-assembly failure is handled by the reaper,
+        // which returns the original error; the success path stores the child.
+        assert!(
+            worker.contains("reap_owned_tor_child_on_startup_error(&mut child, error)"),
+            "the managed shared-assembly error arm must reap the owned child"
+        );
+        assert!(
+            worker.contains("tor_child: Some(child)"),
+            "the managed success path must transfer the owned child into state"
+        );
+    }
 
     fn app_root() -> PathBuf {
         PathBuf::from(if cfg!(windows) {
@@ -1665,8 +2636,11 @@ mod tests {
                 "organizer Tor lifecycle must never use `{forbidden}` (global/name-based kill)"
             );
         }
-        // The only process termination is on an owned std::process::Child handle.
-        assert!(code.contains("tor_child.kill()"));
+        // The only process termination is on an owned std::process::Child
+        // handle, taken out of the Option so a remote-mode run (None) has
+        // nothing to terminate.
+        assert!(code.contains("tor_child.take()"));
+        assert!(code.contains("child.kill()"));
     }
 
     #[test]

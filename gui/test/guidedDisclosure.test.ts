@@ -613,6 +613,10 @@ describe("guided disclosure adds no backend surface", () => {
       "api.organizerTorStatus(",
       "api.startPrivateIntake(",
       "api.stopPrivateIntake(",
+      // Advanced external-remote Tor hosting: explicit zero-application-byte
+      // connection test (no collector start, no ballot bytes, external daemon
+      // untouched). Shown only under Show all election controls.
+      "api.testRemoteOrganizerTor(",
       "api.exportVoterTransportBundle(",
       "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",

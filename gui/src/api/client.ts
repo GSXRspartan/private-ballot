@@ -505,9 +505,47 @@ export const api = {
     call<OrganizerIntakeStatusV1>("organizer_tor_status", {
       torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
     }),
-  startPrivateIntake: (torExePath?: string) =>
+  startPrivateIntake: (
+    torExePath?: string,
+    // Advanced external-remote Tor hosting. Omitted/undefined ⇒ default
+    // managed-local mode (the backend re-validates every field regardless).
+    remote?: {
+      socksHost: string;
+      socksPort: number;
+      onionHostname: string;
+      collectorPort: number;
+    },
+  ) =>
     call<OrganizerIntakeStatusV1>("start_private_intake", {
       torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+      remote: remote
+        ? {
+            tor_mode: "external-remote",
+            socks_host: remote.socksHost,
+            socks_port: remote.socksPort,
+            onion_hostname: remote.onionHostname,
+            collector_port: remote.collectorPort,
+          }
+        : null,
+    }),
+  // Advanced external-remote explicit connection test: validates the operator
+  // configuration and runs ONLY the non-mutating, zero-application-byte SOCKS5
+  // CONNECT probe to the organizer onion. No collector start, no state change,
+  // and the external Tor daemon is never touched.
+  testRemoteOrganizerTor: (remote: {
+    socksHost: string;
+    socksPort: number;
+    onionHostname: string;
+    collectorPort: number;
+  }) =>
+    call<OrganizerIntakeStatusV1>("test_remote_organizer_tor", {
+      remote: {
+        tor_mode: "external-remote",
+        socks_host: remote.socksHost,
+        socks_port: remote.socksPort,
+        onion_hostname: remote.onionHostname,
+        collector_port: remote.collectorPort,
+      },
     }),
   stopPrivateIntake: () =>
     call<OrganizerIntakeStatusV1>("stop_private_intake"),

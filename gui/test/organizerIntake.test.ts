@@ -31,10 +31,17 @@ describe("organizer one-click private intake controls", () => {
   it("shows a plain Tor / transport status line, not raw ports or torrc", () => {
     assert.match(manage, /label="Tor"/);
     assert.match(manage, /label="Election transport"/);
-    // Normal operation never asks the operator to type a SOCKS/collector port,
-    // a torrc path, an onion hostname, or the app-data root.
-    assert.doesNotMatch(manage, /SOCKS port/i);
-    assert.doesNotMatch(manage, /collector port/i);
+    // The GUIDED/managed-local view never asks the operator to type a
+    // SOCKS/collector port, a torrc path, or the app-data root. (The advanced
+    // external-remote configuration exists ONLY behind the explicit
+    // "Show all election controls" toggle — asserted in
+    // organizerRemoteTor.test.ts — so the default one-click flow is unchanged.)
+    const guidedIntro = manage.slice(
+      manage.indexOf('<Card title="Private ballot intake">'),
+      manage.indexOf("showAllControls && ("),
+    );
+    assert.doesNotMatch(guidedIntro, /SOCKS port/i);
+    assert.doesNotMatch(guidedIntro, /collector port/i);
     assert.doesNotMatch(manage, /app-data root/i);
   });
 
@@ -66,9 +73,11 @@ describe("organizer intake client bindings", () => {
 
   it("passes the tor.exe path as an optional convenience only", () => {
     // Both status and start accept an optional remembered path; the backend
-    // re-validates and may fall back to its allowlist.
+    // re-validates and may fall back to its allowlist. Start additionally
+    // accepts the (optional) external-remote Tor hosting configuration; the
+    // backend re-validates every field of it.
     assert.match(client, /organizerTorStatus:\s*\(torExePath\?: string\)/);
-    assert.match(client, /startPrivateIntake:\s*\(torExePath\?: string\)/);
+    assert.match(client, /startPrivateIntake:\s*\(\s*torExePath\?: string,/);
   });
 });
 

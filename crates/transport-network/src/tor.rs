@@ -403,7 +403,20 @@ fn probe_onion_reachability_over_proxy(
     timeouts: &TorCarrierTimeoutsV1,
 ) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
     let (onion_host, onion_port) = onion_route_from_descriptor_v1(descriptor)?;
+    probe_onion_host_reachability_over_proxy(proxy, onion_host, onion_port, timeouts)
+}
 
+/// The host-level core of [`probe_onion_reachability_over_proxy`]: one SOCKS5
+/// CONNECT to an ALREADY-VALIDATED onion hostname through an ALREADY-VALIDATED
+/// proxy, immediately closed, ZERO application bytes. Shared by the
+/// descriptor-derived probes and the explicit-hostname remote organizer probe
+/// so the onion-routing / zero-application-byte behaviour can never diverge.
+fn probe_onion_host_reachability_over_proxy(
+    proxy: &SocksProxyEndpointV1,
+    onion_host: &str,
+    onion_port: u16,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<OnionReachabilityOutcomeV1, PrivateTransportNetworkErrorV1> {
     // Stage 1: TCP connect to the SOCKS proxy.
     let mut stream = match proxy.connect(timeouts.socks_connect) {
         Ok(stream) => stream,
@@ -1016,6 +1029,64 @@ pub fn probe_remote_onion_reachability_v1(
         }
         Err(_) => RemoteTorReadinessOutcomeV1::EndpointInvalid,
     }
+}
+
+/// Non-mutating REMOTE reachability probe for an EXPLICITLY SUPPLIED onion
+/// hostname (the remote organizer mode: the operator's externally provisioned
+/// hidden service, not a descriptor-derived route). Identical zero-application-
+/// byte behaviour to [`probe_remote_onion_reachability_v1`]: TCP connect to the
+/// proxy, SOCKS5 no-auth negotiation, one CONNECT to the literal `.onion`
+/// (`ATYP = 0x03`, never OS-resolved), then close. The onion hostname is
+/// strictly validated as a Tor v3 onion BEFORE any connection; a proxy or
+/// onion failure fails closed with a bounded classification.
+#[must_use]
+pub fn probe_remote_onion_hostname_v1(
+    endpoint: &RemoteSocksEndpointV1,
+    onion_host: &str,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> RemoteTorReadinessOutcomeV1 {
+    // A malformed onion hostname is a configuration error (EndpointInvalid),
+    // never a network state — and it is rejected BEFORE any connection.
+    if validate_onion_hostname_v1(onion_host).is_err() {
+        return RemoteTorReadinessOutcomeV1::EndpointInvalid;
+    }
+    let proxy = SocksProxyEndpointV1::Remote(endpoint.clone());
+    match probe_onion_host_reachability_over_proxy(&proxy, onion_host, ONION_VIRTUAL_PORT_V1, timeouts)
+    {
+        Ok(OnionReachabilityOutcomeV1::Reachable) => RemoteTorReadinessOutcomeV1::Ready,
+        Ok(OnionReachabilityOutcomeV1::SocksConnectFailed) => {
+            RemoteTorReadinessOutcomeV1::Unreachable
+        }
+        Ok(OnionReachabilityOutcomeV1::SocksHandshakeFailed) => {
+            RemoteTorReadinessOutcomeV1::SocksHandshakeFailed
+        }
+        Ok(OnionReachabilityOutcomeV1::OnionConnectFailed) => {
+            RemoteTorReadinessOutcomeV1::OnionUnreachable
+        }
+        Err(_) => RemoteTorReadinessOutcomeV1::EndpointInvalid,
+    }
+}
+
+/// Remote-SOCKS election-status fetch to an EXPLICITLY SUPPLIED onion hostname
+/// (the remote organizer readiness path). The request is the public,
+/// credential-free `GET /v1/election-status`: no voter credential, selection,
+/// proof, nullifier, or package. The onion is strictly validated as a Tor v3
+/// hostname and sent as a SOCKS5 `DOMAINNAME` literal (never OS-resolved); a
+/// proxy or onion failure fails closed — there is no clearnet fallback.
+pub fn fetch_election_status_over_remote_tor_onion(
+    endpoint: &RemoteSocksEndpointV1,
+    onion_host: &str,
+    timeouts: &TorCarrierTimeoutsV1,
+) -> Result<Vec<u8>, PrivateTransportNetworkErrorV1> {
+    validate_onion_hostname_v1(onion_host)?;
+    let mut stream = endpoint.connect(timeouts.socks_connect)?;
+    socks5_handshake_and_connect_onion_over_stream(
+        &mut stream,
+        onion_host,
+        ONION_VIRTUAL_PORT_V1,
+        timeouts,
+    )?;
+    http_get_election_status(&mut stream, onion_host, timeouts)
 }
 
 #[cfg(test)]

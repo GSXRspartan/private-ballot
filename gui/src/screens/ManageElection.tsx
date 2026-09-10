@@ -13,6 +13,10 @@ import {
   recallManagedTorConfig,
   rememberManagedTorConfig,
 } from "../api/managedTorConfigMemory";
+import {
+  recallOrganizerRemoteTorConfig,
+  rememberOrganizerRemoteTorConfig,
+} from "../api/organizerRemoteTorMemory";
 import type {
   GuiArchiveWriteResultV1,
   GuiCommandError,
@@ -135,6 +139,30 @@ export function ManageElection() {
   const [intakeTorExePath, setIntakeTorExePath] = useState(
     () => recallManagedTorConfig().torExePath,
   );
+  // Advanced external-remote Tor hosting: an EXTERNALLY managed Tor instance
+  // (trusted LAN/VPN/tunnel) already hosts the organizer onion service, so
+  // Private Ballot never spawns/owns a Tor process in that mode. These are
+  // GLOBAL non-secret preferences; the Rust shell re-validates every field
+  // (fail closed) before anything connects. Default/absent → managed-local.
+  const [organizerTorMode, setOrganizerTorMode] = useState<"managed-local" | "external-remote">(
+    () =>
+      recallOrganizerRemoteTorConfig().torMode === "external-remote"
+        ? "external-remote"
+        : "managed-local",
+  );
+  const [remoteSocksHost, setRemoteSocksHost] = useState(
+    () => recallOrganizerRemoteTorConfig().socksHost,
+  );
+  const [remoteSocksPort, setRemoteSocksPort] = useState(
+    () => recallOrganizerRemoteTorConfig().socksPort || "9050",
+  );
+  const [remoteOnionHostname, setRemoteOnionHostname] = useState(
+    () => recallOrganizerRemoteTorConfig().onionHostname,
+  );
+  const [remoteCollectorPort, setRemoteCollectorPort] = useState(
+    () => recallOrganizerRemoteTorConfig().collectorPort || "18081",
+  );
+  const [remoteTestStatus, setRemoteTestStatus] = useState<OrganizerIntakeStatusV1 | null>(null);
   const [bundleExportPath, setBundleExportPath] = useState<string | null>(null);
   // Bounded automatic inbox sync: a single in-flight guard and the last observed
   // intake-worker accepted count. Auto-sync calls the SAME authoritative
@@ -902,12 +930,69 @@ export function ManageElection() {
     }
   };
 
+  // The advanced external-remote argument for the intake start call, or
+  // undefined for the default managed-local mode. Malformed numbers are sent
+  // as 0 so the Rust shell rejects the whole request (fail closed).
+  function remoteIntakeArg():
+    | { socksHost: string; socksPort: number; onionHostname: string; collectorPort: number }
+    | undefined {
+    if (organizerTorMode !== "external-remote") return undefined;
+    const port = /^\d{1,5}$/.test(remoteSocksPort.trim())
+      ? Number(remoteSocksPort.trim())
+      : 0;
+    const collector = /^\d{1,5}$/.test(remoteCollectorPort.trim())
+      ? Number(remoteCollectorPort.trim())
+      : 0;
+    return {
+      socksHost: remoteSocksHost.trim(),
+      socksPort: port,
+      onionHostname: remoteOnionHostname.trim(),
+      collectorPort: collector,
+    };
+  }
+
+  // Persist the NON-SECRET external-remote configuration (mode + endpoint +
+  // onion hostname + collector port). Sanitized on both write and read.
+  function persistOrganizerRemoteTorConfig() {
+    rememberOrganizerRemoteTorConfig({
+      torMode: organizerTorMode,
+      socksHost: remoteSocksHost.trim(),
+      socksPort: remoteSocksPort.trim(),
+      onionHostname: remoteOnionHostname.trim(),
+      collectorPort: remoteCollectorPort.trim(),
+    });
+  }
+
+  // Advanced external-remote explicit connection test. Runs ONLY the backend's
+  // non-mutating, zero-application-byte SOCKS5 CONNECT probe to the organizer
+  // onion through the external proxy — no collector start, no ballot bytes,
+  // and the external Tor daemon is never touched.
+  const onTestRemoteOrganizer = async () => {
+    clearLocalError();
+    setOrganizerBusy(true);
+    try {
+      const arg = remoteIntakeArg();
+      if (!arg) return;
+      const status = await api.testRemoteOrganizerTor(arg);
+      setRemoteTestStatus(status);
+      persistOrganizerRemoteTorConfig();
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
   const onStartIntake = async () => {
     clearLocalError();
     setOrganizerBusy(true);
     try {
-      const status = await api.startPrivateIntake(intakeTorExepathOrUndefined());
+      const status = await api.startPrivateIntake(
+        intakeTorExepathOrUndefined(),
+        remoteIntakeArg(),
+      );
       setOrganizerStatus(status);
+      persistOrganizerRemoteTorConfig();
       recordAction("Started private ballot intake");
     } catch (error) {
       showError(error);
@@ -1929,12 +2014,159 @@ export function ManageElection() {
             the lifecycle transition actions last. */}
         {showControl("intake") && (
         <Card title="Private ballot intake">
-          <p className="card-body">
-            Accept ballots submitted privately over Tor. Starting intake runs Tor and the
-            private receiver for you — no terminal, torrc, or network settings. Ballots are
-            accepted into this election through the same checks as an imported ballot: each is
-            accepted only once, and an exact resend is never counted twice.
-          </p>
+          {organizerTorMode === "managed-local" ? (
+            <p className="card-body">
+              Accept ballots submitted privately over Tor. Starting intake runs Tor and the
+              private receiver for you — no terminal, torrc, or network settings. Ballots are
+              accepted into this election through the same checks as an imported ballot: each is
+              accepted only once, and an exact resend is never counted twice.
+            </p>
+          ) : (
+            <p className="card-body">
+              Accept ballots submitted privately over Tor through your EXTERNALLY managed Tor
+              instance. Private Ballot does not start, stop, or verify that Tor daemon; it only
+              checks that the organizer onion is reachable through it and runs the local ballot
+              receiver the remote hidden service forwards to. Ballot acceptance checks are
+              identical to managed-local mode.
+            </p>
+          )}
+
+          {/* Advanced Tor hosting mode. Hidden from the guided view entirely:
+              normal operators always stay on the recommended managed-local
+              mode; the remote option is only visible under Show all election
+              controls and always requires explicit configuration. */}
+          {showAllControls && (
+            <>
+              <fieldset className="tor-mode-fieldset">
+                <legend>Organizer Tor hosting</legend>
+                <label className="radio-row">
+                  <input
+                    type="radio"
+                    name="organizer-tor-mode"
+                    checked={organizerTorMode === "managed-local"}
+                    disabled={organizerBusy || organizerStatus?.intake_running === true}
+                    onChange={() => setOrganizerTorMode("managed-local")}
+                  />
+                  <span>
+                    <strong>Managed Local Tor</strong> — Recommended. Private Ballot starts and
+                    manages Tor locally.
+                  </span>
+                </label>
+                <label className="radio-row">
+                  <input
+                    type="radio"
+                    name="organizer-tor-mode"
+                    checked={organizerTorMode === "external-remote"}
+                    disabled={organizerBusy || organizerStatus?.intake_running === true}
+                    onChange={() => setOrganizerTorMode("external-remote")}
+                  />
+                  <span>
+                    <strong>Remote Organizer Tor</strong> — Advanced. Use an externally managed
+                    Tor instance and onion service.
+                  </span>
+                </label>
+              </fieldset>
+
+              {organizerTorMode === "external-remote" && (
+                <div className="config-stack">
+                  <Notice tone="warn">
+                    Remote Organizer Tor is intended for infrastructure you control over a
+                    trusted LAN, VPN, or protected tunnel. Private Ballot does not manage or
+                    verify the remote Tor daemon, and the link between this app and the SOCKS
+                    proxy is not itself encrypted. The ballot receiver binds to this machine's
+                    loopback only and is never exposed on the network, so a Tor daemon running
+                    on a different machine must reach it through a tunnel that terminates on
+                    this machine's loopback collector port — its HiddenServicePort cannot target
+                    this machine's LAN address directly. Onion traffic still goes only through
+                    Tor; there is no clearnet fallback.
+                  </Notice>
+                  <div className="form-row form-row--full">
+                    <label htmlFor="remote-organizer-socks-host">SOCKS host</label>
+                    <input
+                      id="remote-organizer-socks-host"
+                      type="text"
+                      value={remoteSocksHost}
+                      onChange={(e) => {
+                        setRemoteSocksHost(e.target.value);
+                        // Editing any field invalidates a prior connection-test
+                        // result so a stale "Ready ✓" is never shown against
+                        // changed inputs (the backend re-probes on Start anyway).
+                        setRemoteTestStatus(null);
+                      }}
+                      placeholder="127.0.0.1  or  tor.internal.example"
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label htmlFor="remote-organizer-socks-port">SOCKS port</label>
+                    <input
+                      id="remote-organizer-socks-port"
+                      type="text"
+                      inputMode="numeric"
+                      value={remoteSocksPort}
+                      onChange={(e) => {
+                        setRemoteSocksPort(e.target.value);
+                        setRemoteTestStatus(null);
+                      }}
+                      placeholder="9050"
+                    />
+                  </div>
+                  <div className="form-row">
+                    <label htmlFor="remote-organizer-collector-port">
+                      Local collector port (remote HiddenServicePort target)
+                    </label>
+                    <input
+                      id="remote-organizer-collector-port"
+                      type="text"
+                      inputMode="numeric"
+                      value={remoteCollectorPort}
+                      onChange={(e) => {
+                        setRemoteCollectorPort(e.target.value);
+                        setRemoteTestStatus(null);
+                      }}
+                      placeholder="18081"
+                    />
+                  </div>
+                  <div className="form-row form-row--full">
+                    <label htmlFor="remote-organizer-onion">Organizer onion hostname</label>
+                    <input
+                      id="remote-organizer-onion"
+                      type="text"
+                      value={remoteOnionHostname}
+                      onChange={(e) => {
+                        setRemoteOnionHostname(e.target.value);
+                        setRemoteTestStatus(null);
+                      }}
+                      placeholder="your-organizer-onion-hostname.onion"
+                    />
+                  </div>
+                  <div className="field-list">
+                    <Field label="Connection test">
+                      {remoteTestStatus === null
+                        ? "Not checked"
+                        : remoteTestStatus.ready
+                          ? "Ready ✓"
+                          : "Failed / not reachable"}
+                    </Field>
+                  </div>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={
+                        organizerBusy ||
+                        organizerStatus?.intake_running === true ||
+                        !remoteSocksHost.trim() ||
+                        !remoteOnionHostname.trim()
+                      }
+                      onClick={() => void onTestRemoteOrganizer()}
+                    >
+                      Test connection
+                    </button>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
 
           {/* Near-one-click status line: a plain Ready pill first, then the
               plain Tor/transport lines. The two accepted-ballot counters stay
@@ -1955,11 +2187,13 @@ export function ManageElection() {
               )}
             </Field>
             <Field label="Tor">
-              {organizerStatus === null
-                ? "Checking…"
-                : organizerStatus.tor_found
-                  ? "Found"
-                  : "Not found"}
+              {organizerTorMode === "external-remote"
+                ? "External (not managed here)"
+                : organizerStatus === null
+                  ? "Checking…"
+                  : organizerStatus.tor_found
+                    ? "Found"
+                    : "Not found"}
             </Field>
             <Field label="Election transport">
               {organizerStatus === null
@@ -2061,7 +2295,9 @@ export function ManageElection() {
                 disabled={
                   !canAct ||
                   organizerBusy ||
-                  (organizerStatus !== null && !organizerStatus.tor_found)
+                  (organizerTorMode === "managed-local" &&
+                    organizerStatus !== null &&
+                    !organizerStatus.tor_found)
                 }
                 onClick={() => void onStartIntake()}
               >
@@ -2083,7 +2319,9 @@ export function ManageElection() {
                 disabled={
                   !canAct ||
                   organizerBusy ||
-                  (organizerStatus !== null && !organizerStatus.tor_found)
+                  (organizerTorMode === "managed-local"
+                    ? organizerStatus !== null && !organizerStatus.tor_found
+                    : !remoteSocksHost.trim() || !remoteOnionHostname.trim())
                 }
                 onClick={() => void onStartIntake()}
               >

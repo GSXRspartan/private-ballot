@@ -1223,6 +1223,10 @@ export interface OrganizerIntakeStatusV1 {
    * `organizer-tor-datadir-lock`); `null` unless `failed` is true. */
   failure_reason: string | null;
   accepted_ballots: number;
+  /** Stable hosting-mode token of the running intake: "managed-local"
+   *  (default/recommended) or "external-remote" (advanced). "managed-local"
+   *  while no intake is running. */
+  tor_mode: string;
   /** Lifecycle the running collector would currently sign into status answers
    * (backend-authoritative fence). `null` while no intake is running. */
   published_lifecycle: string | null;
