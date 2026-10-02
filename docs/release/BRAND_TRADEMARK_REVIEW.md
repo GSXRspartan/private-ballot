@@ -78,17 +78,23 @@ governance pilot software.
    metadata, archive/evidence schemas, and canonical test vectors are
    frozen — treated as historical stable identifiers, not as public
    branding.
-5. The already-deployed and qualified V2 anchor template
+5. The V2 anchor template deployed at the time of this review
    (`template_f49e19743d7f9a92f7c675619412ce2b50efe55514ee9012f2e9cdab25f8e214`,
    SHA-256
    `022beeaea7805775192623c87970c03cd384732b37666d1d95a79a967fa44d49`,
    BLAKE3
    `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`)
-   is not rebuilt or republished for this branding pass. Public release
-   packaging **does** publish the exact same bytes under a generic
+   was not rebuilt or republished for this branding pass. Public release
+   packaging **did** publish the exact same bytes under a generic
    Private Ballot filename (`private_ballot_ootle_anchor_v2.wasm`) — a
    file rename only, with both hashes verified unchanged. See
    [docs/CONTROLLED_ALPHA_PACKAGE_CHECKLIST.md](../CONTROLLED_ALPHA_PACKAGE_CHECKLIST.md#release-asset-filename-bytes-must-remain-identical).
+   **Superseded since:** the Ootle v0.42.0 testnet reset wiped that network
+   generation. The current post-reset deployment is
+   `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee`.
+   None of this changes the branding position — the protocol name
+   `TariPrivateBallotAnchorV2`, the module, the function, and the event topic
+   are all unchanged by the redeployment.
 6. `%LOCALAPPDATA%\Tari Private Ballot\anchor-state\...` and the equivalent
    macOS/Linux paths remain unchanged for v0.1.0-alpha to avoid orphaning
    existing V2 evidence/lifecycle sidecars on operator machines.

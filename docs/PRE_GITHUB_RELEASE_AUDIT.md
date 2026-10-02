@@ -71,16 +71,24 @@ process are documented.
 
 Source belongs in `templates/ootle-anchor-event-template-v2`. Compiled WASM
 belongs in release assets only when accompanied by hashes and provenance.
-Current controlled-alpha authoritative hashes:
+Current controlled-alpha authoritative hashes (as recorded by this audit):
 
 | Algorithm | Digest |
 | --- | --- |
 | SHA-256 | `022beeaea7805775192623c87970c03cd384732b37666d1d95a79a967fa44d49` |
 | BLAKE3-256 | `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc` |
 
-Current Esmeralda template address:
+Esmeralda template address recorded by this audit:
 `template_f49e19743d7f9a92f7c675619412ce2b50efe55514ee9012f2e9cdab25f8e214`.
 No publish action was performed by this audit.
+
+> **SUPERSEDED — historical, pre-reset network generation.** The values above
+> are preserved verbatim as the record of this audit. The Tari Ootle **v0.42.0
+> testnet reset** wiped that network generation, so this template address and
+> this artifact are no longer valid or deployable. For the current values see
+> [../templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md](../templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md).
+> The current post-reset deployment of `TariPrivateBallotAnchorV2` is
+> `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee`.
 
 ## Decisions Needed Before Publication
 

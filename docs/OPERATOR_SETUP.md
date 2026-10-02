@@ -29,7 +29,7 @@ Private Ballot installer. Nothing else is downloaded silently.
 | Component | Where to get it | Verify | Required for |
 | --- | --- | --- | --- |
 | Private Ballot | GitHub Release (MSI, NSIS setup, or portable `.exe`) once one is published, or a source build. | Compare the release-asset `SHA256SUMS` against your own `Get-FileHash` before running the installer. | Organizer, Voter, Developer |
-| Tari Ootle `walletd` | Upstream Tari Ootle project (v0.39.2 is the currently pinned Esmeralda-compatible release). Get it from the official tari-project distribution channel. | Compare SHA-256 against the value published by upstream. | Organizer (only if publishing an anchor) |
+| Tari Ootle `walletd` | Upstream Tari Ootle project (v0.42.0 is the currently pinned Esmeralda-compatible release, the post-testnet-reset cohort). Get it from the official tari-project distribution channel. | Compare SHA-256 against the value published by upstream. | Organizer (only if publishing an anchor) |
 | Tor | [Tor Browser](https://www.torproject.org/download/) or the [Tor Expert Bundle](https://www.torproject.org/download/tor/) provides an unmodified `tor.exe` on Windows and an unmodified `tor` binary on Linux/macOS. On Ubuntu Linux the Debian `tor` package (`sudo apt install tor`, executable at `/usr/bin/tor`) is also accepted. | Compare SHA-256 against the value published on `torproject.org`. On Windows, also confirm the digital signature. On Linux, verify the apt repository signature or the `torproject.org` SHA-256. | Organizer (private intake) and Voter (private submission). Not required for developer scale benchmarks. |
 | tTARI (Esmeralda testnet TARI) | The current Tari Esmeralda testnet faucet or your existing testnet balance. | n/a | Organizer, only for publishing the optional Ootle anchor. |
 | MSVC Build Tools, vcpkg, Node.js, Rust `1.97.1-x86_64-pc-windows-msvc` | Vendor sites. | Vendor-published checksums. | Developer only. |
@@ -122,7 +122,9 @@ walletd; the finalized archive is the authoritative verification artifact.
 If you do want a public Ootle anchor:
 
 1. Install Tari Ootle `walletd`. The currently pinned Esmeralda-compatible
-   version is `0.39.2`.
+   version is `0.42.0` (the testnet-reset cohort). Note that v0.42.0 wiped
+   the previous network generation: a wallet, template address, or artifact
+   from the v0.39.x era is no longer valid against this network.
 2. Start `walletd` on the Esmeralda network with its JSON-RPC endpoint on
    loopback. The application expects the endpoint at
    `http://127.0.0.1:5100/json_rpc` (the `/json_rpc` route is required —

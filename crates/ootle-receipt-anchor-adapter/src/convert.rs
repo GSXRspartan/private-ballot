@@ -147,7 +147,28 @@ pub fn convert_transaction_receipt(
 
     let mut event_proofs = Vec::with_capacity(events.len());
     for (index, event) in events.iter().enumerate() {
-        let metadata = event.payload().clone().into_iter().collect();
+        // v0.42 cohort change (tari-ootle PR #2679): event metadata values are
+        // now CBOR (`RawCbor`), not hex strings. The anchor template emits only
+        // CBOR text-string values, so decode each value back to its String form
+        // via `get_str`. Non-anchor engine/fee events in the same receipt may
+        // carry non-string CBOR values (e.g. an integer `amount`); those are
+        // never compared by the V2 anchor verifier, so they are preserved
+        // losslessly as the lowercase hex of their raw CBOR bytes rather than
+        // being dropped. The anchor event's four string fields therefore round
+        // trip byte-for-byte, exactly as the old String-metadata model did.
+        let payload = event.payload();
+        let mut metadata: Vec<(String, String)> = Vec::with_capacity(payload.len());
+        for (key, raw) in payload.iter() {
+            let value = match payload.get_str(key.as_str()) {
+                Some(text) => text.to_owned(),
+                None => raw
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            };
+            metadata.push((key.clone(), value));
+        }
         let event_index = u16::try_from(index).map_err(|_| ReceiptConversionError::TooManyLogs)?;
         // Render the canonical `template_<64 hex>` address string. The pinned
         // `TemplateAddress` is a bare `Hash32` whose `Display` is only the 64 hex
@@ -171,7 +192,7 @@ pub fn convert_transaction_receipt(
         transaction_id.clone(),
         network.clone(),
         map_finalize_outcome(*receipt.outcome()),
-        // V1 log data is intentionally empty for a v0.39.2 receipt. A new
+        // V1 log data is intentionally empty for a current-cohort receipt. A new
         // lifecycle queries `event_proofs_v2`; historical V1 evidence remains
         // readable through the unchanged log field.
         Vec::new(),
@@ -402,5 +423,143 @@ mod tests {
             panic!("exact-max receipt must convert");
         };
         assert_eq!(converted.event_proofs_v2().len(), MAX_RECEIPT_LOG_ENTRIES);
+    }
+
+    // --- v0.42 cohort: CBOR event-metadata decode (tari-ootle PR #2679) ---
+    //
+    // Under v0.42 event metadata values are CBOR (`RawCbor`), not hex strings.
+    // These tests pin the exact behaviour of the decode in
+    // `convert_transaction_receipt`: the anchor template's four string fields
+    // round-trip byte-for-byte, and non-string / unexpected values on unrelated
+    // engine events stay total via a lossless lowercase-hex fallback (never a
+    // panic, never silent corruption).
+
+    /// A representative canonical public-summary JSON string, exactly as the
+    /// template places it on-chain verbatim.
+    const V2_SUMMARY_JSON: &str = "{\"q\":\"Adopt the charter?\",\"opts\":[{\"l\":\"Yes\",\"n\":7},{\"l\":\"No\",\"n\":3}],\"eligible\":10}";
+
+    /// Builds a V2 anchor event carrying the exact four string metadata keys the
+    /// template emits, each encoded as a CBOR text string under the v0.42 model.
+    fn v2_anchor_event(digest_hex: &str, election_id: &str, summary: &str) -> Event {
+        let mut metadata = Metadata::default();
+        metadata.insert("anchor_digest_v2", digest_hex);
+        metadata.insert("network", "esme");
+        metadata.insert("election_id", election_id);
+        metadata.insert("public_summary", summary);
+        Event::new(None, template_address(), ANCHOR_TOPIC.to_owned(), metadata)
+    }
+
+    /// Converts a single-event receipt and returns that event's copied metadata.
+    fn sole_proof_metadata(receipt: &TransactionReceipt) -> Vec<(String, String)> {
+        let id = transaction_id(&"77".repeat(32));
+        let Ok(converted) = convert_transaction_receipt(receipt, &id, &network()) else {
+            panic!("receipt must convert");
+        };
+        let proofs = converted.event_proofs_v2();
+        assert_eq!(proofs.len(), 1, "expected exactly one event proof");
+        proofs[0].metadata().to_vec()
+    }
+
+    fn lookup(md: &[(String, String)], key: &str) -> Option<String> {
+        md.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    /// (1) The four V2 anchor string fields decode to their exact String values.
+    #[test]
+    fn v2_anchor_string_metadata_decodes_exactly() {
+        let digest = "ab".repeat(32);
+        let election = "deadbeefcafe0011";
+        let receipt = make_receipt(
+            FinalizeOutcome::Commit,
+            vec![v2_anchor_event(&digest, election, V2_SUMMARY_JSON)],
+            9,
+        );
+        let md = sole_proof_metadata(&receipt);
+        assert_eq!(md.len(), 4);
+        assert_eq!(
+            lookup(&md, "anchor_digest_v2").as_deref(),
+            Some(digest.as_str())
+        );
+        assert_eq!(lookup(&md, "network").as_deref(), Some("esme"));
+        assert_eq!(lookup(&md, "election_id").as_deref(), Some(election));
+        assert_eq!(
+            lookup(&md, "public_summary").as_deref(),
+            Some(V2_SUMMARY_JSON)
+        );
+    }
+
+    /// (4) The on-chain `public_summary` bytes round-trip byte-for-byte, so the
+    /// public-summary meaning is unchanged by the CBOR model.
+    #[test]
+    fn v2_public_summary_round_trips_byte_for_byte() {
+        let digest = "cd".repeat(32);
+        let receipt = make_receipt(
+            FinalizeOutcome::Commit,
+            vec![v2_anchor_event(&digest, "e1", V2_SUMMARY_JSON)],
+            1,
+        );
+        let md = sole_proof_metadata(&receipt);
+        let Some(summary) = lookup(&md, "public_summary") else {
+            panic!("public_summary must be present");
+        };
+        assert_eq!(summary.as_bytes(), V2_SUMMARY_JSON.as_bytes());
+        assert_eq!(summary.len(), V2_SUMMARY_JSON.len());
+    }
+
+    /// (2) A non-string integer value on an unrelated engine event does not break
+    /// conversion: the string field decodes, the integer is preserved as lossless
+    /// lowercase hex of its raw CBOR bytes, and nothing panics.
+    #[test]
+    fn non_string_engine_metadata_stays_total_via_hex_fallback() {
+        let mut metadata = Metadata::default();
+        metadata.insert("note", "hello");
+        metadata.insert("amount", &123_u64);
+        let event = Event::new(
+            None,
+            template_address(),
+            "std.vault.pay_fee".to_owned(),
+            metadata,
+        );
+        let receipt = make_receipt(FinalizeOutcome::Commit, vec![event], 3);
+        let md = sole_proof_metadata(&receipt);
+        assert_eq!(md.len(), 2);
+        assert_eq!(lookup(&md, "note").as_deref(), Some("hello"));
+        let Some(amount_hex) = lookup(&md, "amount") else {
+            panic!("amount must be present");
+        };
+        // Lossless hex of the raw CBOR bytes, not the ASCII of the number.
+        assert_ne!(amount_hex, "123");
+        assert!(!amount_hex.is_empty());
+        assert!(amount_hex.len() % 2 == 0);
+        assert!(
+            amount_hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        );
+        // CBOR canonical unsigned 123 == 0x18 0x7b.
+        assert_eq!(amount_hex, "187b");
+    }
+
+    /// (3) An unexpected non-string value (a CBOR bool) uses the same safe
+    /// lossless-hex fallback rather than panicking or decoding to a bogus string.
+    #[test]
+    fn unexpected_cbor_value_uses_safe_lossless_fallback() {
+        let mut metadata = Metadata::default();
+        metadata.insert("anchor_digest_v2", &"ff".repeat(32));
+        metadata.insert("flag", &true);
+        let event = Event::new(None, template_address(), ANCHOR_TOPIC.to_owned(), metadata);
+        let receipt = make_receipt(FinalizeOutcome::Commit, vec![event], 5);
+        let md = sole_proof_metadata(&receipt);
+        assert_eq!(md.len(), 2);
+        assert_eq!(
+            lookup(&md, "anchor_digest_v2").as_deref(),
+            Some("ff".repeat(32).as_str())
+        );
+        let Some(flag_hex) = lookup(&md, "flag") else {
+            panic!("flag must be present");
+        };
+        assert_ne!(flag_hex, "true");
+        // CBOR `true` == 0xf5.
+        assert_eq!(flag_hex, "f5");
     }
 }

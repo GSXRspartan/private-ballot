@@ -29,11 +29,26 @@ pub const TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2: &str =
 pub const TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2: &str = "trusted-ootle-anchor-deployment-v2.json";
 /// BLAKE3-256 of the reviewed V2 WASM that is eligible for manual publication.
 ///
-/// Corrected V2 template (four-argument ABI with readable `public_summary`) —
-/// the previous six-argument WASM (BLAKE3
-/// `e0bdf9c4…4c8c`) is intentionally obsolete and rejected by the lock.
+/// Current value is the **Tari Ootle v0.42.0 testnet-reset (esmeralda) cohort**
+/// artifact: the four-argument ABI template rebuilt against `tari_template_lib`
+/// `=0.33.0` and emitted path-clean (`--remap-path-prefix`) so no builder-local
+/// path is baked into the published bytes. Reproduced and re-verified locally
+/// at 61479 bytes with SHA-256
+/// `76532c3c703aa2e755c8f436b0055a30b42caab2d803bbbc762af0eee9bbcfce`. This is
+/// the only BLAKE3 the V2 lock accepts.
+///
+/// The v0.42 event-metadata model is CBOR (tari-ootle PR #2679), a
+/// consensus-breaking change, so a template built against the older
+/// `tari_template_lib` is not deployable on the reset network at all.
+///
+/// Superseded historical artifacts (intentionally rejected by the lock):
+/// - `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`
+///   — the v0.39.2 / `tari_template_lib` `=0.31.1` four-argument build
+///   (60714 bytes, SHA-256 `022beeae…4d49`), valid only on the pre-reset
+///   network. See `release-staging/` and the `docs/` historical records.
+/// - the earlier six-argument WASM (`e0bdf9c4…4c8c`).
 pub const TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX: &str =
-    "475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc";
+    "ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908";
 pub const TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1: &str = "BLAKE3-256";
 pub const MAX_TEMPLATE_WASM_BYTES_V1: usize = 16 * 1024 * 1024;
 const WASM_MAGIC: &[u8; 4] = b"\0asm";

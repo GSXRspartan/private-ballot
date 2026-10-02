@@ -118,9 +118,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "ootle_serde"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1bb7773609b12e5af47cbe66a808f852e1262196a77e9d7d4feb64c7cf66b26"
+checksum = "87d94f13b3fe0e1236bbe8ff37af2d0c0715d4f264d6e577db53e1badd00d1f9"
 dependencies = [
  "serde",
 ]
@@ -206,9 +206,9 @@ dependencies = [
 
 [[package]]
 name = "tari_bor"
-version = "0.15.0"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d214945e3a0187054cecae21652b628c7f04fef795c76cd841cc98981aff86db"
+checksum = "3aef3b7d50696abb0cfc44f0b0fa3f653a37511631d70edcff33afa91f78684a"
 dependencies = [
  "borsh",
  "minicbor",
@@ -224,9 +224,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_abi"
-version = "0.19.1"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bc1c5cdf09781c11e2a4a809bd179eb09d73a2c0165c41fe21a511074d76495"
+checksum = "4a2055105ddf637caa61fcc4f29a407fc87965d39537c2e66e13b60a595fde97"
 dependencies = [
  "minicbor",
  "serde",
@@ -236,9 +236,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib"
-version = "0.31.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e81c9d07365c06056d9f36e032734c70d46fe7fb4fb4b6fcbdafaa2cc91a0507"
+checksum = "31b7ca84b7360f61a9319596d7744b211ecb0e63f0468df4c37d8c9c9e2b121a"
 dependencies = [
  "minicbor",
  "serde",
@@ -250,9 +250,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib_types"
-version = "0.31.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1b2dff4d097073da80e815c0293bb31b4bd5f8f248fa67e440770ec320baf6a"
+checksum = "34a593db5abc22fda6adb2fc5202d6c854d731a3edbd16ef31840caa64c63dfe"
 dependencies = [
  "borsh",
  "minicbor",
@@ -265,9 +265,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_macros"
-version = "0.22.1"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76fe844d90e2335dc3636c06fa2164ba9e2be9af940806a9174a3e22a704b266"
+checksum = "e22865713a3ee345b06d742e2652947a72aaac06e8881ff87008060886f44ddf"
 dependencies = [
  "proc-macro2",
  "quote",

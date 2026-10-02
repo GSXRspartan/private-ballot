@@ -1,7 +1,13 @@
 # V2 Public-Summary Anchor — Deployment Runbook
 
-> Status: **template source ready, NOT deployed.** No live publish has been
-> performed. Do not deploy or publish live until explicitly approved.
+> **Network generation: post-Ootle-v0.42 esmeralda testnet reset.** The
+> v0.39.2-era network was wiped; every address, artifact, and digest from that
+> generation is historical and is marked as such below.
+>
+> Status: **V2 template source ready and built for the current cohort.** The
+> post-reset deployment address is recorded in the Identity table below. This
+> repository does not itself perform, authorize, or verify an on-chain publish:
+> step 3 is a fee-bearing outward action that only the operator may take.
 >
 > **Controlled-alpha only.** The V2 live path is a controlled-alpha capability.
 > V2 template publish is allowed **only after** the V1/V2 isolation blocker is
@@ -27,44 +33,78 @@ on-chain digest.
 | Module | `tari_private_ballot_anchor_v2` |
 | Function | `publish_anchor_v2` |
 | Event topic | `tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2` |
-| Network | `esmeralda` |
+| Network | `esmeralda` (post-Ootle-v0.42 testnet reset) |
+| Current deployment address | `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee` |
 
 The V2 function signature (compact on-chain summary):
 
 ```
 publish_anchor_v2(
-  anchor_digest: String,     // 64 lowercase hex — the V2 public-payload digest
-  network: String,           // e.g. "esmeralda"
-  election_id: String,       // lowercase hex
-  eligible_voters: String,   // decimal
-  accepted_ballots: String,  // decimal
-  rejected_ballots: String,  // decimal
+  anchor_digest: String,   // 64 lowercase hex — the V2 public-payload digest
+  network: String,         // e.g. "esmeralda"
+  election_id: String,     // lowercase hex
+  public_summary: String,  // exact canonical public-summary bytes (deterministic JSON)
 )
 ```
 
+The template emits exactly four metadata fields: `anchor_digest_v2`,
+`network`, `election_id`, and `public_summary`. The full canonical summary is
+placed on-chain verbatim so an independent observer can reproduce
+`anchor_digest_v2` as `blake3(frame || public_summary)` without any detached
+artifact. The `eligible_voters` / `accepted_ballots` / `rejected_ballots`
+scalars and the counts they imply live *inside* `public_summary`, not as separate
+arguments — an earlier six-argument draft of this document was wrong about that
+and has been corrected.
+
 ## 1. Build the template WASM
 
-Build exactly as the V1 template is built (same pinned `tari_template_lib`
-`=0.31.1`, same release profile). From the template crate directory:
+Build the four-argument V2 template against the **Tari Ootle v0.42.0
+testnet-reset (esmeralda) cohort** — `tari_template_lib = "=0.33.0"` — and emit
+it path-clean so no local build path (cargo home, repository checkout) is baked
+into the published artifact. From the template crate directory:
 
 ```bash
-cargo build --release --target wasm32-unknown-unknown
+# Remap the cargo registry home out of embedded panic-location strings.
+# <CARGO_HOME> is the builder's cargo home (e.g. the default ~/.cargo).
+RUSTFLAGS="--remap-path-prefix=<CARGO_HOME>=cargo-home" \
+  cargo build --release --target wasm32-unknown-unknown
 ```
 
 The artifact is `target/wasm32-unknown-unknown/release/tari_cc_private_ballot_ootle_anchor_event_template_v2.wasm`.
 
+(Historical: the pre-reset artifact was built against `tari_template_lib`
+`=0.31.1` on the v0.39.2 cohort; that build is not valid on the reset network.)
+
 ## 2. Compute and confirm artifact digests
 
 Compute both SHA256 and BLAKE3-256 over the exact release WASM. The reviewed
-artifact currently has:
+artifact for the **current esmeralda v0.42.0 cohort** is 61479 bytes:
 
 | Algorithm | Digest |
 | --- | --- |
-| SHA256 | `022beeaea7805775192623c87970c03cd384732b37666d1d95a79a967fa44d49` |
-| BLAKE3-256 | `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc` |
+| SHA256 | `76532c3c703aa2e755c8f436b0055a30b42caab2d803bbbc762af0eee9bbcfce` |
+| BLAKE3-256 | `ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908` |
 
-The V2 lock accepts only this reviewed BLAKE3-256 value. A changed build must
-be audited before the lock policy is updated.
+The V2 lock accepts only this reviewed BLAKE3-256 value (the constant
+`TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX` in
+`crates/gui-core/src/trusted_anchor_deployment.rs`). A changed build must be
+audited before the lock policy is updated. The build is reproducible: rebuilding
+with the same toolchain and the same `--remap-path-prefix` yields byte-identical
+output.
+
+> **Unproven linkage.** These digests identify the artifact this repository
+> builds. They do **not** by themselves prove that the bytes behind
+> `template_bb539bdd…` are these exact bytes — a template address is a network
+> identity, not a content hash. The operator must confirm the linkage out of
+> band before locking, or republish this artifact and lock the address it
+> returns.
+
+Historical (pre-reset v0.39.2 / `tari_template_lib` 0.31.1 artifact, 60714 bytes,
+retained for provenance only): SHA256
+`022beeaea7805775192623c87970c03cd384732b37666d1d95a79a967fa44d49`, BLAKE3-256
+`475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`. That
+network generation was wiped by the v0.42 reset, so this artifact is no longer
+deployable.
 
 ## 3. Publish the V2 template to Ootle
 
@@ -94,10 +134,10 @@ that detached evidence against the archive before preparing the transaction.
 
 ## 6. Prepare and manually approve one V2 anchor (fee-bearing)
 
-Prepare a `publish_anchor_v2` call with the digest and the compact scalar summary
-(`network`, `election_id`, `eligible_voters`, `accepted_ballots`,
-`rejected_ballots`) from the build result. Save the full `payload_cbor_hex` as
-the detached evidence file alongside the archive sidecars.
+Prepare a `publish_anchor_v2` call with the digest and the canonical
+`public_summary` (plus `network` and `election_id`) from the build result. Save
+the full `payload_cbor_hex` as the detached evidence file alongside the archive
+sidecars.
 
 Do not publish until the operator has manually reviewed the detached evidence,
 the V2 lock, and the resulting transaction. The V1 lock and V1 publish path are
@@ -122,7 +162,7 @@ RECEIPT_VERIFIED`, with terminal `REJECTED`/`FAILED`.
 
 - **Preparation** (`decision: none`, no snapshot yet) replays the detached
   evidence against the verified archive, confirms the walletd/indexer network
-  and current epoch, builds the exact six-argument `publish_anchor_v2` call,
+  and current epoch, builds the exact four-argument `publish_anchor_v2` call,
   runs walletd input detection, re-inspects the detected transaction, and
   creates a frozen walletd approval request. It never approves or submits.
 - **Approval** requires an explicit `decision: approve`. There is no
@@ -134,8 +174,8 @@ RECEIPT_VERIFIED`, with terminal `REJECTED`/`FAILED`.
   window maps to a terminal `FAILED`; a wallet rejection maps to `REJECTED`.
 - **Receipt polling** retrieves the receipt through the indexer and verifies it
   with the V2 receipt verifier **only** (`verify_v2_event_receipt`) against the
-  locked V2 deployment binding and the **all six** scalar event fields (digest,
-  network, election id, eligible/accepted/rejected counts). A verifier failure or
+  locked V2 deployment binding and the **all four** event fields (`anchor_digest_v2`,
+  `network`, `election_id`, `public_summary`). A verifier failure or
   a rejected transaction is terminal and writes the failure artifact; a
   not-yet-available receipt keeps polling without failing.
 - **Evidence-exists crash recovery.** If a success-evidence sidecar already
@@ -161,9 +201,8 @@ an independent mutation test in
 ## 7. Verify the V2 receipt
 
 Retrieve the transaction receipt/event through the indexer and verify the exact
-V2 template address/topic plus `anchor_digest_v2`, `network`, `election_id`,
-`eligible_voters`, `accepted_ballots`, and `rejected_ballots` against the
-detached evidence and archive replay.
+V2 template address/topic plus `anchor_digest_v2`, `network`, `election_id`, and
+`public_summary` against the detached evidence and archive replay.
 
 ## 8. Verify the evidence (offline)
 

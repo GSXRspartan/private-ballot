@@ -38,7 +38,7 @@
 //! transaction transitively binds the fee account and amount.
 //!
 //! It depends on the exact pinned Tari Ootle revision (`tari-ootle` git rev
-//! `dd1d731`, v0.39.2 workspace) for the walletd wire types, and on the wallet
+//! `a43773e`, v0.42.0 workspace) for the walletd wire types, and on the wallet
 //! SDK only to name those types' public fields ([`KeyId`], `EffectiveStatus`).
 //!
 //! It deliberately never:

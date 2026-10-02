@@ -8,9 +8,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# The event ABI must match the audited Tari Ootle v0.39.2 template library,
-# exactly as the V1 template pins it.
-tari_template_lib = "=0.31.1"
+# Pinned to the Tari Ootle v0.42.0 testnet-reset cohort (esmeralda). The on-chain
+# event metadata model became CBOR in this cohort (tari-ootle PR #2679), a
+# consensus-breaking change, so the template MUST be built against this library
+# version; a 0.31.1 build is rejected by the reset network. The historical
+# v0.39.2 / 0.31.1 build is retained only as a compatibility baseline.
+tari_template_lib = "=0.33.0"
 
 [lib]
 crate-type = ["cdylib"]

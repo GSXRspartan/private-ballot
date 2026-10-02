@@ -41,7 +41,7 @@
 //! verification failure, or disagreement — leaves every offline election artifact
 //! unchanged.
 //!
-//! # Confirmed pinned indexer APIs (rev `dd1d731`, v0.39.2)
+//! # Confirmed pinned indexer APIs (rev `a43773e`, v0.42.0)
 //!
 //! * Receipt retrieval: `IndexerRestApiClient::get_transaction_receipt(TransactionReceiptAddress) -> GetTransactionReceiptResponse { receipt: TransactionReceipt }`
 //!   (`clients/tari_indexer_client/src/rest_api_client.rs:260`).

@@ -32,16 +32,38 @@ renamed as part of a branding pass — see the "internal compatibility
 identifiers" clause in [../CONTROLLED_ALPHA_RELEASE_NOTES.md](CONTROLLED_ALPHA_RELEASE_NOTES.md)
 and [release/BRAND_TRADEMARK_REVIEW.md](release/BRAND_TRADEMARK_REVIEW.md).
 
-### V2 template WASM — anchor digest (bytes frozen from earlier qualification)
+### V2 template WASM — anchor digest (current, post-Ootle-v0.42 reset)
 
 - **SHA-256** (packaging checksum):
-  `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49`
+  `76532C3C703AA2E755C8F436B0055A30B42CAAB2D803BBC762AF0EEE9BBCFCE`
 - **BLAKE3-256** (the *anchor artifact digest* the GUI/verifier use —
   `template_wasm_digest_for_bytes_v1` = unkeyed BLAKE3-256, lowercase hex):
-  `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`
+  `ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908`
+- Size: 61479 bytes. Built against `tari_template_lib =0.33.0` (the
+  v0.42.0 testnet-reset cohort) with `--remap-path-prefix` so no builder-local
+  path is embedded.
 - Re-derive the BLAKE3 digest in-product via **Advanced anchor settings →
   select the V2 WASM** (`inspect_template_wasm`); it must equal the value
   above.
+
+> **Superseded.** The pre-reset v0.39.2 cohort artifact was SHA-256
+> `022BEEAE…4D49` / BLAKE3-256 `475421a4…66cc` (60714 bytes). The v0.42.0 testnet
+> reset wiped that network generation, so it is no longer deployable. Its
+> digests are preserved above and in the HISTORICAL BUILD SNAPSHOT below for
+> provenance only — do **not** ship it as the current artifact.
+
+### Current deployment identity
+
+| Field | Value |
+| --- | --- |
+| Protocol | `TariPrivateBallotAnchorV2` (unchanged — this is **not** a V3) |
+| Module / function | `tari_private_ballot_anchor_v2` / `publish_anchor_v2` |
+| Network | `esmeralda`, post-Ootle-v0.42 testnet reset |
+| Template address | `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee` |
+
+A template address is a network identity, not a content hash. The address above
+and the artifact digests above are separate identities; confirm the linkage out
+of band before locking (see the runbook's "Unproven linkage" note).
 
 ### Release-asset filename (bytes must remain identical)
 
@@ -67,25 +89,30 @@ $src = "templates/ootle-anchor-event-template-v2/target/wasm32-unknown-unknown/r
 $dst = "release-staging/private_ballot_ootle_anchor_v2.wasm"
 New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
 Copy-Item -LiteralPath $src -Destination $dst -Force
-(Get-FileHash $dst -Algorithm SHA256).Hash  # must equal 022BEEAEA…FA44D49
+(Get-FileHash $dst -Algorithm SHA256).Hash  # must equal 76532C3C…BBFCFE
 ```
 
 Constraints:
 
 - Do **not** rebuild the WASM to obtain the new filename — the compiled
-  bytes must remain bit-identical to the qualified deployment.
+  bytes must remain bit-identical to the artifact named above. (To regenerate
+  the artifact from source, follow the runbook's build step exactly, including
+  `--remap-path-prefix`; a different toolchain or flag set yields different
+  bytes and requires a fresh audit.)
 - Do **not** rename the deployed on-chain module/function/event
   identifiers, canonical hashing domains, archive/evidence schemas, or the
   `TARI_CC_PRIVATE_BALLOT_*` protocol constants. Those are stable protocol
   identifiers and are frozen; see
   [release/BRAND_TRADEMARK_REVIEW.md](release/BRAND_TRADEMARK_REVIEW.md).
-- Do **not** republish the template. The already-deployed
+- Do **not** republish the template on the current network. The deployed
+  `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee`
+  is authoritative. The earlier
   `template_f49e19743d7f9a92f7c675619412ce2b50efe55514ee9012f2e9cdab25f8e214`
-  remains authoritative.
+  belongs to the wiped pre-reset generation and is **not** usable.
 - The renamed release asset must hash exactly to
-  `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49`
+  `76532C3C703AA2E755C8F436B0055A30B42CAAB2D803BBC762AF0EEE9BBCFCE`
   (SHA-256) and
-  `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`
+  `ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908`
   (BLAKE3-256).
 
 ## HISTORICAL BUILD SNAPSHOT — before public product rename

@@ -38,7 +38,7 @@ pub struct GuiLiveAnchorConfigRequestV1 {
     pub walletd_endpoint: String,
     /// Public indexer endpoint.
     pub indexer_endpoint: String,
-    /// Immutable published v0.39.2 event-template address for this network.
+    /// Immutable published event-template address for this network (post-v0.42 reset).
     pub template_address: String,
     /// Immutable event-template module name.
     pub template_module: String,

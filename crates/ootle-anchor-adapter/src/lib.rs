@@ -7,7 +7,7 @@
 //! exactly one transaction-level `CallFunction` instruction invoking the pinned
 //! stateless event-only anchor template with the canonical anchor digest. It
 //! depends on an exact pinned Tari Ootle revision (`tari-ootle` git rev
-//! `dd1d731`, v0.39.2 workspace) and does nothing beyond construction and
+//! `a43773e`, v0.42.0 workspace) and does nothing beyond construction and
 //! inspection. The network is never hard-coded: it is carried as runtime data
 //! through [`map_ootle_network`] and the per-network template deployment
 //! binding travels with each build request.

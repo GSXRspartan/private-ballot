@@ -1,7 +1,14 @@
 # Walletd auto-launch — investigation (Phase 8)
 
 Author: 2026-08-29 · Scope: Private Ballot desktop shell + pinned
-Ootle v0.39.2 walletd.
+Ootle v0.42.0 walletd.
+
+> **Superseded cohort note.** This report was written against the pinned Ootle
+> v0.39.2 walletd (`dd1d731…`). The pins have since moved to the v0.42.0
+> testnet-reset cohort (`a43773e…`), and the safety conclusions below still hold
+> for the new cohort. The version numbers and the exact walletd config surface
+> should be re-verified against v0.42.0 before any auto-launch work is
+> implemented.
 
 This report answers the Phase 8 questions from the "Connect Tari Wallet
 UX" task. It is **investigation only** — no walletd lifecycle code has
