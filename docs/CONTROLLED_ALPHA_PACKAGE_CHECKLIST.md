@@ -17,7 +17,7 @@ rebuild.
 | 1 | GUI executable (raw) | `gui/src-tauri/target/release/tari-cc-private-ballot-gui.exe` | 32661504 | `9FFACDB2F59F93B7039027F2BAF28724A1360A7B2130D29DE97CB2A2E853875A` |
 | 2 | GUI installer (MSI) | `gui/src-tauri/target/release/bundle/msi/Private Ballot_0.1.0_x64_en-US.msi` | 17604608 | `6F00AB43172993083F37F405E540493FD7CB5565FC64A118E66EED50AF7F1C13` |
 | 3 | GUI installer (NSIS setup) | `gui/src-tauri/target/release/bundle/nsis/Private Ballot_0.1.0_x64-setup.exe` | 11819986 | `B6B56B1E0F35CA29F3D37440A4CE0161BA2F22AD6592D7B56507F68F437D8598` |
-| 4 | V2 Ootle anchor release asset (WASM) | `release-staging/private_ballot_ootle_anchor_v2.wasm` | 60714 | `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49` |
+| 4 | V2 Ootle anchor release asset (WASM) — **SUPERSEDED, see below** | `release-staging/private_ballot_ootle_anchor_v2.wasm` | 60714 | `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49` |
 | 5 | Controlled-alpha runbook | `docs/CONTROLLED_ALPHA_RUNBOOK.md` | — | (text; covered by SHA256SUMS if bundled) |
 | 6 | Release notes | `docs/CONTROLLED_ALPHA_RELEASE_NOTES.md` | — | (text; covered by SHA256SUMS if bundled) |
 | 7 | Checksum file | `SHA256SUMS` (see scratchpad copy) | — | self |
@@ -34,6 +34,9 @@ and [release/BRAND_TRADEMARK_REVIEW.md](release/BRAND_TRADEMARK_REVIEW.md).
 
 ### V2 template WASM — anchor digest (current, post-Ootle-v0.42 reset)
 
+**Reviewed pre-optimisation build** (what this repository builds, and what the
+V2 lock pins):
+
 - **SHA-256** (packaging checksum):
   `76532C3C703AA2E755C8F436B0055A30B42CAAB2D803BBC762AF0EEE9BBCFCE`
 - **BLAKE3-256** (the *anchor artifact digest* the GUI/verifier use —
@@ -46,11 +49,27 @@ and [release/BRAND_TRADEMARK_REVIEW.md](release/BRAND_TRADEMARK_REVIEW.md).
   select the V2 WASM** (`inspect_template_wasm`); it must equal the value
   above.
 
-> **Superseded.** The pre-reset v0.39.2 cohort artifact was SHA-256
-> `022BEEAE…4D49` / BLAKE3-256 `475421a4…66cc` (60714 bytes). The v0.42.0 testnet
-> reset wiped that network generation, so it is no longer deployable. Its
-> digests are preserved above and in the HISTORICAL BUILD SNAPSHOT below for
-> provenance only — do **not** ship it as the current artifact.
+**Deployed optimised WASM** (what `template_bb539bdd…` actually executes).
+`walletd` rewrites the binary with `wasm-opt -Os` before publishing, so the
+deployed bytes are deliberately *not* the reviewed bytes above:
+
+- Size: 43913 bytes (`template_byte_size` in the publish receipt).
+- **SHA-256**: `b87594d974bea1c4ea2e2c0e0df6c80ee99722b8a31cb7d9eb7fb65779b1ef5c`
+- **BLAKE3-256**: `aa7ae07869f32b496dc8f6f6d88a61e9a8bac3fdc6c0cab7d27c41e1864d6297`
+- Proven linkage: re-running walletd's exact optimisation pipeline (Binaryen
+  116, matching tari-ootle `wasm-opt 0.116.1`) over the reviewed 61479-byte
+  artifact reproduces these 43913 bytes **byte-for-byte**. Extracted from
+  publish tx `612ff931c70ec1b85f08bf57f9b6939a88834e1bf4b0c9fee5f33c5458e83347`
+  (outcome `Commit`, fee 541818).
+
+> **Superseded pre-reset artifact — do not ship.** The v0.39.2 cohort build was
+> SHA-256 `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49` /
+> BLAKE3-256 `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`
+> at **60714** bytes. The v0.42.0 testnet reset wiped that network generation, so
+> it is no longer deployable. The `release-staging/` copy and its `SHA256SUMS` /
+> `BLAKE3SUMS` entries still carry these superseded bytes and are retained for
+> provenance only. The same superseded values also appear in the HISTORICAL
+> BUILD SNAPSHOT below.
 
 ### Current deployment identity
 
@@ -61,9 +80,34 @@ and [release/BRAND_TRADEMARK_REVIEW.md](release/BRAND_TRADEMARK_REVIEW.md).
 | Network | `esmeralda`, post-Ootle-v0.42 testnet reset |
 | Template address | `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee` |
 
-A template address is a network identity, not a content hash. The address above
-and the artifact digests above are separate identities; confirm the linkage out
-of band before locking (see the runbook's "Unproven linkage" note).
+A template address is a network identity, not a content hash, so the address and
+the artifact digests are separate identities. **The linkage is now proven rather
+than assumed:** walletd's `wasm-opt` publication pipeline (Binaryen 116)
+transforms the reviewed 61479-byte artifact into the deployed 43913-byte binary
+byte-for-byte, so the address above provably runs this repository's reviewed
+source. See the runbook's "Proven linkage" note.
+
+### Live qualification (esmeralda, v0.42.0 cohort)
+
+The deployed template has executed a real, committed anchor publication:
+
+| Item | Value |
+| --- | --- |
+| Anchor transaction | `13cac2ff1a6d108304bffc58ae4d1e5bb10266731bf35aa7910eef7a5ba5b571` |
+| Outcome | `Commit` / `RECEIPT_VERIFIED` |
+| Emitted event topic | `TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2` |
+| Dry-run estimate | 3324 units |
+| Authorised max fee | 100000 units (ceiling, not a charge) |
+| Actual fee paid | **3312** units, `total_fee_overcharge: 0` |
+| Election id | `gui-core-test-election` (disposable synthetic smoke test) |
+| Expected anchor digest | `d8cd6ec6fe1cca0cd53b52795bf78b8a0198c0b89eafd8d6a12e4a3d762f9fc9` |
+| Observed on-chain digest | `d8cd6ec6fe1cca0cd53b52795bf78b8a0198c0b89eafd8d6a12e4a3d762f9fc9` — **equal** |
+| Independent digest oracle | plain BLAKE3-256 over the on-chain `public_summary` under the V2 domain frame — **equal** |
+
+Retained fee-regression history: attempt 1 (max 761, required 1143) aborted with
+`InsufficientFeesPaid` as tx `fca149bd2cad21ac554a9ea49964a1d5d8ab28a5ef5af056b1d5204414e0e992`;
+attempt 2 (max 2500, dry-run required 3324) stopped at preflight before any
+approval request. Both are kept deliberately as regression evidence.
 
 ### Release-asset filename (bytes must remain identical)
 
@@ -128,7 +172,7 @@ Constraints:
 | 1 | GUI executable (raw) | `gui/src-tauri/target/release/tari-cc-private-ballot-gui.exe` | 30430208 | `54FFB05DF576FE7753A5B22C440AC5594939D4999C843322F921E1E4F103A162` |
 | 2 | GUI installer (MSI) | `gui/src-tauri/target/release/bundle/msi/Tari Private Ballot_0.1.0_x64_en-US.msi` | 14053376 | `F64D0646AD6CD169178E215452785FB9E418FBA96534BE167C49BBF7B15162DC` |
 | 3 | GUI installer (NSIS setup) | `gui/src-tauri/target/release/bundle/nsis/Tari Private Ballot_0.1.0_x64-setup.exe` | 11184384 | `794B2D941C0420D4BD1FDA30098F9E3981E5569A0FC6998E5B2A484FB97D51F0` |
-| 4 | V2 template WASM (build output) | `templates/ootle-anchor-event-template-v2/target/wasm32-unknown-unknown/release/tari_cc_private_ballot_ootle_anchor_event_template_v2.wasm` | 61546 | `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49` |
+| 4 | V2 template WASM (build output) — **SUPERSEDED pre-reset, and the size here was wrong** | `templates/ootle-anchor-event-template-v2/target/wasm32-unknown-unknown/release/tari_cc_private_ballot_ootle_anchor_event_template_v2.wasm` | 60714 | `022BEEAEA7805775192623C87970C03CD384732B37666D1D95A79A967FA44D49` |
 
 ## walletd runtime dependency
 

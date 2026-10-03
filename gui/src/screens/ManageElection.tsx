@@ -207,7 +207,28 @@ export function ManageElection() {
   const [anchorSealSignerKind, setAnchorSealSignerKind] = useState("account");
   const [anchorSealSignerId, setAnchorSealSignerId] = useState("0");
   const [anchorSealPubKey, setAnchorSealPubKey] = useState("");
-  const [anchorMaxFee, setAnchorMaxFee] = useState(1000);
+  // Maximum fee the operator authorizes for the V2 anchor transaction, in raw fee
+  // units. The four distinct fee concepts are:
+  //
+  //   dry-run estimate -> the EXPECTED / advisory network cost, shown to the
+  //                       operator for guidance. Never used to change the cap.
+  //   max_fee          -> the operator-AUTHORIZED spending ceiling for this
+  //                       publication. Authoritative for the transaction.
+  //   actual fee       -> whatever the committed transaction really requires,
+  //                       always bounded by max_fee. A high cap is not a
+  //                       promise of a high charge.
+  //   hard ceiling     -> the absolute application safety policy
+  //                       (OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 = 10_000_000),
+  //                       unchanged, and never bypassed by this value.
+  //
+  // 100000 (not an estimate) for the Esmeralda v0.42 controlled-alpha
+  // configuration. Live qualification measured real required fees well above
+  // earlier low caps: 1143 required against a 761 cap (Abort /
+  // InsufficientFeesPaid), then a dry-run requirement of 3324 against a 2500 cap
+  // (stopped at preflight, before approval). Authorizing a generous ceiling keeps
+  // fee-market movement from stranding an otherwise valid publication, while the
+  // actual charge stays at the network's true requirement.
+  const [anchorMaxFee, setAnchorMaxFee] = useState(100000);
   const [anchorFloor, setAnchorFloor] = useState(2);
   const [anchorDedicatedWallet, setAnchorDedicatedWallet] = useState(false);
   const anchorVersion = ANCHOR_VERSION;

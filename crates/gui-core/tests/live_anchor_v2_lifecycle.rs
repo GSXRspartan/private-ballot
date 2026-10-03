@@ -28,7 +28,7 @@ use tari_cc_private_ballot_gui_core::{
     build_v2_public_payload_from_verified_archive_v1, inspect_v2_live_anchor_state,
     read_v2_public_anchor_evidence_file, run_v2_live_anchor_recovery_step_with_indexer,
     run_v2_live_anchor_step_with_transports, v2_evidence_sidecar_path, v2_failure_sidecar_path,
-    v2_lifecycle_sidecar_path,
+    v2_lifecycle_sidecar_path, verify_v2_public_payload_against_archive_v1,
 };
 use tari_cc_private_ballot_ootle_anchor_adapter::inspect_detected_fee_bearing_v2_anchor_transaction;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
@@ -113,6 +113,12 @@ fn decode32(hex: &str) -> [u8; 32] {
     <[u8; 32]>::try_from(bytes.as_slice()).expect("32 bytes")
 }
 
+fn decode_hex(hex: &str) -> Vec<u8> {
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("hex"))
+        .collect()
+}
+
 fn network() -> OotleNetworkIdV1 {
     OotleNetworkIdV1::new("esmeralda".to_owned()).expect("network")
 }
@@ -163,7 +169,7 @@ impl Harness {
             fee_component: format!("component_{}", "11".repeat(32)),
             seal_signer_kind: "account".to_owned(),
             seal_signer_id: "0".to_owned(),
-            max_fee: 1000,
+            max_fee: 2500,
             max_epoch_delta: 10,
             walletd_endpoint: "http://127.0.0.1:5100".to_owned(),
             indexer_endpoint: "http://127.0.0.1:18300".to_owned(),
@@ -213,7 +219,7 @@ impl Harness {
         assert_eq!(result.phase, "WAITING_FOR_WALLET_APPROVAL");
         assert!(result.waiting_for_wallet_approval);
         assert_eq!(result.estimated_required_fee, Some(1_110));
-        assert_eq!(result.selected_max_fee, Some(1_221));
+        assert_eq!(result.selected_max_fee, Some(2_500));
         assert_eq!(self.walletd.transport().create_calls(), 1);
         assert!(lifecycle_sidecar(&self.archive).exists());
         result
@@ -420,11 +426,11 @@ fn prepare_creates_waiting_snapshot_and_never_approves() {
 }
 
 #[test]
-fn dry_run_fee_1110_never_creates_request_with_1000() {
+fn dry_run_estimate_never_reduces_the_authorized_max_fee() {
     let mut h = Harness::new("v2life-fee-1110");
     let result = h.prepare();
     assert_eq!(result.estimated_required_fee, Some(1_110));
-    assert_eq!(result.selected_max_fee, Some(1_221));
+    assert_eq!(result.selected_max_fee, Some(2_500));
     assert_eq!(h.walletd.transport().dry_run_calls(), 1);
     assert_eq!(h.walletd.transport().detect_calls(), 2);
 
@@ -448,7 +454,7 @@ fn dry_run_fee_1110_never_creates_request_with_1000() {
         format!("component_{}", "11".repeat(32))
             .parse()
             .expect("fee component"),
-        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(1_221),
+        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(2_500),
         &h.binding,
         &payload,
     );
@@ -680,7 +686,7 @@ fn rejected_request_allows_one_fresh_request_without_resubmitting_old_id() {
         format!("component_{}", "11".repeat(32))
             .parse()
             .expect("fee component"),
-        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(1_221),
+        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(2_500),
         &h.binding,
         &AnchorEventPayloadV3::new(
             decode32(&h.built.v2_anchor_digest_hex),
@@ -725,7 +731,7 @@ fn rejected_request_allows_one_fresh_request_without_resubmitting_old_id() {
         format!("component_{}", "11".repeat(32))
             .parse()
             .expect("fee component"),
-        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(1_221),
+        tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(2_500),
         &h.binding,
         &AnchorEventPayloadV3::new(
             decode32(&h.built.v2_anchor_digest_hex),
@@ -878,7 +884,7 @@ fn wrong_topic_failure_can_recover_existing_accepted_transaction_without_new_req
 }
 
 #[test]
-fn rejected_transaction_receipt_is_terminal() {
+fn rejected_transaction_receipt_is_retryable_publication_failure() {
     let mut h = Harness::new("v2life-txrejected");
     h.prepare();
     h.approve();
@@ -889,7 +895,11 @@ fn rejected_transaction_receipt_is_terminal() {
             reason: Some("aborted".to_owned()),
         });
     let result = h.step("none");
-    assert_eq!(result.phase, "FAILED");
+    // A network-proven abort with no committed anchor is a retryable
+    // PUBLICATION failure, never an election failure and never a false success.
+    assert_eq!(result.phase, "REJECTED");
+    assert!(result.retry_required);
+    assert!(!result.receipt_verified);
     assert!(failure_sidecar(&h.archive).exists());
     assert!(!evidence_sidecar(&h.archive).exists());
 }
@@ -1025,7 +1035,7 @@ fn missing_snapshot_with_only_failure_sidecar_is_not_treated_as_success() {
             reason: Some("aborted".to_owned()),
         });
     let failed = h.step("none");
-    assert_eq!(failed.phase, "FAILED");
+    assert_eq!(failed.phase, "REJECTED");
     assert!(failure_sidecar(&h.archive).exists());
     assert!(!evidence_sidecar(&h.archive).exists());
 
@@ -1363,4 +1373,426 @@ fn hydration_reports_written_paths_outside_the_archive_directory() {
     assert_eq!(Path::new(&hydrated.lifecycle_path), expected_lifecycle);
     assert_eq!(Path::new(&hydrated.evidence_path), expected_evidence);
     assert_eq!(Path::new(&hydrated.failure_path), expected_failure);
+}
+
+// ---------------------------------------------------------------------------
+// Fee-policy regression tests.
+//
+// Live v0.42 Esmeralda qualification of `template_bb539bdd...` aborted with
+// `InsufficientFeesPaid: paid 761, required 1143`: the old policy derived the
+// final transaction fee as `walletd_dry_run_estimate * 11 / 10` (691 -> 761),
+// which under-funded a transaction the network actually priced at 1143.
+// `request.max_fee` is the operator-authorized cap and must be authoritative.
+// ---------------------------------------------------------------------------
+
+/// Prepares with an explicit dry-run estimate and an explicit authorized cap.
+fn prepare_with_fee_policy(
+    h: &mut Harness,
+    estimate: u64,
+    max_fee: u64,
+) -> Result<GuiV2LiveAnchorStepResultV1, tari_cc_private_ballot_gui_core::GuiCoreError> {
+    h.walletd
+        .transport_mut()
+        .set_dry_run_response(ScriptedWalletdResponse::DryRun {
+            required_fees: estimate,
+        });
+    h.walletd
+        .transport_mut()
+        .set_create_response(ScriptedWalletdResponse::Create {
+            request_id: REQUEST_ID,
+            expires_at: 0,
+        });
+    let mut request = h.request("none");
+    request.max_fee = max_fee;
+    run_v2_live_anchor_step_with_transports(
+        &request,
+        &h.binding,
+        &mut h.walletd,
+        &mut h.indexer,
+    )
+}
+
+/// The exact live regression: walletd estimated 691 for the real transaction
+/// whose true cost was 1143. With an authorized cap of 2500 the final
+/// transaction must carry 2500 - never the old estimate-derived 761.
+#[test]
+fn live_regression_estimate_691_with_cap_2500_yields_final_fee_2500() {
+    let mut h = Harness::new("v2life-fee-regression");
+    let result = prepare_with_fee_policy(&mut h, 691, 2_500)
+        .expect("prepare with estimate below cap");
+
+    assert_eq!(result.phase, "WAITING_FOR_WALLET_APPROVAL");
+    // The estimate is retained and surfaced as advisory preflight evidence...
+    assert_eq!(result.estimated_required_fee, Some(691));
+    // ...but it must not become, or lower, the transaction's fee.
+    assert_eq!(result.selected_max_fee, Some(2_500));
+    assert_ne!(result.selected_max_fee, Some(761));
+
+    // Assert against the actual transaction handed to walletd for approval.
+    let created = h
+        .walletd
+        .transport()
+        .captured_create()
+        .expect("an approval request must have been created");
+    let max_epoch = created.transaction.max_epoch().as_u64();
+    let payload = AnchorEventPayloadV3::new(
+        decode32(&h.built.v2_anchor_digest_hex),
+        h.built.network.clone(),
+        h.built.election_id.clone(),
+        h.built.public_summary_json.clone(),
+    )
+    .expect("event payload");
+    let fee_component = format!("component_{}", "11".repeat(32))
+        .parse()
+        .expect("fee component");
+    assert!(
+        inspect_detected_fee_bearing_v2_anchor_transaction(
+            &created.transaction,
+            &network(),
+            max_epoch,
+            fee_component,
+            tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(2_500),
+            &h.binding,
+            &payload,
+        )
+        .is_ok(),
+        "the approved transaction must carry the full authorized 2500-unit cap"
+    );
+    // And the old derived value must be rejected outright.
+    let fee_component = format!("component_{}", "11".repeat(32))
+        .parse()
+        .expect("fee component");
+    assert!(
+        inspect_detected_fee_bearing_v2_anchor_transaction(
+            &created.transaction,
+            &network(),
+            max_epoch,
+            fee_component,
+            tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(761),
+            &h.binding,
+            &payload,
+        )
+        .is_err(),
+        "the transaction must not carry the old estimate-derived 761-unit fee"
+    );
+}
+
+/// `max_fee` is the operator-authorized cap: an estimate well below it is
+/// surfaced but never used to shrink the transaction's authorization.
+#[test]
+fn estimate_below_max_fee_never_shrinks_the_authorized_cap() {
+    for estimate in [1_u64, 691, 1_110, 2_499] {
+        let mut h = Harness::new(&format!("v2life-cap-{estimate}"));
+        let result = prepare_with_fee_policy(&mut h, estimate, 2_500)
+            .expect("prepare with estimate below cap");
+        assert_eq!(
+            result.selected_max_fee,
+            Some(2_500),
+            "estimate {estimate} must not reduce the authorized cap"
+        );
+        assert_eq!(result.estimated_required_fee, Some(estimate));
+    }
+}
+
+/// A zero cap authorizes nothing and must fail closed before any walletd call.
+#[test]
+fn zero_max_fee_fails_closed() {
+    let mut h = Harness::new("v2life-zero-fee");
+    let error = prepare_with_fee_policy(&mut h, 691, 0)
+        .expect_err("a zero authorized maximum fee must fail closed");
+    assert_eq!(error.code(), "GUI_ANCHOR_V2_MAX_FEE_INVALID");
+    assert_eq!(h.walletd.transport().create_calls(), 0);
+    assert!(!lifecycle_sidecar(&h.archive).exists());
+}
+
+/// A cap above the project hard ceiling is rejected fail-closed.
+#[test]
+fn max_fee_above_hard_ceiling_fails_closed() {
+    let mut h = Harness::new("v2life-ceiling-fee");
+    let ceiling = tari_cc_private_ballot_ootle_anchor_network_adapters::OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1;
+    let error = prepare_with_fee_policy(&mut h, 691, ceiling + 1)
+        .expect_err("a cap above the hard ceiling must fail closed");
+    assert_eq!(error.code(), "GUI_ANCHOR_V2_MAX_FEE_OUT_OF_POLICY");
+    assert_eq!(h.walletd.transport().create_calls(), 0);
+    assert!(!lifecycle_sidecar(&h.archive).exists());
+
+    // Exactly at the ceiling is still accepted: the ceiling is inclusive.
+    let mut h = Harness::new("v2life-ceiling-ok");
+    let result =
+        prepare_with_fee_policy(&mut h, 691, ceiling).expect("ceiling is inclusive");
+    assert_eq!(result.selected_max_fee, Some(ceiling));
+}
+
+/// An estimate above the authorized cap is detected during preflight and
+/// rejected BEFORE an approval request is created.
+#[test]
+fn estimate_above_max_fee_fails_before_wallet_approval() {
+    let mut h = Harness::new("v2life-est-above-cap");
+    let error = prepare_with_fee_policy(&mut h, 1_500, 1_000)
+        .expect_err("an estimate above the authorized cap must fail closed");
+    assert_eq!(error.code(), "GUI_ANCHOR_V2_MAX_FEE_BELOW_ESTIMATE");
+    // No approval request, no approval, no submit.
+    assert_eq!(h.walletd.transport().create_calls(), 0);
+    assert_eq!(h.walletd.transport().approve_calls(), 0);
+    assert_eq!(h.walletd.transport().submit_calls(), 0);
+    assert!(!lifecycle_sidecar(&h.archive).exists());
+}
+
+/// An estimate exactly equal to the cap is sufficient, not a failure.
+#[test]
+fn estimate_equal_to_max_fee_is_accepted() {
+    let mut h = Harness::new("v2life-est-equal-cap");
+    let result = prepare_with_fee_policy(&mut h, 2_500, 2_500)
+        .expect("an estimate equal to the cap must be accepted");
+    assert_eq!(result.estimated_required_fee, Some(2_500));
+    assert_eq!(result.selected_max_fee, Some(2_500));
+}
+
+/// The explicit operator approval gate is unchanged by the fee fix: prepare
+/// still stops at WAITING_FOR_WALLET_APPROVAL and never approves or submits.
+#[test]
+fn fee_policy_fix_preserves_the_explicit_approval_gate() {
+    let mut h = Harness::new("v2life-gate-intact");
+    let result = prepare_with_fee_policy(&mut h, 691, 2_500).expect("prepare");
+    assert_eq!(result.phase, "WAITING_FOR_WALLET_APPROVAL");
+    assert!(result.waiting_for_wallet_approval);
+    assert!(result.transaction_id.is_none());
+    assert_eq!(h.walletd.transport().create_calls(), 1);
+    assert_eq!(h.walletd.transport().approve_calls(), 0);
+    assert_eq!(h.walletd.transport().submit_calls(), 0);
+}
+
+/// A zero walletd estimate is treated as an invalid preflight result rather
+/// than silently authorizing an unbounded spend.
+#[test]
+fn zero_estimate_fails_closed() {
+    let mut h = Harness::new("v2life-zero-est");
+    let error = prepare_with_fee_policy(&mut h, 0, 2_500).expect_err("a zero dry-run estimate must fail closed");
+    assert_eq!(error.code(), "GUI_ANCHOR_V2_FEE_ESTIMATE_INVALID");
+    assert_eq!(h.walletd.transport().create_calls(), 0);
+}
+
+/// Observed case C: the second live qualification's dry run required 3324 while
+/// the authorized cap was 2500, so preflight failed before approval. With the
+/// production default cap of 100000 the same estimate preflights successfully and
+/// the final transaction still carries the full authorized cap.
+#[test]
+fn observed_estimate_3324_fails_at_2500_but_succeeds_at_100000() {
+    let mut low = Harness::new("v2life-3324-at-2500");
+    let error =
+        prepare_with_fee_policy(&mut low, 3_324, 2_500).expect_err("3324 must not fit a 2500 cap");
+    assert_eq!(error.code(), "GUI_ANCHOR_V2_MAX_FEE_BELOW_ESTIMATE");
+    assert_eq!(low.walletd.transport().create_calls(), 0);
+    assert!(!lifecycle_sidecar(&low.archive).exists());
+
+    let mut high = Harness::new("v2life-3324-at-100000");
+    let result = prepare_with_fee_policy(&mut high, 3_324, 100_000)
+        .expect("3324 must fit the production default cap");
+    assert_eq!(result.phase, "WAITING_FOR_WALLET_APPROVAL");
+    assert_eq!(result.estimated_required_fee, Some(3_324));
+    // The estimate must not become the fee, nor reduce the authorized ceiling.
+    assert_eq!(result.selected_max_fee, Some(100_000));
+
+    let created = high
+        .walletd
+        .transport()
+        .captured_create()
+        .expect("approval request created");
+    let max_epoch = created.transaction.max_epoch().as_u64();
+    let payload = AnchorEventPayloadV3::new(
+        decode32(&high.built.v2_anchor_digest_hex),
+        high.built.network.clone(),
+        high.built.election_id.clone(),
+        high.built.public_summary_json.clone(),
+    )
+    .expect("event payload");
+    let fee_component = format!("component_{}", "11".repeat(32))
+        .parse()
+        .expect("fee component");
+    assert!(
+        inspect_detected_fee_bearing_v2_anchor_transaction(
+            &created.transaction,
+            &network(),
+            max_epoch,
+            fee_component,
+            tari_cc_private_ballot_anchor_transport::AnchorMaxFeeV1::from_units(100_000),
+            &high.binding,
+            &payload,
+        )
+        .is_ok(),
+        "the approved transaction must carry the full 100000 authorized cap"
+    );
+}
+
+/// Observed case G: a fee failure after the election is finalized must leave the
+/// election result finalized and the anchor retryable. Nothing about the ballots
+/// or the finalized result changes, and no success is ever claimed.
+#[test]
+fn fee_failure_leaves_the_finalized_election_and_a_retryable_anchor() {
+    let mut h = Harness::new("v2life-fee-not-election-failure");
+    h.prepare();
+    h.approve();
+    h.submit();
+    // Network-proven abort: nothing was anchored.
+    h.indexer
+        .transport_mut()
+        .set_response(ScriptedIndexerResponse::Rejected {
+            reason: Some("InsufficientFeesPaid: paid 761, required 1143".to_owned()),
+        });
+    let result = h.step("none");
+
+    // Publication is retryable, and NOT published.
+    assert_eq!(result.phase, "REJECTED");
+    assert!(result.retry_required);
+    assert!(!result.receipt_verified);
+    assert!(!evidence_sidecar(&h.archive).exists(), "no anchor may be claimed");
+
+    // The election itself is untouched: the finalized archive still verifies and
+    // still yields exactly the same anchor identity.
+    let verified =
+        verify_v2_public_payload_against_archive_v1(&h.archive, &decode_hex(&h.built.payload_hex), &h.built.v2_anchor_digest_hex)
+            .expect("the finalized archive must still verify after an anchor fee failure");
+    assert_eq!(verified.v2_anchor_digest_hex, h.built.v2_anchor_digest_hex);
+    assert_eq!(verified.public_summary_json, h.built.public_summary_json);
+    let hydrated = inspect_v2_live_anchor_state(&h.archive).expect("inspect");
+    assert!(
+        hydrated.blocks_fresh_publish,
+        "the pending anchor must still block an unrelated fresh publish until resolved"
+    );
+}
+
+/// Observed cases H and J: after an explicit abort, retrying with a higher
+/// operator-authorized cap must reuse the IDENTICAL anchor - same election_id,
+/// network, public summary, anchor digest, template address, and V2 ABI. Only
+/// fee/transaction metadata may change.
+#[test]
+fn retry_after_abort_reuses_the_identical_anchor() {
+    let mut h = Harness::new("v2life-retry-identical");
+    h.prepare();
+    h.approve();
+    h.submit();
+    h.indexer
+        .transport_mut()
+        .set_response(ScriptedIndexerResponse::Rejected {
+            reason: Some("InsufficientFeesPaid".to_owned()),
+        });
+    let failed = h.step("none");
+    assert_eq!(failed.phase, "REJECTED");
+    let failed_tx = failed.transaction_id.clone().expect("failed attempt has a tx id");
+    let original_digest = h.built.v2_anchor_digest_hex.clone();
+    let original_summary = h.built.public_summary_json.clone();
+
+    // A fresh dry run (new estimate) then a higher authorized cap.
+    h.walletd
+        .transport_mut()
+        .set_dry_run_response(ScriptedWalletdResponse::DryRun {
+            required_fees: 3_324,
+        });
+    h.walletd
+        .transport_mut()
+        .set_create_response(ScriptedWalletdResponse::Create {
+            request_id: REQUEST_ID + 1,
+            expires_at: 0,
+        });
+    let mut request = h.request("none");
+    request.max_fee = 100_000;
+    let retried = run_v2_live_anchor_step_with_transports(
+        &request,
+        &h.binding,
+        &mut h.walletd,
+        &mut h.indexer,
+    )
+    .expect("retry after a proven abort must re-prepare");
+
+    assert_eq!(retried.phase, "WAITING_FOR_WALLET_APPROVAL");
+    assert_eq!(retried.selected_max_fee, Some(100_000));
+    // Identical anchor identity - nothing about the election was regenerated.
+    assert_eq!(request.expected_digest_hex, original_digest);
+    assert_eq!(h.built.v2_anchor_digest_hex, original_digest);
+    assert_eq!(h.built.public_summary_json, original_summary);
+    // A fresh prepare must NOT inherit the failed transaction id: a retry always
+    // builds and submits a brand-new transaction, and never reuses an id that
+    // might already be on chain.
+    assert_eq!(
+        retried.transaction_id, None,
+        "a re-prepared retry must not inherit the failed transaction id"
+    );
+    assert_ne!(retried.transaction_id.as_deref(), Some(failed_tx.as_str()));
+    let verified = verify_v2_public_payload_against_archive_v1(
+        &h.archive,
+        &decode_hex(&request.payload_hex),
+        &original_digest,
+    )
+    .expect("the retried anchor must still verify against the same archive");
+    assert_eq!(verified.v2_anchor_digest_hex, original_digest);
+    assert_eq!(verified.public_summary_json, original_summary);
+    // The failed attempt's evidence is retained, not overwritten.
+    assert!(failure_sidecar(&h.archive).exists());
+}
+
+/// Observed case I: an ambiguous submit followed by chain evidence that the
+/// transaction already committed must reconcile locally and NEVER resubmit.
+#[test]
+fn ambiguous_submit_with_chain_commit_evidence_never_resubmits() {
+    let mut h = Harness::new("v2life-no-blind-resubmit");
+    h.prepare();
+    h.approve();
+    h.submit();
+    let submits_before = h.walletd.transport().submit_calls();
+
+    // walletd reports the request already submitted with a sealed id, even
+    // though this client never observed the submit response.
+    h.set_get(
+        WalletdEffectiveStatusV1::Submitted,
+        Some(AnchorTransactionId::new(TX_HEX.to_owned()).expect("tx id")),
+    );
+    let result = h.step("none");
+
+    assert_eq!(result.phase, "POLLING_RECEIPT");
+    assert_eq!(
+        h.walletd.transport().submit_calls(),
+        submits_before,
+        "a submit must never be repeated once the transaction is known to be sealed"
+    );
+    assert!(!result.receipt_verified);
+}
+
+/// A non-terminal, transient publication failure (indexer unavailable / pending /
+/// not found) must not destroy the pending anchor or fabricate a terminal state.
+#[test]
+fn transient_indexer_failures_never_destroy_the_pending_anchor() {
+    for (label, response) in [
+        ("pending", ScriptedIndexerResponse::Pending),
+        ("not-found", ScriptedIndexerResponse::NotFound),
+    ] {
+        let mut h = Harness::new(&format!("v2life-transient-{label}"));
+        h.prepare();
+        h.approve();
+        h.submit();
+        h.indexer.transport_mut().set_response(response);
+        let result = h.step("none");
+        assert_eq!(
+            result.phase, "POLLING_RECEIPT",
+            "{label} must stay retryable rather than failing"
+        );
+        assert!(!result.receipt_verified);
+        assert!(lifecycle_sidecar(&h.archive).exists());
+    }
+
+    // An indexer transport error is also non-destructive.
+    let mut h = Harness::new("v2life-transient-err");
+    h.prepare();
+    h.approve();
+    h.submit();
+    h.indexer
+        .transport_mut()
+        .set_response(ScriptedIndexerResponse::Error(
+            tari_cc_private_ballot_ootle_anchor_network_adapters::TransportError::from_category(
+                tari_cc_private_ballot_ootle_anchor_network_adapters::TransportErrorCategory::Timeout,
+            ),
+        ));
+    let result = h.step("none");
+    assert_eq!(result.phase, "POLLING_RECEIPT");
+    assert!(!result.receipt_verified);
+    assert!(lifecycle_sidecar(&h.archive).exists());
 }

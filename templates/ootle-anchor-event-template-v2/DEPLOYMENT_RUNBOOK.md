@@ -92,12 +92,79 @@ audited before the lock policy is updated. The build is reproducible: rebuilding
 with the same toolchain and the same `--remap-path-prefix` yields byte-identical
 output.
 
-> **Unproven linkage.** These digests identify the artifact this repository
-> builds. They do **not** by themselves prove that the bytes behind
-> `template_bb539bdd…` are these exact bytes — a template address is a network
-> identity, not a content hash. The operator must confirm the linkage out of
-> band before locking, or republish this artifact and lock the address it
-> returns.
+> **Proven linkage (supersedes the former "unproven linkage" caveat).**
+> The deployed template is **not** these exact bytes, and that difference is now
+> fully explained and reproduced. Before publishing, `walletd` runs the binary
+> through `wasm-opt` (`OptimizationOptions::new_optimize_for_size()` plus
+> `BulkMemory`/`ReferenceTypes` enabled, `Simd`/`RelaxedSimd` disabled, and the
+> `StripDebug`/`StripProducers`/`StripTargetFeatures` passes — see
+> `applications/tari_walletd/src/services/wasm_optimizer.rs` in tari-ootle
+> `a43773e`). The deployed binary is therefore the deterministic optimised form
+> of the reviewed artifact.
+>
+> This was proven by measurement, not assumed: re-running that exact pipeline
+> (Binaryen **116**, matching tari-ootle's `wasm-opt 0.116.1`) over the reviewed
+> 61479-byte artifact reproduces the deployed bytes **byte-for-byte**.
+>
+> | Artifact | Bytes | SHA-256 | BLAKE3-256 |
+> | --- | --- | --- | --- |
+> | Reviewed pre-optimisation build (this repository) | 61479 | `76532c3c703aa2e755c8f436b0055a30b42caab2d803bbbc762af0eee9bbcfce` | `ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908` |
+> | Deployed, post-`wasm-opt` (what `template_bb539bdd…` runs) | 43913 | `b87594d974bea1c4ea2e2c0e0df6c80ee99722b8a31cb7d9eb7fb65779b1ef5c` | `aa7ae07869f32b496dc8f6f6d88a61e9a8bac3fdc6c0cab7d27c41e1864d6297` |
+>
+> The deployed 43913-byte binary was extracted from the publish transaction
+> `612ff931c70ec1b85f08bf57f9b6939a88834e1bf4b0c9fee5f33c5458e83347`
+> (`std.template.publish`, `template_byte_size: 43913`, outcome `Commit`, fee
+> 541818). The V2 lock still pins the **pre-optimisation** BLAKE3-256
+> (`ce5334df…`), which is the value this repository builds and reviews.
+
+## 2a. Live qualification evidence (esmeralda, v0.42.0 cohort)
+
+The deployed template has been qualified live end to end:
+
+| Item | Value |
+| --- | --- |
+| Template | `TariPrivateBallotAnchorV2` at `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee` |
+| Live ABI (on-chain) | `publish_anchor_v2`, four `String` arguments (`anchor_digest`, `network`, `election_id`, `public_summary`), output `Unit`, `is_mut: false` |
+| Anchor transaction | `13cac2ff1a6d108304bffc58ae4d1e5bb10266731bf35aa7910eef7a5ba5b571` |
+| Outcome | `Commit` (`RECEIPT_VERIFIED`) |
+| Emitted event | `TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2` with all four metadata fields |
+| Dry-run estimate | 3324 units |
+| Authorised max fee | 100000 units (authorisation ceiling, not a charge) |
+| Actual fee paid | **3312** units (`total_fee_overcharge: 0`) |
+| Election id | `gui-core-test-election` (disposable synthetic smoke-test election) |
+| Expected anchor digest | `d8cd6ec6fe1cca0cd53b52795bf78b8a0198c0b89eafd8d6a12e4a3d762f9fc9` |
+| Observed on-chain digest | `d8cd6ec6fe1cca0cd53b52795bf78b8a0198c0b89eafd8d6a12e4a3d762f9fc9` — **equal** |
+
+The digest was additionally recomputed **independently of this codebase** by
+hashing the on-chain `public_summary` bytes under the V2 domain frame
+(`TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_FRAME_V2` 0x00
+`tari-cc-private-ballot/ootle-anchor-public-payload/v2` 0x00 ‖ canonical bytes)
+with plain BLAKE3-256, and matched the emitted `anchor_digest_v2` exactly.
+
+Reproduce with the repository harness:
+
+```bash
+PRIVATE_BALLOT_V2_MAX_FEE=100000 \
+PRIVATE_BALLOT_V2_FEE_COMPONENT=component_<hex> \
+WALLETD_AUTH_TOKEN=<token> \
+cargo test -p tari-cc-private-ballot-gui-core --test live_v2_anchor_esmeralda \
+  -- --ignored --nocapture --test-threads=1
+```
+
+### Fee qualification history (retained deliberately)
+
+| Attempt | Authorised max | Required | Result |
+| --- | --- | --- | --- |
+| 1 | 761 (derived from a 691 dry-run estimate × 11/10) | 1143 | `Abort` / `InsufficientFeesPaid`, tx `fca149bd2cad21ac554a9ea49964a1d5d8ab28a5ef5af056b1d5204414e0e992` |
+| 2 | 2500 | 3324 (dry run) | stopped at preflight by `GUI_ANCHOR_V2_MAX_FEE_BELOW_ESTIMATE`, before any approval request or submission |
+| 3 | 100000 | 3312 (actual) | **`Commit`** — see above |
+
+Attempt 1 exposed the defect that `request.max_fee` was being replaced by an
+estimate-derived fee. The fix makes `max_fee` authoritative and treats the
+dry-run estimate as advisory evidence only. A fee failure is a **retryable
+publication** failure: the finalized election, its result, and the anchor digest
+are unaffected, and nothing is ever resubmitted without proof that the previous
+attempt did not commit.
 
 Historical (pre-reset v0.39.2 / `tari_template_lib` 0.31.1 artifact, 60714 bytes,
 retained for provenance only): SHA256

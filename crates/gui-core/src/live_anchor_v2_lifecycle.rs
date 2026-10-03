@@ -37,8 +37,6 @@ use crate::live_anchor_v2::v2_event_payload_from_verified_evidence_v1;
 const V2_LIFECYCLE_SCHEMA: &str = "TARI_CC_PRIVATE_BALLOT_V2_ANCHOR_LIFECYCLE_V1";
 const V2_EVIDENCE_SCHEMA: &str = "TARI_CC_PRIVATE_BALLOT_V2_ANCHOR_EVIDENCE_V1";
 const V2_FAILURE_SCHEMA: &str = "TARI_CC_PRIVATE_BALLOT_V2_ANCHOR_FAILURE_EVIDENCE_V1";
-const V2_FEE_HEADROOM_NUMERATOR: u64 = 11;
-const V2_FEE_HEADROOM_DENOMINATOR: u64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct GuiV2LiveAnchorStepRequestV1 {
@@ -99,6 +97,13 @@ struct V2LifecycleSnapshotV1 {
     walletd_request_id: i32,
     #[serde(default)]
     prior_rejected_walletd_request_ids: Vec<i32>,
+    /// Transaction ids of fee-bearing attempts that reached a terminal decision
+    /// without committing an anchor (for example an explicit
+    /// `InsufficientFeesPaid` abort). Retained so a retry never loses the
+    /// evidence of what was already tried, and so a retry can never reuse an id
+    /// that might already be on chain.
+    #[serde(default)]
+    prior_failed_transaction_ids: Vec<String>,
     phase: String,
     transaction_id: Option<String>,
     failure_reason: Option<String>,
@@ -432,6 +437,11 @@ where
                             snapshot.failure_reason = None;
                         }
                         Err(error @ WalletdAnchorAdapterError::InsufficientFeesPaid { .. }) => {
+                            // A proven fee abort, not an election failure: the
+                            // anchor is untouched and the operator may retry the
+                            // identical anchor after a fresh preflight with a
+                            // higher authorized cap.
+                            record_failed_attempt(&mut snapshot);
                             reject(&mut snapshot, walletd_error_reason(&error));
                             write_failure_evidence(&failure_path, &snapshot);
                         }
@@ -513,7 +523,11 @@ where
         )
     })?;
     let signer = parse_signer(&request.seal_signer_kind, &request.seal_signer_id)?;
-    let dry_run_fee = AnchorMaxFeeV1::from_units(request.max_fee);
+    // `request.max_fee` is the operator-authorized spend cap and is authoritative
+    // for the final fee-bearing transaction. It is validated fail-closed and used
+    // verbatim; it is never replaced by an estimate-derived fee.
+    let selected_max_fee = validate_v2_anchor_max_fee(request.max_fee)?;
+    let dry_run_fee = AnchorMaxFeeV1::from_units(selected_max_fee);
     let dry_run_transaction = build_fee_bearing_v2_anchor_transaction(
         &network,
         max_epoch,
@@ -559,7 +573,16 @@ where
                 "walletd dry-run fee estimation failed for the V2 transaction",
             )
         })?;
-    let selected_max_fee = select_v2_anchor_fee(estimated_required_fee)?;
+    if estimated_required_fee == 0 {
+        return Err(v2_error(
+            "GUI_ANCHOR_V2_FEE_ESTIMATE_INVALID",
+            "walletd returned an invalid zero V2 fee estimate",
+        ));
+    }
+    // The estimate is advisory preflight evidence only: recorded and surfaced to
+    // the operator, and used to reject a cap that is already known to be too
+    // low, but never used to lower the authorized cap.
+    ensure_v2_max_fee_covers_estimate(selected_max_fee, estimated_required_fee)?;
     let max_fee = AnchorMaxFeeV1::from_units(selected_max_fee);
     let transaction = build_fee_bearing_v2_anchor_transaction(
         &network,
@@ -618,6 +641,10 @@ where
         fee_component: request.fee_component.clone(),
         seal_signer_kind: request.seal_signer_kind.clone(),
         seal_signer_id: request.seal_signer_id.clone(),
+        // `max_fee` is the operator-authorized cap; `selected_max_fee` is the cap
+        // actually written into the approved transaction. They are equal by
+        // design now that the estimate no longer derives the transaction fee.
+        // `estimated_required_fee` is retained as advisory preflight evidence.
         max_fee: selected_max_fee,
         estimated_required_fee: Some(estimated_required_fee),
         selected_max_fee: Some(selected_max_fee),
@@ -625,6 +652,7 @@ where
         walletd_request_id: created.walletd_request_id().value(),
         phase: "WAITING_FOR_WALLET_APPROVAL".to_owned(),
         prior_rejected_walletd_request_ids,
+        prior_failed_transaction_ids: Vec::new(),
         transaction_id: None,
         failure_reason: None,
     };
@@ -632,24 +660,51 @@ where
     Ok(result(&snapshot, evidence_path, false))
 }
 
-fn select_v2_anchor_fee(required_fee: u64) -> Result<u64, GuiCoreError> {
-    if required_fee == 0 {
+/// Validates the operator-authorized V2 maximum fee and returns it unchanged.
+///
+/// `max_fee` is an authorization ceiling the operator explicitly approved, not an
+/// estimate. It is deliberately **not** derived from, nor lowered to, walletd's
+/// dry-run estimate: during live v0.42 Esmeralda qualification walletd's dry run
+/// reported 691 units while the network actually required 1143, so an
+/// estimate-derived fee silently under-funded a valid transaction and the network
+/// aborted it with `InsufficientFeesPaid`. The estimate is retained separately as
+/// advisory preflight evidence (see [`prepare`]).
+///
+/// Fails closed on a zero cap and on any cap above the project hard ceiling.
+fn validate_v2_anchor_max_fee(max_fee: u64) -> Result<u64, GuiCoreError> {
+    if max_fee == 0 {
         return Err(v2_error(
-            "GUI_ANCHOR_V2_FEE_ESTIMATE_INVALID",
-            "walletd returned an invalid zero V2 fee estimate",
+            "GUI_ANCHOR_V2_MAX_FEE_INVALID",
+            "the authorized V2 maximum fee must be greater than zero",
         ));
     }
-    let headroom = required_fee
-        .saturating_mul(V2_FEE_HEADROOM_NUMERATOR)
-        .saturating_add(V2_FEE_HEADROOM_DENOMINATOR - 1)
-        / V2_FEE_HEADROOM_DENOMINATOR;
-    if headroom == 0 || headroom > OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 {
+    if max_fee > OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1 {
         return Err(v2_error(
-            "GUI_ANCHOR_V2_FEE_ESTIMATE_OUT_OF_POLICY",
-            "walletd's V2 fee estimate exceeds the anchor fee policy ceiling",
+            "GUI_ANCHOR_V2_MAX_FEE_OUT_OF_POLICY",
+            "the authorized V2 maximum fee exceeds the anchor fee policy ceiling",
         ));
     }
-    Ok(headroom)
+    Ok(max_fee)
+}
+
+/// Fails closed when walletd's advisory dry-run estimate already exceeds the
+/// operator-authorized cap.
+///
+/// This rejects an obviously insufficient cap **before** an approval request is
+/// created, so the operator is never asked to approve a transaction that is
+/// known to be under-funded. It never raises the cap and never lowers it to the
+/// estimate; a cap that merely exceeds the estimate is passed through untouched.
+fn ensure_v2_max_fee_covers_estimate(
+    selected_max_fee: u64,
+    estimated_required_fee: u64,
+) -> Result<(), GuiCoreError> {
+    if estimated_required_fee > selected_max_fee {
+        return Err(v2_error(
+            "GUI_ANCHOR_V2_MAX_FEE_BELOW_ESTIMATE",
+            "walletd's dry-run fee estimate exceeds the authorized maximum fee; raise the authorized maximum fee",
+        ));
+    }
+    Ok(())
 }
 
 fn poll_receipt<I>(
@@ -709,9 +764,18 @@ where
             }
         },
         Ok(V2IndexerReceiptFetchV1::Rejected(_)) => {
-            fail(
+            // The transaction reached a terminal decision without committing an
+            // anchor, so this is proven "not published" rather than an ambiguous
+            // failure. Model it as a retryable PUBLICATION failure, never as an
+            // election failure: the finalized archive, public summary, and anchor
+            // digest are untouched, and the next no-decision step re-prepares
+            // from the same archive with a fresh fee dry-run.
+            record_failed_attempt(snapshot);
+            reject(
                 snapshot,
-                "the V2 transaction was rejected before a receipt event was available",
+                "the V2 anchor transaction was aborted by the network before any anchor event \
+                 was committed (the election and its finalized result are unaffected); \
+                 publication can be retried with the same anchor digest and public summary",
             );
             write_failure_evidence(failure_path, snapshot);
         }
@@ -745,6 +809,21 @@ fn fail(snapshot: &mut V2LifecycleSnapshotV1, reason: impl Into<String>) {
 fn reject(snapshot: &mut V2LifecycleSnapshotV1, reason: impl Into<String>) {
     snapshot.phase = "REJECTED".to_owned();
     snapshot.failure_reason = Some(reason.into());
+}
+
+/// Records the current attempt's transaction id as a prior failed/aborted
+/// attempt.
+///
+/// Called only when the network has proven a terminal decision with no committed
+/// anchor. The id is retained across a re-prepare so the operator keeps the
+/// evidence of the attempt and so a retry can never reuse an id that might
+/// already exist on chain.
+fn record_failed_attempt(snapshot: &mut V2LifecycleSnapshotV1) {
+    if let Some(id) = snapshot.transaction_id.clone() {
+        if !snapshot.prior_failed_transaction_ids.contains(&id) {
+            snapshot.prior_failed_transaction_ids.push(id);
+        }
+    }
 }
 
 /// Adopts a walletd-sealed transaction id observed during recovery and advances
@@ -1060,6 +1139,7 @@ where
         max_epoch: 0,
         walletd_request_id: 0,
         prior_rejected_walletd_request_ids: Vec::new(),
+        prior_failed_transaction_ids: Vec::new(),
         phase: "RECEIPT_VERIFIED".to_owned(),
         transaction_id: Some(evidence.transaction_id.clone()),
         failure_reason: None,
