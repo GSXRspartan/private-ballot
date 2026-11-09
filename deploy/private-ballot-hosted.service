@@ -1,5 +1,5 @@
 [Unit]
-Description=Private Ballot Hosted backend (Stage 2 prototype)
+Description=Private Ballot Hosted backend (Stage 3 staging)
 After=network.target
 
 [Service]
@@ -8,11 +8,14 @@ User=private-ballot-hosted
 Group=private-ballot-hosted
 WorkingDirectory=/opt/private-ballot-hosted
 ExecStart=/opt/private-ballot-hosted/private-ballot-hosted
+# Root-owned 0600 file carrying ADMIN_TOKEN / ORIGIN_TOKEN. Never in Git.
 EnvironmentFile=/etc/private-ballot-hosted/hosted.env
 Restart=on-failure
 RestartSec=5
-# Backend must stay on loopback; Cloudflare Tunnel connects to 127.0.0.1:8788.
-# Do NOT set PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND=1 in production.
+# Public plane: 127.0.0.1:8788 (Cloudflare Tunnel origin).
+# Admin plane: 127.0.0.1:8789 (localhost only, NEVER routed through
+# Cloudflare). Do NOT set PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND=1.
+# Do NOT open 8788/8789 in the VPS firewall; the Tunnel connects outbound.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

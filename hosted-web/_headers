@@ -1,8 +1,13 @@
+# Reference parity file (Pages-legacy syntax). Workers Static Assets does
+# NOT read `_headers`; the binding header policy is implemented in
+# src-edge/worker.ts (applySecurityHeaders), which is the authoritative
+# staging source. This file documents the same policy for review.
 /*
   Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
-  Cache-Control: public, max-age=31536000, immutable
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
 /api/*

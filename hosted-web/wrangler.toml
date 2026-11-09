@@ -1,0 +1,32 @@
+# Private Ballot — Staging edge (Stage 3).
+# Cloudflare Worker + Static Assets. STAGING ONLY; no production hostname.
+# Requires human Cloudflare login: `npx wrangler login` (or set
+# CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID locally, never in Git).
+#
+# Deploy (after `npm run build` produces ./dist):
+#   npx wrangler deploy
+# Set the origin token secret (must match the VPS
+# PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN for the staging backend):
+#   npx wrangler secret put ORIGIN_TOKEN
+# Docs: docs/hosted/CLOUDFLARE_STAGE3.md
+name = "private-ballot-staging"
+main = "./src-edge/worker.ts"
+compatibility_date = "2026-11-09"
+upload_source_maps = true
+workers_dev = true
+
+[assets]
+directory = "./dist/"
+not_found_handling = "single-page-application"
+binding = "ASSETS"
+# Worker-first for API paths so the edge can block /api/v1/admin/* and
+# inject the origin token before anything reaches the staging backend.
+# Static/hashed assets are still served from the edge.
+run_worker_first = ["/api/*"]
+
+[vars]
+# Public Tunnel ingress hostname (must exist in Cloudflare DNS pointing at
+# the staging named Tunnel). Served ONLY via this Worker; the backend
+# requires the injected origin token when one is configured, so direct
+# hits to this hostname fail closed. See docs/hosted/CLOUDFLARE_STAGE3.md.
+STAGING_ORIGIN = "https://pb-staging-origin.example.com"
