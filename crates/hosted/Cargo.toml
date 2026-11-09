@@ -1,0 +1,23 @@
+[package]
+name = "tari-cc-private-ballot-hosted"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tari-cc-private-ballot-deployment-registry = { path = "../deployment-registry" }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "private-ballot-hosted"
+path = "src/main.rs"
+
+[lints]
+workspace = true
