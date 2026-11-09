@@ -27,8 +27,8 @@ use tari_cc_private_ballot_verifier::{
 use tower::ServiceExt;
 
 use crate::{
-    AppState, HostedConfig, InMemoryStorage, hex_encode, router_with_state, test_config,
-    verify_archive_dir_for_test,
+    AppState, HostedConfig, InMemoryStorage, ORIGIN_TOKEN_HEADER, admin_router_with_state, hex_encode,
+    router_with_state, test_config, verify_archive_dir_for_test,
 };
 use crate::storage::HostedStorage;
 
@@ -132,10 +132,21 @@ fn make_package(f: &Fixture, scalar: u64, candidate: &[u8]) -> Vec<u8> {
     match package.to_canonical_cbor() { Ok(v) => v, Err(_) => panic!("package cbor") }
 }
 
-fn test_router() -> (axum::Router, Arc<InMemoryStorage>) {
+struct TestRouters {
+    public: axum::Router,
+    admin: axum::Router,
+}
+
+fn test_routers() -> (TestRouters, Arc<InMemoryStorage>) {
     let storage = Arc::new(InMemoryStorage::new());
     let state = Arc::new(AppState::new(test_config(), storage.clone()));
-    (router_with_state(state), storage)
+    let routers = TestRouters { public: router_with_state(state.clone()), admin: admin_router_with_state(state) };
+    (routers, storage)
+}
+
+fn test_router() -> (axum::Router, Arc<InMemoryStorage>) {
+    let (routers, storage) = test_routers();
+    (routers.public, storage)
 }
 
 async fn req(router: axum::Router, method: &str, uri: &str, body: Option<String>, headers: &[(&str, &str)]) -> (axum::http::StatusCode, String) {
@@ -149,17 +160,18 @@ async fn req(router: axum::Router, method: &str, uri: &str, body: Option<String>
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-async fn import(router: axum::Router, f: &Fixture) -> axum::http::StatusCode {
+async fn import(admin: axum::Router, f: &Fixture) -> axum::http::StatusCode {
     let body = serde_json::json!({"election_id": f.election_id, "manifest_cbor_hex": hex_encode(&f.manifest_cbor), "registry_cbor_hex": hex_encode(&f.registry_cbor), "candidate_cbor_hex": hex_encode(&f.candidate_cbor)}).to_string();
-    let (status, _) = req(router, "POST", "/api/v1/admin/elections/import", Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    let (status, _) = req(admin, "POST", "/api/v1/admin/elections/import", Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
     status
 }
 
 #[tokio::test]
 async fn end_to_end_hosted_flow_and_desktop_archive_verifier() {
     let f = fixture();
-    let (router, storage) = test_router();
-    assert_eq!(import(router.clone(), &f).await, axum::http::StatusCode::CREATED);
+    let (routers, storage) = test_routers();
+    let router = routers.public.clone();
+    assert_eq!(import(routers.admin.clone(), &f).await, axum::http::StatusCode::CREATED);
     // Voter A ballot
     let pkg_a = make_package(&f, 1, b"candidate-a");
     let body_a = serde_json::json!({"receipt_id": "00000000-0000-4000-8000-000000000001", "package_cbor_hex": hex_encode(&pkg_a), "api_version": "v1"}).to_string();
@@ -195,15 +207,15 @@ async fn end_to_end_hosted_flow_and_desktop_archive_verifier() {
     // Wrong-election: valid package for a different election id would need second fixture; tamper manifest hash by using pkg from other election is covered by wrong manifest hash check in verifier tests. Here submit pkg_a to unknown election -> 404
     let (s7, _) = req(router.clone(), "POST", "/api/v1/elections/nope/ballots", Some(body_a.clone()), &[("content-type", "application/json")]).await;
     assert_eq!(s7, axum::http::StatusCode::NOT_FOUND);
-    // Close + finalize
-    let (s8, _) = req(router.clone(), "POST", &format!("/api/v1/admin/elections/{}/close", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
+    // Close + finalize (admin plane)
+    let (s8, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{}/close", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(s8, axum::http::StatusCode::OK);
     // Ballot after close -> election_closed
     let pkg_c = make_package(&f, 3, b"candidate-c");
     let body_c = serde_json::json!({"receipt_id": "00000000-0000-4000-8000-000000000005", "package_cbor_hex": hex_encode(&pkg_c), "api_version": "v1"}).to_string();
     let (s9, r9) = req(router.clone(), "POST", &format!("/api/v1/elections/{}/ballots", f.election_id), Some(body_c), &[("content-type", "application/json")]).await;
     assert_eq!(s9, axum::http::StatusCode::CONFLICT, "{r9}");
-    let (s10, r10) = req(router.clone(), "POST", &format!("/api/v1/admin/elections/{}/finalize", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
+    let (s10, r10) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{}/finalize", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(s10, axum::http::StatusCode::OK, "{r10}");
     // Results: A->a, B->b => counts 1,1,0
     let (s11, r11) = req(router.clone(), "GET", &format!("/api/v1/elections/{}/results", f.election_id), None, &[]).await;
@@ -258,9 +270,10 @@ fn write_archive_from_endpoint(dir: &std::path::Path, f: &Fixture, files: &[serd
 async fn wrong_election_binding_is_rejected() {
     let f1 = fixture_with("hosted-synthetic-001", "hosted-synthetic");
     let f2 = fixture_with("hosted-synthetic-002", "hosted-synthetic-other");
-    let (router, _storage) = test_router();
-    assert_eq!(import(router.clone(), &f1).await, axum::http::StatusCode::CREATED);
-    assert_eq!(import(router.clone(), &f2).await, axum::http::StatusCode::CREATED);
+    let (routers, _storage) = test_routers();
+    let router = routers.public.clone();
+    assert_eq!(import(routers.admin.clone(), &f1).await, axum::http::StatusCode::CREATED);
+    assert_eq!(import(routers.admin.clone(), &f2).await, axum::http::StatusCode::CREATED);
     let pkg1 = make_package(&f1, 1, b"candidate-a");
     let body = serde_json::json!({"receipt_id": "99999999-9999-4999-8999-999999999999", "package_cbor_hex": hex_encode(&pkg1), "api_version": "v1"}).to_string();
     let (status, text) = req(router.clone(), "POST", "/api/v1/elections/hosted-synthetic-002/ballots", Some(body), &[("content-type", "application/json")]).await;
@@ -275,8 +288,9 @@ async fn wrong_election_binding_is_rejected() {
 #[tokio::test]
 async fn stored_ballot_does_not_contain_voter_secret() {
     let f = fixture();
-    let (router, storage) = test_router();
-    assert_eq!(import(router.clone(), &f).await, axum::http::StatusCode::CREATED);
+    let (routers, storage) = test_routers();
+    let router = routers.public.clone();
+    assert_eq!(import(routers.admin.clone(), &f).await, axum::http::StatusCode::CREATED);
     let pkg = make_package(&f, 1, b"candidate-a");
     let body = serde_json::json!({"receipt_id": "88888888-8888-4888-8888-888888888888", "package_cbor_hex": hex_encode(&pkg), "api_version": "v1"}).to_string();
     let (s, t) = req(router.clone(), "POST", &format!("/api/v1/elections/{}/ballots", f.election_id), Some(body), &[("content-type", "application/json")]).await;
@@ -293,8 +307,9 @@ async fn stored_ballot_does_not_contain_voter_secret() {
 #[tokio::test]
 async fn concurrent_same_receipt_does_not_double_count() {
     let f = fixture();
-    let (router, storage) = test_router();
-    assert_eq!(import(router.clone(), &f).await, axum::http::StatusCode::CREATED);
+    let (routers, storage) = test_routers();
+    let router = routers.public.clone();
+    assert_eq!(import(routers.admin.clone(), &f).await, axum::http::StatusCode::CREATED);
     let pkg = make_package(&f, 1, b"candidate-a");
     let body = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111111", "package_cbor_hex": hex_encode(&pkg), "api_version": "v1"}).to_string();
     let r1 = router.clone();
@@ -338,8 +353,74 @@ fn storage_and_config_boundaries() {
     storage.append_ballot_envelope("e1", vec![1,2,3]);
     assert_eq!(storage.ballot_envelope_count("e1"), 1);
     assert_eq!(crate::DEFAULT_BIND, "127.0.0.1:8788");
-    let cfg = HostedConfig { bind: "0.0.0.0:8788".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, allow_public_bind: false, rate_limit_per_minute: 10 };
+    assert_eq!(crate::DEFAULT_ADMIN_BIND, "127.0.0.1:8789");
+    let cfg = HostedConfig { bind: "0.0.0.0:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10 };
     assert!(cfg.validate().is_err());
+    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "0.0.0.0:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: true, rate_limit_per_minute: 10 };
+    assert!(cfg.validate().is_err(), "admin bind must stay loopback even with public bind allowed");
+    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8788".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10 };
+    assert!(cfg.validate().is_err(), "public and admin binds must differ");
+}
+
+#[tokio::test]
+async fn public_plane_never_serves_admin_mutations() {
+    let f = fixture();
+    let (routers, _storage) = test_routers();
+    // Admin import succeeds only on the admin plane.
+    assert_eq!(import(routers.admin.clone(), &f).await, axum::http::StatusCode::CREATED);
+    // The public plane has no admin routes at all: import, close, finalize
+    // all 404 even with a valid admin token (edge failure fails closed).
+    let body = serde_json::json!({"election_id": f.election_id, "manifest_cbor_hex": hex_encode(&f.manifest_cbor), "registry_cbor_hex": hex_encode(&f.registry_cbor), "candidate_cbor_hex": hex_encode(&f.candidate_cbor)}).to_string();
+    let (s1, _) = req(routers.public.clone(), "POST", "/api/v1/admin/elections/import", Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s1, axum::http::StatusCode::NOT_FOUND);
+    let (s2, _) = req(routers.public.clone(), "POST", &format!("/api/v1/admin/elections/{}/close", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s2, axum::http::StatusCode::NOT_FOUND);
+    let (s3, _) = req(routers.public.clone(), "POST", &format!("/api/v1/admin/elections/{}/finalize", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s3, axum::http::StatusCode::NOT_FOUND);
+    // The admin plane does not serve voter routes.
+    let (s4, _) = req(routers.admin.clone(), "GET", "/api/v1/status", None, &[]).await;
+    assert_eq!(s4, axum::http::StatusCode::NOT_FOUND);
+    let (s5, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/elections/{}/ballots", f.election_id), Some(serde_json::json!({"receipt_id": "r", "package_cbor_hex": "00", "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(s5, axum::http::StatusCode::NOT_FOUND);
+    // Admin plane health is separate from public health.
+    let (s6, _) = req(routers.admin.clone(), "GET", "/admin-health", None, &[]).await;
+    assert_eq!(s6, axum::http::StatusCode::OK);
+    // Public plane health still works.
+    let (s7, _) = req(routers.public.clone(), "GET", "/health", None, &[]).await;
+    assert_eq!(s7, axum::http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn admin_plane_requires_token_when_configured() {
+    let f = fixture();
+    let (routers, _storage) = test_routers();
+    let body = serde_json::json!({"election_id": f.election_id, "manifest_cbor_hex": hex_encode(&f.manifest_cbor), "registry_cbor_hex": hex_encode(&f.registry_cbor), "candidate_cbor_hex": hex_encode(&f.candidate_cbor)}).to_string();
+    let (s1, _) = req(routers.admin.clone(), "POST", "/api/v1/admin/elections/import", Some(body.clone()), &[("content-type", "application/json")]).await;
+    assert_eq!(s1, axum::http::StatusCode::UNAUTHORIZED);
+    let (s2, _) = req(routers.admin.clone(), "POST", "/api/v1/admin/elections/import", Some(body.clone()), &[("content-type", "application/json"), ("x-admin-token", "wrong-token")]).await;
+    assert_eq!(s2, axum::http::StatusCode::UNAUTHORIZED);
+    let (s3, _) = req(routers.admin.clone(), "POST", "/api/v1/admin/elections/import", Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s3, axum::http::StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn origin_token_enforced_on_public_plane_when_configured() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut cfg = test_config();
+    cfg.origin_token = Some("test-origin-secret".to_owned());
+    let state = Arc::new(AppState::new(cfg, storage));
+    let router = router_with_state(state);
+    // /health stays exempt (Tunnel health checks hit the origin directly).
+    let (s1, _) = req(router.clone(), "GET", "/health", None, &[]).await;
+    assert_eq!(s1, axum::http::StatusCode::OK);
+    // API without the Worker-injected header fails closed.
+    let (s2, _) = req(router.clone(), "GET", "/api/v1/status", None, &[]).await;
+    assert_eq!(s2, axum::http::StatusCode::UNAUTHORIZED);
+    let (s3, _) = req(router.clone(), "GET", "/api/v1/status", None, &[(ORIGIN_TOKEN_HEADER, "wrong")]).await;
+    assert_eq!(s3, axum::http::StatusCode::UNAUTHORIZED);
+    // API with the correct header passes.
+    let (s4, _) = req(router.clone(), "GET", "/api/v1/status", None, &[(ORIGIN_TOKEN_HEADER, "test-origin-secret")]).await;
+    assert_eq!(s4, axum::http::StatusCode::OK);
 }
 
 #[tokio::test]

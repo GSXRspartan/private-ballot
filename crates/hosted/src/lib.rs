@@ -17,6 +17,18 @@
 //! explicitly opted in; request bodies size-bounded; errors carry no secrets;
 //! no request-body, secret, or full-IP logging; ballot/receipt responses are
 //! `private, no-store`; no wildcard CORS (same-origin only, no CORS layer).
+//!
+//! Two control planes (Stage 3): the PUBLIC plane (`127.0.0.1:8788` by
+//! default) serves only voter-facing routes and is the only listener the
+//! Cloudflare Tunnel may route to. The ADMIN plane (`127.0.0.1:8789` by
+//! default) serves only organizer/admin mutation routes, is always
+//! loopback-only, and must never be routed through Cloudflare. The public
+//! plane has no admin routes at all (404), so public admin access fails
+//! even if edge blocking fails. When `PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN`
+//! is set, the public plane additionally requires the Worker-injected
+//! `x-private-ballot-origin` header (`/health` exempt for Tunnel checks);
+//! the token is never in browser JavaScript. Unset token = local dev, no
+//! header check.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -60,6 +72,12 @@ pub use storage::{HostedStorage, InMemoryStorage, SqliteStorage, StorageError};
 
 /// Loopback bind address used when no configuration overrides it.
 pub const DEFAULT_BIND: &str = "127.0.0.1:8788";
+/// Loopback bind address for the admin plane when no configuration overrides
+/// it. Always loopback-only; never routed through Cloudflare.
+pub const DEFAULT_ADMIN_BIND: &str = "127.0.0.1:8789";
+/// Header the Cloudflare Worker injects on public-plane `/api/*` requests
+/// when origin-token authentication is enabled. Never set by the browser.
+pub const ORIGIN_TOKEN_HEADER: &str = "x-private-ballot-origin";
 /// Maximum accepted request body (64 KiB).
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Stricter per-route limit for ballot submissions.
@@ -69,33 +87,50 @@ pub const SCHEMA_VERSION: i64 = 2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedConfig {
     pub bind: String,
+    pub admin_bind: String,
     pub service_name: String,
     pub api_version: String,
     pub db_path: PathBuf,
     pub admin_token: Option<String>,
+    pub origin_token: Option<String>,
     pub allow_public_bind: bool,
     pub rate_limit_per_minute: u32,
+}
+
+fn is_loopback_bind(bind: &str) -> Option<bool> {
+    let host = bind.rsplit(':').nth(1)?;
+    Some(host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]")
 }
 
 impl HostedConfig {
     pub fn from_env() -> Result<Self, ConfigError> {
         let bind = std::env::var("PRIVATE_BALLOT_HOSTED_BIND")
             .unwrap_or_else(|_| std::env::var("HOSTED_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_owned()));
+        let admin_bind = std::env::var("PRIVATE_BALLOT_HOSTED_ADMIN_BIND")
+            .unwrap_or_else(|_| DEFAULT_ADMIN_BIND.to_owned());
         let service_name = std::env::var("PRIVATE_BALLOT_HOSTED_SERVICE").unwrap_or_else(|_| "hosted".to_owned());
         let api_version = std::env::var("PRIVATE_BALLOT_HOSTED_API_VERSION").unwrap_or_else(|_| "v1".to_owned());
         let db_path = PathBuf::from(std::env::var("PRIVATE_BALLOT_HOSTED_DB").unwrap_or_else(|_| "hosted.db".to_owned()));
         let admin_token = std::env::var("PRIVATE_BALLOT_HOSTED_ADMIN_TOKEN").ok().filter(|v| !v.trim().is_empty());
+        let origin_token = std::env::var("PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN").ok().filter(|v| !v.trim().is_empty());
         let allow_public_bind = std::env::var("PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND").is_ok_and(|v| v == "1");
         let rate_limit_per_minute = std::env::var("PRIVATE_BALLOT_HOSTED_RATE_LIMIT_PER_MIN")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(120);
-        Self { bind, service_name, api_version, db_path, admin_token, allow_public_bind, rate_limit_per_minute }.validate()
+        Self { bind, admin_bind, service_name, api_version, db_path, admin_token, origin_token, allow_public_bind, rate_limit_per_minute }.validate()
     }
 
     pub fn validate(self) -> Result<Self, ConfigError> {
-        let host = self.bind.rsplit(':').nth(1).ok_or(ConfigError::InvalidBind)?;
-        let is_loopback = host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "[::1]";
+        let is_loopback = is_loopback_bind(&self.bind).ok_or(ConfigError::InvalidBind)?;
         if !is_loopback && !self.allow_public_bind {
             return Err(ConfigError::NonLoopbackBind);
+        }
+        // The admin plane must stay loopback-only with no opt-out.
+        let admin_loopback = is_loopback_bind(&self.admin_bind).ok_or(ConfigError::InvalidBind)?;
+        if !admin_loopback {
+            return Err(ConfigError::AdminBindNotLoopback);
+        }
+        if self.bind == self.admin_bind {
+            return Err(ConfigError::InvalidBind);
         }
         if self.service_name.trim().is_empty() || self.service_name.len() > 128 {
             return Err(ConfigError::InvalidBind);
@@ -108,10 +143,10 @@ impl HostedConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ConfigError { InvalidBind, NonLoopbackBind }
+pub enum ConfigError { InvalidBind, NonLoopbackBind, AdminBindNotLoopback }
 impl ConfigError {
     #[must_use] pub const fn as_str(self) -> &'static str {
-        match self { Self::InvalidBind => "HOSTED_CONFIG_INVALID_BIND", Self::NonLoopbackBind => "HOSTED_CONFIG_NON_LOOPBACK_BIND" }
+        match self { Self::InvalidBind => "HOSTED_CONFIG_INVALID_BIND", Self::NonLoopbackBind => "HOSTED_CONFIG_NON_LOOPBACK_BIND", Self::AdminBindNotLoopback => "HOSTED_CONFIG_ADMIN_BIND_NOT_LOOPBACK" }
     }
 }
 impl core::fmt::Display for ConfigError { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { f.write_str(self.as_str()) } }
@@ -438,7 +473,7 @@ async fn ootle_status(State(state): State<Arc<AppState>>) -> Response {
 fn check_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     if let Some(token) = &state.config.admin_token {
         let provided = headers.get("x-admin-token").and_then(|v| v.to_str().ok()).unwrap_or("");
-        if provided != token { return Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized", "admin token required")); }
+        if !token_equals(provided, token) { return Err(error_response(StatusCode::UNAUTHORIZED, "unauthorized", "admin token required")); }
     }
     Ok(())
 }
@@ -519,7 +554,38 @@ fn logging_middleware(
     }
 }
 
-pub fn router_with_state(state: Arc<AppState>) -> Router {
+/// Constant-time comparison for bearer-style tokens (no new dependency).
+fn token_equals(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() { return false; }
+    let mut diff = 0u8;
+    for i in 0..a.len() { diff |= a[i] ^ b[i]; }
+    diff == 0
+}
+
+/// Edge-origin authentication for the public plane. No-op when no origin
+/// token is configured (local development). When configured, every
+/// `/api/*` request must carry the Worker-injected `x-private-ballot-origin`
+/// header; `/health` is exempt so Cloudflare Tunnel health checks work.
+/// The browser never knows this token; the Worker injects it.
+async fn origin_token_middleware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+    if let Some(expected) = &state.config.origin_token {
+        let provided = request.headers().get(ORIGIN_TOKEN_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+        if !token_equals(provided, expected) {
+            return error_response(StatusCode::UNAUTHORIZED, "unauthorized", "origin authentication required");
+        }
+    }
+    next.run(request).await
+}
+
+fn public_router_with_state(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/status", get(status))
@@ -530,6 +596,17 @@ pub fn router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/results", get(get_results))
         .route("/api/v1/elections/{id}/archive", get(get_archive))
         .route("/api/v1/ootle/status", get(ootle_status))
+        .with_state(state.clone())
+        .layer(axum::middleware::from_fn_with_state(state, origin_token_middleware))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn(logging_middleware))
+}
+
+/// Admin plane: organizer mutations only, loopback-only listener, never
+/// routed through Cloudflare. Token-gated when configured.
+pub fn admin_router_with_state(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/admin-health", get(health))
         .route("/api/v1/admin/elections/import", post(admin_import))
         .route("/api/v1/admin/elections/{id}/close", post(admin_close))
         .route("/api/v1/admin/elections/{id}/finalize", post(admin_finalize))
@@ -538,21 +615,56 @@ pub fn router_with_state(state: Arc<AppState>) -> Router {
         .layer(axum::middleware::from_fn(logging_middleware))
 }
 
+/// Public plane only: voter-facing routes, no admin routes. This is the
+/// only router the Cloudflare Tunnel may route to.
+pub fn router_with_state(state: Arc<AppState>) -> Router {
+    public_router_with_state(state)
+}
+
 #[must_use]
 pub fn router(config: HostedConfig) -> Router {
     let state = Arc::new(AppState::new(config, Arc::new(InMemoryStorage::new())));
-    router_with_state(state)
+    public_router_with_state(state)
 }
 
 pub fn test_config() -> HostedConfig {
-    HostedConfig { bind: "127.0.0.1:8788".to_owned(), service_name: "test".to_owned(), api_version: "v1".to_owned(), db_path: PathBuf::from(":memory:"), admin_token: Some("test-admin-token".to_owned()), allow_public_bind: false, rate_limit_per_minute: 10_000 }
+    HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "test".to_owned(), api_version: "v1".to_owned(), db_path: PathBuf::from(":memory:"), admin_token: Some("test-admin-token".to_owned()), origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10_000 }
+}
+
+async fn shutdown_signal(shutdown: impl Future<Output = ()> + Send + 'static) {
+    shutdown.await;
 }
 
 pub async fn serve_with_state(state: Arc<AppState>, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), String> {
-    let bind = state.config.bind.clone();
-    let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|_| "HOSTED_BIND_FAILED".to_owned())?;
-    let app = router_with_state(state);
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await.map_err(|_| "HOSTED_SERVE_FAILED".to_owned())
+    let public_bind = state.config.bind.clone();
+    let admin_bind = state.config.admin_bind.clone();
+    let public_listener = tokio::net::TcpListener::bind(&public_bind).await.map_err(|_| "HOSTED_BIND_FAILED".to_owned())?;
+    let admin_listener = tokio::net::TcpListener::bind(&admin_bind).await.map_err(|_| "HOSTED_BIND_FAILED".to_owned())?;
+    let public_app = public_router_with_state(state.clone());
+    let admin_app = admin_router_with_state(state);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        shutdown_signal(shutdown).await;
+        let _ = shutdown_tx.send(true);
+    });
+    let mut public_rx = shutdown_rx.clone();
+    let public_server = axum::serve(public_listener, public_app).with_graceful_shutdown(async move {
+        loop {
+            if *public_rx.borrow() { break; }
+            if public_rx.changed().await.is_err() { break; }
+        }
+    });
+    let mut admin_rx = shutdown_rx;
+    let admin_server = axum::serve(admin_listener, admin_app).with_graceful_shutdown(async move {
+        loop {
+            if *admin_rx.borrow() { break; }
+            if admin_rx.changed().await.is_err() { break; }
+        }
+    });
+    tokio::select! {
+        result = public_server => result.map_err(|_| "HOSTED_SERVE_FAILED".to_owned()),
+        result = admin_server => result.map_err(|_| "HOSTED_SERVE_FAILED".to_owned()),
+    }
 }
 
 pub async fn serve(config: HostedConfig, shutdown: impl Future<Output = ()> + Send + 'static) -> Result<(), String> {
