@@ -137,8 +137,7 @@ the installer does **not** ship:
   and point the app at its `tor.exe`. The app validates the path and
   launches Tor as a child process; it never resolves `tor` from `PATH`
   and never downloads Tor for you.
-- **Tari Ootle `walletd`** (v0.42.0 on Esmeralda, the post-testnet-reset
-  cohort) — required only if you want to publish an optional public anchor.
+- **Tari Ootle `walletd`** (v0.51.0 on Esmeralda, Protocol V1 cohort) — required only if you want to publish an optional public anchor.
   Voters do not need walletd
   and do not need tTARI. The app talks to walletd on loopback at
   `http://127.0.0.1:5100/json_rpc`. No wallet API key is stored in this

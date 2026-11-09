@@ -502,7 +502,7 @@ export interface GuiLiveAnchorConfigRequestV1 {
   network: string;
   walletd_endpoint: string;
   indexer_endpoint: string;
-  /** Published v0.39.2 event-template address for the selected network. */
+  /** Published V2 (tari_template_lib 0.39.0) event-template address for the selected network (registry-resolved; see crates/deployment-registry). */
   template_address: string;
   /** Event-template module name (shared template-contract constant). */
   template_module: string;
