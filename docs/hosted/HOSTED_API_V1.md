@@ -1,4 +1,11 @@
-# Hosted API v1 (Phase 10 — design, not yet deployed)
+# Hosted API v1 (IMPLEMENTED in Stage 2, locally runnable)
+
+All endpoints below except Ootle anchor publication are implemented in
+`crates/hosted`. Ootle publication (`/api/v1/ootle/status` reports
+`not_configured_in_stage2_prototype`) is wired to the Stage 1 deployment
+registry abstraction but performs no live transaction in Stage 2.
+Admin routes (`/api/v1/admin/elections/*`) are localhost + token-gated
+organizer controls (import/close/finalize), not public voter APIs.
 
 Versioned, minimal-cryptographic-envelope API. The server receives the minimum necessary to accept and route a ballot. **It never receives ballot plaintext.**
 

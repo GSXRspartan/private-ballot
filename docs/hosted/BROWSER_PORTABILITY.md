@@ -29,6 +29,28 @@ Classification per component. “Browser-ready” means pure Rust with no OS dep
 - TypeScript SDK (`@tari-project/ootle` 0.11.0, `@tari-project/ootle-indexer`, `@tari-project/ootle-wallet-daemon-signer`): Node ≥ 22 currently needs `--experimental-wasm-modules` under tsx/plain node (see npm page). The browser path uses the Rust WASM core once ported; the TS SDK is an interim reference, not the secrecy boundary.
 - Host SDKs must decode the V2 template definition layout (v0.50.0 note: ootle-go/py/ts). Stage 2 re-validates the TS indexer client against Protocol V1 `Encoded` types before depending on it.
 
+## Stage 2 implementation (implemented, not just assessed)
+
+`crates/hosted-wasm` (wasm-bindgen, `wasm32-unknown-unknown`) ports:
+canonical serialization, credential handling (`generate_secret_key`,
+`public_key_for_secret`), ballot construction, Triptych proof **generation**
+and local verification, nullifier (linking tag) derivation, package binding
+hash. `cargo check -p tari-cc-private-ballot-hosted-wasm --target wasm32-unknown-unknown`
+passes; `wasm-pack build --target web` produces a 521 KiB WASM module.
+
+RNG blocker resolved: `getrandom` 0.2 with the `js` feature (WebCrypto
+CSPRNG) via a `cfg(target_arch = "wasm32")` dependency in `hosted-wasm`,
+so the existing `OsRng`-based prover works unchanged in the browser.
+Verified in Node (WebCrypto) by `hosted-web/scripts/e2e.mjs`: browser WASM
+created proofs the backend independently verified.
+
+Zeroization limitation (documented, M4 in STAGE2_REVIEW): Rust zeroizes
+`TariTriptychSecretKeyV1` on drop, but WASM linear memory and JS strings
+cannot be guaranteed wiped. Secret lifetime = active tab session, memory-only,
+never persisted. This matches the prototype threat model; a production
+browser build should additionally consider WebCrypto non-extractable keys
+where the protocol allows, without ever exporting secrets to the server.
+
 ## Design rule
 
 Where browser support requires WASM, identify the exact crates (above) and the blocker. Where it would require exposing a secret, mark UNSAFE and keep the operation in the browser.

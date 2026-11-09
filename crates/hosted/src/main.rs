@@ -1,31 +1,29 @@
 #![forbid(unsafe_code)]
 
-//! Hosted backend binary (Stage 1 skeleton).
+//! Hosted backend binary (Stage 2).
 //!
 //! Binds to `127.0.0.1:8788` by default (override only to another loopback
-//! address), serves `/health` and `/api/v1/status`, and shuts down gracefully
-//! on Ctrl-C / SIGTERM. No request-body logging.
+//! address unless PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND=1), serves the
+//! hosted API v1, persists to SQLite (PRIVATE_BALLOT_HOSTED_DB, default
+//! hosted.db), and shuts down gracefully on Ctrl-C / SIGTERM. No
+//! request-body, secret, or full-IP logging.
 
-use tari_cc_private_ballot_hosted::{HostedConfig, serve};
+use std::sync::Arc;
+
+use tari_cc_private_ballot_hosted::{AppState, HostedConfig, SqliteStorage, serve_with_state};
 
 #[tokio::main]
 async fn main() {
     let config = match HostedConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("{}", error.as_str());
-            std::process::exit(2);
-        }
+        Ok(c) => c,
+        Err(e) => { eprintln!("{}", e.as_str()); std::process::exit(2); }
     };
-    eprintln!(
-        "private-ballot-hosted starting (service={}, api_version={})",
-        config.service_name, config.api_version
-    );
-    let shutdown = async {
-        let _ = tokio::signal::ctrl_c().await;
+    let storage = match SqliteStorage::open(&config.db_path) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{}", e.as_str()); std::process::exit(1); }
     };
-    if let Err(code) = serve(config, shutdown).await {
-        eprintln!("{code}");
-        std::process::exit(1);
-    }
+    eprintln!("private-ballot-hosted starting (service={}, api_version={}, bind={}, db={})", config.service_name, config.api_version, config.bind, config.db_path.display());
+    let state = Arc::new(AppState::new(config, Arc::new(storage)));
+    let shutdown = async { let _ = tokio::signal::ctrl_c().await; };
+    if let Err(code) = serve_with_state(state, shutdown).await { eprintln!("{code}"); std::process::exit(1); }
 }

@@ -1,0 +1,23 @@
+[Unit]
+Description=Private Ballot Hosted backend (Stage 2 prototype)
+After=network.target
+
+[Service]
+Type=simple
+User=private-ballot-hosted
+Group=private-ballot-hosted
+WorkingDirectory=/opt/private-ballot-hosted
+ExecStart=/opt/private-ballot-hosted/private-ballot-hosted
+EnvironmentFile=/etc/private-ballot-hosted/hosted.env
+Restart=on-failure
+RestartSec=5
+# Backend must stay on loopback; Cloudflare Tunnel connects to 127.0.0.1:8788.
+# Do NOT set PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND=1 in production.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/private-ballot-hosted
+
+[Install]
+WantedBy=multi-user.target

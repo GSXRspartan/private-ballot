@@ -1,31 +1,54 @@
-# Hosted Storage Model (Phase 12)
+# Hosted Storage Model (Stage 2 implementation)
 
-## Semantic categories (interface now, implementation later)
+## Selected backend: SQLite (embedded, single VPS)
 
-| Category | Semantics |
-|---|---|
-| Public election package | Immutable, hash-addressed, append-only |
-| Opaque ballot envelopes | Append-only/auditable; never updated or deleted except by election close |
-| Receipt state | `receipt_id → envelope hash + status`; idempotent writes |
-| Finalized archive | Immutable, content-addressed |
-| Ootle publication state | Anchor lifecycle snapshots (same shape as `AnchorLifecycleState`) |
-| Deployment registry | `DeploymentRegistry` (see `crates/deployment-registry`) |
+`crates/hosted/src/storage.rs` implements the `HostedStorage` trait with:
 
-The skeleton provides `HostedStorage` with one test implementation (`InMemoryStorage`) and no persistence. No external database is introduced in Stage 1: Stage 2 decides between an embedded store and a managed store based on the VPS threat model (a database is a new trust boundary; it must hold envelopes and registry data only — never plaintext).
+- `SqliteStorage` (rusqlite, bundled SQLite): WAL mode, foreign keys,
+  busy timeout, transactional ballot inserts. Schema version `2` stored in
+  `meta`; startup migration is `CREATE TABLE IF NOT EXISTS` + version check
+  (fail-closed on unknown version).
+- `InMemoryStorage`: unit-test implementation with identical semantics.
 
-## Never stored
+### Schema
 
-- Ballot plaintext
-- Voter secret keys
-- Triptych secret witness material
-- Wallet private keys / bearer tokens
+```sql
+meta(key TEXT PRIMARY KEY, value TEXT)  -- schema_version = '2'
+elections(id TEXT PRIMARY KEY, manifest_cbor BLOB, registry_cbor BLOB,
+          candidate_cbor BLOB, state TEXT, manifest_hash_hex TEXT)
+ballots(election_id TEXT, receipt_id TEXT, package_cbor BLOB,
+        envelope_hash_hex TEXT, nullifier BLOB, seq INTEGER,
+        PRIMARY KEY (election_id, receipt_id),
+        UNIQUE (election_id, nullifier))
+```
 
-These never cross the API boundary (see `HOSTED_API_V1.md`). The storage trait has no method that accepts them.
+`PRIMARY KEY (election_id, receipt_id)` + `UNIQUE (election_id, nullifier)`
+enforce transport idempotency and nullifier uniqueness at the database
+layer, in addition to the in-memory ingestion lock and the canonical
+ledger replay. Ballot insert (ballot row + receipt identity) is a single
+SQLite transaction.
 
-## Append-only / auditable semantics
+### What is stored / never stored
 
-Ballots and election evidence use append-only semantics so results can be re-verified from the stored envelope sequence. Reads never mutate. Receipt state transitions are forward-only (`pending → accepted/rejected`), matching `AnchorLifecycleState`.
+Stored: public election packages (manifest/registry/candidate canonical
+bytes), canonical ballot packages, verified nullifiers, envelope hashes,
+receipt ids, election state, finalized archive inputs.
 
-## Migration from desktop
+Never stored: voter secret scalars, Triptych witnesses, wallet private
+keys, bearer tokens, admin tokens (env only), request bodies beyond the
+canonical package. The trait has no method accepting secrets. A test
+(`stored_ballot_does_not_contain_voter_secret`) asserts the raw secret
+scalar does not appear verbatim in the stored package.
 
-Desktop archives remain the source of truth for finalized elections. The hosted backend serves copies referenced by hash; it never invents a new archive format. A hosted ballot payload, once finalized, produces the same canonical archive the desktop verifier accepts (shared domain core).
+Note on "plaintext": the only Private Ballot confidentiality mode in the
+canonical protocol is `PUBLIC` (`BallotConfidentialityV1::Public`); the
+canonical ballot package therefore contains the public approval payload
+by protocol design, exactly as in every Desktop archive. Voter *identity*
+linkage (anonymous membership) and voter *secrets* are what Hosted Mode
+protects; it does not invent a confidential-ballot variant.
+
+### File layout / backup
+
+Single `.db` file at `$PRIVATE_BALLOT_HOSTED_DB` (default `hosted.db`).
+Backup with SQLite `.backup` or by copying the file while the service is
+stopped. See `deploy/README.md`.
