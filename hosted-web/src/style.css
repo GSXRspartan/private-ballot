@@ -1,0 +1,9 @@
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 760px; padding: 0 1rem; line-height: 1.5; }
+.notice { border: 2px solid #b45309; background: #fffbeb; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+code { word-break: break-all; font-size: 0.85em; }
+button { margin: 0.25rem 0.25rem 0.25rem 0; padding: 0.4rem 0.9rem; cursor: pointer; }
+input[type="text"], input[type="password"] { padding: 0.4rem; margin: 0.25rem 0; width: 100%; box-sizing: border-box; }
+.error { color: #b91c1c; }
+.ok { color: #15803d; }
+.mono { font-family: ui-monospace, monospace; font-size: 0.85em; word-break: break-all; }

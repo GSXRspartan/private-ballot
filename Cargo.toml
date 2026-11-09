@@ -20,6 +20,7 @@ members = [
     "crates/registry",
     "crates/deployment-registry",
     "crates/hosted",
+    "crates/hosted-wasm",
     "crates/tally",
     "crates/verifier",
 ]
