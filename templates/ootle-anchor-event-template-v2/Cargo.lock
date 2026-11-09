@@ -74,9 +74,9 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "minicbor"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c12b4033ffaa92fbf9df03df38d19324f52bad130dd223f811734a8006dd2d69"
+checksum = "e7244eafd1e09e7c4e33043881997aa6ab6dffff3ed2cee3395a278980481d6e"
 dependencies = [
  "minicbor-derive",
 ]
@@ -118,9 +118,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "ootle_serde"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87d94f13b3fe0e1236bbe8ff37af2d0c0715d4f264d6e577db53e1badd00d1f9"
+checksum = "411d61bfe17d642e5c535adf03349cc7b1c424f741e8e3a83ba74d406f85c810"
 dependencies = [
  "serde",
 ]
@@ -206,9 +206,9 @@ dependencies = [
 
 [[package]]
 name = "tari_bor"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aef3b7d50696abb0cfc44f0b0fa3f653a37511631d70edcff33afa91f78684a"
+checksum = "76a167e17eeed15f9fb8cd2c7985c5a481b758e673e6cb05d60004888dce84ee"
 dependencies = [
  "borsh",
  "minicbor",
@@ -224,9 +224,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_abi"
-version = "0.20.1"
+version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a2055105ddf637caa61fcc4f29a407fc87965d39537c2e66e13b60a595fde97"
+checksum = "db01a6d9318904f9d9ef1a5d533496ab2409000fdb62fa1cea88cc5d22d7d5ea"
 dependencies = [
  "minicbor",
  "serde",
@@ -236,9 +236,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib"
-version = "0.33.0"
+version = "0.39.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b7ca84b7360f61a9319596d7744b211ecb0e63f0468df4c37d8c9c9e2b121a"
+checksum = "0b60d7c4ce55fc81b416e7fda198263af267f7025fa8d62bac3315f7e8227e70"
 dependencies = [
  "minicbor",
  "serde",
@@ -250,9 +250,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib_types"
-version = "0.33.0"
+version = "0.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34a593db5abc22fda6adb2fc5202d6c854d731a3edbd16ef31840caa64c63dfe"
+checksum = "e0fd2be1f14a9d98cd45e62622b80f28e03d61aa5e66106dad1c7fb8015cd57d"
 dependencies = [
  "borsh",
  "minicbor",
@@ -265,9 +265,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_macros"
-version = "0.23.0"
+version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e22865713a3ee345b06d742e2652947a72aaac06e8881ff87008060886f44ddf"
+checksum = "95171dcab38baa05f63fa3f17aaed4b3cefad84fa5cdaf020858ce6446d4f343"
 dependencies = [
  "proc-macro2",
  "quote",

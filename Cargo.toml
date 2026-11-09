@@ -18,6 +18,8 @@ members = [
     "crates/ootle-walletd-anchor-adapter",
     "crates/protocol",
     "crates/registry",
+    "crates/deployment-registry",
+    "crates/hosted",
     "crates/tally",
     "crates/verifier",
 ]

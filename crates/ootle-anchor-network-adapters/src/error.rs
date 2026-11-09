@@ -194,6 +194,9 @@ impl TransportError {
             WalletDaemonClientError::SerializeRequest { .. } => {
                 Self::from_category(TransportErrorCategory::UnsupportedApi)
             }
+            WalletDaemonClientError::CookieFileError { .. } => {
+                Self::from_category(TransportErrorCategory::AuthenticationFailure)
+            }
         }
     }
 
@@ -244,6 +247,15 @@ impl TransportError {
             }
             IndexerRestClientError::RequestInvariant { .. } => {
                 Self::from_category(TransportErrorCategory::UnsupportedApi)
+            }
+            IndexerRestClientError::UnexpectedStatus { status, .. } => match status.as_u16() {
+                401 => Self::from_category(TransportErrorCategory::AuthenticationFailure),
+                404 => Self::from_category(TransportErrorCategory::NotFound),
+                503 => Self::from_category(TransportErrorCategory::ServiceUnavailable),
+                code => Self::with_status(TransportErrorCategory::HttpStatusError, code),
+            },
+            IndexerRestClientError::ResponseTooLarge { .. } => {
+                Self::from_category(TransportErrorCategory::MalformedResponse)
             }
         }
     }

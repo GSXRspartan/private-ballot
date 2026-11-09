@@ -76,6 +76,9 @@ stable_error! {
         LogMessageTooLong => "RECEIPT_CONVERSION_LOG_MESSAGE_TOO_LONG",
         /// The receipt's bounded rejection/diagnostic text exceeded the maximum.
         DiagnosticTooLong => "RECEIPT_CONVERSION_DIAGNOSTIC_TOO_LONG",
+        /// The CBOR-encoded receipt bytes failed exact decoding (malformed CBOR,
+        /// trailing bytes, wrong semantic type, or excess nesting depth).
+        MalformedEncodedReceipt => "RECEIPT_CONVERSION_MALFORMED_ENCODED_RECEIPT",
     }
 }
 

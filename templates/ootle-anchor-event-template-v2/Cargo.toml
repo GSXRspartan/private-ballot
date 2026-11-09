@@ -8,12 +8,13 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Pinned to the Tari Ootle v0.42.0 testnet-reset cohort (esmeralda). The on-chain
-# event metadata model became CBOR in this cohort (tari-ootle PR #2679), a
-# consensus-breaking change, so the template MUST be built against this library
-# version; a 0.31.1 build is rejected by the reset network. The historical
-# v0.39.2 / 0.31.1 build is retained only as a compatibility baseline.
-tari_template_lib = "=0.33.0"
+# Pinned to the Tari Ootle v0.51.0 cohort (Protocol V1, Esmeralda epoch 12951+).
+# The on-chain event metadata model is CBOR (tari-ootle PR #2679, v0.42 cohort,
+# live under Protocol V1), and template definitions are now V2 (#3281/#3398),
+# so the template MUST be built against tari_template_lib 0.39.0; earlier
+# builds fail to load. The historical v0.39.2 / 0.31.1 build is retained only
+# as a compatibility baseline and is never published on the live network.
+tari_template_lib = "=0.39.0"
 
 [lib]
 crate-type = ["cdylib"]

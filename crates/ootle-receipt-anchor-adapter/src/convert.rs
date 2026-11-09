@@ -210,19 +210,30 @@ pub fn convert_transaction_receipt(
 ///
 /// This is the seam that names the indexer's own receipt-response wire type: a
 /// future real client forwards the response of
-/// `IndexerRestApiClient::get_transaction_receipt` here verbatim. It simply
-/// converts the wrapped [`TransactionReceipt`].
+/// `IndexerRestApiClient::get_transaction_receipt` here verbatim.
+///
+/// v0.51.0 (Protocol V1): the indexer returns the receipt as
+/// `Encoded<TransactionReceipt>` — CBOR bytes, base64 in JSON (`tari_engine_types::Encoded`).
+/// This seam decodes exactly (`Encoded::decode`, bounded depth, no trailing bytes)
+/// and fails closed with `MalformedEncodedReceipt` on malformed CBOR, wrong type,
+/// or oversized payload. It never tries random decoders; capability is the
+/// pinned `Encoded` type itself.
 ///
 /// # Errors
 ///
-/// Propagates any [`ReceiptConversionError`] from
-/// [`convert_transaction_receipt`].
+/// Returns `MalformedEncodedReceipt` if the CBOR bytes do not decode exactly
+/// into a `TransactionReceipt`, propagating any other [`ReceiptConversionError`]
+/// from [`convert_transaction_receipt`].
 pub fn convert_receipt_response(
     response: &GetTransactionReceiptResponse,
     transaction_id: &AnchorTransactionId,
     network: &OotleNetworkIdV1,
 ) -> Result<AnchorReceiptV1, ReceiptConversionError> {
-    convert_transaction_receipt(&response.receipt, transaction_id, network)
+    let receipt = response
+        .receipt
+        .decode()
+        .map_err(|_| ReceiptConversionError::MalformedEncodedReceipt)?;
+    convert_transaction_receipt(&receipt, transaction_id, network)
 }
 
 #[cfg(test)]
@@ -236,11 +247,13 @@ mod tests {
         AnchorFinalStatusV1, AnchorReceiptSourceKindV1, AnchorTransactionId,
     };
     use tari_engine_types::Epoch;
+    use tari_engine_types::encoded::Encoded;
     use tari_engine_types::events::Event;
     use tari_engine_types::fees::FeeReceipt;
     use tari_engine_types::transaction_receipt::{
         DiffSummary, FinalizeOutcome, TransactionReceipt,
     };
+    use tari_indexer_client::types::GetTransactionReceiptResponse;
     use tari_ootle_transaction::TransactionId;
     use tari_template_lib_types::{Metadata, TemplateAddress};
 
@@ -561,5 +574,61 @@ mod tests {
         assert_ne!(flag_hex, "true");
         // CBOR `true` == 0xf5.
         assert_eq!(flag_hex, "f5");
+    }
+
+    // --- v0.51.0 (Protocol V1): Encoded receipt decode is fail-closed ---
+    //
+    // GetTransactionReceiptResponse now carries Encoded<TransactionReceipt>
+    // (CBOR bytes, base64 in JSON). convert_receipt_response decodes exactly
+    // and fails closed on malformed CBOR, trailing bytes, wrong type, and
+    // empty payload. It never tries random decoders; the pinned Encoded type
+    // is the capability.
+
+    /// A well-formed CBOR-encoded receipt decodes through the wire seam.
+    #[test]
+    fn encoded_receipt_round_trips_through_wire_seam() {
+        let receipt = make_receipt(FinalizeOutcome::Commit, Vec::new(), 7);
+        let encoded = Encoded::encode(&receipt).expect("encodes");
+        let response = GetTransactionReceiptResponse { receipt: encoded };
+        let id = transaction_id(&"88".repeat(32));
+        let converted =
+            super::convert_receipt_response(&response, &id, &network()).expect("decodes");
+        assert_eq!(converted.ledger_position(), Some(7));
+    }
+
+    /// Malformed CBOR bytes are rejected, never salvaged.
+    #[test]
+    fn malformed_encoded_receipt_is_rejected() {
+        let response = GetTransactionReceiptResponse {
+            receipt: Encoded::from_bytes(vec![0xff, 0xff, 0xff]),
+        };
+        let id = transaction_id(&"89".repeat(32));
+        assert_eq!(
+            super::convert_receipt_response(&response, &id, &network()),
+            Err(crate::errors::ReceiptConversionError::MalformedEncodedReceipt)
+        );
+    }
+
+    /// Trailing bytes after a valid CBOR value are rejected (exact decode).
+    #[test]
+    fn trailing_bytes_after_encoded_receipt_are_rejected() {
+        let receipt = make_receipt(FinalizeOutcome::Commit, Vec::new(), 8);
+        let mut bytes = Encoded::encode(&receipt).expect("encodes").into_bytes();
+        bytes.push(0x00);
+        let response = GetTransactionReceiptResponse {
+            receipt: Encoded::from_bytes(bytes),
+        };
+        let id = transaction_id(&"8a".repeat(32));
+        assert!(super::convert_receipt_response(&response, &id, &network()).is_err());
+    }
+
+    /// An empty payload is rejected.
+    #[test]
+    fn empty_encoded_receipt_is_rejected() {
+        let response = GetTransactionReceiptResponse {
+            receipt: Encoded::from_bytes(Vec::new()),
+        };
+        let id = transaction_id(&"8b".repeat(32));
+        assert!(super::convert_receipt_response(&response, &id, &network()).is_err());
     }
 }
