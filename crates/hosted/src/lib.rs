@@ -912,6 +912,45 @@ async fn admin_open_voting(
     }))).into_response()
 }
 
+// ---------- Public enrollment status (read-only, no secrets exposed) ----------
+
+#[derive(Debug, Serialize)]
+struct PublicEnrollmentInfoBody {
+    election_id: String,
+    /// "DRAFT" | "ENROLLMENT_OPEN" | "REGISTRY_FROZEN"
+    eligibility_state: String,
+    /// Only present when REGISTRY_FROZEN; enables browser-side commitment verification.
+    registry_commitment_hex: Option<String>,
+    enrolled_count: Option<i64>,
+    authorized_slot_count: i64,
+}
+
+async fn public_enrollment_info(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let (registry_commitment_hex, enrolled_count) = if draft.eligibility_state == "REGISTRY_FROZEN" {
+        match state.storage.get_frozen_registry(&id) {
+            Ok(Some(f)) => (Some(f.registry_commitment_hex), Some(f.enrolled_count)),
+            _ => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+    Json(PublicEnrollmentInfoBody {
+        election_id: id,
+        eligibility_state: draft.eligibility_state,
+        registry_commitment_hex,
+        enrolled_count,
+        authorized_slot_count: draft.authorized_slot_count,
+    }).into_response()
+}
+
 // ---------- Public enrollment endpoint ----------
 
 #[derive(Debug, Deserialize)]
@@ -1187,6 +1226,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/receipt/{receipt_id}", get(get_receipt))
         .route("/api/v1/elections/{id}/results", get(get_results))
         .route("/api/v1/elections/{id}/archive", get(get_archive))
+        .route("/api/v1/elections/{id}/enrollment-info", get(public_enrollment_info))
         .route("/api/v1/elections/{id}/enroll", post(enroll_voter))
         .route("/api/v1/ootle/status", get(ootle_status))
         .with_state(state.clone())

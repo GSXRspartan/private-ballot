@@ -8,5 +8,14 @@ export default defineConfig({
       "/health": "http://127.0.0.1:8788",
     },
   },
-  build: { outDir: "dist", sourcemap: false },
+  build: {
+    outDir: "dist",
+    sourcemap: false,
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        enroll: "enroll.html",
+      },
+    },
+  },
 });
