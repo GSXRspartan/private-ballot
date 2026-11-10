@@ -1046,3 +1046,110 @@ async fn synthetic_full_election_3slots_enroll_2_freeze_vote_finalize() {
     assert!(verify_archive_dir_for_test(&dir), "desktop verifier must pass 3-slot synthetic election archive");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── Concurrent enrollment race tests ──────────────────────────────────────────
+
+#[tokio::test]
+async fn concurrent_same_invitation_race_no_double_enrollment() {
+    // Two requests racing with the SAME invitation + SAME key.
+    // The ingest_lock serializes them. Required outcome:
+    //   - exactly one enrolled credential
+    //   - exactly one consumed slot
+    //   - both callers receive a safe logical outcome (CREATED or OK/idempotent)
+    //   - no server error (5xx)
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "concurrent-same-inv";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let key_x = enroll_key(1);
+
+    let (pub1, pub2) = (routers.public.clone(), routers.public.clone());
+    let (sec1, sec2) = (secret.clone(), secret.clone());
+    let (k1, k2) = (key_x.clone(), key_x.clone());
+    let eid1 = election_id.to_owned();
+    let eid2 = election_id.to_owned();
+
+    // Race: both spawn at the same time and compete for ingest_lock
+    let h1 = tokio::spawn(async move { enroll(&pub1, &eid1, &sec1, &k1).await });
+    let h2 = tokio::spawn(async move { enroll(&pub2, &eid2, &sec2, &k2).await });
+    let (r1, r2) = tokio::join!(h1, h2);
+    let (s1, v1) = r1.unwrap_or_else(|_| panic!("join h1"));
+    let (s2, v2) = r2.unwrap_or_else(|_| panic!("join h2"));
+
+    // Both must be safe outcomes (no 5xx)
+    assert!(s1.is_success() || s1 == axum::http::StatusCode::CONFLICT,
+        "caller 1 must get a safe outcome, got {s1}: {v1}");
+    assert!(s2.is_success() || s2 == axum::http::StatusCode::CONFLICT,
+        "caller 2 must get a safe outcome, got {s2}: {v2}");
+    // At least one CREATED
+    assert!(s1 == axum::http::StatusCode::CREATED || s2 == axum::http::StatusCode::CREATED,
+        "at least one caller must get CREATED: {s1} {v1} / {s2} {v2}");
+    // No double enrollment: exactly 1 credential
+    let creds = storage.list_enrolled_credentials(election_id).unwrap();
+    assert_eq!(creds.len(), 1, "exactly one credential must be enrolled after same-invitation race");
+    // Exactly 1 slot consumed
+    let slots2 = storage.list_slots(election_id).unwrap();
+    assert_eq!(slots2.iter().filter(|s| s.consumed).count(), 1,
+        "exactly one slot must be consumed after same-invitation race");
+}
+
+#[tokio::test]
+async fn concurrent_different_invitations_same_key_slot_safety() {
+    // Two requests racing with DIFFERENT invitations but the SAME public key.
+    // Required outcome:
+    //   - exactly one credential enrolled
+    //   - exactly one slot consumed
+    //   - losing slot remains UNCONSUMED and its invitation remains usable
+    //   - after the race, the losing invitation can enroll a DIFFERENT key (critical)
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "concurrent-diff-inv";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    assert_eq!(slots.len(), 2);
+    let secret_a = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let secret_b = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    let key_x = enroll_key(5); // same key for both racing requests
+
+    let (pub1, pub2) = (routers.public.clone(), routers.public.clone());
+    let (sa_c, sb_c) = (secret_a.clone(), secret_b.clone());
+    let (kx1, kx2) = (key_x.clone(), key_x.clone());
+    let eid1 = election_id.to_owned();
+    let eid2 = election_id.to_owned();
+
+    // Race: inv A + key X vs inv B + key X
+    let h1 = tokio::spawn(async move { enroll(&pub1, &eid1, &sa_c, &kx1).await });
+    let h2 = tokio::spawn(async move { enroll(&pub2, &eid2, &sb_c, &kx2).await });
+    let (r1, r2) = tokio::join!(h1, h2);
+    let (s1, v1) = r1.unwrap_or_else(|_| panic!("join h1"));
+    let (s2, v2) = r2.unwrap_or_else(|_| panic!("join h2"));
+
+    // Exactly one CREATED, one CONFLICT
+    assert!(
+        (s1 == axum::http::StatusCode::CREATED && s2 == axum::http::StatusCode::CONFLICT) ||
+        (s2 == axum::http::StatusCode::CREATED && s1 == axum::http::StatusCode::CONFLICT),
+        "exactly one CREATED and one CONFLICT required: {s1}:{v1} / {s2}:{v2}"
+    );
+    // Exactly 1 credential enrolled
+    let creds = storage.list_enrolled_credentials(election_id).unwrap();
+    assert_eq!(creds.len(), 1, "exactly one credential enrolled after different-invitation race");
+    // Exactly 1 slot consumed (the losing slot must be UNCONSUMED)
+    let slots2 = storage.list_slots(election_id).unwrap();
+    let consumed: Vec<_> = slots2.iter().filter(|s| s.consumed).collect();
+    assert_eq!(consumed.len(), 1, "exactly one slot consumed after different-invitation race");
+
+    // The winning credential is key X; identify which invitation won and which lost
+    // The losing invitation must remain usable for enrolling a DIFFERENT key (key Y)
+    let key_y = enroll_key(6);
+    // Determine losing secret: whichever invitation's slot was NOT consumed
+    let losing_slot_id = slots2.iter().find(|s| !s.consumed).map(|s| s.slot_id.clone()).unwrap();
+    let losing_secret = if slots[0].slot_id == losing_slot_id { &secret_a } else { &secret_b };
+    let (sy, vy) = enroll(&routers.public, election_id, losing_secret, &key_y).await;
+    assert_eq!(sy, axum::http::StatusCode::CREATED,
+        "losing slot must remain enrollable after race: {vy}");
+    // Now 2 credentials enrolled total (key X from winner + key Y from losing slot)
+    let creds2 = storage.list_enrolled_credentials(election_id).unwrap();
+    assert_eq!(creds2.len(), 2, "total 2 credentials after using losing slot");
+}
