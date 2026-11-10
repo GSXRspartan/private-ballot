@@ -665,8 +665,10 @@ async fn freeze_immutability_no_enrollment_after_freeze() {
     let election_id = "enroll-freeze-immut";
     create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
     let slots = storage.list_slots(election_id).unwrap();
-    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
-    let (s1, _) = enroll(&routers.public, election_id, &secret, &enroll_key(1)).await;
+    // Issue invitation for slot[1] BEFORE freeze so we can try to enroll with it after.
+    let secret_slot1 = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let secret_slot2_pre = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    let (s1, _) = enroll(&routers.public, election_id, &secret_slot1, &enroll_key(1)).await;
     assert_eq!(s1, axum::http::StatusCode::CREATED);
     // Freeze
     let (sf, tf) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
@@ -674,10 +676,14 @@ async fn freeze_immutability_no_enrollment_after_freeze() {
     // Double-freeze must fail
     let (sf2, tf2) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(sf2, axum::http::StatusCode::CONFLICT, "double-freeze: {tf2}");
-    // Enrollment after freeze must fail
-    let secret2 = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
-    let (se, te) = enroll(&routers.public, election_id, &secret2, &enroll_key(2)).await;
-    assert_eq!(se, axum::http::StatusCode::CONFLICT, "enrollment after freeze: {te}");
+    // Issuing a NEW invitation after freeze must fail (state is REGISTRY_FROZEN)
+    let (si, ti) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/invitations"),
+        Some(serde_json::json!({"slot_id": &slots[1].slot_id}).to_string()),
+        &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(si, axum::http::StatusCode::CONFLICT, "post-freeze invitation issue should fail: {ti}");
+    // Enrolling with an invitation issued BEFORE freeze must also fail (state is REGISTRY_FROZEN)
+    let (se, te) = enroll(&routers.public, election_id, &secret_slot2_pre, &enroll_key(2)).await;
+    assert_eq!(se, axum::http::StatusCode::CONFLICT, "enrollment after freeze with pre-freeze invitation: {te}");
 }
 
 #[tokio::test]
@@ -728,4 +734,315 @@ async fn void_and_reissue_invitation() {
     // New secret can enroll
     let (sn, tn) = enroll(&routers.public, election_id, &secret2, &enroll_key(1)).await;
     assert_eq!(sn, axum::http::StatusCode::CREATED, "reissued enrollment: {tn}");
+}
+
+// ── Additional spec-required security invariant tests ─────────────────────────
+
+#[tokio::test]
+async fn wrong_election_invitation_rejected() {
+    // An invitation for election A used in election B must be rejected.
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_a = "enroll-wrong-election-a";
+    let election_b = "enroll-wrong-election-b";
+    create_draft_and_open_enrollment(&routers.admin, election_a, &f.candidate_cbor, 1).await;
+    create_draft_and_open_enrollment(&routers.admin, election_b, &f.candidate_cbor, 1).await;
+    let slots_a = storage.list_slots(election_a).unwrap();
+    let secret_a = issue_invitation_for_slot(&routers.admin, election_a, &slots_a[0].slot_id).await;
+    // Use invitation from election A in election B → must fail with 401
+    let (s, v) = enroll(&routers.public, election_b, &secret_a, &enroll_key(1)).await;
+    assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED, "wrong-election invitation must be rejected: {v}");
+    // The same secret is valid in its own election A
+    let (s2, v2) = enroll(&routers.public, election_a, &secret_a, &enroll_key(1)).await;
+    assert_eq!(s2, axum::http::StatusCode::CREATED, "own-election invitation must succeed: {v2}");
+}
+
+#[test]
+fn deterministic_registry_commitment_and_domain_separation() {
+    use tari_cc_private_ballot_registry::{GovernancePublicKey, RegistryEntry, RegistrySnapshot,
+        VoterGovernanceKeyRegistrationV1, VoterKeyProvisioningV1};
+    use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
+    let p = Blake3HashProviderV1;
+    let key1 = point_bytes(1).to_vec();
+    let key2 = point_bytes(2).to_vec();
+    let key3 = point_bytes(3).to_vec();
+    let make_entry = |k: Vec<u8>| {
+        let gk = GovernancePublicKey::new(k).expect("gk");
+        let reg = VoterGovernanceKeyRegistrationV1::new(gk, VoterKeyProvisioningV1::GeneratedByVoter);
+        RegistryEntry::from_voter_registration(reg)
+    };
+    let entries1 = vec![make_entry(key1.clone()), make_entry(key2.clone())];
+    let entries2 = vec![make_entry(key1.clone()), make_entry(key2.clone())];
+    let snap1 = RegistrySnapshot::new(entries1).expect("snap1");
+    let snap2 = RegistrySnapshot::new(entries2).expect("snap2");
+    let commit1a = snap1.canonical_commitment(&p).expect("c1a");
+    let commit1b = snap1.canonical_commitment(&p).expect("c1b");
+    let commit2 = snap2.canonical_commitment(&p).expect("c2");
+    // Same inputs → same commitment (deterministic)
+    assert_eq!(commit1a.as_bytes(), commit1b.as_bytes(), "commitment must be deterministic");
+    assert_eq!(commit1a.as_bytes(), commit2.as_bytes(), "same entries → same commitment");
+    // Different entries → different commitment
+    let entries3 = vec![make_entry(key1.clone()), make_entry(key3.clone())];
+    let snap3 = RegistrySnapshot::new(entries3).expect("snap3");
+    let commit3 = snap3.canonical_commitment(&p).expect("c3");
+    assert_ne!(commit1a.as_bytes(), commit3.as_bytes(), "different entries → different commitment");
+    // Single entry → different from two-entry
+    let entries4 = vec![make_entry(key1.clone())];
+    let snap4 = RegistrySnapshot::new(entries4).expect("snap4");
+    let commit4 = snap4.canonical_commitment(&p).expect("c4");
+    assert_ne!(commit1a.as_bytes(), commit4.as_bytes(), "different count → different commitment");
+    // Domain separation: commitment must differ from raw BLAKE3 of the registry CBOR bytes
+    let cbor1 = snap1.to_canonical_cbor().expect("cbor");
+    let raw_hash = {
+        use tari_cc_private_ballot_protocol::HashProvider;
+        p.hash(&cbor1)
+    };
+    assert_ne!(commit1a.as_bytes(), &raw_hash, "commitment must use domain separation, not raw BLAKE3");
+}
+
+#[tokio::test]
+async fn voting_before_election_opened_is_rejected() {
+    // Ballot submission to an election in ENROLLMENT_OPEN or REGISTRY_FROZEN
+    // state must fail because the election record doesn't exist yet in the
+    // elections table (created only by admin_open_voting).
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-vote-before-open";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 1).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let (s1, _) = enroll(&routers.public, election_id, &secret, &enroll_key(1)).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    // Before freeze: no election record → 404
+    let pkg = serde_json::json!({"receipt_id": "test-r-001", "package_cbor_hex": "0000", "api_version": "v1"}).to_string();
+    let (sv1, tv1) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(pkg.clone()), &[("content-type", "application/json")]).await;
+    assert_eq!(sv1, axum::http::StatusCode::NOT_FOUND, "ballot before freeze must 404: {tv1}");
+    // Freeze but don't open voting: still 404
+    let (sf, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK);
+    let (sv2, tv2) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(pkg), &[("content-type", "application/json")]).await;
+    assert_eq!(sv2, axum::http::StatusCode::NOT_FOUND, "ballot before open-voting must 404: {tv2}");
+}
+
+#[tokio::test]
+async fn unenrolled_credential_ballot_rejected() {
+    // A ballot produced for a registry that doesn't match the enrolled registry
+    // must be rejected (wrong manifest hash / wrong commitment).
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-unenrolled-reject";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 1).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    // Enroll only key 1 (scalar 1)
+    let (s1, _) = enroll(&routers.public, election_id, &secret, &enroll_key(1)).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    let (sf, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK);
+    let (sv, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-voting"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED);
+    // Build a ballot using the FIXTURE registry (which has keys 1,2,3) for key 2.
+    // The enrolled election uses a 1-entry registry for key 1 → different commitment →
+    // different manifest hash → wrong_election rejection.
+    let pkg_unenrolled = make_package(&f, 2, b"candidate-a"); // key 2 is in fixture but not enrolled
+    let body = serde_json::json!({"receipt_id": "unenrolled-r-001", "package_cbor_hex": hex_encode(&pkg_unenrolled), "api_version": "v1"}).to_string();
+    let (sr, tr) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body), &[("content-type", "application/json")]).await;
+    // The package is bound to a different manifest (different registry commitment) → wrong_election
+    assert_eq!(sr, axum::http::StatusCode::UNPROCESSABLE_ENTITY, "unenrolled credential ballot must be rejected: {tr}");
+    assert!(tr.contains("wrong_election") || tr.contains("ballot_invalid"), "wrong rejection code: {tr}");
+    // Confirm the enrolled key CAN vote successfully
+    let loaded_election = storage.get_election(election_id).unwrap().unwrap();
+    let manifest = ElectionManifest::from_canonical_cbor(&loaded_election.manifest_cbor).unwrap();
+    let candidates = CandidateSet::from_canonical_cbor(&loaded_election.candidate_cbor).unwrap();
+    let registry = tari_cc_private_ballot_registry::RegistrySnapshot::from_canonical_cbor(&loaded_election.registry_cbor).unwrap();
+    let p = Blake3HashProviderV1;
+    let payload = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-a")], &candidates, manifest.approval_limits()).unwrap();
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&registry, &p).unwrap();
+    let statement = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload, &p).unwrap();
+    let proof = prove_tari_triptych_prototype_v1(&statement, &verifier, &secret_scalar(1)).unwrap();
+    let mh = manifest.canonical_hash(&p).unwrap();
+    let pkg_enrolled = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh,
+        proof_suite_id: manifest.proof_suite_id().to_owned(), proof, payload,
+    }).unwrap().to_canonical_cbor().unwrap();
+    let body2 = serde_json::json!({"receipt_id": "enrolled-r-001", "package_cbor_hex": hex_encode(&pkg_enrolled), "api_version": "v1"}).to_string();
+    let (sa, ta) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body2), &[("content-type", "application/json")]).await;
+    assert_eq!(sa, axum::http::StatusCode::CREATED, "enrolled key must vote successfully: {ta}");
+}
+
+#[tokio::test]
+async fn two_credentials_from_two_slots_can_both_vote() {
+    // Two separate credentials from two separate slots may each cast one vote.
+    // This is the explicit Sybil-boundary proof: ONE ENROLLED CREDENTIAL, ONE ACCEPTED VOTE.
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-two-slots-vote";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret_a = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let secret_b = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    // Enroll two distinct credentials
+    let (s1, _) = enroll(&routers.public, election_id, &secret_a, &enroll_key(1)).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    let (s2, _) = enroll(&routers.public, election_id, &secret_b, &enroll_key(2)).await;
+    assert_eq!(s2, axum::http::StatusCode::CREATED);
+    // Freeze and open voting
+    let (sf, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK);
+    let (sv, tv) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-voting"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{tv}");
+    // Both credentials vote using the enrolled registry
+    let loaded = storage.get_election(election_id).unwrap().unwrap();
+    let manifest = ElectionManifest::from_canonical_cbor(&loaded.manifest_cbor).unwrap();
+    let candidates = CandidateSet::from_canonical_cbor(&loaded.candidate_cbor).unwrap();
+    let registry = tari_cc_private_ballot_registry::RegistrySnapshot::from_canonical_cbor(&loaded.registry_cbor).unwrap();
+    let p = Blake3HashProviderV1;
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&registry, &p).unwrap();
+    let mh = manifest.canonical_hash(&p).unwrap();
+    // Credential A votes
+    let payload_a = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-a")], &candidates, manifest.approval_limits()).unwrap();
+    let stmt_a = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_a, &p).unwrap();
+    let proof_a = prove_tari_triptych_prototype_v1(&stmt_a, &verifier, &secret_scalar(1)).unwrap();
+    let pkg_a = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh.clone(), proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_a, payload: payload_a }).unwrap().to_canonical_cbor().unwrap();
+    let (sa, ta) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "two-slots-r-a", "package_cbor_hex": hex_encode(&pkg_a), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(sa, axum::http::StatusCode::CREATED, "credential A must vote: {ta}");
+    // Credential B votes
+    let payload_b = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-b")], &candidates, manifest.approval_limits()).unwrap();
+    let stmt_b = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_b, &p).unwrap();
+    let proof_b = prove_tari_triptych_prototype_v1(&stmt_b, &verifier, &secret_scalar(2)).unwrap();
+    let pkg_b = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh.clone(), proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_b, payload: payload_b }).unwrap().to_canonical_cbor().unwrap();
+    let (sb, tb) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "two-slots-r-b", "package_cbor_hex": hex_encode(&pkg_b), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(sb, axum::http::StatusCode::CREATED, "credential B must vote: {tb}");
+    // Second attempt by A is rejected (duplicate nullifier)
+    let payload_a2 = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-c")], &candidates, manifest.approval_limits()).unwrap();
+    let stmt_a2 = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_a2, &p).unwrap();
+    let proof_a2 = prove_tari_triptych_prototype_v1(&stmt_a2, &verifier, &secret_scalar(1)).unwrap();
+    let pkg_a2 = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh, proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_a2, payload: payload_a2 }).unwrap().to_canonical_cbor().unwrap();
+    let (sc, tc) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "two-slots-r-a2", "package_cbor_hex": hex_encode(&pkg_a2), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(sc, axum::http::StatusCode::CONFLICT, "credential A second vote must be rejected: {tc}");
+    assert!(tc.contains("duplicate_nullifier"), "{tc}");
+    assert_eq!(storage.list_ballots(election_id).unwrap().len(), 2, "exactly 2 ballots accepted");
+}
+
+#[tokio::test]
+async fn synthetic_full_election_3slots_enroll_2_freeze_vote_finalize() {
+    // Full synthetic election: 3 authorized slots, A and B enroll, C does not.
+    // Freeze at 2/3. A votes, second A proof rejected, B votes. Finalize.
+    // Document: ONE ENROLLED CREDENTIAL, ONE ACCEPTED VOTE PER ELECTION.
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-synth-3slot";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 3).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    assert_eq!(slots.len(), 3, "3 authorized slots must be created");
+    let secret_a = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let secret_b = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    // Slot C: invitation issued but voter never enrolls
+    let _secret_c = issue_invitation_for_slot(&routers.admin, election_id, &slots[2].slot_id).await;
+    // Enroll A and B; C left unused
+    let (sa, _) = enroll(&routers.public, election_id, &secret_a, &enroll_key(1)).await;
+    assert_eq!(sa, axum::http::StatusCode::CREATED);
+    let (sb, _) = enroll(&routers.public, election_id, &secret_b, &enroll_key(2)).await;
+    assert_eq!(sb, axum::http::StatusCode::CREATED);
+    // Check enrollment status: 2/3 enrolled
+    let (ss, sb_status) = req(routers.admin.clone(), "GET", &format!("/api/v1/admin/elections/{election_id}/enrollment"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(ss, axum::http::StatusCode::OK);
+    let status_v: serde_json::Value = serde_json::from_str(&sb_status).unwrap();
+    assert_eq!(status_v["enrolled_count"], 2);
+    assert_eq!(status_v["authorized_slot_count"], 3);
+    // Freeze at 2/3
+    let (sf, tf) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{tf}");
+    let freeze_v: serde_json::Value = serde_json::from_str(&tf).unwrap();
+    assert_eq!(freeze_v["enrolled_count"], 2);
+    assert_eq!(freeze_v["authorized_slot_count"], 3);
+    // Open voting
+    let (sv, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-voting"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED);
+    let loaded = storage.get_election(election_id).unwrap().unwrap();
+    let manifest = ElectionManifest::from_canonical_cbor(&loaded.manifest_cbor).unwrap();
+    let candidates = CandidateSet::from_canonical_cbor(&loaded.candidate_cbor).unwrap();
+    let registry = tari_cc_private_ballot_registry::RegistrySnapshot::from_canonical_cbor(&loaded.registry_cbor).unwrap();
+    // Registry has exactly 2 members (A and B, C not enrolled)
+    assert_eq!(registry.entries().len(), 2, "registry must have exactly 2 enrolled members");
+    let p = Blake3HashProviderV1;
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&registry, &p).unwrap();
+    let mh = manifest.canonical_hash(&p).unwrap();
+    // A votes (device 1)
+    let payload_a = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-a")], &candidates, manifest.approval_limits()).unwrap();
+    let stmt_a = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_a, &p).unwrap();
+    let proof_a1 = prove_tari_triptych_prototype_v1(&stmt_a, &verifier, &secret_scalar(1)).unwrap();
+    let pkg_a1 = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh.clone(), proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_a1, payload: payload_a.clone() }).unwrap().to_canonical_cbor().unwrap();
+    let (ra1, ta1) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "synth-a1", "package_cbor_hex": hex_encode(&pkg_a1), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(ra1, axum::http::StatusCode::CREATED, "A first vote: {ta1}");
+    // A votes again (device 2, new proof, same credential) → duplicate_nullifier
+    let stmt_a2 = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_a, &p).unwrap();
+    let proof_a2 = prove_tari_triptych_prototype_v1(&stmt_a2, &verifier, &secret_scalar(1)).unwrap();
+    let pkg_a2_bytes = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh.clone(), proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_a2, payload: payload_a }).unwrap().to_canonical_cbor().unwrap();
+    assert_ne!(pkg_a1, pkg_a2_bytes, "proof bytes should differ (randomized Triptych); nullifier identical");
+    let (ra2, ta2) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "synth-a2", "package_cbor_hex": hex_encode(&pkg_a2_bytes), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(ra2, axum::http::StatusCode::CONFLICT, "A second vote must be rejected: {ta2}");
+    assert!(ta2.contains("duplicate_nullifier"), "{ta2}");
+    // B votes
+    let payload_b = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-b")], &candidates, manifest.approval_limits()).unwrap();
+    let stmt_b = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload_b, &p).unwrap();
+    let proof_b = prove_tari_triptych_prototype_v1(&stmt_b, &verifier, &secret_scalar(2)).unwrap();
+    let pkg_b = BallotPackageV1::new(BallotPackageV1Input { protocol_version: PROTOCOL_VERSION_V1, manifest_hash: mh, proof_suite_id: manifest.proof_suite_id().to_owned(), proof: proof_b, payload: payload_b }).unwrap().to_canonical_cbor().unwrap();
+    let (rb, tb) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(serde_json::json!({"receipt_id": "synth-b", "package_cbor_hex": hex_encode(&pkg_b), "api_version": "v1"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(rb, axum::http::StatusCode::CREATED, "B vote: {tb}");
+    // Close and finalize
+    let (rc, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/close"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(rc, axum::http::StatusCode::OK);
+    let (rfin, tfin) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/finalize"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(rfin, axum::http::StatusCode::OK, "{tfin}");
+    // Results: exactly 2 accepted ballots (A and B); C never voted
+    let (rres, tres) = req(routers.public.clone(), "GET", &format!("/api/v1/elections/{election_id}/results"), None, &[]).await;
+    assert_eq!(rres, axum::http::StatusCode::OK, "{tres}");
+    let results: serde_json::Value = serde_json::from_str(&tres).unwrap();
+    assert_eq!(results["accepted_ballots"], 2, "exactly 2 votes accepted (C never enrolled/voted)");
+    // Archive endpoint: verify the archive can be generated and contains the frozen registry
+    let (rar, tar) = req(routers.public.clone(), "GET", &format!("/api/v1/elections/{election_id}/archive"), None, &[]).await;
+    assert_eq!(rar, axum::http::StatusCode::OK, "{tar}");
+    let archive: serde_json::Value = serde_json::from_str(&tar).unwrap();
+    // Archive must contain voter_registry.cbor
+    let files = archive["files"].as_array().expect("files array");
+    assert!(files.iter().any(|f| f["path"].as_str().unwrap_or("").contains("voter-registry")), "archive must include voter registry");
+    // Write archive to temp dir and verify with EXISTING desktop verifier
+    let dir = std::env::temp_dir().join(format!("pb-synth-3slot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Reconstruct the enrolled election manifest (not the fixture manifest)
+    let enrolled_manifest = manifest;
+    struct TmpFixture { manifest_cbor: Vec<u8>, registry_cbor: Vec<u8>, candidate_cbor: Vec<u8>, election_id: String }
+    let enroll_fixture = TmpFixture {
+        manifest_cbor: enrolled_manifest.to_canonical_cbor().unwrap(),
+        registry_cbor: loaded.registry_cbor.clone(),
+        candidate_cbor: loaded.candidate_cbor.clone(),
+        election_id: election_id.to_owned(),
+    };
+    // Write archive files from endpoint response
+    {
+        use std::collections::BTreeMap;
+        use tari_cc_private_ballot_archive::{ArchiveFileCatalogV1, ArchiveFileEntryV1, ArchiveManifestV1, ArchivePathV1, ARCHIVE_MANIFEST_CANONICAL_PATH};
+        let p2 = Blake3HashProviderV1;
+        let mut map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+        for file in files {
+            let path = file["path"].as_str().unwrap_or("").to_owned();
+            let hex = file["cbor_hex"].as_str().unwrap_or("");
+            let bytes = crate::hex_decode(hex).unwrap();
+            map.insert(path, bytes);
+        }
+        let enroll_manifest_obj = tari_cc_private_ballot_ballot::ElectionManifest::from_canonical_cbor(&enroll_fixture.manifest_cbor).unwrap();
+        let mh2 = enroll_manifest_obj.canonical_hash(&p2).unwrap();
+        let entries2: Vec<ArchiveFileEntryV1> = map.iter().map(|(path, bytes)| ArchiveFileEntryV1::for_bytes(ArchivePathV1::new(path.clone()).unwrap(), &p2, bytes)).collect();
+        let catalog2 = ArchiveFileCatalogV1::new(entries2).unwrap();
+        let am = ArchiveManifestV1::finalized_for_provider(mh2, catalog2, &p2).unwrap();
+        let am_bytes = am.to_canonical_cbor().unwrap();
+        let submissions_dir = dir.join("submissions");
+        if map.keys().any(|k| k.starts_with("submissions")) { std::fs::create_dir_all(&submissions_dir).unwrap(); }
+        for (path, bytes) in &map { let fp = dir.join(path); if let Some(parent) = fp.parent() { std::fs::create_dir_all(parent).unwrap(); } std::fs::write(&fp, bytes).unwrap(); }
+        std::fs::write(dir.join(ARCHIVE_MANIFEST_CANONICAL_PATH), &am_bytes).unwrap();
+    }
+    assert!(verify_archive_dir_for_test(&dir), "desktop verifier must pass 3-slot synthetic election archive");
+    let _ = std::fs::remove_dir_all(&dir);
 }
