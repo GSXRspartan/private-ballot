@@ -436,3 +436,296 @@ async fn health_status_and_no_secret_echo() {
     assert!(!b3.contains("deadbeef"), "error must not echo package: {b3}");
     assert_eq!(s3, axum::http::StatusCode::NOT_FOUND);
 }
+
+// ── Enrollment tests ──────────────────────────────────────────────────────────
+
+use tari_cc_private_ballot_ballot::ElectionManifest;
+
+fn enroll_key(scalar: u64) -> String {
+    hex_encode(&point_bytes(scalar))
+}
+
+async fn create_draft_and_open_enrollment(
+    admin: &axum::Router,
+    election_id: &str,
+    candidate_cbor: &[u8],
+    slot_count: i64,
+) {
+    let body = serde_json::json!({
+        "election_id": election_id,
+        "candidate_cbor_hex": hex_encode(candidate_cbor),
+        "proof_suite_id": TARI_TRIPTYCH_PROOF_SUITE_ID_V1,
+        "min_approvals": 1,
+        "max_approvals": 1,
+        "allow_abstention": false,
+        "governance_revision": "test-rev-001",
+        "authorized_slot_count": slot_count,
+    }).to_string();
+    let (s, t) = req(admin.clone(), "POST", "/api/v1/admin/elections/draft", Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s, axum::http::StatusCode::CREATED, "create_draft: {t}");
+    let (s2, t2) = req(admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-enrollment"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s2, axum::http::StatusCode::OK, "open_enrollment: {t2}");
+}
+
+async fn issue_invitation_for_slot(admin: &axum::Router, election_id: &str, slot_id: &str) -> String {
+    let body = serde_json::json!({"slot_id": slot_id}).to_string();
+    let (s, t) = req(admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/invitations"), Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(s, axum::http::StatusCode::CREATED, "issue_invitation: {t}");
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+    v["invitation_secret_hex"].as_str().unwrap().to_owned()
+}
+
+async fn enroll(public: &axum::Router, election_id: &str, invitation_secret_hex: &str, public_key_hex: &str) -> (axum::http::StatusCode, serde_json::Value) {
+    let body = serde_json::json!({"invitation_secret_hex": invitation_secret_hex, "public_key_hex": public_key_hex}).to_string();
+    let (s, t) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/enroll"), Some(body), &[("content-type", "application/json")]).await;
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap_or_else(|_| serde_json::json!({"raw": t}));
+    (s, v)
+}
+
+#[tokio::test]
+async fn enrollment_happy_path_and_voting() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let admin = routers.admin.clone();
+    let public = routers.public.clone();
+    let election_id = "enroll-happy-001";
+
+    create_draft_and_open_enrollment(&admin, election_id, &f.candidate_cbor, 3).await;
+
+    // List slots to get slot IDs
+    let slots = storage.list_slots(election_id).unwrap();
+    assert_eq!(slots.len(), 3);
+    let slot_a = &slots[0].slot_id;
+    let slot_b = &slots[1].slot_id;
+
+    // Issue invitations
+    let secret_a = issue_invitation_for_slot(&admin, election_id, slot_a).await;
+    let secret_b = issue_invitation_for_slot(&admin, election_id, slot_b).await;
+
+    // Enroll voter A
+    let key_a = enroll_key(1);
+    let (s1, v1) = enroll(&public, election_id, &secret_a, &key_a).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{v1}");
+    assert_eq!(v1["idempotent"], false);
+
+    // Case A: same invitation + same key = idempotent retry
+    let (s2, v2) = enroll(&public, election_id, &secret_a, &key_a).await;
+    assert_eq!(s2, axum::http::StatusCode::OK, "Case A: {v2}");
+    assert_eq!(v2["idempotent"], true);
+
+    // Enroll voter B
+    let key_b = enroll_key(2);
+    let (s3, v3) = enroll(&public, election_id, &secret_b, &key_b).await;
+    assert_eq!(s3, axum::http::StatusCode::CREATED, "{v3}");
+
+    // Check enrollment status
+    let (ss, sb) = req(admin.clone(), "GET", &format!("/api/v1/admin/elections/{election_id}/enrollment"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(ss, axum::http::StatusCode::OK, "{sb}");
+    let status_v: serde_json::Value = serde_json::from_str(&sb).unwrap();
+    assert_eq!(status_v["enrolled_count"], 2);
+    assert_eq!(status_v["eligibility_state"], "ENROLLMENT_OPEN");
+
+    // Freeze registry
+    let (sf, tf) = req(admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{tf}");
+    let freeze_v: serde_json::Value = serde_json::from_str(&tf).unwrap();
+    assert_eq!(freeze_v["enrolled_count"], 2);
+    assert!(freeze_v["registry_commitment_hex"].as_str().unwrap().len() == 64);
+
+    // Open voting
+    let (sv, tv) = req(admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-voting"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{tv}");
+    let voting_v: serde_json::Value = serde_json::from_str(&tv).unwrap();
+    assert_eq!(voting_v["state"], "open");
+
+    // Verify enrollment is closed after freeze
+    let (se, te) = enroll(&public, election_id, &secret_b, &key_b).await;
+    assert_eq!(se, axum::http::StatusCode::CONFLICT, "enrollment after freeze should fail: {te}");
+
+    // Verify linkage scrubbed: slot_id and invitation_id removed from credentials
+    let creds = storage.list_enrolled_credentials(election_id).unwrap();
+    assert_eq!(creds.len(), 2);
+    for c in &creds {
+        assert!(c.slot_id.is_none(), "slot_id should be scrubbed after freeze");
+        assert!(c.invitation_id.is_none(), "invitation_id should be scrubbed after freeze");
+    }
+}
+
+#[tokio::test]
+async fn enrollment_idempotency_case_b_different_key() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-case-b";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    // Enroll key 1
+    let (s1, _) = enroll(&routers.public, election_id, &secret, &enroll_key(1)).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    // Case B: same invitation + different key
+    let (s2, v2) = enroll(&routers.public, election_id, &secret, &enroll_key(2)).await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "Case B: {v2}");
+    assert!(v2["code"].as_str().unwrap_or("").contains("credential_conflict"), "{v2}");
+    // Slot was consumed only once
+    let slots2 = storage.list_slots(election_id).unwrap();
+    assert_eq!(slots2.iter().filter(|s| s.consumed).count(), 1);
+}
+
+#[tokio::test]
+async fn enrollment_idempotency_case_c_duplicate_key_different_invitation() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-case-c";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret1 = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let secret2 = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    // Enroll key 1 with invitation 1
+    let key = enroll_key(1);
+    let (s1, _) = enroll(&routers.public, election_id, &secret1, &key).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    // Case C: different invitation, same public key → reject WITHOUT consuming second invitation
+    let (s2, v2) = enroll(&routers.public, election_id, &secret2, &key).await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "Case C: {v2}");
+    // Second invitation must NOT be consumed (slot 2 still ACTIVE)
+    let invs = storage.list_slots(election_id).unwrap();
+    // slot 0 consumed (from first enrollment), slot 1 NOT consumed
+    let consumed_count = invs.iter().filter(|s| s.consumed).count();
+    assert_eq!(consumed_count, 1, "second slot must not be consumed in Case C");
+    // Second invitation still ACTIVE - verify by trying to enroll with it successfully for a different key
+    let key2 = enroll_key(2);
+    let (s3, _) = enroll(&routers.public, election_id, &secret2, &key2).await;
+    assert_eq!(s3, axum::http::StatusCode::CREATED, "second slot should still be enrollable after Case C rejection");
+}
+
+#[tokio::test]
+async fn cross_device_duplicate_vote_rejected() {
+    // After enrollment and open-voting, the same credential from two "devices"
+    // (same secret key) produces the same nullifier → second ballot is rejected.
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-dup-vote";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 1).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let pub_key = enroll_key(1);
+    let (s1, _) = enroll(&routers.public, election_id, &secret, &pub_key).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    // Freeze and open voting
+    let (sf, tf) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{tf}");
+    let (sv, tv) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/open-voting"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{tv}");
+    // Now build the manifest from open-voting response to create a ballot
+    // The election was opened with key 1 as the only enrolled credential.
+    // Build a ballot using the same election id.
+    let loaded_election = storage.get_election(election_id).unwrap().unwrap();
+    let manifest = ElectionManifest::from_canonical_cbor(&loaded_election.manifest_cbor).unwrap();
+    let candidates = CandidateSet::from_canonical_cbor(&loaded_election.candidate_cbor).unwrap();
+    let registry = tari_cc_private_ballot_registry::RegistrySnapshot::from_canonical_cbor(&loaded_election.registry_cbor).unwrap();
+    let p = Blake3HashProviderV1;
+    let payload = ApprovalBallotPayload::new(vec![candidate_id(b"candidate-a")], &candidates, manifest.approval_limits()).unwrap();
+    let verifier = build_tari_triptych_verifier_from_registry_v1(&registry, &p).unwrap();
+    let statement = tari_cc_private_ballot_verifier::reconstruct_approval_proof_statement(&manifest, &payload, &p).unwrap();
+    let secret_key = secret_scalar(1);
+    let proof = prove_tari_triptych_prototype_v1(&statement, &verifier, &secret_key).unwrap();
+    let mh = manifest.canonical_hash(&p).unwrap();
+    let pkg = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: mh,
+        proof_suite_id: manifest.proof_suite_id().to_owned(),
+        proof,
+        payload: payload.clone(),
+    }).unwrap();
+    let pkg_bytes = pkg.to_canonical_cbor().unwrap();
+    // "Device 1" submits ballot
+    let body1 = serde_json::json!({"receipt_id": "device1-receipt-001", "package_cbor_hex": hex_encode(&pkg_bytes), "api_version": "v1"}).to_string();
+    let (sa, _) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body1), &[("content-type", "application/json")]).await;
+    assert_eq!(sa, axum::http::StatusCode::CREATED, "first ballot should be accepted");
+    // "Device 2" submits the same proof (same nullifier, same credential, same election)
+    let proof2 = prove_tari_triptych_prototype_v1(&statement, &verifier, &secret_key).unwrap();
+    let pkg2 = BallotPackageV1::new(BallotPackageV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        manifest_hash: manifest.canonical_hash(&p).unwrap(),
+        proof_suite_id: manifest.proof_suite_id().to_owned(),
+        proof: proof2,
+        payload,
+    }).unwrap();
+    let pkg2_bytes = pkg2.to_canonical_cbor().unwrap();
+    let body2 = serde_json::json!({"receipt_id": "device2-receipt-002", "package_cbor_hex": hex_encode(&pkg2_bytes), "api_version": "v1"}).to_string();
+    let (sb, rb) = req(routers.public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body2), &[("content-type", "application/json")]).await;
+    assert_eq!(sb, axum::http::StatusCode::CONFLICT, "cross-device duplicate vote must be rejected: {rb}");
+    assert!(rb.contains("duplicate_nullifier"), "must report duplicate_nullifier: {rb}");
+}
+
+#[tokio::test]
+async fn freeze_immutability_no_enrollment_after_freeze() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-freeze-immut";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+    let (s1, _) = enroll(&routers.public, election_id, &secret, &enroll_key(1)).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED);
+    // Freeze
+    let (sf, tf) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{tf}");
+    // Double-freeze must fail
+    let (sf2, tf2) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/freeze"), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sf2, axum::http::StatusCode::CONFLICT, "double-freeze: {tf2}");
+    // Enrollment after freeze must fail
+    let secret2 = issue_invitation_for_slot(&routers.admin, election_id, &slots[1].slot_id).await;
+    let (se, te) = enroll(&routers.public, election_id, &secret2, &enroll_key(2)).await;
+    assert_eq!(se, axum::http::StatusCode::CONFLICT, "enrollment after freeze: {te}");
+}
+
+#[tokio::test]
+async fn invitation_secret_never_stored_server_side() {
+    // The server must never store the invitation plaintext in any storage field.
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-secret-storage";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 1).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let slot_id = &slots[0].slot_id;
+    // Issue an invitation and get the plaintext secret
+    let body = serde_json::json!({"slot_id": slot_id}).to_string();
+    let (_, t) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/invitations"), Some(body), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+    let v: serde_json::Value = serde_json::from_str(&t).unwrap();
+    let secret_hex = v["invitation_secret_hex"].as_str().unwrap().to_owned();
+    // Retrieve the stored invitation record
+    let invitation = storage.get_active_invitation_for_slot(slot_id).unwrap().unwrap();
+    // The stored verifier must NOT equal the secret
+    assert_ne!(invitation.verifier_hex, secret_hex, "invitation plaintext must not be stored as verifier");
+    // The stored verifier must equal the computed verifier from the secret
+    let secret_bytes = crate::hex_decode(&secret_hex).unwrap();
+    let computed_verifier = crate::invitation_verifier(&secret_bytes);
+    assert_eq!(invitation.verifier_hex, computed_verifier, "stored verifier must match computed verifier");
+    // The raw secret must have 256 bits of entropy (64 hex chars = 32 bytes)
+    assert_eq!(secret_hex.len(), 64, "invitation secret must be 32 bytes (64 hex chars)");
+}
+
+#[tokio::test]
+async fn void_and_reissue_invitation() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-void-reissue";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 1).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let slot_id = &slots[0].slot_id;
+    let secret1 = issue_invitation_for_slot(&routers.admin, election_id, slot_id).await;
+    // Void the invitation
+    let inv = storage.get_active_invitation_for_slot(slot_id).unwrap().unwrap();
+    let (sv, tv) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/invitations/{}/void", inv.invitation_id), None, &[("x-admin-token", "test-admin-token")]).await;
+    assert_eq!(sv, axum::http::StatusCode::OK, "{tv}");
+    // Voided secret can no longer enroll
+    let (se, te) = enroll(&routers.public, election_id, &secret1, &enroll_key(1)).await;
+    assert_eq!(se, axum::http::StatusCode::UNAUTHORIZED, "voided invitation: {te}");
+    // Reissue: issue a new invitation for the same slot
+    let secret2 = issue_invitation_for_slot(&routers.admin, election_id, slot_id).await;
+    assert_ne!(secret1, secret2, "reissued secret must differ");
+    // New secret can enroll
+    let (sn, tn) = enroll(&routers.public, election_id, &secret2, &enroll_key(1)).await;
+    assert_eq!(sn, axum::http::StatusCode::CREATED, "reissued enrollment: {tn}");
+}
