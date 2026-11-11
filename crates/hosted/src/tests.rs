@@ -30,7 +30,7 @@ use crate::{
     AppState, HostedConfig, InMemoryStorage, ORIGIN_TOKEN_HEADER, admin_router_with_state, hex_encode,
     router_with_state, test_config, verify_archive_dir_for_test,
 };
-use crate::storage::HostedStorage;
+use crate::storage::{EnrollmentFailpoint, HostedStorage};
 
 fn point_bytes(m: u64) -> [u8; 32] {
     (RISTRETTO_BASEPOINT_POINT * Scalar::from(m)).compress().to_bytes()
@@ -343,6 +343,91 @@ fn sqlite_storage_persists_and_enforces_uniqueness() {
     {
         let s2 = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen"));
         assert_eq!(s2.list_ballots("e1").map(|v| v.len()).unwrap_or(99), 1);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn seed_sqlite_enrollment(storage: &crate::SqliteStorage, election_id: &str) -> (String, String, String) {
+    storage.put_election_draft(crate::storage::ElectionDraftRecord {
+        election_id: election_id.to_owned(),
+        candidate_cbor: vec![1],
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        min_approvals: 1,
+        max_approvals: 1,
+        allow_abstention: true,
+        governance_revision: "rollback-test".to_owned(),
+        authorized_slot_count: 1,
+        external_roster_commitment_hex: None,
+        eligibility_state: "ENROLLMENT_OPEN".to_owned(),
+        created_at_ms: 1,
+    }).unwrap_or_else(|_| panic!("draft"));
+    let slot_id = storage.create_slots(election_id, 1, 1).unwrap_or_else(|_| panic!("slot"))[0].clone();
+    let verifier = format!("verifier-{election_id}");
+    let invitation_id = format!("invitation-{election_id}");
+    storage.insert_invitation(crate::storage::InvitationRecord {
+        invitation_id: invitation_id.clone(),
+        slot_id: slot_id.clone(),
+        election_id: election_id.to_owned(),
+        verifier_hex: verifier.clone(),
+        state: "ACTIVE".to_owned(),
+        created_at_ms: 1,
+    }).unwrap_or_else(|_| panic!("invitation"));
+    (slot_id, verifier, invitation_id)
+}
+
+fn assert_sqlite_enrollment_rolled_back(storage: &crate::SqliteStorage, election_id: &str, verifier: &str, public_key: &str) {
+    let invitation = storage.get_invitation_by_verifier(verifier).unwrap_or_else(|_| panic!("invitation lookup")).unwrap_or_else(|| panic!("invitation exists"));
+    assert_eq!(invitation.state, "ACTIVE", "invitation must roll back to ACTIVE");
+    let slots = storage.list_slots(election_id).unwrap_or_else(|_| panic!("slots"));
+    assert_eq!(slots.len(), 1);
+    assert!(!slots[0].consumed, "slot must roll back to unconsumed");
+    assert!(storage.get_enrolled_credential_by_key(election_id, public_key).unwrap_or_else(|_| panic!("credential lookup")).is_none(), "credential must be absent after rollback");
+}
+
+#[test]
+fn sqlite_enrollment_failure_injection_rolls_back_every_mutation() {
+    for failpoint in [
+        EnrollmentFailpoint::AfterInvitationMutation,
+        EnrollmentFailpoint::AfterSlotMutation,
+        EnrollmentFailpoint::BeforeCredentialInsertion,
+    ] {
+        let dir = std::env::temp_dir().join(format!("pb-hosted-enrollment-fail-{}-{:?}", std::process::id(), failpoint));
+        let _ = std::fs::remove_dir_all(&dir);
+        let db = dir.join("enrollment.db");
+        {
+            let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("open"));
+            let election_id = "rollback-election";
+            let (_slot_id, verifier, _invitation_id) = seed_sqlite_enrollment(&storage, election_id);
+            let public_key = "test-public-key";
+            storage.set_enrollment_failpoint(failpoint);
+            assert_eq!(storage.complete_enrollment(election_id, &verifier, public_key, 2), Err(crate::storage::StorageError::Db));
+            assert_sqlite_enrollment_rolled_back(&storage, election_id, &verifier, public_key);
+            storage.set_enrollment_failpoint(EnrollmentFailpoint::None);
+            assert!(matches!(storage.complete_enrollment(election_id, &verifier, public_key, 3), Ok(crate::storage::EnrollmentCompletion::Created(_))), "retry must succeed after rollback at {failpoint:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn sqlite_enrollment_rollback_survives_database_reopen() {
+    let dir = std::env::temp_dir().join(format!("pb-hosted-enrollment-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let db = dir.join("enrollment.db");
+    let election_id = "restart-rollback-election";
+    let verifier;
+    let public_key = "restart-public-key";
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("open"));
+        let (_slot_id, stored_verifier, _invitation_id) = seed_sqlite_enrollment(&storage, election_id);
+        verifier = stored_verifier;
+        storage.set_enrollment_failpoint(EnrollmentFailpoint::AfterSlotMutation);
+        assert_eq!(storage.complete_enrollment(election_id, &verifier, public_key, 2), Err(crate::storage::StorageError::Db));
+    }
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen"));
+        assert_sqlite_enrollment_rolled_back(&storage, election_id, &verifier, public_key);
+        assert!(matches!(storage.complete_enrollment(election_id, &verifier, public_key, 3), Ok(crate::storage::EnrollmentCompletion::Created(_))), "exact retry must succeed after database reopen");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -921,6 +921,8 @@ struct PublicEnrollmentInfoBody {
     eligibility_state: String,
     /// Only present when REGISTRY_FROZEN; enables browser-side commitment verification.
     registry_commitment_hex: Option<String>,
+    /// Canonical frozen registry bytes for independent browser/WASM verification.
+    registry_cbor_hex: Option<String>,
     enrolled_count: Option<i64>,
     authorized_slot_count: i64,
 }
@@ -934,18 +936,19 @@ async fn public_enrollment_info(
         Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
     };
-    let (registry_commitment_hex, enrolled_count) = if draft.eligibility_state == "REGISTRY_FROZEN" {
+    let (registry_commitment_hex, registry_cbor_hex, enrolled_count) = if draft.eligibility_state == "REGISTRY_FROZEN" {
         match state.storage.get_frozen_registry(&id) {
-            Ok(Some(f)) => (Some(f.registry_commitment_hex), Some(f.enrolled_count)),
-            _ => (None, None),
+            Ok(Some(f)) => (Some(f.registry_commitment_hex), Some(f.registry_cbor_hex), Some(f.enrolled_count)),
+            _ => (None, None, None),
         }
     } else {
-        (None, None)
+        (None, None, None)
     };
     Json(PublicEnrollmentInfoBody {
         election_id: id,
         eligibility_state: draft.eligibility_state,
         registry_commitment_hex,
+        registry_cbor_hex,
         enrolled_count,
         authorized_slot_count: draft.authorized_slot_count,
     }).into_response()
@@ -988,108 +991,27 @@ async fn enroll_voter(
         Ok(v) if !v.is_empty() => v,
         _ => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid public_key_hex"),
     };
-    // Validate enrollment is open
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    if draft.eligibility_state != "ENROLLMENT_OPEN" {
-        let code = if draft.eligibility_state == "REGISTRY_FROZEN" || draft.eligibility_state == "DRAFT" {
-            "enrollment_closed"
-        } else {
-            "enrollment_closed"
-        };
-        return error_response(StatusCode::CONFLICT, code, "enrollment is not open");
-    }
     // Validate public key fits as GovernancePublicKey
     if GovernancePublicKey::new(public_key_bytes.clone()).is_err() {
         return error_response(StatusCode::BAD_REQUEST, "invalid_request", "public_key_hex is not a valid governance key");
     }
-    // Look up invitation by verifier
     let verifier_hex = invitation_verifier(&secret_bytes);
+    let norm_key = hex_encode(&public_key_bytes);
+    // SQLite enforces cross-process atomicity; this also keeps the in-memory test
+    // storage's independently locked collections coherent.
     let _guard = state.ingest_lock.lock().unwrap_or_else(|e| e.into_inner());
-    let invitation = match state.storage.get_invitation_by_verifier(&verifier_hex) {
-        Ok(Some(inv)) => inv,
-        Ok(None) => return error_response(StatusCode::UNAUTHORIZED, "invalid_invitation", "invitation not found or already expired"),
+    let completion = match state.storage.complete_enrollment(&id, &verifier_hex, &norm_key, now_ms()) {
+        Ok(value) => value,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
     };
-    if invitation.election_id != id {
-        return error_response(StatusCode::UNAUTHORIZED, "invalid_invitation", "invitation is for a different election");
-    }
-    let norm_key = hex_encode(&public_key_bytes);
-    let now_ms = now_ms();
-    match invitation.state.as_str() {
-        "CONSUMED" => {
-            // Case A or B: check if the same key was already enrolled for this slot
-            match state.storage.get_enrolled_credential_by_slot(&id, &invitation.slot_id) {
-                Ok(Some(cred)) => {
-                    if cred.public_key_hex == norm_key {
-                        // Case A: idempotent retry — same key
-                        return (StatusCode::OK, Json(EnrollResponse {
-                            election_id: id,
-                            public_key_hex: norm_key,
-                            enrolled_at_ms: cred.enrolled_at_ms,
-                            idempotent: true,
-                        })).into_response();
-                    } else {
-                        // Case B: same invitation, different key
-                        return error_response(StatusCode::CONFLICT, "credential_conflict", "this invitation was already used to enroll a different credential");
-                    }
-                }
-                Ok(None) => {
-                    // Linkage scrubbed (after freeze) — invitation was consumed but linkage gone
-                    // This only happens if someone retries after freeze; treat as already enrolled
-                    return error_response(StatusCode::CONFLICT, "enrollment_closed", "registry has been frozen; enrollment is closed");
-                }
-                Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-            }
-        }
-        "VOIDED" => {
-            return error_response(StatusCode::UNAUTHORIZED, "invalid_invitation", "invitation has been voided");
-        }
-        "ACTIVE" => {
-            // Case C check: does this public key already exist for this election?
-            match state.storage.get_enrolled_credential_by_key(&id, &norm_key) {
-                Ok(Some(_)) => {
-                    // Case C: different invitation, key already enrolled → reject WITHOUT consuming
-                    return error_response(StatusCode::CONFLICT, "credential_conflict", "this credential is already enrolled in this election");
-                }
-                Ok(None) => {}
-                Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-            }
-            // Enroll: mark invitation CONSUMED, mark slot consumed, insert credential
-            match state.storage.set_invitation_state(&invitation.invitation_id, "ACTIVE", "CONSUMED") {
-                Ok(false) => return error_response(StatusCode::CONFLICT, "enrollment_race", "concurrent enrollment; retry"),
-                Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-                Ok(true) => {}
-            }
-            if let Err(_) = state.storage.mark_slot_consumed(&invitation.slot_id) {
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable");
-            }
-            let cred = storage::EnrolledCredentialRecord {
-                election_id: id.clone(),
-                public_key_hex: norm_key.clone(),
-                slot_id: Some(invitation.slot_id.clone()),
-                invitation_id: Some(invitation.invitation_id.clone()),
-                enrolled_at_ms: now_ms,
-            };
-            match state.storage.insert_enrolled_credential(cred) {
-                Ok(()) => {}
-                Err(storage::StorageError::DuplicatePublicKey) => {
-                    // Case D concurrent: lost the race, but key is now enrolled
-                    return error_response(StatusCode::CONFLICT, "credential_conflict", "this credential is already enrolled in this election");
-                }
-                Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-            }
-            (StatusCode::CREATED, Json(EnrollResponse {
-                election_id: id,
-                public_key_hex: norm_key,
-                enrolled_at_ms: now_ms,
-                idempotent: false,
-            })).into_response()
-        }
-        _ => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "invitation in unknown state"),
+    match completion {
+        storage::EnrollmentCompletion::Created(credential) => (StatusCode::CREATED, Json(EnrollResponse { election_id: id, public_key_hex: norm_key, enrolled_at_ms: credential.enrolled_at_ms, idempotent: false })).into_response(),
+        storage::EnrollmentCompletion::Idempotent(credential) => (StatusCode::OK, Json(EnrollResponse { election_id: id, public_key_hex: norm_key, enrolled_at_ms: credential.enrolled_at_ms, idempotent: true })).into_response(),
+        storage::EnrollmentCompletion::ElectionNotFound => error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
+        storage::EnrollmentCompletion::InvitationNotFound | storage::EnrollmentCompletion::WrongElection | storage::EnrollmentCompletion::InvitationVoided => error_response(StatusCode::UNAUTHORIZED, "invalid_invitation", "invitation not found, invalid, or voided"),
+        storage::EnrollmentCompletion::EnrollmentClosed => error_response(StatusCode::CONFLICT, "enrollment_closed", "enrollment is not open"),
+        storage::EnrollmentCompletion::CredentialConflict => error_response(StatusCode::CONFLICT, "credential_conflict", "invitation or credential is already enrolled"),
+        storage::EnrollmentCompletion::EnrollmentRace => error_response(StatusCode::CONFLICT, "enrollment_race", "concurrent enrollment; retry"),
     }
 }
 

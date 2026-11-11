@@ -16,6 +16,9 @@ use std::sync::Mutex;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
+
 // ── Election records (post-freeze, for voting) ──────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +229,14 @@ pub trait HostedStorage: Send + Sync {
     ) -> Result<Vec<EnrolledCredentialRecord>, StorageError>;
     fn count_enrolled_credentials(&self, election_id: &str) -> Result<i64, StorageError>;
     fn scrub_enrollment_linkage(&self, election_id: &str) -> Result<(), StorageError>;
+    /// Atomically validates and consumes an invitation, its slot, and a public credential.
+    fn complete_enrollment(
+        &self,
+        election_id: &str,
+        verifier_hex: &str,
+        public_key_hex: &str,
+        now_ms: i64,
+    ) -> Result<EnrollmentCompletion, StorageError>;
 
     // Frozen registry evidence
     fn put_frozen_registry(
@@ -236,6 +247,28 @@ pub trait HostedStorage: Send + Sync {
         &self,
         election_id: &str,
     ) -> Result<Option<FrozenRegistryRecord>, StorageError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnrollmentCompletion {
+    Created(EnrolledCredentialRecord),
+    Idempotent(EnrolledCredentialRecord),
+    ElectionNotFound,
+    InvitationNotFound,
+    WrongElection,
+    EnrollmentClosed,
+    InvitationVoided,
+    CredentialConflict,
+    EnrollmentRace,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnrollmentFailpoint {
+    None = 0,
+    AfterInvitationMutation = 1,
+    AfterSlotMutation = 2,
+    BeforeCredentialInsertion = 3,
 }
 
 // ── In-memory implementation (tests) ─────────────────────────────────────────
@@ -526,6 +559,52 @@ impl HostedStorage for InMemoryStorage {
         Ok(())
     }
 
+    fn complete_enrollment(
+        &self,
+        election_id: &str,
+        verifier_hex: &str,
+        public_key_hex: &str,
+        now_ms: i64,
+    ) -> Result<EnrollmentCompletion, StorageError> {
+        let draft = self.get_election_draft(election_id)?;
+        let Some(draft) = draft else {
+            return Ok(EnrollmentCompletion::ElectionNotFound);
+        };
+        if draft.eligibility_state != "ENROLLMENT_OPEN" {
+            return Ok(EnrollmentCompletion::EnrollmentClosed);
+        }
+        let invitation = match self.get_invitation_by_verifier(verifier_hex)? {
+            Some(invitation) => invitation,
+            None => return Ok(EnrollmentCompletion::InvitationNotFound),
+        };
+        if invitation.election_id != election_id { return Ok(EnrollmentCompletion::WrongElection); }
+        if invitation.state == "VOIDED" { return Ok(EnrollmentCompletion::InvitationVoided); }
+        if invitation.state == "CONSUMED" {
+            return Ok(match self.get_enrolled_credential_by_slot(election_id, &invitation.slot_id)? {
+                Some(credential) if credential.public_key_hex == public_key_hex => EnrollmentCompletion::Idempotent(credential),
+                Some(_) => EnrollmentCompletion::CredentialConflict,
+                None => EnrollmentCompletion::EnrollmentClosed,
+            });
+        }
+        if self.get_enrolled_credential_by_key(election_id, public_key_hex)?.is_some() {
+            return Ok(EnrollmentCompletion::CredentialConflict);
+        }
+        let slots = self.list_slots(election_id)?;
+        if !slots.iter().any(|slot| slot.slot_id == invitation.slot_id && !slot.consumed) {
+            return Ok(EnrollmentCompletion::EnrollmentRace);
+        }
+        if !self.set_invitation_state(&invitation.invitation_id, "ACTIVE", "CONSUMED")? {
+            return Ok(EnrollmentCompletion::EnrollmentRace);
+        }
+        self.mark_slot_consumed(&invitation.slot_id)?;
+        let credential = EnrolledCredentialRecord {
+            election_id: election_id.to_owned(), public_key_hex: public_key_hex.to_owned(),
+            slot_id: Some(invitation.slot_id), invitation_id: Some(invitation.invitation_id), enrolled_at_ms: now_ms,
+        };
+        self.insert_enrolled_credential(credential.clone())?;
+        Ok(EnrollmentCompletion::Created(credential))
+    }
+
     fn put_frozen_registry(&self, record: FrozenRegistryRecord) -> Result<(), StorageError> {
         let mut g = self.frozen.lock().unwrap_or_else(|e| e.into_inner());
         if g.contains_key(&record.election_id) {
@@ -578,6 +657,8 @@ fn map_rusqlite(e: &rusqlite::Error) -> StorageError {
 
 pub struct SqliteStorage {
     conn: Mutex<Connection>,
+    #[cfg(test)]
+    enrollment_failpoint: AtomicU8,
 }
 impl std::fmt::Debug for SqliteStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -605,6 +686,8 @@ impl SqliteStorage {
             .map_err(|_| StorageError::Db)?;
         let storage = Self {
             conn: Mutex::new(conn),
+            #[cfg(test)]
+            enrollment_failpoint: AtomicU8::new(EnrollmentFailpoint::None as u8),
         };
         storage.migrate()?;
         Ok(storage)
@@ -723,6 +806,16 @@ impl SqliteStorage {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_enrollment_failpoint(&self, failpoint: EnrollmentFailpoint) {
+        self.enrollment_failpoint.store(failpoint as u8, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn enrollment_failpoint_active(&self, failpoint: EnrollmentFailpoint) -> bool {
+        self.enrollment_failpoint.load(Ordering::SeqCst) == failpoint as u8
     }
 }
 
@@ -1232,6 +1325,68 @@ impl HostedStorage for SqliteStorage {
         )
         .map_err(|_| StorageError::Db)?;
         Ok(())
+    }
+
+    fn complete_enrollment(
+        &self,
+        election_id: &str,
+        verifier_hex: &str,
+        public_key_hex: &str,
+        now_ms: i64,
+    ) -> Result<EnrollmentCompletion, StorageError> {
+        let mut connection = self.lock();
+        // An IMMEDIATE transaction gives this enrollment attempt the writer lock before any
+        // validation or mutation, so every early return rolls back and leaves no partial state.
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| StorageError::Db)?;
+        let state: Option<String> = tx.query_row(
+            "SELECT eligibility_state FROM election_drafts WHERE election_id = ?1",
+            params![election_id], |row| row.get(0),
+        ).optional().map_err(|_| StorageError::Db)?;
+        let Some(state) = state else { return Ok(EnrollmentCompletion::ElectionNotFound); };
+        if state != "ENROLLMENT_OPEN" { return Ok(EnrollmentCompletion::EnrollmentClosed); }
+        let invitation: Option<InvitationRecord> = tx.query_row(
+            "SELECT invitation_id, slot_id, election_id, verifier_hex, state, created_at_ms FROM enrollment_invitations WHERE verifier_hex = ?1",
+            params![verifier_hex], |row| Ok(InvitationRecord { invitation_id: row.get(0)?, slot_id: row.get(1)?, election_id: row.get(2)?, verifier_hex: row.get(3)?, state: row.get(4)?, created_at_ms: row.get(5)? }),
+        ).optional().map_err(|_| StorageError::Db)?;
+        let invitation = match invitation { Some(value) => value, None => return Ok(EnrollmentCompletion::InvitationNotFound) };
+        if invitation.election_id != election_id { return Ok(EnrollmentCompletion::WrongElection); }
+        if invitation.state == "VOIDED" { return Ok(EnrollmentCompletion::InvitationVoided); }
+        let existing_for_slot: Option<EnrolledCredentialRecord> = tx.query_row(
+            "SELECT election_id, public_key_hex, slot_id, invitation_id, enrolled_at_ms FROM enrolled_credentials WHERE election_id = ?1 AND slot_id = ?2",
+            params![election_id, invitation.slot_id], |row| Ok(EnrolledCredentialRecord { election_id: row.get(0)?, public_key_hex: row.get(1)?, slot_id: row.get(2)?, invitation_id: row.get(3)?, enrolled_at_ms: row.get(4)? }),
+        ).optional().map_err(|_| StorageError::Db)?;
+        if invitation.state == "CONSUMED" {
+            return Ok(match existing_for_slot { Some(credential) if credential.public_key_hex == public_key_hex => EnrollmentCompletion::Idempotent(credential), Some(_) => EnrollmentCompletion::CredentialConflict, None => EnrollmentCompletion::EnrollmentClosed });
+        }
+        let key_exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM enrolled_credentials WHERE election_id = ?1 AND public_key_hex = ?2)",
+            params![election_id, public_key_hex], |row| row.get(0),
+        ).map_err(|_| StorageError::Db)?;
+        if key_exists { return Ok(EnrollmentCompletion::CredentialConflict); }
+        let slot_available: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM eligibility_slots WHERE slot_id = ?1 AND election_id = ?2 AND consumed = 0)",
+            params![invitation.slot_id, election_id], |row| row.get(0),
+        ).map_err(|_| StorageError::Db)?;
+        if !slot_available { return Ok(EnrollmentCompletion::EnrollmentRace); }
+        if tx.execute("UPDATE enrollment_invitations SET state = 'CONSUMED' WHERE invitation_id = ?1 AND state = 'ACTIVE'", params![invitation.invitation_id]).map_err(|_| StorageError::Db)? != 1 { return Ok(EnrollmentCompletion::EnrollmentRace); }
+        #[cfg(test)]
+        if self.enrollment_failpoint_active(EnrollmentFailpoint::AfterInvitationMutation) {
+            return Err(StorageError::Db);
+        }
+        if tx.execute("UPDATE eligibility_slots SET consumed = 1 WHERE slot_id = ?1 AND election_id = ?2 AND consumed = 0", params![invitation.slot_id, election_id]).map_err(|_| StorageError::Db)? != 1 { return Ok(EnrollmentCompletion::EnrollmentRace); }
+        #[cfg(test)]
+        if self.enrollment_failpoint_active(EnrollmentFailpoint::AfterSlotMutation) {
+            return Err(StorageError::Db);
+        }
+        let credential = EnrolledCredentialRecord { election_id: election_id.to_owned(), public_key_hex: public_key_hex.to_owned(), slot_id: Some(invitation.slot_id), invitation_id: Some(invitation.invitation_id), enrolled_at_ms: now_ms };
+        #[cfg(test)]
+        if self.enrollment_failpoint_active(EnrollmentFailpoint::BeforeCredentialInsertion) {
+            return Err(StorageError::Db);
+        }
+        tx.execute("INSERT INTO enrolled_credentials (election_id, public_key_hex, slot_id, invitation_id, enrolled_at_ms) VALUES (?1,?2,?3,?4,?5)", params![credential.election_id, credential.public_key_hex, credential.slot_id, credential.invitation_id, credential.enrolled_at_ms]).map_err(|e| map_rusqlite(&e))?;
+        tx.commit().map_err(|_| StorageError::Db)?;
+        Ok(EnrollmentCompletion::Created(credential))
     }
 
     fn put_frozen_registry(&self, record: FrozenRegistryRecord) -> Result<(), StorageError> {
