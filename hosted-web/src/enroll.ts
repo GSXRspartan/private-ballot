@@ -14,6 +14,7 @@
  */
 
 import init, {
+  compute_registry_commitment,
   generate_secret_key,
   public_key_for_secret,
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
@@ -28,12 +29,14 @@ type Step =
   | "enrolling"
   | "receipt"
   | "wait_freeze"
-  | "frozen";
+  | "frozen"
+  | "integrity_failure";
 
 type EnrollmentInfo = {
   election_id: string;
   eligibility_state: string;
   registry_commitment_hex?: string;
+  registry_cbor_hex?: string;
   enrolled_count?: number;
   authorized_slot_count: number;
 };
@@ -60,6 +63,7 @@ let publicKeyHex = "";
 let enrollResult: EnrollResult | null = null;
 let errorMsg = "";
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let registryVerificationError = "";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -234,13 +238,20 @@ function buildHtml(): string {
             <summary>Full registry commitment hex</summary>
             <pre class="mono">${esc(ei.registry_commitment_hex ?? "")}</pre>
           </details>
-          <p><small>Local WASM commitment verification is available once the WASM module is rebuilt
-          with the <code>compute_registry_commitment</code> export. The commitment shown above is
-          the server-provided value from the frozen registry record.</small></p>
+          <p class="ok"><strong>Registry verified locally with canonical Rust/WASM code.</strong></p>
           <p>Voting will open shortly. Keep your private credential safe.</p>
           <a href="/">Go to voting page →</a>
         </div>`;
     }
+
+    case "integrity_failure":
+      return `${notice}
+        <div class="card error" role="alert">
+          <h2>Registry integrity verification failed</h2>
+          <p>The frozen registry did not match its advertised commitment. Voting and proof generation are blocked for this registry.</p>
+          <p>${esc(registryVerificationError || "Unable to verify the frozen registry.")}</p>
+          <button id="btn-refresh">Refresh now</button>
+        </div>`;
   }
 }
 
@@ -273,6 +284,7 @@ function bind() {
         ?.addEventListener("click", () => pollFreezeStatus());
       break;
     case "wait_freeze":
+    case "integrity_failure":
       (document.getElementById("btn-refresh") as HTMLButtonElement)
         ?.addEventListener("click", () => pollFreezeStatus());
       startAutoPoll();
@@ -423,7 +435,14 @@ async function pollFreezeStatus() {
     if (res.ok) {
       enrollmentInfo = await res.json() as EnrollmentInfo;
       if (enrollmentInfo.eligibility_state === "REGISTRY_FROZEN") {
-        step = "frozen";
+        const local = parseWasm(compute_registry_commitment(enrollmentInfo.registry_cbor_hex ?? ""));
+        if (local.ok && local.registry_commitment_hex === enrollmentInfo.registry_commitment_hex) {
+          registryVerificationError = "";
+          step = "frozen";
+        } else {
+          registryVerificationError = String(local.error ?? "The local commitment does not match the advertised commitment.");
+          step = "integrity_failure";
+        }
       } else {
         step = "wait_freeze";
       }

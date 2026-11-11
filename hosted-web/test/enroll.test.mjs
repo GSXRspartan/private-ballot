@@ -65,12 +65,13 @@ test("no third-party runtime dependencies", () => {
   assert.equal(pkg.dependencies, undefined);
 });
 
-test("enroll.ts imports only WASM generate_secret_key and public_key_for_secret", () => {
+test("enroll.ts imports only credential and registry-verification WASM functions", () => {
   // Must NOT import create_ballot_package (private secret is passed to that fn in voting UI)
   assert.doesNotMatch(src, /create_ballot_package/, "enroll.ts must not import ballot creation");
-  // Must import the two safe WASM functions
+  // Must import the safe credential and canonical registry commitment functions.
   assert.match(src, /generate_secret_key/, "must import generate_secret_key");
   assert.match(src, /public_key_for_secret/, "must import public_key_for_secret");
+  assert.match(src, /compute_registry_commitment/, "must import canonical registry commitment function");
 });
 
 test("no console.log of secrets in enroll.ts", () => {
@@ -105,4 +106,11 @@ test("conflict and 401 errors handled without revealing internals", () => {
   assert.match(src, /status === 401/, "must handle 401");
   // enrollment_closed handled
   assert.match(src, /enrollment_closed/, "must handle enrollment_closed");
+});
+
+test("frozen registry is verified locally and mismatches fail closed", () => {
+  assert.match(src, /registry_cbor_hex/, "must obtain canonical frozen registry bytes");
+  assert.match(src, /compute_registry_commitment/, "must use WASM commitment computation");
+  assert.match(src, /integrity_failure/, "must show integrity failure state");
+  assert.match(src, /Voting and proof generation are blocked/, "must fail closed on mismatch");
 });

@@ -1,5 +1,6 @@
 import init, {
   create_ballot_package,
+  compute_registry_commitment,
   election_info,
   generate_secret_key,
   package_hash_hex,
@@ -13,6 +14,7 @@ type Pkg = {
   registry_cbor_hex: string;
   candidate_cbor_hex: string;
   manifest_hash_hex: string;
+  registry_commitment_hex: string;
   package_hash_hex: string;
   candidates: { id_hex: string; id_text: string; display_name: string }[];
 };
@@ -27,6 +29,7 @@ const app = document.getElementById("app") as HTMLElement;
 let pkg: Pkg | null = null;
 let secretHex = "";
 let lastSubmission: { receipt_id: string; body: string } | null = null;
+let packageIntegrityError = "";
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
@@ -47,7 +50,7 @@ function render() {
     <h2>1. Load election</h2>
     <input type="text" id="election-id" placeholder="election id" value="hosted-synthetic-001" />
     <button id="load">Load public package</button>
-    <div id="election-info">${pkg ? "Loaded" : "Not loaded"}</div>
+    <div id="election-info">${pkg ? "Registry verified locally" : esc(packageIntegrityError || "Not loaded")}</div>
   </div>
   <div class="card">
     <h2>2. Voter credential (memory only)</h2>
@@ -61,7 +64,7 @@ function render() {
   <div class="card">
     <h2>3. Ballot choice</h2>
     <div id="candidates">${pkg ? pkg.candidates.map((c) => `<label><input type="checkbox" value="${esc(c.id_hex)}" /> ${esc(c.display_name)} <span class="mono">${esc(c.id_text)}</span></label>`).join("<br/>") : "Load an election first"}</div>
-    <button id="create">Create ballot + proof locally</button>
+    <button id="create"${pkg ? "" : " disabled"}>Create ballot + proof locally</button>
     <div id="created" class="mono"></div>
   </div>
   <div class="card">
@@ -88,13 +91,20 @@ function bind() {
     const id = (document.getElementById("election-id") as HTMLInputElement).value.trim();
     const res = await fetch(`/api/v1/elections/${encodeURIComponent(id)}/public-package`);
     if (!res.ok) { output(`load failed: ${res.status}`); return; }
-    pkg = (await res.json()) as Pkg;
+    const loaded = (await res.json()) as Pkg;
     // Verify package binding hash locally in WASM
-    const local = parseWasm(package_hash_hex(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex));
-    const info = parseWasm(election_info(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex));
-    const infoEl = document.getElementById("election-info") as HTMLElement;
-    const hashOk = local.package_hash_hex === pkg.package_hash_hex;
-    infoEl.innerHTML = `State: ${esc(pkg.state)}<br/>Manifest: <span class="mono">${esc(pkg.manifest_hash_hex)}</span><br/>Package hash match: <span class="${hashOk ? "ok" : "error"}">${hashOk ? "YES" : "NO"}</span><br/>Election: ${esc(String(info.election_id_text ?? ""))} | Eligible: ${esc(String(info.eligible_voter_count ?? ""))} | Suite: ${esc(String(info.proof_suite_id ?? ""))}`;
+    const local = parseWasm(package_hash_hex(loaded.manifest_cbor_hex, loaded.registry_cbor_hex, loaded.candidate_cbor_hex));
+    const commitment = parseWasm(compute_registry_commitment(loaded.registry_cbor_hex));
+    const hashOk = local.ok && local.package_hash_hex === loaded.package_hash_hex;
+    const registryOk = commitment.ok && commitment.registry_commitment_hex === loaded.registry_commitment_hex;
+    if (!hashOk || !registryOk) {
+      pkg = null;
+      packageIntegrityError = "Registry integrity verification failed; voting and proof generation are blocked.";
+      render();
+      return;
+    }
+    pkg = loaded;
+    packageIntegrityError = "";
     render();
   });
   document.getElementById("gen-secret")?.addEventListener("click", () => {
@@ -109,7 +119,7 @@ function bind() {
     (document.getElementById("pubkey") as HTMLElement).textContent = r.ok ? `pubkey: ${r.public_key_hex}` : `error: ${r.error}`;
   });
   document.getElementById("create")?.addEventListener("click", () => {
-    if (!pkg) { output("load election first"); return; }
+    if (!pkg) { output(packageIntegrityError || "load a locally verified election first"); return; }
     const checked = Array.from(document.querySelectorAll<HTMLInputElement>('#candidates input[type="checkbox"]:checked')).map((el) => el.value);
     const r = parseWasm(create_ballot_package(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex, secretHex, JSON.stringify(checked)));
     if (!r.ok) { output(`create failed: ${r.error}`); return; }
