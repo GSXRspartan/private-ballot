@@ -43,6 +43,7 @@ use axum::{
     response::{IntoResponse, Response},
     extract::DefaultBodyLimit,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveFileCatalogV1, ArchiveFileEntryV1,
@@ -51,14 +52,19 @@ use tari_cc_private_ballot_archive::{
     SUBMISSIONS_ARCHIVE_DIR,
 };
 use tari_cc_private_ballot_ballot::{
-    ApprovalBallotPayload, CandidateSet,
-    ElectionManifest,
+    ApprovalBallotPayload, ApprovalLimits, CandidateSet,
+    ElectionManifest, ElectionManifestV1, ElectionManifestV1Input,
+    BallotKindV1, BallotConfidentialityV1, ElectionId,
 };
 use tari_cc_private_ballot_protocol::{
-    Blake3HashProviderV1, HashDomain, HashProvider, ValidationCode,
+    Blake3HashProviderV1, HashDomain, HashProvider,
+    PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode,
     hash_domain_separated,
 };
-use tari_cc_private_ballot_registry::RegistrySnapshot;
+use tari_cc_private_ballot_registry::{
+    GovernancePublicKey, RegistryEntry, RegistrySnapshot,
+    VoterGovernanceKeyRegistrationV1, VoterKeyProvisioningV1,
+};
 use tari_cc_private_ballot_tally::ApprovalTally;
 use tari_cc_private_ballot_verifier::{
     BallotAcceptanceLedger, build_tari_triptych_verifier_from_registry_v1,
@@ -82,7 +88,7 @@ pub const ORIGIN_TOKEN_HEADER: &str = "x-private-ballot-origin";
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Stricter per-route limit for ballot submissions.
 pub const MAX_BALLOT_BODY_BYTES: usize = 32 * 1024;
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedConfig {
@@ -170,6 +176,22 @@ pub fn hex_decode(input: &str) -> Result<Vec<u8>, ()> {
         i += 2;
     }
     Ok(out)
+}
+
+/// Generate a 16-byte CSPRNG opaque ID encoded as 32 lowercase hex chars.
+pub fn new_opaque_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex_encode(&bytes)
+}
+
+/// Compute the invitation verifier from the raw secret bytes.
+/// Only the verifier is stored server-side; the secret is returned once to the caller.
+pub fn invitation_verifier(secret: &[u8]) -> String {
+    let p = Blake3HashProviderV1;
+    let mut input = b"invitation-secret-verifier-v1\0".to_vec();
+    input.extend_from_slice(secret);
+    hex_encode(&p.hash(&input))
 }
 
 fn envelope_hash_hex(package: &[u8]) -> String {
@@ -469,6 +491,537 @@ async fn ootle_status(State(state): State<Arc<AppState>>) -> Response {
     Json(serde_json::json!({"network": "ootle-v0.51.0-cohort", "deployment_registry": "present", "anchor_publication": "not_configured_in_stage2_prototype", "service": state.config.service_name})).into_response()
 }
 
+// ---------- Enrollment admin handlers ----------
+
+#[derive(Debug, Deserialize)]
+struct CreateDraftRequest {
+    election_id: String,
+    candidate_cbor_hex: String,
+    proof_suite_id: String,
+    min_approvals: Option<i64>,
+    max_approvals: Option<i64>,
+    allow_abstention: Option<bool>,
+    governance_revision: Option<String>,
+    authorized_slot_count: i64,
+    external_roster_commitment_hex: Option<String>,
+}
+
+async fn admin_create_draft(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    if let Err(r) = check_content_type(&headers) { return r; }
+    let req: CreateDraftRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed create-draft request"),
+    };
+    if req.election_id.trim().is_empty() || req.election_id.len() > 128 {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid election_id");
+    }
+    if req.authorized_slot_count < 1 || req.authorized_slot_count > 100_000 {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "authorized_slot_count must be 1..100000");
+    }
+    let candidate_cbor = match hex_decode(&req.candidate_cbor_hex) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid candidate_cbor_hex"),
+    };
+    // Validate candidate set decodes
+    if CandidateSet::from_canonical_cbor(&candidate_cbor).is_err() {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "candidate set does not decode");
+    }
+    if req.proof_suite_id.trim().is_empty() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "proof_suite_id required");
+    }
+    let now_ms = now_ms();
+    let record = storage::ElectionDraftRecord {
+        election_id: req.election_id.clone(),
+        candidate_cbor,
+        proof_suite_id: req.proof_suite_id.clone(),
+        min_approvals: req.min_approvals.unwrap_or(1),
+        max_approvals: req.max_approvals.unwrap_or(1),
+        allow_abstention: req.allow_abstention.unwrap_or(true),
+        governance_revision: req.governance_revision.clone().unwrap_or_default(),
+        authorized_slot_count: req.authorized_slot_count,
+        external_roster_commitment_hex: req.external_roster_commitment_hex.clone(),
+        eligibility_state: "DRAFT".to_owned(),
+        created_at_ms: now_ms,
+    };
+    match state.storage.put_election_draft(record) {
+        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({
+            "election_id": req.election_id,
+            "eligibility_state": "DRAFT",
+            "authorized_slot_count": req.authorized_slot_count,
+        }))).into_response(),
+        Err(storage::StorageError::ElectionExists) => error_response(StatusCode::CONFLICT, "election_exists", "draft already exists for this election_id"),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+}
+
+async fn admin_open_enrollment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    if draft.eligibility_state != "DRAFT" {
+        return error_response(StatusCode::CONFLICT, "invalid_state", "draft is not in DRAFT state");
+    }
+    let now_ms = now_ms();
+    // Create slots
+    match state.storage.create_slots(&id, draft.authorized_slot_count as usize, now_ms) {
+        Ok(_) => {}
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "slot creation failed"),
+    }
+    // Transition state
+    match state.storage.set_draft_eligibility_state(&id, "DRAFT", "ENROLLMENT_OPEN") {
+        Ok(true) => (StatusCode::OK, Json(serde_json::json!({
+            "election_id": id,
+            "eligibility_state": "ENROLLMENT_OPEN",
+            "authorized_slot_count": draft.authorized_slot_count,
+        }))).into_response(),
+        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "state transition race"),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct IssueInvitationRequest { slot_id: String }
+
+#[derive(Debug, Serialize)]
+struct InvitationResponse {
+    election_id: String,
+    slot_id: String,
+    invitation_id: String,
+    /// The invitation secret (plaintext, 64 hex chars). Present only on issuance/reissuance.
+    /// Never stored server-side; deliver to the voter and discard.
+    invitation_secret_hex: String,
+    state: String,
+}
+
+async fn admin_issue_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    if let Err(r) = check_content_type(&headers) { return r; }
+    let req: IssueInvitationRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed issue-invitation request"),
+    };
+    // Verify draft is ENROLLMENT_OPEN
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    if draft.eligibility_state != "ENROLLMENT_OPEN" {
+        return error_response(StatusCode::CONFLICT, "invalid_state", "enrollment is not open");
+    }
+    // Check slot exists and belongs to this election
+    let slots = match state.storage.list_slots(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let slot = match slots.iter().find(|s| s.slot_id == req.slot_id) {
+        Some(s) => s.clone(),
+        None => return error_response(StatusCode::NOT_FOUND, "slot_not_found", "slot not found for this election"),
+    };
+    if slot.consumed {
+        return error_response(StatusCode::CONFLICT, "slot_consumed", "slot already consumed; cannot issue another invitation");
+    }
+    // Void any existing ACTIVE invitation for this slot (reissuance)
+    if let Err(_) = state.storage.void_active_slot_invitations(&req.slot_id) {
+        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable");
+    }
+    // Generate 32-byte CSPRNG secret; compute verifier; never store secret
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let verifier_hex = invitation_verifier(&secret);
+    let secret_hex = hex_encode(&secret);
+    let invitation_id = new_opaque_id();
+    let now_ms = now_ms();
+    let record = storage::InvitationRecord {
+        invitation_id: invitation_id.clone(),
+        slot_id: req.slot_id.clone(),
+        election_id: id.clone(),
+        verifier_hex,
+        state: "ACTIVE".to_owned(),
+        created_at_ms: now_ms,
+    };
+    match state.storage.insert_invitation(record) {
+        Ok(()) => {}
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    (StatusCode::CREATED, Json(InvitationResponse {
+        election_id: id,
+        slot_id: req.slot_id,
+        invitation_id,
+        invitation_secret_hex: secret_hex,
+        state: "ACTIVE".to_owned(),
+    })).into_response()
+}
+
+async fn admin_void_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((id, invitation_id)): AxumPath<(String, String)>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    // Void ACTIVE → VOIDED; ignore if already voided/consumed
+    match state.storage.set_invitation_state(&invitation_id, "ACTIVE", "VOIDED") {
+        Ok(true) => Json(serde_json::json!({"election_id": id, "invitation_id": invitation_id, "state": "VOIDED"})).into_response(),
+        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "invitation is not ACTIVE"),
+        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct EnrollmentStatusBody {
+    election_id: String,
+    eligibility_state: String,
+    authorized_slot_count: i64,
+    total_slots: i64,
+    consumed_slots: i64,
+    available_slots: i64,
+    enrolled_count: i64,
+}
+
+async fn admin_enrollment_status(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let slots = match state.storage.list_slots(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let consumed = slots.iter().filter(|s| s.consumed).count() as i64;
+    let total = slots.len() as i64;
+    let enrolled = match state.storage.count_enrolled_credentials(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    Json(EnrollmentStatusBody {
+        election_id: id,
+        eligibility_state: draft.eligibility_state,
+        authorized_slot_count: draft.authorized_slot_count,
+        total_slots: total,
+        consumed_slots: consumed,
+        available_slots: total - consumed,
+        enrolled_count: enrolled,
+    }).into_response()
+}
+
+async fn admin_freeze_registry(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    if draft.eligibility_state != "ENROLLMENT_OPEN" {
+        return error_response(StatusCode::CONFLICT, "invalid_state", "enrollment must be ENROLLMENT_OPEN to freeze");
+    }
+    // Collect enrolled credentials → build RegistrySnapshot
+    let creds = match state.storage.list_enrolled_credentials(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    if creds.is_empty() {
+        return error_response(StatusCode::CONFLICT, "empty_registry", "cannot freeze with zero enrolled credentials");
+    }
+    let entries: Result<Vec<RegistryEntry>, ()> = creds.iter().map(|c| {
+        let key_bytes = hex_decode(&c.public_key_hex).map_err(|_| ())?;
+        let gk = GovernancePublicKey::new(key_bytes).map_err(|_| ())?;
+        let reg = VoterGovernanceKeyRegistrationV1::new(gk, VoterKeyProvisioningV1::GeneratedByVoter);
+        Ok(RegistryEntry::from_voter_registration(reg))
+    }).collect();
+    let entries = match entries {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "enrolled key encoding invalid"),
+    };
+    let registry = match RegistrySnapshot::new(entries) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "registry_invalid", "registry construction failed"),
+    };
+    let p = Blake3HashProviderV1;
+    let registry_cbor = match registry.to_canonical_cbor() {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry serialization failed"),
+    };
+    let registry_commitment = match registry.canonical_commitment(&p) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry commitment failed"),
+    };
+    let enrolled_count = creds.len() as i64;
+    let now_ms = now_ms();
+    let frozen = storage::FrozenRegistryRecord {
+        election_id: id.clone(),
+        registry_cbor_hex: hex_encode(&registry_cbor),
+        registry_commitment_hex: hex_encode(registry_commitment.as_bytes()),
+        authorized_slot_count: draft.authorized_slot_count,
+        enrolled_count,
+        frozen_at_ms: now_ms,
+        external_roster_commitment_hex: draft.external_roster_commitment_hex.clone(),
+    };
+    match state.storage.put_frozen_registry(frozen) {
+        Ok(()) => {}
+        Err(storage::StorageError::AlreadyFrozen) => return error_response(StatusCode::CONFLICT, "already_frozen", "registry already frozen"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    // Scrub enrollment linkage (slot_id and invitation_id from credentials)
+    let _ = state.storage.scrub_enrollment_linkage(&id);
+    // Transition state
+    match state.storage.set_draft_eligibility_state(&id, "ENROLLMENT_OPEN", "REGISTRY_FROZEN") {
+        Ok(true) => {}
+        Ok(false) => return error_response(StatusCode::CONFLICT, "invalid_state", "state transition race"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    (StatusCode::OK, Json(serde_json::json!({
+        "election_id": id,
+        "eligibility_state": "REGISTRY_FROZEN",
+        "enrolled_count": enrolled_count,
+        "authorized_slot_count": draft.authorized_slot_count,
+        "registry_commitment_hex": hex_encode(registry_commitment.as_bytes()),
+    }))).into_response()
+}
+
+async fn admin_open_voting(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    if draft.eligibility_state != "REGISTRY_FROZEN" {
+        return error_response(StatusCode::CONFLICT, "invalid_state", "registry must be frozen before opening voting");
+    }
+    let frozen = match state.storage.get_frozen_registry(&id) {
+        Ok(Some(f)) => f,
+        Ok(None) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "frozen registry not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    // Reconstruct registry commitment from stored hex
+    let commit_bytes: [u8; 32] = match hex_decode(&frozen.registry_commitment_hex) {
+        Ok(v) if v.len() == 32 => v.try_into().unwrap(),
+        _ => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored commitment invalid"),
+    };
+    let registry_commitment = RegistryCommitment::new(commit_bytes);
+    // Decode candidate set and compute its commitment
+    let candidates = match CandidateSet::from_canonical_cbor(&draft.candidate_cbor) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored candidate set invalid"),
+    };
+    let p = Blake3HashProviderV1;
+    let candidate_commitment = match candidates.canonical_commitment(&p) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "candidate commitment failed"),
+    };
+    // Build manifest
+    let election_id_bytes = id.as_bytes().to_vec();
+    let election_id_obj = match ElectionId::new(election_id_bytes) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid election_id for manifest"),
+    };
+    let approval_limits = match ApprovalLimits::new(
+        draft.min_approvals as usize,
+        draft.max_approvals as usize,
+        draft.allow_abstention,
+    ) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "invalid approval limits"),
+    };
+    let manifest_input = ElectionManifestV1Input {
+        protocol_version: PROTOCOL_VERSION_V1,
+        election_id: election_id_obj,
+        ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+        ballot_confidentiality: BallotConfidentialityV1::Public,
+        registry_commitment,
+        candidate_set_commitment: candidate_commitment,
+        proof_suite_id: draft.proof_suite_id.clone(),
+        approval_limits,
+        governance_source_revision: draft.governance_revision.clone(),
+    };
+    let manifest_v1 = match ElectionManifestV1::new(manifest_input) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "manifest construction failed"),
+    };
+    let manifest = ElectionManifest::V1(manifest_v1);
+    let manifest_cbor = match manifest.to_canonical_cbor() {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest serialization failed"),
+    };
+    let registry_cbor = match hex_decode(&frozen.registry_cbor_hex) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry invalid"),
+    };
+    let manifest_hash_hex = match manifest.canonical_hash(&p) {
+        Ok(h) => hex_encode(h.as_bytes()),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest hash failed"),
+    };
+    // Validate verifier can be constructed from registry
+    let registry = match RegistrySnapshot::from_canonical_cbor(&registry_cbor) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry does not decode"),
+    };
+    if build_tari_triptych_verifier_from_registry_v1(&registry, &p).is_err() {
+        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "registry verifier construction failed");
+    }
+    let record = storage::ElectionRecord {
+        id: id.clone(),
+        manifest_cbor,
+        registry_cbor,
+        candidate_cbor: draft.candidate_cbor.clone(),
+        state: "open".to_owned(),
+        manifest_hash_hex: manifest_hash_hex.clone(),
+    };
+    match state.storage.put_election(record) {
+        Ok(()) => {}
+        Err(storage::StorageError::ElectionExists) => return error_response(StatusCode::CONFLICT, "election_exists", "voting already opened for this election"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    (StatusCode::CREATED, Json(serde_json::json!({
+        "election_id": id,
+        "state": "open",
+        "manifest_hash_hex": manifest_hash_hex,
+        "registry_commitment_hex": frozen.registry_commitment_hex,
+        "enrolled_count": frozen.enrolled_count,
+    }))).into_response()
+}
+
+// ---------- Public enrollment status (read-only, no secrets exposed) ----------
+
+#[derive(Debug, Serialize)]
+struct PublicEnrollmentInfoBody {
+    election_id: String,
+    /// "DRAFT" | "ENROLLMENT_OPEN" | "REGISTRY_FROZEN"
+    eligibility_state: String,
+    /// Only present when REGISTRY_FROZEN; enables browser-side commitment verification.
+    registry_commitment_hex: Option<String>,
+    /// Canonical frozen registry bytes for independent browser/WASM verification.
+    registry_cbor_hex: Option<String>,
+    enrolled_count: Option<i64>,
+    authorized_slot_count: i64,
+}
+
+async fn public_enrollment_info(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let (registry_commitment_hex, registry_cbor_hex, enrolled_count) = if draft.eligibility_state == "REGISTRY_FROZEN" {
+        match state.storage.get_frozen_registry(&id) {
+            Ok(Some(f)) => (Some(f.registry_commitment_hex), Some(f.registry_cbor_hex), Some(f.enrolled_count)),
+            _ => (None, None, None),
+        }
+    } else {
+        (None, None, None)
+    };
+    Json(PublicEnrollmentInfoBody {
+        election_id: id,
+        eligibility_state: draft.eligibility_state,
+        registry_commitment_hex,
+        registry_cbor_hex,
+        enrolled_count,
+        authorized_slot_count: draft.authorized_slot_count,
+    }).into_response()
+}
+
+// ---------- Public enrollment endpoint ----------
+
+#[derive(Debug, Deserialize)]
+struct EnrollRequest {
+    invitation_secret_hex: String,
+    public_key_hex: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EnrollResponse {
+    election_id: String,
+    public_key_hex: String,
+    enrolled_at_ms: i64,
+    idempotent: bool,
+}
+
+async fn enroll_voter(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_content_type(&headers) { return r; }
+    if body.len() > MAX_BODY_BYTES { return error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "request too large"); }
+    let req: EnrollRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed enrollment request"),
+    };
+    // Validate secret is 64 hex chars (32 bytes)
+    let secret_bytes = match hex_decode(&req.invitation_secret_hex) {
+        Ok(v) if v.len() == 32 => v,
+        _ => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invitation_secret_hex must be 64 hex chars (32 bytes)"),
+    };
+    let public_key_bytes = match hex_decode(&req.public_key_hex) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid public_key_hex"),
+    };
+    // Validate public key fits as GovernancePublicKey
+    if GovernancePublicKey::new(public_key_bytes.clone()).is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "public_key_hex is not a valid governance key");
+    }
+    let verifier_hex = invitation_verifier(&secret_bytes);
+    let norm_key = hex_encode(&public_key_bytes);
+    // SQLite enforces cross-process atomicity; this also keeps the in-memory test
+    // storage's independently locked collections coherent.
+    let _guard = state.ingest_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let completion = match state.storage.complete_enrollment(&id, &verifier_hex, &norm_key, now_ms()) {
+        Ok(value) => value,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    match completion {
+        storage::EnrollmentCompletion::Created(credential) => (StatusCode::CREATED, Json(EnrollResponse { election_id: id, public_key_hex: norm_key, enrolled_at_ms: credential.enrolled_at_ms, idempotent: false })).into_response(),
+        storage::EnrollmentCompletion::Idempotent(credential) => (StatusCode::OK, Json(EnrollResponse { election_id: id, public_key_hex: norm_key, enrolled_at_ms: credential.enrolled_at_ms, idempotent: true })).into_response(),
+        storage::EnrollmentCompletion::ElectionNotFound => error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
+        storage::EnrollmentCompletion::InvitationNotFound | storage::EnrollmentCompletion::WrongElection | storage::EnrollmentCompletion::InvitationVoided => error_response(StatusCode::UNAUTHORIZED, "invalid_invitation", "invitation not found, invalid, or voided"),
+        storage::EnrollmentCompletion::EnrollmentClosed => error_response(StatusCode::CONFLICT, "enrollment_closed", "enrollment is not open"),
+        storage::EnrollmentCompletion::CredentialConflict => error_response(StatusCode::CONFLICT, "credential_conflict", "invitation or credential is already enrolled"),
+        storage::EnrollmentCompletion::EnrollmentRace => error_response(StatusCode::CONFLICT, "enrollment_race", "concurrent enrollment; retry"),
+    }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // ---------- Admin (localhost, token-gated when configured) ----------
 fn check_admin(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
     if let Some(token) = &state.config.admin_token {
@@ -595,6 +1148,8 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/receipt/{receipt_id}", get(get_receipt))
         .route("/api/v1/elections/{id}/results", get(get_results))
         .route("/api/v1/elections/{id}/archive", get(get_archive))
+        .route("/api/v1/elections/{id}/enrollment-info", get(public_enrollment_info))
+        .route("/api/v1/elections/{id}/enroll", post(enroll_voter))
         .route("/api/v1/ootle/status", get(ootle_status))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, origin_token_middleware))
@@ -607,9 +1162,18 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
 pub fn admin_router_with_state(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/admin-health", get(health))
+        // Legacy import (pre-enrollment flow, sets state=open directly)
         .route("/api/v1/admin/elections/import", post(admin_import))
         .route("/api/v1/admin/elections/{id}/close", post(admin_close))
         .route("/api/v1/admin/elections/{id}/finalize", post(admin_finalize))
+        // Invitation enrollment flow
+        .route("/api/v1/admin/elections/draft", post(admin_create_draft))
+        .route("/api/v1/admin/elections/{id}/open-enrollment", post(admin_open_enrollment))
+        .route("/api/v1/admin/elections/{id}/invitations", post(admin_issue_invitation))
+        .route("/api/v1/admin/elections/{id}/invitations/{invitation_id}/void", post(admin_void_invitation))
+        .route("/api/v1/admin/elections/{id}/enrollment", get(admin_enrollment_status))
+        .route("/api/v1/admin/elections/{id}/freeze", post(admin_freeze_registry))
+        .route("/api/v1/admin/elections/{id}/open-voting", post(admin_open_voting))
         .with_state(state)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(axum::middleware::from_fn(logging_middleware))

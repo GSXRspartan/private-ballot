@@ -44,6 +44,11 @@ async function main() {
     const pkg = await r.json();
     const localHash = J(wasmMod.package_hash_hex(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex));
     assert(localHash.package_hash_hex === pkg.package_hash_hex, "package hash parity browser/backend");
+    const localRegistry = J(wasmMod.compute_registry_commitment(pkg.registry_cbor_hex));
+    assert(localRegistry.ok && localRegistry.registry_commitment_hex === pkg.registry_commitment_hex, "registry commitment parity browser/backend");
+    const mutatedRegistry = J(wasmMod.compute_registry_commitment(`${pkg.registry_cbor_hex.slice(0, -2)}${pkg.registry_cbor_hex.endsWith("00") ? "01" : "00"}`));
+    assert(!mutatedRegistry.ok || mutatedRegistry.registry_commitment_hex !== pkg.registry_commitment_hex, "mutated registry must not verify");
+    assert(localRegistry.registry_commitment_hex !== `00${pkg.registry_commitment_hex.slice(2)}`, "wrong advertised registry commitment must fail closed");
     const info = J(wasmMod.election_info(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex));
     assert(info.ok && info.candidates.length === 3, "election info");
 

@@ -189,6 +189,21 @@ fn package_hash_inner(manifest_hex: &str, registry_hex: &str, candidate_hex: &st
     Ok(serde_json::json!({"package_hash_hex": hex_encode(&p.hash(&input))}))
 }
 
+/// Computes the canonical registry commitment from a CBOR-encoded RegistrySnapshot.
+/// Used by the browser to locally verify the commitment matches what the organizer froze.
+/// Returns `{"ok":true,"registry_commitment_hex":"<64 hex chars>"}`.
+#[wasm_bindgen]
+pub fn compute_registry_commitment(registry_cbor_hex: &str) -> String {
+    match registry_commitment_inner(registry_cbor_hex) { Ok(v) => ok_json(v), Err(e) => err(&e) }
+}
+fn registry_commitment_inner(registry_cbor_hex: &str) -> Result<serde_json::Value, String> {
+    let cbor = hex_decode(registry_cbor_hex)?;
+    let registry = RegistrySnapshot::from_canonical_cbor(&cbor).map_err(|e| e.code().as_str().to_owned())?;
+    let p = Blake3HashProviderV1;
+    let commitment = registry.canonical_commitment(&p).map_err(|e| e.code().as_str().to_owned())?;
+    Ok(serde_json::json!({"registry_commitment_hex": hex_encode(commitment.as_bytes())}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
