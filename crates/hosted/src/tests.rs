@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use curve25519_dalek_v4::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
+use rusqlite::{Connection, params};
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
@@ -343,6 +344,70 @@ fn sqlite_storage_persists_and_enforces_uniqueness() {
     {
         let s2 = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen"));
         assert_eq!(s2.list_ballots("e1").map(|v| v.len()).unwrap_or(99), 1);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sqlite_schema_v2_upgrade_preserves_existing_data_and_is_idempotent() {
+    let dir = std::env::temp_dir().join(format!("pb-hosted-v2-upgrade-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    let db = dir.join("hosted.db");
+
+    // This is the Stage 3 pre-enrollment (schema v2) persistent shape.
+    {
+        let legacy = Connection::open(&db).unwrap_or_else(|_| panic!("open v2"));
+        legacy.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE elections (
+                id TEXT PRIMARY KEY, manifest_cbor BLOB NOT NULL, registry_cbor BLOB NOT NULL,
+                candidate_cbor BLOB NOT NULL, state TEXT NOT NULL, manifest_hash_hex TEXT NOT NULL
+             );
+             CREATE TABLE ballots (
+                election_id TEXT NOT NULL, receipt_id TEXT NOT NULL, package_cbor BLOB NOT NULL,
+                envelope_hash_hex TEXT NOT NULL, nullifier BLOB NOT NULL, seq INTEGER NOT NULL,
+                PRIMARY KEY (election_id, receipt_id), UNIQUE (election_id, nullifier),
+                FOREIGN KEY (election_id) REFERENCES elections(id)
+             );",
+        ).unwrap_or_else(|_| panic!("create v2 schema"));
+        legacy.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '2')", []).unwrap_or_else(|_| panic!("v2 version"));
+        legacy.execute(
+            "INSERT INTO elections (id, manifest_cbor, registry_cbor, candidate_cbor, state, manifest_hash_hex) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["legacy-election", vec![1_u8], vec![2_u8], vec![3_u8], "finalized", "legacy-manifest"],
+        ).unwrap_or_else(|_| panic!("v2 election"));
+        legacy.execute(
+            "INSERT INTO ballots (election_id, receipt_id, package_cbor, envelope_hash_hex, nullifier, seq) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["legacy-election", "legacy-receipt", vec![4_u8], "legacy-envelope", vec![5_u8], 7_i64],
+        ).unwrap_or_else(|_| panic!("v2 ballot"));
+    }
+
+    // First open performs the normal migration and must retain v2 records.
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("migrate v2"));
+        let election = storage.get_election("legacy-election").unwrap_or_else(|_| panic!("read election")).unwrap_or_else(|| panic!("legacy election missing"));
+        assert_eq!(election.state, "finalized");
+        assert_eq!(election.manifest_cbor, vec![1]);
+        let ballots = storage.list_ballots("legacy-election").unwrap_or_else(|_| panic!("read ballots"));
+        assert_eq!(ballots.len(), 1);
+        assert_eq!(ballots[0].receipt_id, "legacy-receipt");
+        assert_eq!(ballots[0].seq, 7);
+    }
+
+    // The v3 tables/version exist after migration, and a second open is idempotent.
+    {
+        let migrated = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v3"));
+        let version: String = migrated.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
+        assert_eq!(version, "3");
+        for table in ["election_drafts", "eligibility_slots", "enrollment_invitations", "enrolled_credentials", "frozen_registries"] {
+            let exists: i64 = migrated.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
+            assert_eq!(exists, 1, "missing {table}");
+        }
+    }
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen v3"));
+        assert!(storage.get_election("legacy-election").unwrap_or_else(|_| panic!("read after reopen")).is_some());
+        assert_eq!(storage.list_ballots("legacy-election").unwrap_or_else(|_| panic!("ballots after reopen")).len(), 1);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
