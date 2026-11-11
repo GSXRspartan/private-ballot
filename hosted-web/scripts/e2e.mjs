@@ -1,29 +1,52 @@
 // Local end-to-end test: backend (127.0.0.1:8788) + browser WASM proof
 // generation + HTTP ballot flow. Usage:
 //   node scripts/e2e.mjs [path-to-synthetic-demo.json] [backend-binary]
-// Defaults: generates demo via cargo example output expected at
-// C:\pb-target\synthetic-demo.json and backend at C:\pb-target\debug\private-ballot-hosted.exe
+// The backend binary can also be set explicitly with PRIVATE_BALLOT_HOSTED_BINARY.
+// Otherwise it is derived from Cargo's target directory, optional build target,
+// and profile so the launcher follows the current build configuration.
 // Asserts every Stage 2 step; exits non-zero on any failure. Secrets in the
 // demo JSON are synthetic scalars 1/2/3 for local testing only.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
+const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const demoPath = process.argv[2] || path.join(os.tmpdir(), "pb-synthetic-demo.json");
-const backendBin = process.argv[3] || "C:\\pb-target\\debug\\private-ballot-hosted.exe";
+const executableName = process.platform === "win32" ? "private-ballot-hosted.exe" : "private-ballot-hosted";
+
+function cargoTargetDir() {
+  const configured = process.env.CARGO_TARGET_DIR || "target";
+  return path.isAbsolute(configured) ? configured : path.resolve(workspaceRoot, configured);
+}
+
+function derivedBackendBin() {
+  const profile = process.env.CARGO_PROFILE || process.env.PROFILE || "debug";
+  const buildTarget = process.env.CARGO_BUILD_TARGET;
+  const parts = [cargoTargetDir()];
+  if (buildTarget) parts.push(buildTarget);
+  parts.push(profile, executableName);
+  return path.join(...parts);
+}
+
+const backendBin = process.argv[3] || process.env.PRIVATE_BALLOT_HOSTED_BINARY || derivedBackendBin();
 const dbPath = path.join(os.tmpdir(), `pb-e2e-${process.pid}.db`);
 const ADMIN = "e2e-admin-token";
 const BASE = "http://127.0.0.1:8788";
+const ADMIN_BASE = "http://127.0.0.1:8789";
 
 function assert(cond, msg) { if (!cond) { console.error(`ASSERT FAIL: ${msg}`); process.exitCode = 1; throw new Error(msg); } }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  if (!fs.existsSync(backendBin)) {
+    throw new Error(`Hosted backend executable not found: ${backendBin}. Build private-ballot-hosted or set PRIVATE_BALLOT_HOSTED_BINARY.`);
+  }
   const demo = JSON.parse(fs.readFileSync(demoPath, "utf8"));
   const wasmMod = await import("../src/wasm/tari_cc_private_ballot_hosted_wasm.js");
   const wasmBytes = fs.readFileSync(new URL("../src/wasm/tari_cc_private_ballot_hosted_wasm_bg.wasm", import.meta.url));
-  await wasmMod.default(wasmBytes);
+  await wasmMod.default({ module_or_path: wasmBytes });
   const J = (s) => JSON.parse(s);
 
   const env = { ...process.env, PRIVATE_BALLOT_HOSTED_BIND: "127.0.0.1:8788", PRIVATE_BALLOT_HOSTED_DB: dbPath, PRIVATE_BALLOT_HOSTED_ADMIN_TOKEN: ADMIN };
@@ -35,7 +58,7 @@ async function main() {
     const h = await fetch(`${BASE}/health`); assert(h.ok, "backend health");
 
     // Import election (localhost admin)
-    let r = await fetch(`${BASE}/api/v1/admin/elections/import`, { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ election_id: demo.election_id, manifest_cbor_hex: demo.manifest_cbor_hex, registry_cbor_hex: demo.registry_cbor_hex, candidate_cbor_hex: demo.candidate_cbor_hex }) });
+    let r = await fetch(`${ADMIN_BASE}/api/v1/admin/elections/import`, { method: "POST", headers: { "content-type": "application/json", "x-admin-token": ADMIN }, body: JSON.stringify({ election_id: demo.election_id, manifest_cbor_hex: demo.manifest_cbor_hex, registry_cbor_hex: demo.registry_cbor_hex, candidate_cbor_hex: demo.candidate_cbor_hex }) });
     assert(r.status === 201, `import ${r.status} ${await r.text()}`);
 
     // Public package + WASM binding hash parity
@@ -48,7 +71,8 @@ async function main() {
     assert(localRegistry.ok && localRegistry.registry_commitment_hex === pkg.registry_commitment_hex, "registry commitment parity browser/backend");
     const mutatedRegistry = J(wasmMod.compute_registry_commitment(`${pkg.registry_cbor_hex.slice(0, -2)}${pkg.registry_cbor_hex.endsWith("00") ? "01" : "00"}`));
     assert(!mutatedRegistry.ok || mutatedRegistry.registry_commitment_hex !== pkg.registry_commitment_hex, "mutated registry must not verify");
-    assert(localRegistry.registry_commitment_hex !== `00${pkg.registry_commitment_hex.slice(2)}`, "wrong advertised registry commitment must fail closed");
+    const wrongCommitment = `${pkg.registry_commitment_hex.startsWith("00") ? "01" : "00"}${pkg.registry_commitment_hex.slice(2)}`;
+    assert(localRegistry.registry_commitment_hex !== wrongCommitment, "wrong advertised registry commitment must fail closed");
     const info = J(wasmMod.election_info(pkg.manifest_cbor_hex, pkg.registry_cbor_hex, pkg.candidate_cbor_hex));
     assert(info.ok && info.candidates.length === 3, "election info");
 
@@ -97,9 +121,9 @@ async function main() {
     assert(r.ok && (await r.json()).stable_receipt === receipt1.stable_receipt, "receipt get");
 
     // Close + finalize (admin)
-    r = await fetch(`${BASE}/api/v1/admin/elections/${demo.election_id}/close`, { method: "POST", headers: { "x-admin-token": ADMIN } });
+    r = await fetch(`${ADMIN_BASE}/api/v1/admin/elections/${demo.election_id}/close`, { method: "POST", headers: { "x-admin-token": ADMIN } });
     assert(r.ok, `close ${r.status}`);
-    r = await fetch(`${BASE}/api/v1/admin/elections/${demo.election_id}/finalize`, { method: "POST", headers: { "x-admin-token": ADMIN } });
+    r = await fetch(`${ADMIN_BASE}/api/v1/admin/elections/${demo.election_id}/finalize`, { method: "POST", headers: { "x-admin-token": ADMIN } });
     const fin = await r.json(); assert(r.ok && fin.state === "finalized" && fin.accepted_ballots === 2, `finalize ${JSON.stringify(fin)}`);
 
     // Results deterministic: A->candidate-a, B->candidate-b
