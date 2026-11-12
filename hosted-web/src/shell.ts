@@ -1,4 +1,4 @@
-﻿export type HostedSection = "home" | "guide" | "vote" | "enroll" | "archive" | "evidence" | "settings" | "about";
+export type HostedSection = "home" | "guide" | "create" | "manage" | "vote" | "enroll" | "archive" | "evidence" | "settings" | "about";
 
 function navItem(
   href: string,
@@ -79,8 +79,8 @@ export function hostedShell(content: string, section: HostedSection): string {
         <div>
           <div class="nav-group">Organizer</div>
           <ul>
-            ${disabledNavItem("Create Election")}
-            ${disabledNavItem("Manage Election")}
+            ${navItem("/create.html", "Create Election", "create", section)}
+            ${navItem("/manage.html", "Manage Election", "manage", section)}
             ${disabledNavItem("Anchor")}
           </ul>
         </div>

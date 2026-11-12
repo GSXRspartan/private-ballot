@@ -1,4 +1,4 @@
-﻿import { hostedShell } from "./shell";
+import { hostedShell } from "./shell";
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -106,6 +106,15 @@ app.innerHTML = hostedShell(`
 
   <section class="card">
     <div class="card-title">Organizer / Ballot Office</div>
+
+    <p class="card-body">
+      On the hosted service anyone can run their own election: the
+      <a href="/create.html">Create Election</a> page generates a secret
+      organizer credential in your browser and the <a href="/manage.html">Manage
+      Election</a> console drives the lifecycle below. The server stores only a
+      verifier of your credential, so keep the access file (or the secret
+      itself) safe — losing it means losing organizer access.
+    </p>
 
     <ol class="guide-steps">
       <li>

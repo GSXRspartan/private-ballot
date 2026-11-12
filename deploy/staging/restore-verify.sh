@@ -13,11 +13,11 @@ chmod 600 "$COPY"
 
 sqlite3 "$COPY" "PRAGMA integrity_check;" | grep -qx ok
 sqlite3 "$COPY" "PRAGMA journal_mode;" | grep -qx wal
-sqlite3 "$COPY" "SELECT value FROM meta WHERE key = 'schema_version';" | grep -qx 2
+sqlite3 "$COPY" "SELECT value FROM meta WHERE key = 'schema_version';" | grep -qx 4
 # Uniqueness enforcement is schema-level (UNIQUE constraints); verify the
 # constraints exist rather than loading ballots (no sensitive bulk reads).
 sqlite3 "$COPY" "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ballots';" | grep -q "UNIQUE"
 sqlite3 "$COPY" "SELECT COUNT(*) FROM elections;" >/dev/null
 
 echo "restore-verify ok: $SRC"
-echo "  schema_version=2, integrity=ok, journal_mode=wal, UNIQUE constraints present; temp copy removed"
+echo "  schema_version=4, integrity=ok, journal_mode=wal, UNIQUE constraints present; temp copy removed"

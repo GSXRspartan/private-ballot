@@ -1,14 +1,15 @@
 #![forbid(unsafe_code)]
 
 //! Hosted storage: trait, in-memory test implementation, and SQLite
-//! persistent implementation (schema version 3).
+//! persistent implementation (schema version 4).
 //!
 //! Stored categories only: public election packages, canonical ballot
 //! packages, nullifiers, receipts, election state, eligibility drafts,
 //! invitation verifiers (never plaintext secrets), enrolled public keys,
-//! and frozen registry evidence. NEVER stored: voter secret keys, Triptych
+//! frozen registry evidence, and organizer capability verifiers (never
+//! plaintext organizer secrets). NEVER stored: voter secret keys, Triptych
 //! witnesses, wallet private keys, invitation plaintext secrets, bearer
-//! tokens.
+//! tokens, plaintext organizer capability secrets.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -104,6 +105,16 @@ pub struct FrozenRegistryRecord {
     pub enrolled_count: i64,
     pub frozen_at_ms: i64,
     pub external_roster_commitment_hex: Option<String>,
+}
+
+/// Election-scoped organizer capability verifier (schema v4).
+/// The plaintext organizer secret is NEVER stored; only the
+/// domain-separated BLAKE3 verifier bound to the election id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrganizerCredentialRecord {
+    pub election_id: String,
+    pub organizer_verifier_hex: String,
+    pub created_at_ms: i64,
 }
 
 // ── Storage errors ────────────────────────────────────────────────────────────
@@ -247,6 +258,23 @@ pub trait HostedStorage: Send + Sync {
         &self,
         election_id: &str,
     ) -> Result<Option<FrozenRegistryRecord>, StorageError>;
+
+    // Organizer capability credentials (schema v4)
+    fn put_organizer_credential(
+        &self,
+        record: OrganizerCredentialRecord,
+    ) -> Result<(), StorageError>;
+    fn get_organizer_credential(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<OrganizerCredentialRecord>, StorageError>;
+
+    // Invitation lookups by election scope
+    fn get_invitation_by_id(
+        &self,
+        invitation_id: &str,
+    ) -> Result<Option<InvitationRecord>, StorageError>;
+    fn list_invitations(&self, election_id: &str) -> Result<Vec<InvitationRecord>, StorageError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +311,7 @@ pub struct InMemoryStorage {
     invitations: Mutex<Vec<InvitationRecord>>,
     credentials: Mutex<Vec<EnrolledCredentialRecord>>,
     frozen: Mutex<HashMap<String, FrozenRegistryRecord>>,
+    organizers: Mutex<HashMap<String, OrganizerCredentialRecord>>,
 }
 
 impl InMemoryStorage {
@@ -625,6 +654,48 @@ impl HostedStorage for InMemoryStorage {
             .get(election_id)
             .cloned())
     }
+
+    fn put_organizer_credential(
+        &self,
+        record: OrganizerCredentialRecord,
+    ) -> Result<(), StorageError> {
+        let mut g = self.organizers.lock().unwrap_or_else(|e| e.into_inner());
+        if g.contains_key(&record.election_id) {
+            return Err(StorageError::ElectionExists);
+        }
+        g.insert(record.election_id.clone(), record);
+        Ok(())
+    }
+
+    fn get_organizer_credential(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<OrganizerCredentialRecord>, StorageError> {
+        Ok(self
+            .organizers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(election_id)
+            .cloned())
+    }
+
+    fn get_invitation_by_id(
+        &self,
+        invitation_id: &str,
+    ) -> Result<Option<InvitationRecord>, StorageError> {
+        let g = self.invitations.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(g.iter()
+            .find(|i| i.invitation_id == invitation_id)
+            .cloned())
+    }
+
+    fn list_invitations(&self, election_id: &str) -> Result<Vec<InvitationRecord>, StorageError> {
+        let g = self.invitations.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(g.iter()
+            .filter(|i| i.election_id == election_id)
+            .cloned()
+            .collect())
+    }
 }
 
 // ── SQLite implementation ─────────────────────────────────────────────────────
@@ -651,6 +722,9 @@ fn map_rusqlite(e: &rusqlite::Error) -> StorageError {
     }
     if msg.contains("UNIQUE constraint") && msg.contains("frozen_registries") {
         return StorageError::AlreadyFrozen;
+    }
+    if msg.contains("UNIQUE constraint") && msg.contains("organizer_credentials") {
+        return StorageError::ElectionExists;
     }
     StorageError::Db
 }
@@ -773,6 +847,16 @@ impl SqliteStorage {
         )
         .map_err(|_| StorageError::Db)?;
 
+        // Organizer capability credentials (schema v4, idempotent, additive).
+        g.execute_batch(
+            "CREATE TABLE IF NOT EXISTS organizer_credentials (
+                election_id TEXT PRIMARY KEY,
+                organizer_verifier_hex TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+             );",
+        )
+        .map_err(|_| StorageError::Db)?;
+
         let existing: Option<String> = g
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -785,20 +869,21 @@ impl SqliteStorage {
         match existing.as_deref() {
             None => {
                 g.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', '3')",
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '4')",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("2") => {
-                // Upgrade from v2: enrollment tables already created above.
+            Some("2") | Some("3") => {
+                // Upgrade from v2/v3: the v4 organizer_credentials table was
+                // created idempotently above; existing rows are untouched.
                 g.execute(
-                    "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+                    "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("3") => {}
+            Some("4") => {}
             Some(_) => return Err(StorageError::Db),
         }
         Ok(())
@@ -1433,6 +1518,100 @@ impl HostedStorage for SqliteStorage {
         let mut out = None;
         for row in rows {
             out = Some(row.map_err(|_| StorageError::Db)?);
+        }
+        Ok(out)
+    }
+
+    fn put_organizer_credential(
+        &self,
+        record: OrganizerCredentialRecord,
+    ) -> Result<(), StorageError> {
+        let g = self.lock();
+        g.execute(
+            "INSERT INTO organizer_credentials (election_id, organizer_verifier_hex, created_at_ms) VALUES (?1,?2,?3)",
+            params![record.election_id, record.organizer_verifier_hex, record.created_at_ms],
+        )
+        .map_err(|e| map_rusqlite(&e))?;
+        Ok(())
+    }
+
+    fn get_organizer_credential(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<OrganizerCredentialRecord>, StorageError> {
+        let g = self.lock();
+        let mut stmt = g
+            .prepare(
+                "SELECT election_id, organizer_verifier_hex, created_at_ms FROM organizer_credentials WHERE election_id = ?1",
+            )
+            .map_err(|_| StorageError::Db)?;
+        let rows = stmt
+            .query_map(params![election_id], |r| {
+                Ok(OrganizerCredentialRecord {
+                    election_id: r.get(0)?,
+                    organizer_verifier_hex: r.get(1)?,
+                    created_at_ms: r.get(2)?,
+                })
+            })
+            .map_err(|_| StorageError::Db)?;
+        let mut out = None;
+        for row in rows {
+            out = Some(row.map_err(|_| StorageError::Db)?);
+        }
+        Ok(out)
+    }
+
+    fn get_invitation_by_id(
+        &self,
+        invitation_id: &str,
+    ) -> Result<Option<InvitationRecord>, StorageError> {
+        let g = self.lock();
+        let mut stmt = g
+            .prepare(
+                "SELECT invitation_id, slot_id, election_id, verifier_hex, state, created_at_ms FROM enrollment_invitations WHERE invitation_id = ?1",
+            )
+            .map_err(|_| StorageError::Db)?;
+        let rows = stmt
+            .query_map(params![invitation_id], |r| {
+                Ok(InvitationRecord {
+                    invitation_id: r.get(0)?,
+                    slot_id: r.get(1)?,
+                    election_id: r.get(2)?,
+                    verifier_hex: r.get(3)?,
+                    state: r.get(4)?,
+                    created_at_ms: r.get(5)?,
+                })
+            })
+            .map_err(|_| StorageError::Db)?;
+        let mut out = None;
+        for row in rows {
+            out = Some(row.map_err(|_| StorageError::Db)?);
+        }
+        Ok(out)
+    }
+
+    fn list_invitations(&self, election_id: &str) -> Result<Vec<InvitationRecord>, StorageError> {
+        let g = self.lock();
+        let mut stmt = g
+            .prepare(
+                "SELECT invitation_id, slot_id, election_id, verifier_hex, state, created_at_ms FROM enrollment_invitations WHERE election_id = ?1 ORDER BY created_at_ms ASC",
+            )
+            .map_err(|_| StorageError::Db)?;
+        let rows = stmt
+            .query_map(params![election_id], |r| {
+                Ok(InvitationRecord {
+                    invitation_id: r.get(0)?,
+                    slot_id: r.get(1)?,
+                    election_id: r.get(2)?,
+                    verifier_hex: r.get(3)?,
+                    state: r.get(4)?,
+                    created_at_ms: r.get(5)?,
+                })
+            })
+            .map_err(|_| StorageError::Db)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|_| StorageError::Db)?);
         }
         Ok(out)
     }

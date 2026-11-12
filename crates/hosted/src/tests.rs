@@ -28,8 +28,8 @@ use tari_cc_private_ballot_verifier::{
 use tower::ServiceExt;
 
 use crate::{
-    AppState, HostedConfig, InMemoryStorage, ORIGIN_TOKEN_HEADER, admin_router_with_state, hex_encode,
-    router_with_state, test_config, verify_archive_dir_for_test,
+    AppState, HostedConfig, InMemoryStorage, ORIGIN_TOKEN_HEADER, admin_router_with_state, hex_decode,
+    hex_encode, router_with_state, take_test_log_lines, test_config, verify_archive_dir_for_test,
 };
 use crate::storage::{EnrollmentFailpoint, HostedStorage};
 
@@ -394,12 +394,12 @@ fn sqlite_schema_v2_upgrade_preserves_existing_data_and_is_idempotent() {
         assert_eq!(ballots[0].seq, 7);
     }
 
-    // The v3 tables/version exist after migration, and a second open is idempotent.
+    // The v4 tables/version exist after migration, and a second open is idempotent.
     {
         let migrated = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v3"));
         let version: String = migrated.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "3");
-        for table in ["election_drafts", "eligibility_slots", "enrollment_invitations", "enrolled_credentials", "frozen_registries"] {
+        assert_eq!(version, "4");
+        for table in ["election_drafts", "eligibility_slots", "enrollment_invitations", "enrolled_credentials", "frozen_registries", "organizer_credentials"] {
             let exists: i64 = migrated.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
             assert_eq!(exists, 1, "missing {table}");
         }
@@ -504,11 +504,11 @@ fn storage_and_config_boundaries() {
     assert_eq!(storage.ballot_envelope_count("e1"), 1);
     assert_eq!(crate::DEFAULT_BIND, "127.0.0.1:8788");
     assert_eq!(crate::DEFAULT_ADMIN_BIND, "127.0.0.1:8789");
-    let cfg = HostedConfig { bind: "0.0.0.0:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10 };
+    let cfg = HostedConfig { bind: "0.0.0.0:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10, organizer_max_slots: 10 };
     assert!(cfg.validate().is_err());
-    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "0.0.0.0:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: true, rate_limit_per_minute: 10 };
+    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "0.0.0.0:8789".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: true, rate_limit_per_minute: 10, organizer_max_slots: 10 };
     assert!(cfg.validate().is_err(), "admin bind must stay loopback even with public bind allowed");
-    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8788".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10 };
+    let cfg = HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8788".to_owned(), service_name: "x".to_owned(), api_version: "v1".to_owned(), db_path: std::path::PathBuf::from("x.db"), admin_token: None, origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10, organizer_max_slots: 10 };
     assert!(cfg.validate().is_err(), "public and admin binds must differ");
 }
 
@@ -1302,4 +1302,623 @@ async fn concurrent_different_invitations_same_key_slot_safety() {
     // Now 2 credentials enrolled total (key X from winner + key Y from losing slot)
     let creds2 = storage.list_enrolled_credentials(election_id).unwrap();
     assert_eq!(creds2.len(), 2, "total 2 credentials after using losing slot");
+}
+
+
+// ── Self-service organizer plane tests (schema v4) ─────────────────────────
+
+fn organizer_secret(tag: u8) -> String {
+    hex_encode(&[tag; 32])
+}
+
+async fn organizer_create(public: &axum::Router, election_id: &str, secret_hex: &str, slot_count: i64, options: &[&str]) -> (axum::http::StatusCode, serde_json::Value) {
+    let options_json: Vec<serde_json::Value> = options.iter().map(|o| serde_json::Value::from(*o)).collect();
+    let body = serde_json::json!({
+        "election_id": election_id,
+        "options": options_json,
+        "organizer_secret_hex": secret_hex,
+        "min_approvals": 1,
+        "max_approvals": 1,
+        "allow_abstention": false,
+        "authorized_slot_count": slot_count,
+        "governance_revision": "self-service-test",
+    }).to_string();
+    let (s, t) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some(body), &[("content-type", "application/json")]).await;
+    (s, serde_json::from_str(&t).unwrap_or_else(|_| serde_json::json!({"raw": t})))
+}
+
+async fn organizer_call(public: &axum::Router, method: &str, path: &str, body: Option<String>, secret: Option<&str>) -> (axum::http::StatusCode, serde_json::Value) {
+    let mut headers: Vec<(&str, &str)> = vec![("content-type", "application/json")];
+    let owned_secret = secret.map(str::to_owned).unwrap_or_default();
+    if !owned_secret.is_empty() {
+        headers.push(("x-private-ballot-organizer", owned_secret.as_str()));
+    }
+    let (s, t) = req(public.clone(), method, path, body, &headers).await;
+    // Keep the owned secret alive for the lifetime of the borrowed header.
+    debug_assert_eq!(owned_secret.is_empty(), secret.is_none());
+    (s, serde_json::from_str(&t).unwrap_or_else(|_| serde_json::json!({"raw": t})))
+}
+
+async fn organizer_create_ok(public: &axum::Router, election_id: &str, secret_hex: &str, slot_count: i64) {
+    let (s, v) = organizer_create(public, election_id, secret_hex, slot_count, &["candidate-a", "candidate-b", "candidate-c"]).await;
+    assert_eq!(s, axum::http::StatusCode::CREATED, "organizer create must succeed: {v}");
+    assert_eq!(v["eligibility_state"], "DRAFT");
+    assert_eq!(v["authorized_slot_count"], slot_count);
+    assert_eq!(v["proof_suite_id"], TARI_TRIPTYCH_PROOF_SUITE_ID_V1, "proof suite must be pinned server-side");
+    assert!(v.get("organizer_secret_hex").is_none(), "server must never echo the organizer secret");
+}
+
+#[tokio::test]
+async fn organizer_anyone_can_create_election_via_public_router() {
+    let (routers, storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0xA1);
+    // No admin token, no SSH, no server access: just the public router.
+    organizer_create_ok(&public, "org-create-001", &secret, 5).await;
+    // Draft persisted with pinned proof suite and validated candidate set.
+    let draft = storage.get_election_draft("org-create-001").unwrap().unwrap();
+    assert_eq!(draft.authorized_slot_count, 5);
+    assert_eq!(draft.proof_suite_id, TARI_TRIPTYCH_PROOF_SUITE_ID_V1);
+    assert!(CandidateSet::from_canonical_cbor(&draft.candidate_cbor).is_ok());
+    // Duplicate election id rejected.
+    let (s2, v2) = organizer_create(&public, "org-create-001", &secret, 5, &["candidate-a", "candidate-b", "candidate-c"]).await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "{v2}");
+    assert_eq!(v2["code"], "election_exists");
+}
+
+#[tokio::test]
+async fn organizer_capability_plaintext_is_never_stored() {
+    let dir = std::env::temp_dir().join(format!("pb-hosted-organizer-plaintext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let db = dir.join("org.db");
+    let secret = organizer_secret(0xB2);
+    {
+        let storage = Arc::new(crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("open sqlite")));
+        let state = Arc::new(AppState::new(test_config(), storage));
+        let public = router_with_state(state);
+        organizer_create_ok(&public, "org-plaintext-001", &secret, 3).await;
+    }
+    // Inspect the raw database: the organizer credential row must be the
+    // verifier, never the plaintext secret.
+    {
+        let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect"));
+        let mut stmt = conn.prepare("SELECT election_id, organizer_verifier_hex FROM organizer_credentials").unwrap_or_else(|_| panic!("stmt"));
+        let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().filter_map(|r| r.ok()).collect();
+        assert_eq!(rows.len(), 1);
+        let (eid, verifier_hex) = rows[0].clone();
+        assert_eq!(eid, "org-plaintext-001");
+        assert_eq!(verifier_hex, crate::organizer_verifier("org-plaintext-001", &hex_decode(&secret).unwrap()));
+        assert_ne!(verifier_hex, secret, "plaintext organizer secret must never be stored");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn organizer_missing_or_malformed_credential_rejected() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0xC3);
+    organizer_create_ok(&public, "org-auth-001", &secret, 2).await;
+    // No header at all
+    let (s1, v1) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-auth-001", None, None).await;
+    assert_eq!(s1, axum::http::StatusCode::UNAUTHORIZED, "{v1}");
+    assert_eq!(v1["code"], "organizer_credential_required");
+    // Not hex
+    let (s2, _) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-auth-001", None, Some("zz-not-hex")).await;
+    assert_eq!(s2, axum::http::StatusCode::UNAUTHORIZED);
+    // Wrong length (16 bytes)
+    let (s3, _) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-auth-001", None, Some(&hex_encode(&[1u8; 16]))).await;
+    assert_eq!(s3, axum::http::StatusCode::UNAUTHORIZED);
+    // Error responses carry no secret information.
+    assert!(v1.to_string().len() < 200 && !v1.to_string().contains(&secret));
+}
+
+#[tokio::test]
+async fn organizer_wrong_credential_rejected() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    organizer_create_ok(&public, "org-auth-002", &organizer_secret(0xD4), 2).await;
+    let (s, v) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-auth-002", None, Some(&organizer_secret(0xD5))).await;
+    assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED, "{v}");
+    assert_eq!(v["code"], "organizer_credential_required");
+}
+
+#[tokio::test]
+async fn organizer_credential_is_election_scoped() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret_a = organizer_secret(0xE6);
+    let secret_b = organizer_secret(0xF7);
+    organizer_create_ok(&public, "org-scope-a", &secret_a, 2).await;
+    organizer_create_ok(&public, "org-scope-b", &secret_b, 2).await;
+    // Election A's credential must NOT authorize election B (read or mutate).
+    let (s1, v1) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-scope-b", None, Some(&secret_a)).await;
+    assert_eq!(s1, axum::http::StatusCode::UNAUTHORIZED, "{v1}");
+    let (s2, v2) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-scope-b/open-enrollment", None, Some(&secret_a)).await;
+    assert_eq!(s2, axum::http::StatusCode::UNAUTHORIZED, "{v2}");
+    // And B's credential must not authorize A.
+    let (s3, v3) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-scope-a", None, Some(&secret_b)).await;
+    assert_eq!(s3, axum::http::StatusCode::UNAUTHORIZED, "{v3}");
+    // Own credential works.
+    let (s4, v4) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-scope-a", None, Some(&secret_a)).await;
+    assert_eq!(s4, axum::http::StatusCode::OK, "{v4}");
+    assert_eq!(v4["election_id"], "org-scope-a");
+}
+
+#[tokio::test]
+async fn organizer_lifecycle_enrollment_slots_invitations() {
+    let (routers, storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x11);
+    organizer_create_ok(&public, "org-lifecycle-001", &secret, 3).await;
+
+    // Open enrollment with own credential.
+    let (s1, v1) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-lifecycle-001/open-enrollment", None, Some(&secret)).await;
+    assert_eq!(s1, axum::http::StatusCode::OK, "{v1}");
+    assert_eq!(v1["eligibility_state"], "ENROLLMENT_OPEN");
+
+    // Inspect slot/enrollment state without database access.
+    let (s2, v2) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-lifecycle-001/enrollment", None, Some(&secret)).await;
+    assert_eq!(s2, axum::http::StatusCode::OK, "{v2}");
+    assert_eq!(v2["total_slots"], 3);
+    assert_eq!(v2["available_slots"], 3);
+    assert_eq!(v2["consumed_slots"], 0);
+    assert_eq!(v2["enrolled_count"], 0);
+
+    let (s3, v3) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-lifecycle-001/slots", None, Some(&secret)).await;
+    assert_eq!(s3, axum::http::StatusCode::OK, "{v3}");
+    let slots = v3.as_array().unwrap_or_else(|| panic!("slots array: {v3}"));
+    assert_eq!(slots.len(), 3);
+    for slot in slots {
+        assert!(slot["slot_id"].as_str().unwrap_or("").len() >= 8, "opaque slot id: {slot}");
+        assert_eq!(slot["consumed"], false);
+        assert!(slot["invitation_id"].is_null(), "no invitation yet");
+    }
+
+    // Issue an invitation WITHOUT knowing slot ids (empty body = auto-pick).
+    let (s4, v4) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-lifecycle-001/invitations", None, Some(&secret)).await;
+    assert_eq!(s4, axum::http::StatusCode::CREATED, "{v4}");
+    let invitation_secret = v4["invitation_secret_hex"].as_str().unwrap_or_else(|| panic!("plaintext invitation: {v4}")).to_owned();
+    assert_eq!(invitation_secret.len(), 64, "invitation plaintext is 64 hex chars");
+    let invitation_id = v4["invitation_id"].as_str().unwrap().to_owned();
+
+    // The plaintext is returned ONCE: slot listing exposes state only.
+    let (s5, v5) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-lifecycle-001/slots", None, Some(&secret)).await;
+    assert_eq!(s5, axum::http::StatusCode::OK, "{v5}");
+    assert!(!v5.to_string().contains(&invitation_secret), "slot listing must never contain the invitation plaintext");
+
+    // Reissue: explicit slot targeting returns a NEW plaintext; the old one
+    // is voided and cannot be recovered (only reissued).
+    let slot_id = v4["slot_id"].as_str().unwrap().to_owned();
+    let body = serde_json::json!({ "slot_id": slot_id }).to_string();
+    let (s6, v6) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-lifecycle-001/invitations", Some(body), Some(&secret)).await;
+    assert_eq!(s6, axum::http::StatusCode::CREATED, "{v6}");
+    let reissued_secret = v6["invitation_secret_hex"].as_str().unwrap().to_owned();
+    assert_ne!(reissued_secret, invitation_secret, "reissue must mint a new secret");
+    let reissued_invitation_id = v6["invitation_id"].as_str().unwrap().to_owned();
+    assert_ne!(reissued_invitation_id, invitation_id);
+
+    // Void the reissued invitation, then confirm unknown ids fail closed.
+    let (s7, v7) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/org-lifecycle-001/invitations/{reissued_invitation_id}/void"), None, Some(&secret)).await;
+    assert_eq!(s7, axum::http::StatusCode::OK, "{v7}");
+    assert_eq!(v7["state"], "VOIDED");
+    let (s8, v8) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-lifecycle-001/invitations/does-not-exist/void", None, Some(&secret)).await;
+    assert_eq!(s8, axum::http::StatusCode::NOT_FOUND, "{v8}");
+
+    // Reissue after void works (slot unconsumed again).
+    let body = serde_json::json!({ "slot_id": slot_id }).to_string();
+    let (s9, v9) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-lifecycle-001/invitations", Some(body), Some(&secret)).await;
+    assert_eq!(s9, axum::http::StatusCode::CREATED, "{v9}");
+    let usable_secret = v9["invitation_secret_hex"].as_str().unwrap().to_owned();
+
+    // A voter can enroll with the current invitation; the organizer never
+    // sees the voter's private credential (only the public enrollment key).
+    let key_a = enroll_key(1);
+    let (s10, v10) = enroll(&public, "org-lifecycle-001", &usable_secret, &key_a).await;
+    assert_eq!(s10, axum::http::StatusCode::CREATED, "{v10}");
+    assert_eq!(v10["public_key_hex"], key_a, "enrollment exposes only the public key");
+
+    // Organizer endpoints must not expose voter keys or secrets.
+    let (s11, v11) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-lifecycle-001", None, Some(&secret)).await;
+    assert_eq!(s11, axum::http::StatusCode::OK, "{v11}");
+    let body_text = v11.to_string();
+    assert!(!body_text.contains(&key_a), "organizer view must not expose voter public keys");
+    assert!(!body_text.contains("secret_key"), "organizer view must not expose voter secrets");
+    assert_eq!(v11["enrolled_count"], 1);
+    assert_eq!(v11["consumed_slots"], 1);
+    let creds = storage.list_enrolled_credentials("org-lifecycle-001").unwrap();
+    assert_eq!(creds.len(), 1);
+    assert!(creds[0].slot_id.is_some(), "linkage kept until freeze");
+}
+
+#[tokio::test]
+async fn organizer_freeze_rejects_post_freeze_mutations() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x21);
+    organizer_create_ok(&public, "org-freeze-001", &secret, 2).await;
+    organizer_call(&public, "POST", "/api/v1/organizer/elections/org-freeze-001/open-enrollment", None, Some(&secret)).await;
+    let (s0, v0) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-freeze-001/invitations", None, Some(&secret)).await;
+    assert_eq!(s0, axum::http::StatusCode::CREATED, "{v0}");
+    let invitation_secret = v0["invitation_secret_hex"].as_str().unwrap().to_owned();
+    let (se, _) = enroll(&public, "org-freeze-001", &invitation_secret, &enroll_key(2)).await;
+    assert_eq!(se, axum::http::StatusCode::CREATED);
+
+    // Freeze own registry.
+    let (s1, v1) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-freeze-001/freeze", None, Some(&secret)).await;
+    assert_eq!(s1, axum::http::StatusCode::OK, "{v1}");
+    assert_eq!(v1["eligibility_state"], "REGISTRY_FROZEN");
+    assert_eq!(v1["enrolled_count"], 1);
+    assert_eq!(v1["registry_commitment_hex"].as_str().unwrap_or("").len(), 64);
+
+    // Post-freeze: enrollment closed, new invitations rejected, re-freeze rejected.
+    let (s2, v2) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-freeze-001/invitations", None, Some(&secret)).await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "{v2}");
+    assert_eq!(v2["code"], "invalid_state");
+    let (s3, v3) = enroll(&public, "org-freeze-001", &invitation_secret, &enroll_key(3)).await;
+    assert_eq!(s3, axum::http::StatusCode::CONFLICT, "{v3}");
+    assert_eq!(v3["code"], "enrollment_closed");
+    let (s4, _) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-freeze-001/freeze", None, Some(&secret)).await;
+    assert_eq!(s4, axum::http::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x31);
+    let election_id = "org-full-e2e-001";
+    organizer_create_ok(&public, election_id, &secret, 3).await;
+    organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"), None, Some(&secret)).await;
+
+    // Three invitations, three enrolled voters (scalars 1, 2, 3).
+    let mut invitation_secrets = Vec::new();
+    for _ in 0..3 {
+        let (s, v) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/invitations"), None, Some(&secret)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+        invitation_secrets.push(v["invitation_secret_hex"].as_str().unwrap().to_owned());
+    }
+    for (i, invitation) in invitation_secrets.iter().enumerate() {
+        let (s, v) = enroll(&public, election_id, invitation, &enroll_key((i + 1) as u64)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+    }
+
+    // Freeze then open voting (organizer plane).
+    let (sf, vf) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/freeze"), None, Some(&secret)).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{vf}");
+    let (sv, vv) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/open-voting"), None, Some(&secret)).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{vv}");
+    assert_eq!(vv["state"], "open");
+
+    // Build packages against the manifest the server froze (public package).
+    let (sp, vp) = req(public.clone(), "GET", &format!("/api/v1/elections/{election_id}"), None, &[]).await;
+    assert_eq!(sp, axum::http::StatusCode::OK, "{vp}");
+    let pkg_json: serde_json::Value = serde_json::from_str(&vp).unwrap_or_else(|_| panic!("package json"));
+    let f2 = Fixture {
+        election_id: election_id.to_owned(),
+        manifest_cbor: hex_decode(pkg_json["manifest_cbor_hex"].as_str().unwrap()).unwrap(),
+        registry_cbor: hex_decode(pkg_json["registry_cbor_hex"].as_str().unwrap()).unwrap(),
+        candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
+    };
+
+    // Voter 1 votes; a second ballot from the same credential (same
+    // nullifier) is rejected exactly as before.
+    let pkg_a = make_package(&f2, 1, b"candidate-a");
+    let body_a = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111111", "package_cbor_hex": hex_encode(&pkg_a), "api_version": "v1"}).to_string();
+    let (s1, r1) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body_a), &[("content-type", "application/json")]).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{r1}");
+    let pkg_a2 = make_package(&f2, 1, b"candidate-b");
+    let body_a2 = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111112", "package_cbor_hex": hex_encode(&pkg_a2), "api_version": "v1"}).to_string();
+    let (s2, r2) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body_a2), &[("content-type", "application/json")]).await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "{r2}");
+    assert!(r2.contains("duplicate_nullifier"), "duplicate-nullifier behavior unchanged: {r2}");
+    // Voter 2 votes.
+    let pkg_b = make_package(&f2, 2, b"candidate-b");
+    let body_b = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111113", "package_cbor_hex": hex_encode(&pkg_b), "api_version": "v1"}).to_string();
+    let (s3, r3) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body_b), &[("content-type", "application/json")]).await;
+    assert_eq!(s3, axum::http::StatusCode::CREATED, "{r3}");
+
+    // Close, close-then-submit rejected, finalize.
+    let (sc, vc) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/close"), None, Some(&secret)).await;
+    assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
+    assert_eq!(vc["state"], "closed");
+    let pkg_c = make_package(&f2, 3, b"candidate-c");
+    let body_c = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111114", "package_cbor_hex": hex_encode(&pkg_c), "api_version": "v1"}).to_string();
+    let (s4, r4) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body_c), &[("content-type", "application/json")]).await;
+    assert_eq!(s4, axum::http::StatusCode::CONFLICT, "{r4}");
+    let (sfin, vfin) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/finalize"), None, Some(&secret)).await;
+    assert_eq!(sfin, axum::http::StatusCode::OK, "{vfin}");
+    assert_eq!(vfin["state"], "finalized");
+    assert_eq!(vfin["accepted_ballots"], 2);
+
+    // Public results and archive still work after organizer-driven finalize.
+    let (sres, vres) = organizer_call(&public, "GET", &format!("/api/v1/elections/{election_id}/results"), None, None).await;
+    assert_eq!(sres, axum::http::StatusCode::OK, "{vres}");
+    assert_eq!(vres["accepted_ballots"], 2);
+    let counts = vres["counts"].as_array().unwrap();
+    let total: u64 = counts.iter().filter_map(|c| c["approvals"].as_u64()).sum();
+    assert_eq!(total, 2);
+    let (sarch, varch) = organizer_call(&public, "GET", &format!("/api/v1/elections/{election_id}/archive"), None, None).await;
+    assert_eq!(sarch, axum::http::StatusCode::OK, "{varch}");
+    assert_eq!(varch["archive_hash_hex"].as_str().unwrap_or("").len(), 64);
+    assert!(varch["files"].as_array().unwrap().iter().any(|f| f["path"].as_str().unwrap_or("").contains("manifest")));
+}
+
+#[tokio::test]
+async fn organizer_cannot_perform_global_administration() {
+    let f = fixture();
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let admin = routers.admin.clone();
+    let secret = organizer_secret(0x41);
+    organizer_create_ok(&public, "org-no-admin-001", &secret, 2).await;
+
+    // Global admin routes do not exist on the public router at all.
+    for path in [
+        "/api/v1/admin/elections/draft",
+        "/api/v1/admin/elections/import",
+        "/api/v1/admin/elections/org-no-admin-001/close",
+        "/api/v1/admin/elections/org-no-admin-001/freeze",
+        "/api/v1/admin/elections/org-no-admin-001/finalize",
+    ] {
+        let (s, _) = req(public.clone(), "POST", path, Some("{}".to_owned()), &[("content-type", "application/json"), ("x-admin-token", "test-admin-token")]).await;
+        assert_eq!(s, axum::http::StatusCode::NOT_FOUND, "public router must not serve {path}");
+    }
+
+    // The organizer credential is NOT an admin token: on the loopback admin
+    // plane it authorizes nothing.
+    for path in [
+        "/api/v1/admin/elections/draft",
+        "/api/v1/admin/elections/import",
+        "/api/v1/admin/elections/org-no-admin-001/close",
+        "/api/v1/admin/elections/org-no-admin-001/finalize",
+    ] {
+        let (s, _) = req(admin.clone(), "POST", path, Some("{}".to_owned()), &[("content-type", "application/json"), ("x-private-ballot-organizer", secret.as_str())]).await;
+        assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED, "organizer credential must not grant admin: {path}");
+    }
+
+    // An election the organizer did not create is invisible: even a draft
+    // created on the admin plane cannot be read with a foreign credential.
+    create_draft_and_open_enrollment(&admin, "org-no-admin-foreign", &f.candidate_cbor, 1).await;
+    let (s2, v2) = organizer_call(&public, "GET", "/api/v1/organizer/elections/org-no-admin-foreign", None, Some(&secret)).await;
+    assert_eq!(s2, axum::http::StatusCode::UNAUTHORIZED, "{v2}");
+}
+
+#[tokio::test]
+async fn organizer_request_logging_never_contains_secrets() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x51);
+    organizer_create_ok(&public, "org-log-001", &secret, 2).await;
+    organizer_call(&public, "POST", "/api/v1/organizer/elections/org-log-001/open-enrollment", None, Some(&secret)).await;
+    let (s, v) = organizer_call(&public, "POST", "/api/v1/organizer/elections/org-log-001/invitations", None, Some(&secret)).await;
+    assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+    let invitation_secret = v["invitation_secret_hex"].as_str().unwrap().to_owned();
+    let lines = take_test_log_lines();
+    assert!(!lines.is_empty(), "requests must be logged");
+    for line in &lines {
+        assert!(!line.contains(&secret), "log line must not contain organizer secret: {line}");
+        assert!(!line.contains(&invitation_secret), "log line must not contain invitation secret: {line}");
+        assert!(!line.contains("organizer_secret_hex"), "log line must not contain request body keys: {line}");
+        assert!(!line.contains("x-private-ballot-organizer"), "log line must not contain credential header: {line}");
+    }
+    // The log line format is restricted to method/path/status/duration.
+    let create_line = lines.iter().find(|l| l.contains("POST") && l.contains("/api/v1/organizer/elections")).unwrap();
+    assert!(create_line.starts_with("hosted method=POST path="), "log format restricted: {create_line}");
+}
+
+#[tokio::test]
+async fn organizer_creation_and_slot_limits_enforced() {
+    // Custom config with a tight self-service slot cap.
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut cfg = test_config();
+    cfg.organizer_max_slots = 5;
+    let state = Arc::new(AppState::new(cfg, storage));
+    let public = router_with_state(state);
+    let secret = organizer_secret(0x61);
+
+    let (s_over, v_over) = organizer_create(&public, "org-limit-over", &secret, 6, &["candidate-a", "candidate-b", "candidate-c"]).await;
+    assert_eq!(s_over, axum::http::StatusCode::BAD_REQUEST, "{v_over}");
+    let (s_ok, v_ok) = organizer_create(&public, "org-limit-ok", &secret, 5, &["candidate-a", "candidate-b", "candidate-c"]).await;
+    assert_eq!(s_ok, axum::http::StatusCode::CREATED, "{v_ok}");
+
+    // Config validation: organizer slot cap must be within bounds.
+    let mut cfg = test_config();
+    cfg.organizer_max_slots = 0;
+    assert!(cfg.clone().validate().is_err());
+    cfg.organizer_max_slots = crate::MAX_ORGANIZER_SLOTS_LIMIT + 1;
+    assert!(cfg.clone().validate().is_err());
+    cfg.organizer_max_slots = crate::MAX_ORGANIZER_SLOTS_LIMIT;
+    assert!(cfg.validate().is_ok());
+}
+
+#[tokio::test]
+async fn organizer_malformed_and_oversized_requests_rejected() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x71);
+    let good_options = ["candidate-a", "candidate-b", "candidate-c"];
+
+    // Malformed JSON
+    let (s1, _) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some("{not json".to_owned()), &[("content-type", "application/json")]).await;
+    assert_eq!(s1, axum::http::StatusCode::BAD_REQUEST);
+    // Missing required fields
+    let (s2, _) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some(serde_json::json!({"election_id": "x"}).to_string()), &[("content-type", "application/json")]).await;
+    assert_eq!(s2, axum::http::StatusCode::BAD_REQUEST);
+    // Invalid election_id characters
+    let (s3, v3) = organizer_create(&public, "bad id!", &secret, 1, &good_options).await;
+    assert_eq!(s3, axum::http::StatusCode::BAD_REQUEST, "{v3}");
+    // Oversized election_id
+    let long_id: String = "a".repeat(200);
+    let (s4, _) = organizer_create(&public, &long_id, &secret, 1, &good_options).await;
+    assert_eq!(s4, axum::http::StatusCode::BAD_REQUEST);
+    // Invalid secret (not hex / wrong length)
+    let (s5, _) = organizer_create(&public, "org-malformed-1", "not-hex", 1, &good_options).await;
+    assert_eq!(s5, axum::http::StatusCode::BAD_REQUEST);
+    let (s6, _) = organizer_create(&public, "org-malformed-2", &hex_encode(&[9u8; 16]), 1, &good_options).await;
+    assert_eq!(s6, axum::http::StatusCode::BAD_REQUEST);
+    // Empty options
+    let (s7, _) = organizer_create(&public, "org-malformed-3", &secret, 1, &[]).await;
+    assert_eq!(s7, axum::http::StatusCode::BAD_REQUEST);
+    // Duplicate option names
+    let (s8, _) = organizer_create(&public, "org-malformed-4", &secret, 1, &["Yes", "Yes"]).await;
+    assert_eq!(s8, axum::http::StatusCode::BAD_REQUEST);
+    // Empty option name
+    let (s9, _) = organizer_create(&public, "org-malformed-5", &secret, 1, &["Yes", "   "]).await;
+    assert_eq!(s9, axum::http::StatusCode::BAD_REQUEST);
+    // Approval limits: min > max and max > option count
+    let body = serde_json::json!({
+        "election_id": "org-malformed-6", "options": good_options, "organizer_secret_hex": secret,
+        "min_approvals": 2, "max_approvals": 1, "authorized_slot_count": 1,
+    }).to_string();
+    let (s10, _) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some(body), &[("content-type", "application/json")]).await;
+    assert_eq!(s10, axum::http::StatusCode::BAD_REQUEST);
+    let body = serde_json::json!({
+        "election_id": "org-malformed-7", "options": ["a", "b"], "organizer_secret_hex": secret,
+        "min_approvals": 2, "max_approvals": 3, "authorized_slot_count": 1,
+    }).to_string();
+    let (s11, _) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some(body), &[("content-type", "application/json")]).await;
+    assert_eq!(s11, axum::http::StatusCode::BAD_REQUEST);
+    // Slot count 0 rejected
+    let (s12, _) = organizer_create(&public, "org-malformed-8", &secret, 0, &good_options).await;
+    assert_eq!(s12, axum::http::StatusCode::BAD_REQUEST);
+    // Oversized body (> 64 KiB) rejected
+    let big_options: Vec<String> = (0..2000).map(|i| format!("option-{i}-{}", "x".repeat(64))).collect();
+    let big_body = serde_json::json!({
+        "election_id": "org-oversized", "options": big_options, "organizer_secret_hex": secret,
+        "authorized_slot_count": 1,
+    }).to_string();
+    assert!(big_body.len() > 64 * 1024);
+    let (s13, _) = req(public.clone(), "POST", "/api/v1/organizer/elections", Some(big_body), &[("content-type", "application/json")]).await;
+    assert!(s13 == axum::http::StatusCode::PAYLOAD_TOO_LARGE || s13 == axum::http::StatusCode::BAD_REQUEST, "oversized body must be rejected, got {s13}");
+}
+
+#[test]
+fn sqlite_migration_v3_to_v4_preserves_staging_data() {
+    let dir = std::env::temp_dir().join(format!("pb-hosted-migration-v3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    let db = dir.join("migration.db");
+
+    // Simulate an existing schema v3 staging database with real-looking rows.
+    {
+        let legacy = Connection::open(&db).unwrap_or_else(|_| panic!("open v3"));
+        legacy.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE elections (
+                id TEXT PRIMARY KEY, manifest_cbor BLOB NOT NULL, registry_cbor BLOB NOT NULL,
+                candidate_cbor BLOB NOT NULL, state TEXT NOT NULL, manifest_hash_hex TEXT NOT NULL
+             );
+             CREATE TABLE ballots (
+                election_id TEXT NOT NULL, receipt_id TEXT NOT NULL, package_cbor BLOB NOT NULL,
+                envelope_hash_hex TEXT NOT NULL, nullifier BLOB NOT NULL, seq INTEGER NOT NULL,
+                PRIMARY KEY (election_id, receipt_id), UNIQUE (election_id, nullifier),
+                FOREIGN KEY (election_id) REFERENCES elections(id)
+             );
+             CREATE TABLE election_drafts (
+                election_id TEXT PRIMARY KEY, candidate_cbor BLOB NOT NULL, proof_suite_id TEXT NOT NULL,
+                min_approvals INTEGER NOT NULL DEFAULT 1, max_approvals INTEGER NOT NULL DEFAULT 1,
+                allow_abstention INTEGER NOT NULL DEFAULT 1, governance_revision TEXT NOT NULL DEFAULT '',
+                authorized_slot_count INTEGER NOT NULL, external_roster_commitment_hex TEXT,
+                eligibility_state TEXT NOT NULL DEFAULT 'DRAFT', created_at_ms INTEGER NOT NULL
+             );
+             CREATE TABLE eligibility_slots (
+                slot_id TEXT PRIMARY KEY, election_id TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0,
+                created_at_ms INTEGER NOT NULL, FOREIGN KEY (election_id) REFERENCES election_drafts(election_id)
+             );
+             CREATE TABLE enrollment_invitations (
+                invitation_id TEXT PRIMARY KEY, slot_id TEXT NOT NULL, election_id TEXT NOT NULL,
+                verifier_hex TEXT NOT NULL UNIQUE, state TEXT NOT NULL DEFAULT 'ACTIVE', created_at_ms INTEGER NOT NULL,
+                FOREIGN KEY (slot_id) REFERENCES eligibility_slots(slot_id),
+                FOREIGN KEY (election_id) REFERENCES election_drafts(election_id)
+             );
+             CREATE TABLE enrolled_credentials (
+                election_id TEXT NOT NULL, public_key_hex TEXT NOT NULL, slot_id TEXT, invitation_id TEXT,
+                enrolled_at_ms INTEGER NOT NULL, PRIMARY KEY (election_id, public_key_hex)
+             );
+             CREATE TABLE frozen_registries (
+                election_id TEXT PRIMARY KEY, registry_cbor_hex TEXT NOT NULL, registry_commitment_hex TEXT NOT NULL,
+                authorized_slot_count INTEGER NOT NULL, enrolled_count INTEGER NOT NULL, frozen_at_ms INTEGER NOT NULL,
+                external_roster_commitment_hex TEXT
+             );",
+        ).unwrap_or_else(|_| panic!("create v3 schema"));
+        legacy.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '3')", []).unwrap_or_else(|_| panic!("v3 version"));
+        legacy.execute(
+            "INSERT INTO election_drafts (election_id, candidate_cbor, proof_suite_id, min_approvals, max_approvals, allow_abstention, governance_revision, authorized_slot_count, external_roster_commitment_hex, eligibility_state, created_at_ms) VALUES (?1, ?2, ?3, 1, 1, 1, 'legacy-rev', 4, NULL, 'ENROLLMENT_OPEN', 1000)",
+            params!["legacy-draft", vec![1_u8], TARI_TRIPTYCH_PROOF_SUITE_ID_V1],
+        ).unwrap_or_else(|_| panic!("v3 draft"));
+        legacy.execute(
+            "INSERT INTO eligibility_slots (slot_id, election_id, consumed, created_at_ms) VALUES (?1, 'legacy-draft', 1, 1001)",
+            params!["legacy-slot"],
+        ).unwrap_or_else(|_| panic!("v3 slot"));
+        legacy.execute(
+            "INSERT INTO enrollment_invitations (invitation_id, slot_id, election_id, verifier_hex, state, created_at_ms) VALUES (?1, 'legacy-slot', 'legacy-draft', 'legacy-verifier', 'CONSUMED', 1002)",
+            params!["legacy-invitation"],
+        ).unwrap_or_else(|_| panic!("v3 invitation"));
+        legacy.execute(
+            "INSERT INTO enrolled_credentials (election_id, public_key_hex, slot_id, invitation_id, enrolled_at_ms) VALUES ('legacy-draft', 'legacy-key', 'legacy-slot', 'legacy-invitation', 1003)",
+            [],
+        ).unwrap_or_else(|_| panic!("v3 credential"));
+    }
+
+    // First open migrates to v4 and preserves every v3 record.
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("migrate v3->v4"));
+        let draft = storage.get_election_draft("legacy-draft").unwrap().unwrap();
+        assert_eq!(draft.eligibility_state, "ENROLLMENT_OPEN");
+        assert_eq!(draft.authorized_slot_count, 4);
+        assert_eq!(draft.governance_revision, "legacy-rev");
+        let slots = storage.list_slots("legacy-draft").unwrap();
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].consumed);
+        let invitation = storage.get_invitation_by_id("legacy-invitation").unwrap().unwrap();
+        assert_eq!(invitation.state, "CONSUMED");
+        assert_eq!(invitation.verifier_hex, "legacy-verifier");
+        let creds = storage.list_enrolled_credentials("legacy-draft").unwrap();
+        assert_eq!(creds.len(), 1);
+        assert_eq!(creds[0].public_key_hex, "legacy-key");
+        assert!(creds[0].slot_id.is_some(), "pre-freeze linkage preserved");
+        // New v4 capacity exists: an organizer credential can be added.
+        storage.put_organizer_credential(crate::storage::OrganizerCredentialRecord {
+            election_id: "legacy-draft".to_owned(),
+            organizer_verifier_hex: "v4-verifier".to_owned(),
+            created_at_ms: 2000,
+        }).unwrap_or_else(|_| panic!("v4 insert after migration"));
+    }
+
+    // Version bumped to 4 and organizer_credentials exists.
+    {
+        let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v4"));
+        let version: String = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
+        assert_eq!(version, "4");
+        let exists: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'organizer_credentials'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
+        assert_eq!(exists, 1);
+    }
+
+    // Reopen is idempotent: data intact, version still 4.
+    {
+        let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen v4"));
+        assert!(storage.get_election_draft("legacy-draft").unwrap().is_some());
+        assert_eq!(storage.get_invitation_by_id("legacy-invitation").unwrap().unwrap().state, "CONSUMED");
+        assert!(storage.get_organizer_credential("legacy-draft").unwrap().is_some());
+        let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect after reopen"));
+        let version: String = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
+        assert_eq!(version, "4");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn in_memory_organizer_credential_operations() {
+    let storage = InMemoryStorage::new();
+    assert!(storage.get_organizer_credential("nope").unwrap().is_none());
+    storage.put_organizer_credential(crate::storage::OrganizerCredentialRecord {
+        election_id: "e".to_owned(), organizer_verifier_hex: "v".to_owned(), created_at_ms: 1,
+    }).unwrap_or_else(|_| panic!("put"));
+    assert_eq!(storage.get_organizer_credential("e").unwrap().unwrap().organizer_verifier_hex, "v");
+    assert!(matches!(storage.put_organizer_credential(crate::storage::OrganizerCredentialRecord {
+        election_id: "e".to_owned(), organizer_verifier_hex: "v2".to_owned(), created_at_ms: 2,
+    }), Err(crate::StorageError::ElectionExists)));
+    assert!(storage.get_invitation_by_id("missing").unwrap().is_none());
+    assert_eq!(storage.list_invitations("e").unwrap().len(), 0);
 }

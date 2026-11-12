@@ -1,4 +1,4 @@
-﻿import { hostedShell } from "./shell";
+import { hostedShell } from "./shell";
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -19,6 +19,31 @@ app.innerHTML = hostedShell(`
   </div>
 
   <div class="home-actions">
+    <section class="card home-action-card">
+      <div class="card-title">Organizer</div>
+      <h2>Create an election</h2>
+      <p>
+        Set up your own vote in minutes: define the ballot options and voter
+        seats, and manage the whole lifecycle from your browser with a
+        secret organizer credential.
+      </p>
+      <a class="btn-link btn-primary-link" href="/create.html">
+        Create Election
+      </a>
+    </section>
+
+    <section class="card home-action-card">
+      <div class="card-title">Organizer</div>
+      <h2>Manage an election</h2>
+      <p>
+        Use your organizer credential to issue voter invitations, freeze the
+        registry, open voting, and publish the final archive.
+      </p>
+      <a class="btn-link btn-primary-link" href="/manage.html">
+        Manage Election
+      </a>
+    </section>
+
     <section class="card home-action-card">
       <div class="card-title">Voter</div>
       <h2>Enroll to vote</h2>

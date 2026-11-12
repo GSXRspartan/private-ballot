@@ -20,7 +20,7 @@
  * credential, or admin token ever touches this Worker.
  */
 
-const ORIGIN_TOKEN_HEADER = "x-private-ballot-origin";
+import { buildUpstreamHeaders, isAdminPath } from "./headers.mjs";
 
 const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
   [
@@ -59,19 +59,10 @@ function applySecurityHeaders(response: Response): Response {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
-function isAdminPath(pathname: string): boolean {
-  return pathname === "/api/v1/admin" || pathname.startsWith("/api/v1/admin/");
-}
-
 async function proxyApi(request: Request, env: Env, url: URL): Promise<Response> {
   const origin = env.STAGING_ORIGIN.replace(/\/$/, "");
   const target = `${origin}${url.pathname}${url.search}`;
-  const headers = new Headers(request.headers);
-  headers.delete(ORIGIN_TOKEN_HEADER);
-  headers.delete("x-admin-token");
-  if (env.ORIGIN_TOKEN) {
-    headers.set(ORIGIN_TOKEN_HEADER, env.ORIGIN_TOKEN);
-  }
+  const headers = buildUpstreamHeaders(request.headers, env.ORIGIN_TOKEN);
   const method = request.method.toUpperCase();
   const init: RequestInit = { method, headers };
   if (method !== "GET" && method !== "HEAD") {

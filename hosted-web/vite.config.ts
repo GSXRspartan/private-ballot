@@ -17,6 +17,8 @@ export default defineConfig({
         guide: "guide.html",
         vote: "vote.html",
         enroll: "enroll.html",
+        create: "create.html",
+        manage: "manage.html",
         about: "about.html",
         settings: "settings.html",
         archive: "archive.html",

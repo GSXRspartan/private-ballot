@@ -18,8 +18,8 @@ chmod 600 "$DEST"
 
 # Verification: integrity + schema version + expected tables.
 sqlite3 "$DEST" "PRAGMA integrity_check;" | grep -qx ok
-sqlite3 "$DEST" "SELECT value FROM meta WHERE key = 'schema_version';" | grep -qx 2
-sqlite3 "$DEST" "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('elections','ballots');" | sort | tr '\n' ',' | grep -qx "ballots,elections,"
+sqlite3 "$DEST" "SELECT value FROM meta WHERE key = 'schema_version';" | grep -qx 4
+sqlite3 "$DEST" "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('elections','ballots','organizer_credentials');" | sort | tr '\n' ',' | grep -qx "ballots,elections,organizer_credentials,"
 
 echo "backup ok: $DEST"
 ls -l "$DEST"

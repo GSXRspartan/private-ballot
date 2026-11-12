@@ -18,14 +18,20 @@
 //! no request-body, secret, or full-IP logging; ballot/receipt responses are
 //! `private, no-store`; no wildcard CORS (same-origin only, no CORS layer).
 //!
-//! Two control planes (Stage 3): the PUBLIC plane (`127.0.0.1:8788` by
-//! default) serves only voter-facing routes and is the only listener the
-//! Cloudflare Tunnel may route to. The ADMIN plane (`127.0.0.1:8789` by
-//! default) serves only organizer/admin mutation routes, is always
-//! loopback-only, and must never be routed through Cloudflare. The public
-//! plane has no admin routes at all (404), so public admin access fails
-//! even if edge blocking fails. When `PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN`
-//! is set, the public plane additionally requires the Worker-injected
+//! Three control planes: the PUBLIC plane (`127.0.0.1:8788` by
+//! default) serves voter-facing routes PLUS self-service organizer routes
+//! authorized by election-scoped capability credentials (`POST
+//! /api/v1/organizer/elections` and election-scoped lifecycle mutations
+//! under `/api/v1/organizer/...`); an organizer credential authorizes only
+//! its own election and never grants server-global administration. The
+//! public plane is the only listener the Cloudflare Tunnel may route to.
+//! The ADMIN plane (`127.0.0.1:8789` by default) serves the global
+//! organizer/admin mutation routes, is always loopback-only, and must
+//! never be routed through Cloudflare; it exists for
+//! infrastructure/emergency/legacy operations. The public plane has no
+//! global-admin routes at all (404), so public admin access fails even if
+//! edge blocking fails. When `PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN` is set,
+//! the public plane additionally requires the Worker-injected
 //! `x-private-ballot-origin` header (`/health` exempt for Tunnel checks);
 //! the token is never in browser JavaScript. Unset token = local dev, no
 //! header check.
@@ -52,15 +58,17 @@ use tari_cc_private_ballot_archive::{
     SUBMISSIONS_ARCHIVE_DIR,
 };
 use tari_cc_private_ballot_ballot::{
-    ApprovalBallotPayload, ApprovalLimits, CandidateSet,
+    ApprovalBallotPayload, ApprovalLimits, CandidateId, CandidateSet,
     ElectionManifest, ElectionManifestV1, ElectionManifestV1Input,
     BallotKindV1, BallotConfidentialityV1, ElectionId,
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, HashProvider,
+    MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
     PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode,
     hash_domain_separated,
 };
+use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_registry::{
     GovernancePublicKey, RegistryEntry, RegistrySnapshot,
     VoterGovernanceKeyRegistrationV1, VoterKeyProvisioningV1,
@@ -88,7 +96,22 @@ pub const ORIGIN_TOKEN_HEADER: &str = "x-private-ballot-origin";
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Stricter per-route limit for ballot submissions.
 pub const MAX_BALLOT_BODY_BYTES: usize = 32 * 1024;
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+/// Domain separator for the election-scoped organizer capability verifier.
+/// The verifier is BLAKE3 over `{domain}\0{election_id}\0{secret_bytes}`;
+/// the plaintext organizer secret is never stored server-side.
+pub const ORGANIZER_CAPABILITY_DOMAIN: &str = "private-ballot-organizer-capability-v1";
+/// Header carrying the election-scoped organizer capability secret hex on
+/// organizer routes of the public plane. Never used for the global admin
+/// plane (which keeps `x-admin-token`), never logged, never persisted.
+pub const ORGANIZER_CREDENTIAL_HEADER: &str = "x-private-ballot-organizer";
+/// Default maximum voter-slot count for self-service (organizer-plane)
+/// election creation. Much safer than the admin-plane 100,000 maximum;
+/// operators may raise it via PRIVATE_BALLOT_HOSTED_ORGANIZER_MAX_SLOTS.
+pub const DEFAULT_ORGANIZER_MAX_SLOTS: i64 = 1_000;
+/// Hard upper bound for the self-service voter-slot limit regardless of
+/// configuration (matches the admin-plane maximum).
+pub const MAX_ORGANIZER_SLOTS_LIMIT: i64 = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostedConfig {
@@ -101,6 +124,9 @@ pub struct HostedConfig {
     pub origin_token: Option<String>,
     pub allow_public_bind: bool,
     pub rate_limit_per_minute: u32,
+    /// Maximum voter-slot count accepted on self-service (organizer-plane)
+    /// election creation. Defaults to 1,000; bounded by MAX_ORGANIZER_SLOTS_LIMIT.
+    pub organizer_max_slots: i64,
 }
 
 fn is_loopback_bind(bind: &str) -> Option<bool> {
@@ -122,7 +148,9 @@ impl HostedConfig {
         let allow_public_bind = std::env::var("PRIVATE_BALLOT_HOSTED_ALLOW_PUBLIC_BIND").is_ok_and(|v| v == "1");
         let rate_limit_per_minute = std::env::var("PRIVATE_BALLOT_HOSTED_RATE_LIMIT_PER_MIN")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(120);
-        Self { bind, admin_bind, service_name, api_version, db_path, admin_token, origin_token, allow_public_bind, rate_limit_per_minute }.validate()
+        let organizer_max_slots = std::env::var("PRIVATE_BALLOT_HOSTED_ORGANIZER_MAX_SLOTS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_ORGANIZER_MAX_SLOTS);
+        Self { bind, admin_bind, service_name, api_version, db_path, admin_token, origin_token, allow_public_bind, rate_limit_per_minute, organizer_max_slots }.validate()
     }
 
     pub fn validate(self) -> Result<Self, ConfigError> {
@@ -142,6 +170,9 @@ impl HostedConfig {
             return Err(ConfigError::InvalidBind);
         }
         if self.rate_limit_per_minute == 0 || self.rate_limit_per_minute > 10_000 {
+            return Err(ConfigError::InvalidBind);
+        }
+        if self.organizer_max_slots < 1 || self.organizer_max_slots > MAX_ORGANIZER_SLOTS_LIMIT {
             return Err(ConfigError::InvalidBind);
         }
         Ok(self)
@@ -190,6 +221,23 @@ pub fn new_opaque_id() -> String {
 pub fn invitation_verifier(secret: &[u8]) -> String {
     let p = Blake3HashProviderV1;
     let mut input = b"invitation-secret-verifier-v1\0".to_vec();
+    input.extend_from_slice(secret);
+    hex_encode(&p.hash(&input))
+}
+
+/// Compute the election-scoped organizer capability verifier from the raw
+/// secret bytes. Domain-separated from invitation verifiers and bound to the
+/// election id, so a credential for election A can never authorize election B.
+/// Only the verifier is stored server-side; the plaintext secret stays with
+/// the organizer (browser memory / downloaded access file).
+#[must_use]
+pub fn organizer_verifier(election_id: &str, secret: &[u8]) -> String {
+    let p = Blake3HashProviderV1;
+    let mut input = Vec::with_capacity(ORGANIZER_CAPABILITY_DOMAIN.len() + election_id.len() + secret.len() + 2);
+    input.extend_from_slice(ORGANIZER_CAPABILITY_DOMAIN.as_bytes());
+    input.push(0);
+    input.extend_from_slice(election_id.as_bytes());
+    input.push(0);
     input.extend_from_slice(secret);
     hex_encode(&p.hash(&input))
 }
@@ -559,35 +607,37 @@ async fn admin_create_draft(
     }
 }
 
+fn do_open_enrollment(state: &AppState, id: &str) -> Result<Response, Response> {
+    let draft = state.storage.get_election_draft(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"))?;
+    if draft.eligibility_state != "DRAFT" {
+        return Err(error_response(StatusCode::CONFLICT, "invalid_state", "draft is not in DRAFT state"));
+    }
+    // Create slots
+    state.storage.create_slots(id, draft.authorized_slot_count as usize, now_ms())
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "slot creation failed"))?;
+    // Transition state
+    match state.storage.set_draft_eligibility_state(id, "DRAFT", "ENROLLMENT_OPEN") {
+        Ok(true) => Ok((StatusCode::OK, Json(serde_json::json!({
+            "election_id": id,
+            "eligibility_state": "ENROLLMENT_OPEN",
+            "authorized_slot_count": draft.authorized_slot_count,
+        }))).into_response()),
+        Ok(false) => Err(error_response(StatusCode::CONFLICT, "invalid_state", "state transition race")),
+        Err(_) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
+    }
+}
+
 async fn admin_open_enrollment(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     if let Err(r) = check_admin(&state, &headers) { return r; }
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    if draft.eligibility_state != "DRAFT" {
-        return error_response(StatusCode::CONFLICT, "invalid_state", "draft is not in DRAFT state");
-    }
-    let now_ms = now_ms();
-    // Create slots
-    match state.storage.create_slots(&id, draft.authorized_slot_count as usize, now_ms) {
-        Ok(_) => {}
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "slot creation failed"),
-    }
-    // Transition state
-    match state.storage.set_draft_eligibility_state(&id, "DRAFT", "ENROLLMENT_OPEN") {
-        Ok(true) => (StatusCode::OK, Json(serde_json::json!({
-            "election_id": id,
-            "eligibility_state": "ENROLLMENT_OPEN",
-            "authorized_slot_count": draft.authorized_slot_count,
-        }))).into_response(),
-        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "state transition race"),
-        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    match do_open_enrollment(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
     }
 }
 
@@ -605,6 +655,84 @@ struct InvitationResponse {
     state: String,
 }
 
+/// Issue (or reissue) an invitation for an unconsumed slot of `id`.
+/// When `slot_id` is `None`, an available slot is chosen automatically
+/// (first unconsumed slot with no ACTIVE invitation), so self-service
+/// organizers never need to know storage-level slot identifiers.
+fn do_issue_invitation(state: &AppState, id: &str, slot_id: Option<String>) -> Result<InvitationResponse, Response> {
+    let draft = state.storage.get_election_draft(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"))?;
+    if draft.eligibility_state != "ENROLLMENT_OPEN" {
+        return Err(error_response(StatusCode::CONFLICT, "invalid_state", "enrollment is not open"));
+    }
+    let slots = state.storage.list_slots(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?;
+    let slot = match slot_id {
+        Some(requested) => {
+            let slot = slots.iter().find(|s| s.slot_id == requested).cloned()
+                .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "slot_not_found", "slot not found for this election"))?;
+            if slot.consumed {
+                return Err(error_response(StatusCode::CONFLICT, "slot_consumed", "slot already consumed; cannot issue another invitation"));
+            }
+            slot
+        }
+        None => {
+            let mut available: Vec<&storage::EligibilitySlotRecord> = slots.iter().filter(|s| !s.consumed).collect();
+            available.sort_by(|a, b| a.slot_id.cmp(&b.slot_id));
+            // Prefer a slot with no ACTIVE invitation so reissuance stays an
+            // explicit action rather than an accident of ordering.
+            let mut chosen: Option<String> = None;
+            for s in &available {
+                let has_active = state.storage.get_active_invitation_for_slot(&s.slot_id)
+                    .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+                    .is_some();
+                if !has_active { chosen = Some(s.slot_id.clone()); break; }
+            }
+            let chosen = match chosen {
+                Some(c) => c,
+                None => match available.first() {
+                    Some(s) => s.slot_id.clone(),
+                    None => return Err(error_response(StatusCode::CONFLICT, "no_available_slot", "no unconsumed voter slots remain")),
+                },
+            };
+            match slots.iter().find(|s| s.slot_id == chosen) {
+                Some(s) => s.clone(),
+                None => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
+            }
+        }
+    };
+    // Void any existing ACTIVE invitation for this slot (reissuance)
+    if state.storage.void_active_slot_invitations(&slot.slot_id).is_err() {
+        return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"));
+    }
+    // Generate 32-byte CSPRNG secret; compute verifier; never store secret
+    let mut secret = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut secret);
+    let verifier_hex = invitation_verifier(&secret);
+    let secret_hex = hex_encode(&secret);
+    let invitation_id = new_opaque_id();
+    let now_ms = now_ms();
+    let record = storage::InvitationRecord {
+        invitation_id: invitation_id.clone(),
+        slot_id: slot.slot_id.clone(),
+        election_id: id.to_owned(),
+        verifier_hex,
+        state: "ACTIVE".to_owned(),
+        created_at_ms: now_ms,
+    };
+    if state.storage.insert_invitation(record).is_err() {
+        return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"));
+    }
+    Ok(InvitationResponse {
+        election_id: id.to_owned(),
+        slot_id: slot.slot_id,
+        invitation_id,
+        invitation_secret_hex: secret_hex,
+        state: "ACTIVE".to_owned(),
+    })
+}
+
 async fn admin_issue_invitation(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -617,57 +745,10 @@ async fn admin_issue_invitation(
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed issue-invitation request"),
     };
-    // Verify draft is ENROLLMENT_OPEN
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    if draft.eligibility_state != "ENROLLMENT_OPEN" {
-        return error_response(StatusCode::CONFLICT, "invalid_state", "enrollment is not open");
+    match do_issue_invitation(state.as_ref(), &id, Some(req.slot_id)) {
+        Ok(resp) => (StatusCode::CREATED, Json(resp)).into_response(),
+        Err(r) => r,
     }
-    // Check slot exists and belongs to this election
-    let slots = match state.storage.list_slots(&id) {
-        Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    let slot = match slots.iter().find(|s| s.slot_id == req.slot_id) {
-        Some(s) => s.clone(),
-        None => return error_response(StatusCode::NOT_FOUND, "slot_not_found", "slot not found for this election"),
-    };
-    if slot.consumed {
-        return error_response(StatusCode::CONFLICT, "slot_consumed", "slot already consumed; cannot issue another invitation");
-    }
-    // Void any existing ACTIVE invitation for this slot (reissuance)
-    if let Err(_) = state.storage.void_active_slot_invitations(&req.slot_id) {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable");
-    }
-    // Generate 32-byte CSPRNG secret; compute verifier; never store secret
-    let mut secret = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut secret);
-    let verifier_hex = invitation_verifier(&secret);
-    let secret_hex = hex_encode(&secret);
-    let invitation_id = new_opaque_id();
-    let now_ms = now_ms();
-    let record = storage::InvitationRecord {
-        invitation_id: invitation_id.clone(),
-        slot_id: req.slot_id.clone(),
-        election_id: id.clone(),
-        verifier_hex,
-        state: "ACTIVE".to_owned(),
-        created_at_ms: now_ms,
-    };
-    match state.storage.insert_invitation(record) {
-        Ok(()) => {}
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    }
-    (StatusCode::CREATED, Json(InvitationResponse {
-        election_id: id,
-        slot_id: req.slot_id,
-        invitation_id,
-        invitation_secret_hex: secret_hex,
-        state: "ACTIVE".to_owned(),
-    })).into_response()
 }
 
 async fn admin_void_invitation(
@@ -695,59 +776,51 @@ struct EnrollmentStatusBody {
     enrolled_count: i64,
 }
 
-async fn admin_enrollment_status(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    if let Err(r) = check_admin(&state, &headers) { return r; }
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    let slots = match state.storage.list_slots(&id) {
-        Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
+fn do_enrollment_status(state: &AppState, id: &str) -> Result<EnrollmentStatusBody, Response> {
+    let draft = state.storage.get_election_draft(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "election_not_found", "draft election not found"))?;
+    let slots = state.storage.list_slots(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?;
     let consumed = slots.iter().filter(|s| s.consumed).count() as i64;
     let total = slots.len() as i64;
-    let enrolled = match state.storage.count_enrolled_credentials(&id) {
-        Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    Json(EnrollmentStatusBody {
-        election_id: id,
+    let enrolled = state.storage.count_enrolled_credentials(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?;
+    Ok(EnrollmentStatusBody {
+        election_id: id.to_owned(),
         eligibility_state: draft.eligibility_state,
         authorized_slot_count: draft.authorized_slot_count,
         total_slots: total,
         consumed_slots: consumed,
         available_slots: total - consumed,
         enrolled_count: enrolled,
-    }).into_response()
+    })
 }
 
-async fn admin_freeze_registry(
+async fn admin_enrollment_status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     if let Err(r) = check_admin(&state, &headers) { return r; }
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
+    match do_enrollment_status(state.as_ref(), &id) {
+        Ok(body) => Json(body).into_response(),
+        Err(r) => r,
+    }
+}
+
+fn do_freeze_registry(state: &AppState, id: &str) -> Result<Response, Response> {
+    let draft = state.storage.get_election_draft(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"))?;
     if draft.eligibility_state != "ENROLLMENT_OPEN" {
-        return error_response(StatusCode::CONFLICT, "invalid_state", "enrollment must be ENROLLMENT_OPEN to freeze");
+        return Err(error_response(StatusCode::CONFLICT, "invalid_state", "enrollment must be ENROLLMENT_OPEN to freeze"));
     }
     // Collect enrolled credentials → build RegistrySnapshot
-    let creds = match state.storage.list_enrolled_credentials(&id) {
-        Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
+    let creds = state.storage.list_enrolled_credentials(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?;
     if creds.is_empty() {
-        return error_response(StatusCode::CONFLICT, "empty_registry", "cannot freeze with zero enrolled credentials");
+        return Err(error_response(StatusCode::CONFLICT, "empty_registry", "cannot freeze with zero enrolled credentials"));
     }
     let entries: Result<Vec<RegistryEntry>, ()> = creds.iter().map(|c| {
         let key_bytes = hex_decode(&c.public_key_hex).map_err(|_| ())?;
@@ -757,25 +830,25 @@ async fn admin_freeze_registry(
     }).collect();
     let entries = match entries {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "enrolled key encoding invalid"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "enrolled key encoding invalid")),
     };
     let registry = match RegistrySnapshot::new(entries) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "registry_invalid", "registry construction failed"),
+        Err(_) => return Err(error_response(StatusCode::UNPROCESSABLE_ENTITY, "registry_invalid", "registry construction failed")),
     };
     let p = Blake3HashProviderV1;
     let registry_cbor = match registry.to_canonical_cbor() {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry serialization failed"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry serialization failed")),
     };
     let registry_commitment = match registry.canonical_commitment(&p) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry commitment failed"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "registry commitment failed")),
     };
     let enrolled_count = creds.len() as i64;
     let now_ms = now_ms();
     let frozen = storage::FrozenRegistryRecord {
-        election_id: id.clone(),
+        election_id: id.to_owned(),
         registry_cbor_hex: hex_encode(&registry_cbor),
         registry_commitment_hex: hex_encode(registry_commitment.as_bytes()),
         authorized_slot_count: draft.authorized_slot_count,
@@ -783,68 +856,69 @@ async fn admin_freeze_registry(
         frozen_at_ms: now_ms,
         external_roster_commitment_hex: draft.external_roster_commitment_hex.clone(),
     };
-    match state.storage.put_frozen_registry(frozen) {
-        Ok(()) => {}
-        Err(storage::StorageError::AlreadyFrozen) => return error_response(StatusCode::CONFLICT, "already_frozen", "registry already frozen"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    if let Err(storage::StorageError::AlreadyFrozen) = state.storage.put_frozen_registry(frozen) {
+        return Err(error_response(StatusCode::CONFLICT, "already_frozen", "registry already frozen"));
     }
     // Scrub enrollment linkage (slot_id and invitation_id from credentials)
-    let _ = state.storage.scrub_enrollment_linkage(&id);
+    let _ = state.storage.scrub_enrollment_linkage(id);
     // Transition state
-    match state.storage.set_draft_eligibility_state(&id, "ENROLLMENT_OPEN", "REGISTRY_FROZEN") {
+    match state.storage.set_draft_eligibility_state(id, "ENROLLMENT_OPEN", "REGISTRY_FROZEN") {
         Ok(true) => {}
-        Ok(false) => return error_response(StatusCode::CONFLICT, "invalid_state", "state transition race"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+        Ok(false) => return Err(error_response(StatusCode::CONFLICT, "invalid_state", "state transition race")),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
     }
-    (StatusCode::OK, Json(serde_json::json!({
+    Ok((StatusCode::OK, Json(serde_json::json!({
         "election_id": id,
         "eligibility_state": "REGISTRY_FROZEN",
         "enrolled_count": enrolled_count,
         "authorized_slot_count": draft.authorized_slot_count,
         "registry_commitment_hex": hex_encode(registry_commitment.as_bytes()),
-    }))).into_response()
+    }))).into_response())
 }
 
-async fn admin_open_voting(
+async fn admin_freeze_registry(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     if let Err(r) = check_admin(&state, &headers) { return r; }
-    let draft = match state.storage.get_election_draft(&id) {
-        Ok(Some(d)) => d,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
-    if draft.eligibility_state != "REGISTRY_FROZEN" {
-        return error_response(StatusCode::CONFLICT, "invalid_state", "registry must be frozen before opening voting");
+    match do_freeze_registry(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
     }
-    let frozen = match state.storage.get_frozen_registry(&id) {
-        Ok(Some(f)) => f,
-        Ok(None) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "frozen registry not found"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
-    };
+}
+
+fn do_open_voting(state: &AppState, id: &str) -> Result<Response, Response> {
+    let draft = state.storage.get_election_draft(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "election_not_found", "draft not found"))?;
+    if draft.eligibility_state != "REGISTRY_FROZEN" {
+        return Err(error_response(StatusCode::CONFLICT, "invalid_state", "registry must be frozen before opening voting"));
+    }
+    let frozen = state.storage.get_frozen_registry(id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "frozen registry not found"))?;
     // Reconstruct registry commitment from stored hex
     let commit_bytes: [u8; 32] = match hex_decode(&frozen.registry_commitment_hex) {
         Ok(v) if v.len() == 32 => v.try_into().unwrap(),
-        _ => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored commitment invalid"),
+        _ => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored commitment invalid")),
     };
     let registry_commitment = RegistryCommitment::new(commit_bytes);
     // Decode candidate set and compute its commitment
     let candidates = match CandidateSet::from_canonical_cbor(&draft.candidate_cbor) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored candidate set invalid"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored candidate set invalid")),
     };
     let p = Blake3HashProviderV1;
     let candidate_commitment = match candidates.canonical_commitment(&p) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "candidate commitment failed"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "candidate commitment failed")),
     };
     // Build manifest
     let election_id_bytes = id.as_bytes().to_vec();
     let election_id_obj = match ElectionId::new(election_id_bytes) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid election_id for manifest"),
+        Err(_) => return Err(error_response(StatusCode::BAD_REQUEST, "invalid_request", "invalid election_id for manifest")),
     };
     let approval_limits = match ApprovalLimits::new(
         draft.min_approvals as usize,
@@ -852,7 +926,7 @@ async fn admin_open_voting(
         draft.allow_abstention,
     ) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "invalid approval limits"),
+        Err(_) => return Err(error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "invalid approval limits")),
     };
     let manifest_input = ElectionManifestV1Input {
         protocol_version: PROTOCOL_VERSION_V1,
@@ -867,31 +941,31 @@ async fn admin_open_voting(
     };
     let manifest_v1 = match ElectionManifestV1::new(manifest_input) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "manifest construction failed"),
+        Err(_) => return Err(error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "manifest construction failed")),
     };
     let manifest = ElectionManifest::V1(manifest_v1);
     let manifest_cbor = match manifest.to_canonical_cbor() {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest serialization failed"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest serialization failed")),
     };
     let registry_cbor = match hex_decode(&frozen.registry_cbor_hex) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry invalid"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry invalid")),
     };
     let manifest_hash_hex = match manifest.canonical_hash(&p) {
         Ok(h) => hex_encode(h.as_bytes()),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest hash failed"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "manifest hash failed")),
     };
     // Validate verifier can be constructed from registry
     let registry = match RegistrySnapshot::from_canonical_cbor(&registry_cbor) {
         Ok(v) => v,
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry does not decode"),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored registry does not decode")),
     };
     if build_tari_triptych_verifier_from_registry_v1(&registry, &p).is_err() {
-        return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "registry verifier construction failed");
+        return Err(error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "registry verifier construction failed"));
     }
     let record = storage::ElectionRecord {
-        id: id.clone(),
+        id: id.to_owned(),
         manifest_cbor,
         registry_cbor,
         candidate_cbor: draft.candidate_cbor.clone(),
@@ -900,16 +974,28 @@ async fn admin_open_voting(
     };
     match state.storage.put_election(record) {
         Ok(()) => {}
-        Err(storage::StorageError::ElectionExists) => return error_response(StatusCode::CONFLICT, "election_exists", "voting already opened for this election"),
-        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+        Err(storage::StorageError::ElectionExists) => return Err(error_response(StatusCode::CONFLICT, "election_exists", "voting already opened for this election")),
+        Err(_) => return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
     }
-    (StatusCode::CREATED, Json(serde_json::json!({
+    Ok((StatusCode::CREATED, Json(serde_json::json!({
         "election_id": id,
         "state": "open",
         "manifest_hash_hex": manifest_hash_hex,
         "registry_commitment_hex": frozen.registry_commitment_hex,
         "enrolled_count": frozen.enrolled_count,
-    }))).into_response()
+    }))).into_response())
+}
+
+async fn admin_open_voting(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_admin(&state, &headers) { return r; }
+    match do_open_voting(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
 }
 
 // ---------- Public enrollment status (read-only, no secrets exposed) ----------
@@ -1065,30 +1151,493 @@ async fn admin_import(State(state): State<Arc<AppState>>, headers: HeaderMap, bo
     }
 }
 
+fn do_close(state: &AppState, id: &str) -> Result<Response, Response> {
+    match state.storage.set_election_state(id, "open", "closed") {
+        Ok(true) => Ok(Json(serde_json::json!({"election_id": id, "state": "closed"})).into_response()),
+        Ok(false) => Err(error_response(StatusCode::CONFLICT, "invalid_state", "election is not open")),
+        Err(storage::StorageError::ElectionNotFound) => Err(error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found")),
+        Err(_) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
+    }
+}
+
 async fn admin_close(State(state): State<Arc<AppState>>, headers: HeaderMap, AxumPath(id): AxumPath<String>) -> Response {
     if let Err(r) = check_admin(&state, &headers) { return r; }
-    match state.storage.set_election_state(&id, "open", "closed") {
-        Ok(true) => Json(serde_json::json!({"election_id": id, "state": "closed"})).into_response(),
-        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "election is not open"),
-        Err(storage::StorageError::ElectionNotFound) => error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
-        Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    match do_close(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+fn do_finalize(state: &AppState, id: &str) -> Result<Response, Response> {
+    let loaded = match LoadedElection::load(state.storage.as_ref(), id) { Ok(v) => v, Err(r) => return Err(r) };
+    if loaded.record.state != "closed" { return Err(error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed")); }
+    // Replay through canonical ledger (no secret needed; packages are public by protocol).
+    if let Err(r) = loaded.replay_ledger(state.storage.as_ref()) { return Err(r); }
+    match state.storage.set_election_state(id, "closed", "finalized") {
+        Ok(true) => {
+            let ballots = state.storage.list_ballots(id).unwrap_or_default();
+            let (_, archive_hash) = build_archive_files(&loaded, &ballots).unwrap_or((BTreeMap::new(), String::new()));
+            Ok(Json(serde_json::json!({"election_id": id, "state": "finalized", "archive_hash_hex": archive_hash, "accepted_ballots": ballots.len()})).into_response())
+        }
+        Ok(false) => Err(error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed")),
+        Err(_) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
     }
 }
 
 async fn admin_finalize(State(state): State<Arc<AppState>>, headers: HeaderMap, AxumPath(id): AxumPath<String>) -> Response {
     if let Err(r) = check_admin(&state, &headers) { return r; }
-    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) { Ok(v) => v, Err(r) => return r };
-    if loaded.record.state != "closed" { return error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed"); }
-    // Replay through canonical ledger (no secret needed; packages are public by protocol).
-    if let Err(r) = loaded.replay_ledger(state.storage.as_ref()) { return r; }
-    match state.storage.set_election_state(&id, "closed", "finalized") {
-        Ok(true) => {
-            let ballots = state.storage.list_ballots(&id).unwrap_or_default();
-            let (_, archive_hash) = build_archive_files(&loaded, &ballots).unwrap_or((BTreeMap::new(), String::new()));
-            Json(serde_json::json!({"election_id": id, "state": "finalized", "archive_hash_hex": archive_hash, "accepted_ballots": ballots.len()})).into_response()
+    match do_finalize(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+// ---------- Self-service organizer plane (public router, election-scoped) ----------
+//
+// Anyone can create an election and manage ONLY that election with an
+// election-scoped capability credential. The plaintext organizer secret is
+// generated client-side (WebCrypto), sent once over the request body here,
+// and afterwards only in the `x-private-ballot-organizer` header. The server
+// stores a domain-separated verifier only. These routes never grant
+// server-global administration: the localhost admin plane keeps its own
+// token and stays off this router entirely.
+
+/// Election-scoped organizer authorization. Missing, malformed, wrong, or
+/// foreign-election credentials all fail closed with the same generic 401
+/// (no information about which part failed). Comparison of verifier bytes
+/// is constant-time.
+fn check_organizer(state: &AppState, headers: &HeaderMap, election_id: &str) -> Result<(), Response> {
+    let invalid = || error_response(StatusCode::UNAUTHORIZED, "organizer_credential_required", "valid organizer credential required");
+    let provided = headers.get(ORGANIZER_CREDENTIAL_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+    let secret = match hex_decode(provided) { Ok(v) if v.len() == 32 => v, _ => return Err(invalid()) };
+    let stored = state.storage.get_organizer_credential(election_id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"))?
+        .ok_or_else(invalid)?;
+    let verifier = organizer_verifier(election_id, &secret);
+    if !token_equals(&verifier, &stored.organizer_verifier_hex) { return Err(invalid()); }
+    Ok(())
+}
+
+fn organizer_rate(state: &AppState, election_id: &str) -> Result<(), Response> {
+    if state.check_rate(election_id, "organizer") { Ok(()) } else {
+        Err(error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "rate limit exceeded"))
+    }
+}
+
+fn is_valid_self_service_election_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
+/// Validates one ballot option display name for self-service creation and
+/// derives the canonical candidate ID from the trimmed name. Rejects empty,
+/// oversized, or control-character names. Returns `None` when invalid.
+fn normalize_ballot_option(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_CANDIDATE_ID_BYTES { return None; }
+    if trimmed.bytes().any(|b| b <= 0x1f || b == 0x7f) { return None; }
+    Some(trimmed.to_owned())
+}
+
+#[derive(Debug, Deserialize)]
+struct OrganizerCreateElectionRequest {
+    election_id: String,
+    options: Vec<String>,
+    organizer_secret_hex: String,
+    min_approvals: Option<i64>,
+    max_approvals: Option<i64>,
+    allow_abstention: Option<bool>,
+    authorized_slot_count: i64,
+    governance_revision: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OrganizerCreateElectionBody {
+    election_id: String,
+    eligibility_state: String,
+    authorized_slot_count: i64,
+    proof_suite_id: String,
+    created_at_ms: i64,
+    candidates: Vec<CandidateJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrganizerIssueInvitationRequest { slot_id: Option<String> }
+
+#[derive(Debug, Serialize)]
+struct OrganizerSlotBody {
+    slot_id: String,
+    consumed: bool,
+    invitation_id: Option<String>,
+    invitation_state: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct OrganizerElectionBody {
+    election_id: String,
+    eligibility_state: String,
+    election_state: Option<String>,
+    authorized_slot_count: i64,
+    total_slots: i64,
+    consumed_slots: i64,
+    available_slots: i64,
+    enrolled_count: i64,
+    registry_commitment_hex: Option<String>,
+    proof_suite_id: String,
+    created_at_ms: i64,
+    candidates: Vec<CandidateJson>,
+}
+
+async fn organizer_create_election(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_content_type(&headers) { return r; }
+    if body.len() > MAX_BODY_BYTES { return error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "request too large"); }
+    if !state.check_rate("__organizer_create__", "public") {
+        return error_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "rate limit exceeded");
+    }
+    let req: OrganizerCreateElectionRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed create-election request"),
+    };
+    if !is_valid_self_service_election_id(&req.election_id) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "election_id must be 1..128 chars of [A-Za-z0-9._-]");
+    }
+    if ElectionId::new(req.election_id.as_bytes().to_vec()).is_err() {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "election_id exceeds protocol limits");
+    }
+    let secret_bytes = match hex_decode(&req.organizer_secret_hex) {
+        Ok(v) if v.len() == 32 => v,
+        _ => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "organizer_secret_hex must be 64 hex chars (32 bytes)"),
+    };
+    if req.options.is_empty() || req.options.len() > MAX_CANDIDATES {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "options must contain 1..256 entries");
+    }
+    let mut names: Vec<String> = Vec::with_capacity(req.options.len());
+    for option in &req.options {
+        let name = match normalize_ballot_option(option) {
+            Some(v) => v,
+            None => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "each option name must be non-empty, <=128 bytes, without control characters"),
+        };
+        if names.iter().any(|n| n == &name) {
+            return error_response(StatusCode::BAD_REQUEST, "invalid_request", "duplicate option names are not allowed");
         }
-        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed"),
+        names.push(name);
+    }
+    let option_count = names.len();
+    let min_approvals = req.min_approvals.unwrap_or(1);
+    let max_approvals = req.max_approvals.unwrap_or(1);
+    if min_approvals < 1 || max_approvals < min_approvals || max_approvals as usize > option_count {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "approval limits must satisfy 1 <= min <= max <= option count");
+    }
+    let allow_abstention = req.allow_abstention.unwrap_or(true);
+    if req.authorized_slot_count < 1 || req.authorized_slot_count > state.config.organizer_max_slots {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "authorized_slot_count exceeds the self-service limit");
+    }
+    let governance_revision = match req.governance_revision.as_deref().map(str::trim) {
+        Some("") | None => "hosted-self-service-v1".to_owned(),
+        Some(v) => v.to_owned(),
+    };
+    if governance_revision.len() > 256 {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_request", "governance_revision must be <= 256 bytes");
+    }
+    // Build the canonical CandidateSet server-side from validated display
+    // names; candidate IDs are the trimmed names so duplicate names would
+    // already have been rejected above.
+    let definitions: Vec<tari_cc_private_ballot_ballot::CandidateDefinition> = match names.iter().map(|name| {
+        CandidateId::new(name.as_bytes().to_vec())
+            .and_then(|id| tari_cc_private_ballot_ballot::CandidateDefinition::new(id, name.clone()))
+    }).collect::<Result<Vec<_>, _>>() {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "candidate definitions rejected by protocol"),
+    };
+    let candidates = match CandidateSet::new(definitions) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, "invalid_election", "candidate set rejected by protocol"),
+    };
+    let candidate_cbor = match candidates.to_canonical_cbor() {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "candidate serialization failed"),
+    };
+    let now_ms = now_ms();
+    let draft = storage::ElectionDraftRecord {
+        election_id: req.election_id.clone(),
+        candidate_cbor,
+        // Proof suite is pinned server-side; the browser never selects crypto.
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        min_approvals,
+        max_approvals,
+        allow_abstention,
+        governance_revision,
+        authorized_slot_count: req.authorized_slot_count,
+        external_roster_commitment_hex: None,
+        eligibility_state: "DRAFT".to_owned(),
+        created_at_ms: now_ms,
+    };
+    match state.storage.put_election_draft(draft) {
+        Ok(()) => {}
+        Err(storage::StorageError::ElectionExists) => return error_response(StatusCode::CONFLICT, "election_exists", "an election with this id already exists"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    let credential = storage::OrganizerCredentialRecord {
+        election_id: req.election_id.clone(),
+        // Only the domain-separated verifier is stored; never the plaintext secret.
+        organizer_verifier_hex: organizer_verifier(&req.election_id, &secret_bytes),
+        created_at_ms: now_ms,
+    };
+    match state.storage.put_organizer_credential(credential) {
+        Ok(()) => {}
+        Err(storage::StorageError::ElectionExists) => return error_response(StatusCode::CONFLICT, "election_exists", "an election with this id already exists"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+    let body = OrganizerCreateElectionBody {
+        election_id: req.election_id,
+        eligibility_state: "DRAFT".to_owned(),
+        authorized_slot_count: req.authorized_slot_count,
+        proof_suite_id: TARI_TRIPTYCH_PROOF_SUITE_ID_V1.to_owned(),
+        created_at_ms: now_ms,
+        candidates: candidates.candidates().iter().map(|c| CandidateJson {
+            id_hex: hex_encode(c.id().as_bytes()),
+            id_text: String::from_utf8_lossy(c.id().as_bytes()).into_owned(),
+            display_name: c.display_name().to_owned(),
+        }).collect(),
+    };
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+async fn organizer_get_election(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    let draft = match state.storage.get_election_draft(&id) {
+        Ok(Some(d)) => d,
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "election_not_found", "election not found"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let slots = match state.storage.list_slots(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let consumed = slots.iter().filter(|s| s.consumed).count() as i64;
+    let enrolled = match state.storage.count_enrolled_credentials(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let election = state.storage.get_election(&id).ok().flatten();
+    let registry_commitment_hex = if draft.eligibility_state == "REGISTRY_FROZEN" {
+        state.storage.get_frozen_registry(&id).ok().flatten().map(|f| f.registry_commitment_hex)
+    } else {
+        None
+    };
+    let candidates = match CandidateSet::from_canonical_cbor(&draft.candidate_cbor) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored election is invalid"),
+    };
+    let body = OrganizerElectionBody {
+        election_id: id,
+        eligibility_state: draft.eligibility_state,
+        election_state: election.map(|e| e.state),
+        authorized_slot_count: draft.authorized_slot_count,
+        total_slots: slots.len() as i64,
+        consumed_slots: consumed,
+        available_slots: slots.len() as i64 - consumed,
+        enrolled_count: enrolled,
+        registry_commitment_hex,
+        proof_suite_id: draft.proof_suite_id,
+        created_at_ms: draft.created_at_ms,
+        candidates: candidates.candidates().iter().map(|c| CandidateJson {
+            id_hex: hex_encode(c.id().as_bytes()),
+            id_text: String::from_utf8_lossy(c.id().as_bytes()).into_owned(),
+            display_name: c.display_name().to_owned(),
+        }).collect(),
+    };
+    Json(body).into_response()
+}
+
+async fn organizer_open_enrollment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_open_enrollment(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+async fn organizer_enrollment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_enrollment_status(state.as_ref(), &id) {
+        Ok(body) => Json(body).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn organizer_slots(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    let slots = match state.storage.list_slots(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    let invitations = match state.storage.list_invitations(&id) {
+        Ok(v) => v,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    // Newest invitation per slot (any state); exposes election-scoped opaque
+    // ids and invitation state only — never invitation secrets or voter keys.
+    let mut per_slot: std::collections::HashMap<String, &storage::InvitationRecord> = std::collections::HashMap::new();
+    for inv in &invitations {
+        let entry = per_slot.entry(inv.slot_id.clone());
+        match entry {
+            std::collections::hash_map::Entry::Vacant(v) => { v.insert(inv); }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if inv.created_at_ms >= o.get().created_at_ms { o.insert(inv); }
+            }
+        }
+    }
+    let mut ordered = slots;
+    ordered.sort_by_key(|s| s.created_at_ms);
+    let body: Vec<OrganizerSlotBody> = ordered.into_iter().map(|s| {
+        let inv = per_slot.get(&s.slot_id);
+        OrganizerSlotBody {
+            slot_id: s.slot_id,
+            consumed: s.consumed,
+            invitation_id: inv.map(|i| i.invitation_id.clone()),
+            invitation_state: inv.map(|i| i.state.clone()),
+        }
+    }).collect();
+    Json(body).into_response()
+}
+
+async fn organizer_issue_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    if let Err(r) = check_content_type(&headers) { return r; }
+    if body.len() > MAX_BODY_BYTES { return error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "request too large"); }
+    let req: OrganizerIssueInvitationRequest = if body.is_empty() {
+        OrganizerIssueInvitationRequest { slot_id: None }
+    } else {
+        match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_request", "malformed issue-invitation request"),
+        }
+    };
+    match do_issue_invitation(state.as_ref(), &id, req.slot_id) {
+        Ok(resp) => (StatusCode::CREATED, Json(resp)).into_response(),
+        Err(r) => r,
+    }
+}
+
+async fn organizer_void_invitation(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath((id, invitation_id)): AxumPath<(String, String)>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    // The invitation must belong to THIS election; anything else fails
+    // closed as not-found without distinguishing foreign elections.
+    let invitation = match state.storage.get_invitation_by_id(&invitation_id) {
+        Ok(Some(i)) if i.election_id == id => i,
+        Ok(_) => return error_response(StatusCode::NOT_FOUND, "invitation_not_found", "invitation not found for this election"),
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    };
+    match state.storage.set_invitation_state(&invitation.invitation_id, "ACTIVE", "VOIDED") {
+        Ok(true) => Json(serde_json::json!({"election_id": id, "invitation_id": invitation_id, "state": "VOIDED"})).into_response(),
+        Ok(false) => error_response(StatusCode::CONFLICT, "invalid_state", "invitation is not ACTIVE"),
         Err(_) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable"),
+    }
+}
+
+async fn organizer_freeze(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_freeze_registry(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+async fn organizer_open_voting(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_open_voting(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+async fn organizer_close(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_close(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+async fn organizer_finalize(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    match do_finalize(state.as_ref(), &id) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
+#[cfg(test)]
+static TEST_LOG_LINES: std::sync::OnceLock<Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn push_test_log_line(line: String) {
+    let cell = TEST_LOG_LINES.get_or_init(|| Mutex::new(Vec::new()));
+    cell.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_log_lines() -> Vec<String> {
+    match TEST_LOG_LINES.get() {
+        Some(cell) => std::mem::take(&mut cell.lock().unwrap_or_else(|e| e.into_inner())),
+        None => Vec::new(),
     }
 }
 
@@ -1102,7 +1651,13 @@ fn logging_middleware(
     async move {
         let response = next.run(request).await;
         let status = response.status();
-        eprintln!("hosted method={method} path={path} status={} duration_ms={}", status.as_u16(), start.elapsed().as_millis());
+        // Only method/path/status/duration are logged. Request headers
+        // (organizer/admin credentials), query strings, and bodies are
+        // never logged.
+        let line = format!("hosted method={method} path={path} status={} duration_ms={}", status.as_u16(), start.elapsed().as_millis());
+        #[cfg(test)]
+        push_test_log_line(line.clone());
+        eprintln!("{line}");
         response
     }
 }
@@ -1151,6 +1706,20 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/enrollment-info", get(public_enrollment_info))
         .route("/api/v1/elections/{id}/enroll", post(enroll_voter))
         .route("/api/v1/ootle/status", get(ootle_status))
+        // Self-service organizer plane: election-scoped capability
+        // credentials only. Separate namespace from /api/v1/admin (which
+        // exists only on the loopback admin plane and is never routed here).
+        .route("/api/v1/organizer/elections", post(organizer_create_election))
+        .route("/api/v1/organizer/elections/{id}", get(organizer_get_election))
+        .route("/api/v1/organizer/elections/{id}/open-enrollment", post(organizer_open_enrollment))
+        .route("/api/v1/organizer/elections/{id}/enrollment", get(organizer_enrollment))
+        .route("/api/v1/organizer/elections/{id}/slots", get(organizer_slots))
+        .route("/api/v1/organizer/elections/{id}/invitations", post(organizer_issue_invitation))
+        .route("/api/v1/organizer/elections/{id}/invitations/{invitation_id}/void", post(organizer_void_invitation))
+        .route("/api/v1/organizer/elections/{id}/freeze", post(organizer_freeze))
+        .route("/api/v1/organizer/elections/{id}/open-voting", post(organizer_open_voting))
+        .route("/api/v1/organizer/elections/{id}/close", post(organizer_close))
+        .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, origin_token_middleware))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
@@ -1192,7 +1761,7 @@ pub fn router(config: HostedConfig) -> Router {
 }
 
 pub fn test_config() -> HostedConfig {
-    HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "test".to_owned(), api_version: "v1".to_owned(), db_path: PathBuf::from(":memory:"), admin_token: Some("test-admin-token".to_owned()), origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10_000 }
+    HostedConfig { bind: "127.0.0.1:8788".to_owned(), admin_bind: "127.0.0.1:8789".to_owned(), service_name: "test".to_owned(), api_version: "v1".to_owned(), db_path: PathBuf::from(":memory:"), admin_token: Some("test-admin-token".to_owned()), origin_token: None, allow_public_bind: false, rate_limit_per_minute: 10_000, organizer_max_slots: DEFAULT_ORGANIZER_MAX_SLOTS }
 }
 
 async fn shutdown_signal(shutdown: impl Future<Output = ()> + Send + 'static) {

@@ -12,12 +12,12 @@ directory). See `deploy/hosted.env.example` for the full config schema and
 Backup: stop the service (or use `sqlite3 hosted.db ".backup '/path/to/backup.db'"`)
 and copy the single `.db` file (plus `-wal`/`-shm` sidecars only while
 running). Restore by placing the file at the configured path and starting
-the service; schema version is stored in `meta` (`schema_version=2`) and
+the service; schema version is stored in `meta` (`schema_version=4`) and
 migrations run on startup.
 
-Migrations: none required in Stage 2 beyond the startup `CREATE TABLE IF NOT
-EXISTS` + schema-version check. A future migration must be additive and
-tested against a copy of a Stage 2 database.
+Migrations: v4 adds the `organizer_credentials` table additively (idempotent
+`CREATE TABLE IF NOT EXISTS` + schema-version check). A future migration must
+remain additive and tested against a copy of an existing database.
 
 Graceful shutdown: Ctrl-C / SIGTERM via `tokio::signal::ctrl_c` and axum
 graceful shutdown. Health: `GET /health`, `GET /api/v1/status`.
