@@ -6,6 +6,7 @@ import init, {
   package_hash_hex,
   public_key_for_secret,
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
+import { hostedShell } from "./shell";
 
 type Pkg = {
   election_id: string;
@@ -36,7 +37,7 @@ function esc(s: string): string {
 }
 
 function render() {
-  app.innerHTML = `
+  app.innerHTML = hostedShell(`
   <div class="notice" role="alert">
     <strong>Hosted / Web Mode - reduced network-metadata privacy.</strong><br/>
     Hosted/Web Mode provides easier access but <strong>reduced network-metadata privacy</strong> compared with
@@ -82,7 +83,7 @@ function render() {
     <button id="get-results">Get results</button>
     <button id="get-archive">Get archive info</button>
     <pre id="output" class="mono"></pre>
-  </div>`;
+  </div>`, "vote");
   bind();
 }
 

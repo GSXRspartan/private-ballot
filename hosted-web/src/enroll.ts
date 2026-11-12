@@ -18,8 +18,9 @@ import init, {
   generate_secret_key,
   public_key_for_secret,
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
+import { hostedShell } from "./shell";
 
-// ── Types ──────────────────────────────────────────────────────────────────────
+// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 type Step =
   | "invitation_entry"
@@ -50,7 +51,7 @@ type EnrollResult = {
 
 type WasmResult = { ok: boolean; error?: string } & Record<string, unknown>;
 
-// ── State (memory only — nothing persisted) ────────────────────────────────────
+// â”€â”€ State (memory only â€” nothing persisted) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 let step: Step = "invitation_entry";
 // invitation secret stays in memory; cleared after successful enrollment
@@ -65,7 +66,7 @@ let errorMsg = "";
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let registryVerificationError = "";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -77,7 +78,7 @@ function esc(s: string): string {
 
 function shortHex(h: string, n = 16): string {
   if (h.length <= n * 2) return h;
-  return h.slice(0, n) + "…" + h.slice(-n);
+  return h.slice(0, n) + "â€¦" + h.slice(-n);
 }
 
 function parseWasm(s: string): WasmResult {
@@ -92,10 +93,10 @@ function stopPoll() {
   if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
+// â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function render() {
-  app.innerHTML = buildHtml();
+  app.innerHTML = hostedShell(buildHtml(), "enroll");
   bind();
 }
 
@@ -106,7 +107,7 @@ function buildHtml(): string {
 
   const notice = `
     <div class="notice" role="note">
-      <strong>Hosted / Web Mode — reduced network-metadata privacy.</strong><br/>
+      <strong>Hosted / Web Mode â€” reduced network-metadata privacy.</strong><br/>
       Cloudflare/VPS infrastructure may observe connection metadata (timing, IP).
       Cryptographic ballot privacy (Triptych ring signatures) is preserved separately:
       your voter credential is generated <strong>in this browser</strong> and never sent to the server.
@@ -126,13 +127,13 @@ function buildHtml(): string {
           <input type="password" id="inv-secret" placeholder="Paste invitation code here" autocomplete="off" />
           <label for="eid-input">Election ID</label>
           <input type="text" id="eid-input" placeholder="e.g. my-election-2026" autocomplete="off" />
-          <button id="btn-load-election">Load election →</button>
+          <button id="btn-load-election">Load election â†’</button>
         </div>`;
 
     case "load_election":
       return `${notice}
         <div class="card">
-          <h2>Loading election…</h2>
+          <h2>Loading electionâ€¦</h2>
           <p>Contacting the election server. Please wait.</p>
         </div>`;
 
@@ -152,7 +153,7 @@ function buildHtml(): string {
           <p>Your private voting credential is generated entirely in this browser using the
           browser's cryptographically secure random number generator. It never leaves your
           device.</p>
-          <p class="error"><strong>⚠ KEEP THIS VOTING CREDENTIAL SAFE.</strong><br/>
+          <p class="error"><strong>âš  KEEP THIS VOTING CREDENTIAL SAFE.</strong><br/>
           If you lose it before voting, the organizer cannot reconstruct your private voting
           credential from the public registry. For this release, the credential is memory-only:
           closing this page will lose it. Write it down securely before proceeding.</p>
@@ -173,10 +174,10 @@ function buildHtml(): string {
           <p>Your private voting credential is memory-only and is <strong>not</strong> your
           real-world identity. Private Ballot does not know your real-world identity from
           this credential.</p>
-          <p class="error"><strong>⚠ Credential is memory-only.</strong> Write down or export
+          <p class="error"><strong>âš  Credential is memory-only.</strong> Write down or export
           your credential securely before proceeding. Closing this page loses it.</p>
           ${err}
-          <button id="btn-enroll">Enroll this credential →</button>
+          <button id="btn-enroll">Enroll this credential â†’</button>
           <button id="btn-regen">Generate a different credential</button>
         </div>`;
     }
@@ -184,7 +185,7 @@ function buildHtml(): string {
     case "enrolling":
       return `${notice}
         <div class="card">
-          <h2>Enrolling…</h2>
+          <h2>Enrollingâ€¦</h2>
           <p>Submitting your public credential to the election server. Please wait.</p>
         </div>`;
 
@@ -197,7 +198,7 @@ function buildHtml(): string {
         : "";
       return `${notice}
         <div class="card ok">
-          <h2>Enrollment accepted ✓</h2>
+          <h2>Enrollment accepted âœ“</h2>
           ${idempotentNote}
           <p><strong>Election:</strong> <span class="mono">${esc(ei.election_id)}</span></p>
           <p><strong>Enrolled public credential:</strong>
@@ -227,7 +228,7 @@ function buildHtml(): string {
       const commitShort = ei.registry_commitment_hex ? shortHex(ei.registry_commitment_hex) : "(unavailable)";
       return `${notice}
         <div class="card ok">
-          <h2>Registry frozen ✓</h2>
+          <h2>Registry frozen âœ“</h2>
           <p><strong>Election:</strong> <span class="mono">${esc(ei.election_id)}</span></p>
           <p><strong>Enrolled credentials:</strong> ${esc(String(ei.enrolled_count ?? "?"))}</p>
           <p><strong>Authorized seats:</strong> ${esc(String(ei.authorized_slot_count))}</p>
@@ -240,7 +241,7 @@ function buildHtml(): string {
           </details>
           <p class="ok"><strong>Registry verified locally with canonical Rust/WASM code.</strong></p>
           <p>Voting will open shortly. Keep your private credential safe.</p>
-          <a href="/">Go to voting page →</a>
+          <a href="/">Go to voting page â†’</a>
         </div>`;
     }
 
@@ -255,7 +256,7 @@ function buildHtml(): string {
   }
 }
 
-// ── Event binding ─────────────────────────────────────────────────────────────
+// â”€â”€ Event binding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function bind() {
   switch (step) {
@@ -292,7 +293,7 @@ function bind() {
   }
 }
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
+// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async function handleLoadElection() {
   const secretInput = document.getElementById("inv-secret") as HTMLInputElement;
@@ -303,7 +304,7 @@ async function handleLoadElection() {
   if (!rawSecret) { setError("Please enter your invitation code."); render(); return; }
   if (!rawEid) { setError("Please enter the election ID."); render(); return; }
 
-  // Keep invitation in memory — not in URL, localStorage, or any persistent store
+  // Keep invitation in memory â€” not in URL, localStorage, or any persistent store
   invitationSecret = rawSecret;
   electionId = rawEid;
   clearError();
@@ -407,7 +408,7 @@ async function handleEnroll() {
       } else {
         setError(`Enrollment conflict (${code}): ${parsed.message ?? text.slice(0, 200)}`);
       }
-      // Don't clear invitation — allow user to retry
+      // Don't clear invitation â€” allow user to retry
       step = "confirm_credential";
       render();
     } else if (res.status === 401) {
@@ -460,7 +461,7 @@ function startAutoPoll() {
   pollTimer = setTimeout(() => { void pollFreezeStatus(); }, 10_000);
 }
 
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
+// â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 await init();
 render();

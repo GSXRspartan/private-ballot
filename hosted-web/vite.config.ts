@@ -14,7 +14,13 @@ export default defineConfig({
     rollupOptions: {
       input: {
         main: "index.html",
+        guide: "guide.html",
+        vote: "vote.html",
         enroll: "enroll.html",
+        about: "about.html",
+        settings: "settings.html",
+        archive: "archive.html",
+        evidence: "evidence.html",
       },
     },
   },
