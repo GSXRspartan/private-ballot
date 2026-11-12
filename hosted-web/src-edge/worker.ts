@@ -25,7 +25,7 @@ const ORIGIN_TOKEN_HEADER = "x-private-ballot-origin";
 const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
   [
     "content-security-policy",
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
   ],
   ["x-content-type-options", "nosniff"],
   ["referrer-policy", "strict-origin-when-cross-origin"],

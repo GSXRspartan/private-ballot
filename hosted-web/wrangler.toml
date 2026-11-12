@@ -24,9 +24,13 @@ binding = "ASSETS"
 # Static/hashed assets are still served from the edge.
 run_worker_first = ["/api/*"]
 
+[[routes]]
+pattern = "private-ballot-staging.ghostgate.boo"
+custom_domain = true
+
 [vars]
 # Public Tunnel ingress hostname (must exist in Cloudflare DNS pointing at
 # the staging named Tunnel). Served ONLY via this Worker; the backend
 # requires the injected origin token when one is configured, so direct
 # hits to this hostname fail closed. See docs/hosted/CLOUDFLARE_STAGE3.md.
-STAGING_ORIGIN = "https://pb-staging-origin.example.com"
+STAGING_ORIGIN = "https://private-ballot-origin-staging.ghostgate.boo"
