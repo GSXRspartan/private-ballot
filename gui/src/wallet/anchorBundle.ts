@@ -1,5 +1,9 @@
 import type { ExpectedAnchorEventPayload, ExpectedAnchorTemplate } from "./verifyReceipt.ts";
 import { encodeCborTextLiteral } from "./cborLiteral.ts";
+import {
+  V2_CANONICAL_RECEIPT_TOPIC_PREFIX,
+  V2_EVENT_TOPIC_SUFFIX,
+} from "./anchorDeploymentConfig.ts";
 
 export interface AnchorBundleV1 {
   schemaVersion: 1;
@@ -172,4 +176,68 @@ export function bundleAnchorArgsAsLiterals(bundle: AnchorBundleV1): string[] {
     bundle.anchorArgs.electionId,
     bundle.anchorArgs.publicSummary,
   ];
+}
+
+export function canonicalEventTopicFromBindingTopic(fullTopic: string): string {
+  const suffix = fullTopic.slice(fullTopic.lastIndexOf(".") + 1);
+  if (suffix !== V2_EVENT_TOPIC_SUFFIX) {
+    throw new AnchorBundleError("event_topic");
+  }
+  return `${V2_CANONICAL_RECEIPT_TOPIC_PREFIX}.${suffix}`;
+}
+
+export interface DesktopBundleSource {
+  network: string;
+  templateAddress: string;
+  templateArtifactDigestHex: string;
+  templateModule: string;
+  templateFunction: string;
+  preparation: {
+    templateEventTopic: string;
+    anchorDigestHex: string;
+    arguments: string[];
+    publicSummaryJson: string;
+  };
+}
+
+export function buildBundleFromDesktop(source: DesktopBundleSource): AnchorBundleV1 {
+  const args = source.preparation.arguments;
+  if (
+    args.length !== 4 ||
+    args[0] !== source.preparation.anchorDigestHex ||
+    args[3] !== source.preparation.publicSummaryJson
+  ) {
+    throw new AnchorBundleError("anchor_digest");
+  }
+  return parseAnchorBundle({
+    schemaVersion: 1,
+    network: source.network,
+    template: {
+      address: source.templateAddress,
+      module: source.templateModule,
+      function: source.templateFunction,
+      eventTopic: canonicalEventTopicFromBindingTopic(source.preparation.templateEventTopic),
+      artifactDigestHex: source.templateArtifactDigestHex,
+    },
+    anchorArgs: {
+      anchorDigestHex: args[0],
+      network: args[1],
+      electionId: args[2],
+      publicSummary: args[3],
+    },
+  });
+}
+
+export interface ClipboardLike {
+  writeText(text: string): Promise<void>;
+}
+
+export async function copyBundleToClipboard(
+  bundle: AnchorBundleV1,
+  clipboard: ClipboardLike | null,
+): Promise<void> {
+  if (!clipboard || typeof clipboard.writeText !== "function") {
+    throw new Error("the clipboard is not available in this environment");
+  }
+  await clipboard.writeText(JSON.stringify(bundle, null, 2));
 }

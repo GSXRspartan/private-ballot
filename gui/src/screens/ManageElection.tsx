@@ -43,6 +43,12 @@ import {
 } from "../anchor/anchorForm";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
+import { isDesktopShell } from "../api/client";
+import {
+  buildBundleFromDesktop,
+  copyBundleToClipboard,
+} from "../wallet/anchorBundle";
+import { BrowserAnchorPublishPanel } from "./anchor/BrowserAnchorPublishPanel";
 import { boundArchiveResult } from "../archive/archiveBinding";
 import {
   canShowTally,
@@ -240,6 +246,10 @@ export function ManageElection() {
     useState<import("../api/types").GuiV2LiveAnchorStepResultV1 | null>(null);
   const [anchorV2PublishConfirmed, setAnchorV2PublishConfirmed] = useState(false);
   const [anchorV2Busy, setAnchorV2Busy] = useState(false);
+  const [browserBundleExportMessage, setBrowserBundleExportMessage] = useState<
+    string | null
+  >(null);
+  const [browserBundleExportBusy, setBrowserBundleExportBusy] = useState(false);
   // Hydrated view of the persisted V2 lifecycle for `selectedFinalArchive`.
   // Populated by a read-only inspect on load; drives the "Existing V2 anchor
   // found" recovery panel and suppresses fresh Build/Prepare/Submit controls
@@ -1355,6 +1365,46 @@ export function ManageElection() {
       showError(error);
     } finally {
       setAnchorV2Busy(false);
+    }
+  };
+
+  // Desktop-only helper: composes the browser anchor bundle from the already
+  // prepared (verified) V2 publish arguments and the locked deployment, and
+  // copies it to the clipboard as canonical JSON. The browser application
+  // imports that bundle to publish the same anchor from a Tari wallet. The
+  // bundle carries only public data: the template binding, the network, and
+  // the exact four publish_anchor_v2 arguments.
+  const onExportBrowserAnchorBundle = async () => {
+    if (!trustedDeploymentV2 || !anchorV2Preparation) return;
+    setBrowserBundleExportBusy(true);
+    setBrowserBundleExportMessage(null);
+    try {
+      const bundle = buildBundleFromDesktop({
+        network: trustedDeploymentV2.network,
+        templateAddress: trustedDeploymentV2.template_address,
+        templateArtifactDigestHex: trustedDeploymentV2.template_artifact_digest_hex,
+        templateModule: V2_TEMPLATE_MODULE,
+        templateFunction: V2_TEMPLATE_FUNCTION,
+        preparation: {
+          templateEventTopic: anchorV2Preparation.template_event_topic,
+          anchorDigestHex: anchorV2Preparation.anchor_digest_hex,
+          arguments: anchorV2Preparation.arguments,
+          publicSummaryJson: anchorV2Preparation.public_summary_json,
+        },
+      });
+      await copyBundleToClipboard(bundle, navigator.clipboard);
+      setBrowserBundleExportMessage(
+        "Anchor bundle copied to the clipboard. Save it as a .json file; the browser application imports it to publish this anchor.",
+      );
+      recordAction("Exported browser anchor bundle to clipboard");
+    } catch (error) {
+      setBrowserBundleExportMessage(
+        error instanceof Error && error.message.length > 0
+          ? error.message
+          : "the anchor bundle could not be exported",
+      );
+    } finally {
+      setBrowserBundleExportBusy(false);
     }
   };
 
@@ -3043,6 +3093,8 @@ export function ManageElection() {
             non-binding — the independently verified offline archive remains authoritative.
           </Notice>
 
+          {!isDesktopShell() && <BrowserAnchorPublishPanel />}
+
           {anchorLockedUntilVerifiedArchive && (
             <Notice tone="warn">
               <p className="anchor-prereq-title">
@@ -3548,6 +3600,31 @@ export function ManageElection() {
                     </div>
                     {anchorV2Preparation && (
                       <>
+                        {isDesktopShell() && (
+                          <DetailsSection summary="Advanced: publish this anchor from a browser wallet">
+                            <p className="form-hint">
+                              Copies the verified anchor arguments and the locked template
+                              binding as a JSON bundle. Save it to a file and import it in the
+                              browser application to publish the same anchor from a Tari wallet.
+                              The bundle carries only public data.
+                            </p>
+                            <div className="btn-row">
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={browserBundleExportBusy || !canAct}
+                                onClick={() => void onExportBrowserAnchorBundle()}
+                              >
+                                {browserBundleExportBusy
+                                  ? "Copying…"
+                                  : "Export browser anchor bundle"}
+                              </button>
+                            </div>
+                            {browserBundleExportMessage && (
+                              <p className="form-hint">{browserBundleExportMessage}</p>
+                            )}
+                          </DetailsSection>
+                        )}
                         <div className="field-list anchor-deployment-fields">
                           <Field label="Prepared function">{anchorV2Preparation.template_function}</Field>
                           <Field label="Prepared arguments">{anchorV2Preparation.arguments.length}</Field>
