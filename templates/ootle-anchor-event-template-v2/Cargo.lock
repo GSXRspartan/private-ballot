@@ -219,14 +219,16 @@ dependencies = [
 name = "tari_cc_private_ballot_ootle_anchor_event_template_v2"
 version = "0.1.0"
 dependencies = [
+ "minicbor",
+ "tari_template_abi",
  "tari_template_lib",
 ]
 
 [[package]]
 name = "tari_template_abi"
-version = "0.23.1"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db01a6d9318904f9d9ef1a5d533496ab2409000fdb62fa1cea88cc5d22d7d5ea"
+checksum = "aa8ec4e3c366cff784741a2e37fe03a65c0bfdf34040b6793822be3e76c83f31"
 dependencies = [
  "minicbor",
  "serde",
@@ -236,9 +238,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib"
-version = "0.39.0"
+version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b60d7c4ce55fc81b416e7fda198263af267f7025fa8d62bac3315f7e8227e70"
+checksum = "3ce650fccb80b2222be82dedaa5d5fe6770181463ef3f2dba70333a7a1cea4bb"
 dependencies = [
  "minicbor",
  "serde",
@@ -250,9 +252,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_lib_types"
-version = "0.38.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0fd2be1f14a9d98cd45e62622b80f28e03d61aa5e66106dad1c7fb8015cd57d"
+checksum = "74f220afc7563953c90c576e931c89db9fd32028c026948ee0799c6c7df8ac6b"
 dependencies = [
  "borsh",
  "minicbor",
@@ -265,9 +267,9 @@ dependencies = [
 
 [[package]]
 name = "tari_template_macros"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "95171dcab38baa05f63fa3f17aaed4b3cefad84fa5cdaf020858ce6446d4f343"
+checksum = "ec80c4b9946b6554ba6c814e436b55749b432a7285db64d3ed1ea2572c8d97c2"
 dependencies = [
  "proc-macro2",
  "quote",

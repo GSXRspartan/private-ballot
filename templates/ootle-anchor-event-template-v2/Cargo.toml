@@ -8,16 +8,36 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Pinned to the Tari Ootle v0.51.0 cohort (Protocol V1, Esmeralda epoch 12951+).
-# The on-chain event metadata model is CBOR (tari-ootle PR #2679, v0.42 cohort,
-# live under Protocol V1), and template definitions are now V2 (#3281/#3398),
-# so the template MUST be built against tari_template_lib 0.39.0; earlier
-# builds fail to load. The historical v0.39.2 / 0.31.1 build is retained only
-# as a compatibility baseline and is never published on the live network.
-tari_template_lib = "=0.39.0"
+# Pinned to the current Tari Ootle MAINNET cohort (v0.53.x: v0.53.0 through
+# v0.53.3 all pin `tari_template_lib = { version = "0.40.0" }` in their tagged
+# workspace Cargo.toml). The v0.53.0 definition change (#3657) tags library
+# types as `Type::WellKnown`; a 0.52-era walletd/indexer cannot read a template
+# definition built against this version. This template's ABI uses only
+# `String` arguments and a `Unit` return, so the WellKnown tagging does not
+# enter its definition — verified by the wasm32 build and the ABI contract
+# tests in this crate.
+#
+# crates.io also has tari_template_lib 0.40.1 (2026-11-11), but no tagged
+# tari-ootle release references it; per the cohort policy in
+# docs/modernization/OOTLE_CURRENT_STATE.md it is treated as unreleased
+# development and the exact 0.40.0 pin is kept.
+#
+# Historical: the v0.42 cohort build (=0.33.0) and the v0.39.2 build (=0.31.1)
+# are retained only as compatibility baselines in
+# `crates/gui-core/src/trusted_anchor_deployment.rs` and the docs; they are
+# never published on the current mainnet cohort.
+tari_template_lib = "=0.40.0"
 
 [lib]
 crate-type = ["cdylib"]
+
+[dev-dependencies]
+# Host-side ABI regression tests decode the compiled artifact's embedded
+# template definition with the exact template_abi version family the pinned
+# `tari_template_lib` was built against (0.24.x), so the test decodes the
+# definition the same way the current mainnet cohort's engine does.
+tari_template_abi = "=0.24.1"
+minicbor = "2.3.1"
 
 [profile.release]
 opt-level = "s"

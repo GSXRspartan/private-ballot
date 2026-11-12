@@ -121,4 +121,168 @@ mod tari_private_ballot_anchor_v2 {
                 .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-' || *byte == b'_')
     }
 
+    /// Host-only regression locks on the argument validators. These run before
+    /// any engine call, so invalid inputs are testable on the host target; the
+    /// successful emission path is exercised by the embedded-definition decode
+    /// test in `tests/abi_contract.rs` and by on-network qualification.
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            TariPrivateBallotAnchorV2, is_bounded_nonempty, is_bounded_printable,
+            is_canonical_digest,
+        };
+        use crate::{
+            ANCHOR_EVENT_TOPIC_V2, MAX_ELECTION_ID_LEN, MAX_NETWORK_LEN, MAX_PUBLIC_SUMMARY_LEN,
+            V2_DIGEST_KEY, V2_ELECTION_ID_KEY, V2_NETWORK_KEY, V2_PUBLIC_SUMMARY_KEY,
+        };
+
+        #[test]
+        fn event_topic_is_stable() {
+            assert_eq!(
+                ANCHOR_EVENT_TOPIC_V2,
+                "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2"
+            );
+        }
+
+        #[test]
+        fn metadata_keys_are_stable() {
+            assert_eq!(V2_DIGEST_KEY, "anchor_digest_v2");
+            assert_eq!(V2_NETWORK_KEY, "network");
+            assert_eq!(V2_ELECTION_ID_KEY, "election_id");
+            assert_eq!(V2_PUBLIC_SUMMARY_KEY, "public_summary");
+        }
+
+        #[test]
+        fn argument_bounds_are_stable() {
+            assert_eq!(MAX_NETWORK_LEN, 32);
+            assert_eq!(MAX_ELECTION_ID_LEN, 128);
+            assert_eq!(MAX_PUBLIC_SUMMARY_LEN, 256 * 1024);
+        }
+
+        #[test]
+        fn canonical_digest_accepts_64_lowercase_hex() {
+            assert!(is_canonical_digest(&"0123456789abcdef".repeat(4)));
+            assert!(is_canonical_digest(&"0".repeat(64)));
+        }
+
+        #[test]
+        fn canonical_digest_rejects_everything_else() {
+            assert!(!is_canonical_digest(""));
+            // 63 / 65 characters
+            assert!(!is_canonical_digest(&"a".repeat(63)));
+            assert!(!is_canonical_digest(&"a".repeat(65)));
+            // uppercase hex
+            assert!(!is_canonical_digest(&"A".repeat(64)));
+            // non-hex characters
+            assert!(!is_canonical_digest(&"g".repeat(64)));
+            assert!(!is_canonical_digest(&format!("{}-", "a".repeat(63))));
+        }
+
+        #[test]
+        fn network_accepts_bounded_identifier_charset() {
+            assert!(is_bounded_nonempty("mainnet", MAX_NETWORK_LEN));
+            assert!(is_bounded_nonempty("esmeralda", MAX_NETWORK_LEN));
+            assert!(is_bounded_nonempty("net-1_2", MAX_NETWORK_LEN));
+        }
+
+        #[test]
+        fn network_rejects_empty_oversized_and_foreign_charset() {
+            assert!(!is_bounded_nonempty("", MAX_NETWORK_LEN));
+            assert!(!is_bounded_nonempty(
+                &"a".repeat(MAX_NETWORK_LEN + 1),
+                MAX_NETWORK_LEN
+            ));
+            assert!(!is_bounded_nonempty("esmeralda testnet", MAX_NETWORK_LEN));
+            assert!(!is_bounded_nonempty("ésmeralda", MAX_NETWORK_LEN));
+        }
+
+        #[test]
+        fn election_id_accepts_bounded_printable() {
+            assert!(is_bounded_printable(
+                "0123456789abcdef0123456789abcdef",
+                MAX_ELECTION_ID_LEN
+            ));
+            assert!(is_bounded_printable(
+                &"x".repeat(MAX_ELECTION_ID_LEN),
+                MAX_ELECTION_ID_LEN
+            ));
+        }
+
+        #[test]
+        fn election_id_rejects_empty_oversized_and_control_bytes() {
+            assert!(!is_bounded_printable("", MAX_ELECTION_ID_LEN));
+            assert!(!is_bounded_printable(
+                &"x".repeat(MAX_ELECTION_ID_LEN + 1),
+                MAX_ELECTION_ID_LEN
+            ));
+            assert!(!is_bounded_printable("\u{0}", MAX_ELECTION_ID_LEN));
+            assert!(!is_bounded_printable("id\u{1f}", MAX_ELECTION_ID_LEN));
+        }
+
+        #[test]
+        fn public_summary_accepts_the_full_cap_and_multibyte_utf8() {
+            assert!(is_bounded_printable(
+                &"a".repeat(MAX_PUBLIC_SUMMARY_LEN),
+                MAX_PUBLIC_SUMMARY_LEN
+            ));
+            assert!(is_bounded_printable("summary 中 é", MAX_PUBLIC_SUMMARY_LEN));
+        }
+
+        #[test]
+        fn public_summary_rejects_over_cap_and_control_bytes() {
+            assert!(!is_bounded_printable(
+                &"a".repeat(MAX_PUBLIC_SUMMARY_LEN + 1),
+                MAX_PUBLIC_SUMMARY_LEN
+            ));
+            assert!(!is_bounded_printable("", MAX_PUBLIC_SUMMARY_LEN));
+            assert!(!is_bounded_printable(
+                "summary\u{7}",
+                MAX_PUBLIC_SUMMARY_LEN
+            ));
+        }
+
+        #[test]
+        #[should_panic(expected = "anchor_digest must be 64 lowercase hexadecimal characters")]
+        fn publish_rejects_non_canonical_digest() {
+            TariPrivateBallotAnchorV2::publish_anchor_v2(
+                "NOT-A-DIGEST".to_owned(),
+                "mainnet".to_owned(),
+                "0123456789abcdef".to_owned(),
+                "{}".to_owned(),
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "network must be a short non-empty identifier")]
+        fn publish_rejects_invalid_network() {
+            TariPrivateBallotAnchorV2::publish_anchor_v2(
+                "a".repeat(64),
+                "esmeralda testnet".to_owned(),
+                "0123456789abcdef".to_owned(),
+                "{}".to_owned(),
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "election_id must be a bounded, printable, non-empty string")]
+        fn publish_rejects_invalid_election_id() {
+            TariPrivateBallotAnchorV2::publish_anchor_v2(
+                "a".repeat(64),
+                "mainnet".to_owned(),
+                "\u{2}".to_owned(),
+                "{}".to_owned(),
+            );
+        }
+
+        #[test]
+        #[should_panic(expected = "public_summary must be a bounded, printable canonical string")]
+        fn publish_rejects_invalid_public_summary() {
+            TariPrivateBallotAnchorV2::publish_anchor_v2(
+                "a".repeat(64),
+                "mainnet".to_owned(),
+                "0123456789abcdef".to_owned(),
+                format!("{}\u{3}", "x".repeat(64)),
+            );
+        }
+    }
 }
