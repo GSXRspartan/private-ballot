@@ -34,3 +34,7 @@ custom_domain = true
 # requires the injected origin token when one is configured, so direct
 # hits to this hostname fail closed. See docs/hosted/CLOUDFLARE_STAGE3.md.
 STAGING_ORIGIN = "https://private-ballot-origin-staging.ghostgate.boo"
+
+# The separate read-only chain-data cross-check Worker is configured in
+# ../deploy/indexer-proxy/wrangler.toml. Do not add its routes or upstream to
+# this organizer-capability backend proxy.

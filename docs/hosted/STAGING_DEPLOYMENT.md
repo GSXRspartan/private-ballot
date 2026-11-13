@@ -21,7 +21,7 @@ Implemented and proven locally:
   `admin_plane_requires_token_when_configured`,
   `origin_token_enforced_on_public_plane_when_configured`.
 - Edge artifacts ready in `hosted-web/`: `wrangler.toml` (Worker +
-  Static Assets, `run_worker_first = ["/api/*"]`, SPA fallback) and
+  Static Assets, `run_worker_first = true`, SPA fallback) and
   `src-edge/worker.ts` (edge 404 for `/api/v1/admin/*`, origin-token
   injection with spoof stripping, security headers, cache policy).
 - Backup/restore/health scripts in `deploy/staging/`.

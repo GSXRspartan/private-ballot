@@ -10,9 +10,12 @@ import {
   parseAnchorBundleJson,
 } from "../src/wallet/anchorBundle.ts";
 import {
+  ESMERALDA_V2_ARTIFACT_DIGEST_HEX,
   ESMERALDA_V2_TEMPLATE_ADDRESS,
   MAINNET_V2_TEMPLATE_ADDRESS,
   MAINNET_V2_ARTIFACT_DIGEST_HEX,
+  MAINNET_V2_PUBLISH_TRANSACTION_ID,
+  RELEASED_V2_DEPLOYMENT_REGISTRY,
   anchorDeploymentConfig,
   deploymentForNetwork,
   mainnetPublishBlocker,
@@ -28,7 +31,7 @@ function validBundle(): Record<string, unknown> {
       module: "tari_private_ballot_anchor_v2",
       function: "publish_anchor_v2",
       eventTopic: "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
-      artifactDigestHex: anchorDeploymentConfig().esmeralda.artifactDigestHex,
+      artifactDigestHex: ESMERALDA_V2_ARTIFACT_DIGEST_HEX,
     },
     anchorArgs: {
       anchorDigestHex: "67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7",
@@ -132,18 +135,21 @@ describe("anchor bundle parsing", () => {
 });
 
 describe("deployment configuration", () => {
-  it("keeps the esmeralda deployment configured from the verified record", () => {
+  it("retains Esmeralda as historical evidence rather than a publish target", () => {
     const config = anchorDeploymentConfig();
-    assert.equal(config.esmeralda.module, "tari_private_ballot_anchor_v2");
-    assert.equal(config.esmeralda.function, "publish_anchor_v2");
+    const historical = RELEASED_V2_DEPLOYMENT_REGISTRY.find((entry) => entry.network === "esmeralda");
+    assert.equal(config.esmeralda, null);
+    assert.equal(deploymentForNetwork(config, "esmeralda"), null);
+    assert.equal(historical?.status, "historical");
     assert.equal(
-      config.esmeralda.eventTopic,
+      historical?.template.eventTopic,
       "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
     );
     assert.equal(
-      config.esmeralda.address,
-      "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee",
+      historical?.template.address,
+      ESMERALDA_V2_TEMPLATE_ADDRESS,
     );
+    assert.equal(historical?.template.artifactDigestHex, ESMERALDA_V2_ARTIFACT_DIGEST_HEX);
   });
 
   it("enables mainnet publishing with the configured mainnet template address", () => {
@@ -152,5 +158,9 @@ describe("deployment configuration", () => {
     assert.equal(mainnetPublishBlocker(config), null);
     assert.deepEqual(deploymentForNetwork(config, "mainnet")?.address, MAINNET_V2_TEMPLATE_ADDRESS);
     assert.equal(deploymentForNetwork(config, "mainnet")?.artifactDigestHex, MAINNET_V2_ARTIFACT_DIGEST_HEX);
+    assert.equal(
+      RELEASED_V2_DEPLOYMENT_REGISTRY.find((entry) => entry.network === "mainnet")?.publishTransactionId,
+      MAINNET_V2_PUBLISH_TRANSACTION_ID,
+    );
   });
 });

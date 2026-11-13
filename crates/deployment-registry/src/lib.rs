@@ -21,6 +21,25 @@ pub const ABI_NAME_V2: &str = "TariPrivateBallotAnchorV2";
 pub const ABI_FUNCTION_V2: &str = "publish_anchor_v2";
 pub const ABI_EVENT_TOPIC_V2: &str = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2";
 
+/// Reviewed Mainnet V2 template address. This is the only `CURRENT` entry in
+/// [`released_v2_deployment_registry`].
+pub const MAINNET_V2_TEMPLATE_ADDRESS: &str =
+    "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb";
+/// BLAKE3-256 of the reviewed Mainnet V2 template artifact.
+pub const MAINNET_V2_ARTIFACT_BLAKE3: &str =
+    "6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830";
+/// Public transaction identifier that published the reviewed Mainnet V2
+/// template.
+pub const MAINNET_V2_PUBLISH_TRANSACTION_ID: &str =
+    "a898f8daaa0ae25095a02f69e5753e38dfe4a9c99c546d26297e08b81a3aa79c";
+
+/// Historical Esmeralda V2 deployment retained for evidence-only lookups.
+pub const ESMERALDA_V2_TEMPLATE_ADDRESS: &str =
+    "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee";
+/// BLAKE3-256 of the historical Esmeralda V2 template artifact.
+pub const ESMERALDA_V2_ARTIFACT_BLAKE3: &str =
+    "ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908";
+
 /// Application status of a deployment record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -224,6 +243,55 @@ impl DeploymentRegistry {
     }
 }
 
+/// Returns the checked-in release registry used to resolve browser-facing V2
+/// deployments. Mainnet is the sole selectable deployment; the older
+/// Esmeralda deployment is preserved as historical evidence and never
+/// resolves as `CURRENT`.
+#[must_use]
+pub fn released_v2_deployment_registry() -> DeploymentRegistry {
+    DeploymentRegistry {
+        schema: REGISTRY_SCHEMA_V1.to_owned(),
+        entries: vec![
+            DeploymentEntry {
+                network: "mainnet".to_owned(),
+                network_generation: "mainnet-v0.53".to_owned(),
+                ootle_version: "v0.53.x".to_owned(),
+                logical_name: "TariPrivateBallotAnchorV2".to_owned(),
+                abi_version: ABI_NAME_V2.to_owned(),
+                template_address: MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+                artifact_sha256: None,
+                artifact_blake3: Some(MAINNET_V2_ARTIFACT_BLAKE3.to_owned()),
+                deployed_artifact_hashes: Vec::new(),
+                deployment_tx_id: Some(MAINNET_V2_PUBLISH_TRANSACTION_ID.to_owned()),
+                activated_at_unix_secs: None,
+                status: DeploymentStatus::Current,
+                qualification_tx_id: None,
+                qualification_digest: None,
+                notes: "Reviewed Mainnet V2 deployment; selectable for new browser anchor requests."
+                    .to_owned(),
+            },
+            DeploymentEntry {
+                network: "esmeralda".to_owned(),
+                network_generation: "pre-mainnet".to_owned(),
+                ootle_version: "v0.42.x".to_owned(),
+                logical_name: "TariPrivateBallotAnchorV2".to_owned(),
+                abi_version: ABI_NAME_V2.to_owned(),
+                template_address: ESMERALDA_V2_TEMPLATE_ADDRESS.to_owned(),
+                artifact_sha256: None,
+                artifact_blake3: Some(ESMERALDA_V2_ARTIFACT_BLAKE3.to_owned()),
+                deployed_artifact_hashes: Vec::new(),
+                deployment_tx_id: None,
+                activated_at_unix_secs: None,
+                status: DeploymentStatus::Historical,
+                qualification_tx_id: None,
+                qualification_digest: None,
+                notes: "Pre-reset Esmeralda V2 deployment retained for evidence only; never selectable for new requests."
+                    .to_owned(),
+            },
+        ],
+    }
+}
+
 impl DeploymentEntry {
     /// Structural validation: non-empty network, `template_<64 hex>` address,
     /// and (when present) 64-char lowercase-hex artifact hashes.
@@ -261,8 +329,10 @@ impl DeploymentEntry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ABI_NAME_V2, DeploymentEntry, DeploymentRegistry, DeploymentStatus, REGISTRY_SCHEMA_V1,
-        RegistryError,
+        ABI_NAME_V2, DeploymentEntry, DeploymentRegistry, DeploymentStatus,
+        ESMERALDA_V2_ARTIFACT_BLAKE3, ESMERALDA_V2_TEMPLATE_ADDRESS, MAINNET_V2_ARTIFACT_BLAKE3,
+        MAINNET_V2_PUBLISH_TRANSACTION_ID, MAINNET_V2_TEMPLATE_ADDRESS, REGISTRY_SCHEMA_V1,
+        RegistryError, released_v2_deployment_registry,
     };
 
     fn entry(network: &str, address_hex: char) -> DeploymentEntry {
@@ -363,6 +433,40 @@ mod tests {
             registry
                 .resolve_current("esmeralda", ABI_NAME_V2, None)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn released_registry_selects_only_the_mainnet_v2_deployment() {
+        let registry = released_v2_deployment_registry();
+        registry
+            .validate()
+            .expect("release registry is structurally valid");
+
+        let mainnet = registry
+            .resolve_current("mainnet", ABI_NAME_V2, Some(MAINNET_V2_ARTIFACT_BLAKE3))
+            .expect("reviewed Mainnet deployment resolves");
+        assert_eq!(mainnet.template_address, MAINNET_V2_TEMPLATE_ADDRESS);
+        assert_eq!(
+            mainnet.deployment_tx_id.as_deref(),
+            Some(MAINNET_V2_PUBLISH_TRANSACTION_ID)
+        );
+        assert_eq!(mainnet.status, DeploymentStatus::Current);
+
+        let historical = registry
+            .entries
+            .iter()
+            .find(|entry| entry.network == "esmeralda")
+            .expect("Esmeralda history is retained");
+        assert_eq!(historical.status, DeploymentStatus::Historical);
+        assert_eq!(historical.template_address, ESMERALDA_V2_TEMPLATE_ADDRESS);
+        assert_eq!(
+            historical.artifact_blake3.as_deref(),
+            Some(ESMERALDA_V2_ARTIFACT_BLAKE3)
+        );
+        assert_eq!(
+            registry.resolve_current("esmeralda", ABI_NAME_V2, None),
+            Err(RegistryError::NetworkMismatch)
         );
     }
 

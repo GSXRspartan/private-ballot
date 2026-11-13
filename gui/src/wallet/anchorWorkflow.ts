@@ -144,7 +144,7 @@ export function phaseLabel(phase: AnchorWorkflowPhase): string {
     case "bundle_invalid":
       return "The imported anchor bundle is not valid. Re-export it from the desktop application.";
     case "mainnet_disabled":
-      return "Mainnet anchor publishing is disabled in this build until a configured mainnet template address is released.";
+      return "Mainnet anchor publishing requires exactly one current configured Mainnet V2 deployment.";
     case "deployment_mismatch":
       return `${phase.message}. Publishing is blocked.`;
     case "wallet_required":

@@ -68,7 +68,7 @@ pub struct LifecycleArgs {
 pub struct WriteConfigArgs {
     /// `--output <absolute-path>` (required).
     pub output: String,
-    /// `--network <esmeralda|igor|localnet>` (required).
+    /// `--network <mainnet|esmeralda|igor|localnet>` (required).
     pub network: String,
     /// `--walletd-endpoint <url>` (required).
     pub walletd_endpoint: String,

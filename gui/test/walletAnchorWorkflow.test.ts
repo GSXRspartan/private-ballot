@@ -53,7 +53,7 @@ function bundleFixture(network: string): AnchorBundleV1 {
   });
 }
 
-function baseInput(network = "esmeralda") {
+function baseInput(network = "mainnet") {
   return {
     bundle: bundleFixture(network),
     bundleInvalidReason: null,
@@ -84,7 +84,7 @@ describe("anchor workflow assessment", () => {
   });
 
   it("blocks a bundle that does not match the configured deployment", () => {
-    const bundle = bundleFixture("esmeralda");
+    const bundle = bundleFixture("mainnet");
     bundle.template.eventTopic =
       "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2";
     const phase = assessAnchorWorkflow({ ...baseInput(), bundle });
@@ -98,6 +98,10 @@ describe("anchor workflow assessment", () => {
     const bundle = bundleFixture("mysterynet");
     const phase = assessAnchorWorkflow({ ...baseInput(), bundle });
     assert.equal(phase.kind, "deployment_mismatch");
+  });
+
+  it("does not create requests for a historical Esmeralda deployment", () => {
+    assert.equal(assessAnchorWorkflow(baseInput("esmeralda")).kind, "deployment_mismatch");
   });
 
   it("requires a connected wallet and a matching wallet network before ready", () => {

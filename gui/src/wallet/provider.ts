@@ -27,6 +27,13 @@ export interface ProviderDiscoveryResult {
   reason: string | null;
 }
 
+/** Globals exposed by Sapient and the reviewed Tari Universe connector. */
+export interface TariProviderScope {
+  tari?: unknown;
+  tariUniverse?: unknown;
+  tariProviders?: unknown;
+}
+
 export interface WindowTariProvider {
   kind: ProviderKind;
   label: string;
@@ -365,17 +372,41 @@ export function hasCapability(
   return !!capabilities && capabilities.capabilities.includes(name);
 }
 
-export function sapientDiscovery(scope: {
-  tari?: unknown;
-}): ProviderDiscoveryResult {
-  const candidate = scope.tari;
+function asTariProvider(candidate: unknown): TariProviderLike | null {
   if (
-    typeof candidate === "object" &&
-    candidate !== null &&
-    (candidate as TariProviderLike).isTariWallet === true &&
-    !(candidate as TariProviderLike).isEmbedded
+    typeof candidate !== "object" ||
+    candidate === null ||
+    (candidate as TariProviderLike).isTariWallet !== true
   ) {
-    return { provider: candidate as TariProviderLike, reason: null };
+    return null;
+  }
+  return candidate as TariProviderLike;
+}
+
+function isUniverseBridge(provider: TariProviderLike): boolean {
+  return provider.info?.rdns === "mw.tari.universe";
+}
+
+function universeCandidates(scope: TariProviderScope): TariProviderLike[] {
+  const candidates: unknown[] = [scope.tariUniverse];
+  if (Array.isArray(scope.tariProviders)) candidates.push(...scope.tariProviders);
+  candidates.push(scope.tari);
+  const unique: TariProviderLike[] = [];
+  for (const candidate of candidates) {
+    const provider = asTariProvider(candidate);
+    if (provider && !unique.includes(provider)) unique.push(provider);
+  }
+  return unique;
+}
+
+export function sapientDiscovery(scope: TariProviderScope): ProviderDiscoveryResult {
+  const candidate = scope.tari;
+  const provider = asTariProvider(candidate);
+  // In a normal tab the reviewed Universe connector intentionally does not
+  // displace Sapient. If no extension owns `window.tari`, the connector's
+  // non-embedded bridge must not be misidentified as a usable extension.
+  if (provider && !provider.isEmbedded && !isUniverseBridge(provider)) {
+    return { provider, reason: null };
   }
   return {
     provider: null,
@@ -384,29 +415,27 @@ export function sapientDiscovery(scope: {
   };
 }
 
-export function universeDiscovery(scope: {
-  tari?: unknown;
-}): ProviderDiscoveryResult {
-  const candidate = scope.tari;
-  if (
-    typeof candidate !== "object" ||
-    candidate === null ||
-    (candidate as TariProviderLike).isTariWallet !== true
-  ) {
+export function universeDiscovery(scope: TariProviderScope): ProviderDiscoveryResult {
+  // In an embedded page the connector intentionally owns `window.tari`, but
+  // a non-writable extension injection can keep that name. The reviewed
+  // connector publishes both a named fallback and a registry, so prefer those
+  // before considering the contested global.
+  const provider = universeCandidates(scope).find((candidate) => candidate.isEmbedded === true);
+  if (provider) return { provider, reason: null };
+
+  const candidate = asTariProvider(scope.tari);
+  if (!candidate && universeCandidates(scope).length === 0) {
     return {
       provider: null,
       reason:
         "Not running inside Tari Universe. Open this dApp from its app catalogue at universe.tari.mw; in a plain tab its provider is unreachable by design.",
     };
   }
-  if (!(candidate as TariProviderLike).isEmbedded) {
-    return {
-      provider: null,
-      reason:
-        "A Tari wallet is present but this page is not running inside it. Open this dApp from Tari Universe's app catalogue instead of a browser tab.",
-    };
-  }
-  return { provider: candidate as TariProviderLike, reason: null };
+  return {
+    provider: null,
+    reason:
+      "A Tari wallet is present but this page is not running inside it. Open this dApp from Tari Universe's app catalogue instead of a browser tab.",
+  };
 }
 
 export function waitForTariInit(scope: {

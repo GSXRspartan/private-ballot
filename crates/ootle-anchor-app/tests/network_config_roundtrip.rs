@@ -1,10 +1,10 @@
 //! Network-agnostic V4 config round-trip and durable V3<->V4 compatibility.
 //!
 //! The selected Ootle network is runtime data carried through the config, never
-//! a compile-time constant: esmeralda, igor, and localnet each configure and
+//! a compile-time constant: mainnet, esmeralda, igor, and localnet each configure and
 //! round-trip identically, the per-network template deployment binding travels
 //! with the config, and a network with no configured trusted deployment
-//! (mainnet and the pre-production networks) fails closed. Adding a future
+//! (the pre-production networks) fails closed. Adding a future
 //! network is therefore a configuration/provisioning change, not a source
 //! change.
 
@@ -55,7 +55,7 @@ fn v4_config_for(net: &str) -> AnchorAppConfig {
 
 #[test]
 fn every_supported_network_v4_config_round_trips() {
-    for net in ["esmeralda", "igor", "localnet"] {
+    for net in ["mainnet", "esmeralda", "igor", "localnet"] {
         let config = v4_config_for(net);
         let bytes = config
             .to_canonical_bytes()
@@ -105,10 +105,10 @@ fn v3_config_without_event_template_still_round_trips() {
 
 #[test]
 fn a_network_without_a_trusted_deployment_fails_closed() {
-    // mainnet (and the pre-production networks) have no configured trusted
+    // The pre-production networks have no configured trusted
     // template deployment, so the network adapter refuses them rather than
     // silently falling back to another network's deployment.
-    for net in ["mainnet", "stagenet", "nextnet"] {
+    for net in ["stagenet", "nextnet"] {
         let result = NetworkAdapterConfig::new(
             network(net),
             walletd_endpoint(),

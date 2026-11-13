@@ -55,7 +55,7 @@ pub use inspect::{
     inspect_detected_fee_bearing_anchor_transaction, inspect_fee_bearing_anchor_transaction,
     inspect_unsigned_anchor_transaction,
 };
-pub use network::{map_ootle_network, supported_testnet_network_ids};
+pub use network::{map_ootle_network, supported_network_ids};
 pub use request::OotleAnchorTransactionBuildRequestV1;
 pub use v2_build::{
     build_fee_bearing_v2_anchor_transaction, inspect_detected_fee_bearing_v2_anchor_transaction,

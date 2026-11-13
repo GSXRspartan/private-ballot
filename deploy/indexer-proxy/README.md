@@ -19,6 +19,14 @@ Every other path returns 404 without contacting the upstream. Query strings
 are never forwarded. Only `GET`/`HEAD` (plus `OPTIONS` preflight) are accepted;
 writes return 405.
 
+## Staging deployment configuration
+
+`wrangler.toml` is the deployable staging configuration for this Worker. It
+pins the public Mainnet indexer upstream and the exact hosted browser origin;
+it is separate from `hosted-web/wrangler.toml`, which proxies only the
+organizer-capability backend API. No deploy is performed by this repository
+change.
+
 ## Configuration (worker environment variables)
 
 | Variable | Meaning |
@@ -53,5 +61,6 @@ behaviour are all covered without a Workers runtime.
 
 No production deployment is included or performed. Deploying this worker to
 production infrastructure requires explicit authorization; use
-`wrangler deploy` with the two environment variables above set in the
-worker's configuration (never hard-code them).
+`npx wrangler deploy --config deploy/indexer-proxy/wrangler.toml` only after
+reviewing the two configured values above. The upstream is public deployment
+configuration, not a wallet, organizer, or voter secret.

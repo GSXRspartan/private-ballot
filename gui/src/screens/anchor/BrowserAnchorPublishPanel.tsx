@@ -28,7 +28,6 @@ const VERIFY_INTERVAL_MS = 4000;
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 
 export function BrowserAnchorPublishPanel() {
-  const [bundleText, setBundleText] = useState<string>("");
   const [bundle, setBundle] = useState<AnchorBundleV1 | null>(null);
   const [bundleError, setBundleError] = useState<string | null>(null);
   const [entries, setEntries] = useState<WalletEntry[]>(initialWalletEntries);
@@ -57,7 +56,6 @@ export function BrowserAnchorPublishPanel() {
     setBundle(null);
     setPhaseOverride(null);
     const text = await file.text();
-    setBundleText(text);
     try {
       const parsed = parseAnchorBundleJson(text);
       setBundle(parsed);
@@ -74,8 +72,13 @@ export function BrowserAnchorPublishPanel() {
   const walletConnected = entries.some(
     (entry) => entry.kind === "sapient" || entry.kind === "universe",
   ) && entries.some((entry) => entry.phase.kind === "connected" || entry.phase.kind === "ready");
-  const walletNetworkName =
-    entries.find((entry) => entry.phase.kind === "connected")?.phase.network ?? null;
+  let walletNetworkName: string | null = null;
+  for (const entry of entries) {
+    if (entry.phase.kind === "connected") {
+      walletNetworkName = entry.phase.network;
+      break;
+    }
+  }
 
   const phase = bundle
     ? assessAnchorWorkflow({

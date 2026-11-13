@@ -5,7 +5,7 @@ Staging only. No production hostname, no DNS changes to production zones.
 ## What is in the repository
 
 - `hosted-web/wrangler.toml` — Worker `private-ballot-staging`, Static
-  Assets from `dist/`, SPA fallback, `run_worker_first = ["/api/*"]`,
+  Assets from `dist/`, SPA fallback, `run_worker_first = true`,
   `STAGING_ORIGIN` placeholder (must be replaced with the real Tunnel
   ingress hostname before deploy).
 - `hosted-web/src-edge/worker.ts` — edge logic; builds with `npx wrangler
@@ -54,10 +54,16 @@ curl -s -o /dev/null -w "%{http_code}\n" https://<ingress-host>/api/v1/status
 
 ## Security headers / CSP decision
 
-- CSP identical to the Stage 2 policy: `default-src 'self'; script-src
-  'self'; style-src 'self'; img-src 'self' data:; connect-src 'self';
-  font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors
-  'none'`.
+- Every request reaches the Worker before the Assets binding. Canonical dApp
+  documents (`/`, `/manage`, `/create`, `/enroll`, `/vote`, `/archive`,
+  `/evidence`, `/guide`, `/about`, `/settings`, with or without `.html`) use
+  `frame-ancestors https://universe.tari.mw`; API, admin, and asset responses
+  retain `frame-ancestors 'none'`.
+- This is an HTTP response header, not a meta-tag assertion. It is
+  security-relevant because the reviewed Tari Universe connector checks its
+  reply parent's window source but deliberately sends requests with a wildcard
+  `postMessage` target. The CSP framing boundary confines the dApp to the
+  expected Universe embedding origin.
 - `nosniff`, `strict-origin-when-cross-origin`, minimal
   `Permissions-Policy` (`camera/mic/geolocation` off).
 - HSTS `max-age=31536000; includeSubDomains` on HTTPS staging.

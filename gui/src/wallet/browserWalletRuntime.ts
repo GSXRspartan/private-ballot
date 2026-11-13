@@ -6,6 +6,7 @@ import {
   WalletProviderError,
 } from "./provider.ts";
 import type { ProviderKind } from "./types.ts";
+import type { TariProviderScope } from "./provider.ts";
 import {
   WALLET_LABELS,
   accountsChanged,
@@ -17,8 +18,7 @@ import {
 } from "./settingsState.ts";
 import type { WalletEntry } from "./settingsState.ts";
 
-export type WalletScope = {
-  tari?: unknown;
+export type WalletScope = TariProviderScope & {
   addEventListener?: (type: string, listener: () => void) => unknown;
 };
 

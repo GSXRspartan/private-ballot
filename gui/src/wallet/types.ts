@@ -8,6 +8,11 @@ export interface TariProviderLike {
   on?(event: string, listener: (payload: unknown) => void): unknown;
   isTariWallet?: boolean;
   isEmbedded?: boolean;
+  info?: {
+    name?: string;
+    rdns?: string;
+    embedded?: boolean;
+  };
 }
 
 export type TransactionRequestStatus =

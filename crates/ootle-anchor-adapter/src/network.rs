@@ -3,17 +3,16 @@
 //! The mapping is a small, exhaustive, exact-match table. It never falls back to
 //! a default, never reads an environment variable, never infers a network from a
 //! wallet address, and never passes the project identifier string through into
-//! the Ootle transaction. Only exact lowercase canonical testnet identifiers are
-//! accepted, so casing changes (`Esmeralda`), aliases (`esme`), production
-//! networks (`mainnet`, `stagenet`, `nextnet`), and any similar-but-different
-//! name are rejected rather than silently coerced.
+//! the Ootle transaction. Only exact lowercase canonical network identifiers are
+//! accepted, so casing changes (`Esmeralda`), aliases (`esme`),
+//! pre-production networks (`stagenet`, `nextnet`), and any
+//! similar-but-different name are rejected rather than silently coerced.
 //!
 //! The confirmed candidate networks for a non-binding testnet pilot are the two
 //! named public Ootle testnets, `esmeralda` and `igor`, plus `localnet` for
-//! offline and local development. Final target selection is left to a later
-//! configuration slice; this table only fixes which identifiers are mappable at
-//! all. `mainnet` (and the pre-production `stagenet`/`nextnet`) are deliberately
-//! out of scope and always rejected.
+//! offline and local development. The reviewed Mainnet V2 deployment is also
+//! explicitly mapped. Pre-production `stagenet` and `nextnet` remain out of
+//! scope and are always rejected.
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_ootle_transaction::Network;

@@ -8,7 +8,7 @@ import {
   type WindowTariProvider,
 } from "../wallet/provider.ts";
 import type { TransactionRequestSummary } from "../wallet/types.ts";
-import { pollUntilVerified, type VerifyPollOptions } from "../wallet/verifyPoll.ts";
+import { pollUntilVerified } from "../wallet/verifyPoll.ts";
 import type { AnchorVerificationOutcome } from "../wallet/verifyReceipt.ts";
 import type { AnchorRecoveryStore } from "../wallet/recoveryStore.ts";
 import type { WalletScope } from "../wallet/browserWalletRuntime.ts";

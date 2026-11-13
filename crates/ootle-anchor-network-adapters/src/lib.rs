@@ -58,8 +58,8 @@ pub use config::{
 };
 pub use endpoint::{
     IndexerEndpoint, IndexerEndpointError, MAX_ENDPOINT_BASE_PATH_BYTES,
-    TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, WALLETD_JSONRPC_PATH, WalletdEndpoint,
-    WalletdEndpointError, ensure_walletd_jsonrpc_path,
+    TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, TRUSTED_MAINNET_INDEXER_ENDPOINT_V1,
+    WALLETD_JSONRPC_PATH, WalletdEndpoint, WalletdEndpointError, ensure_walletd_jsonrpc_path,
 };
 pub use error::{TransportError, TransportErrorCategory};
 pub use executor::{BlockingExecutor, BlockingExecutorError, SimpleBlockingExecutor};

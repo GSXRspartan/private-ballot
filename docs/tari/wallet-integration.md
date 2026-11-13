@@ -12,8 +12,13 @@ differs. Private Ballot feature-detects capabilities and never wallet-detects.
 
 | Wallet | Where it lives | Discovery |
 |---|---|---|
-| Sapient | a browser extension | `window.tari` with `isTariWallet === true` and `isEmbedded` falsy |
-| Tari Universe | dApps embedded in Universe's own iframe | `window.tari` with `isTariWallet === true` and `isEmbedded === true` |
+| Sapient | a browser extension | `window.tari` with `isTariWallet === true`, `isEmbedded` falsy, and not the Universe bridge |
+| Tari Universe | dApps embedded in Universe's own iframe | embedded provider from `window.tariUniverse`, then `window.tariProviders`, then `window.tari` |
+
+The reviewed Universe connector intentionally publishes `tariUniverse` and
+`tariProviders` as fallbacks when an extension owns or makes `window.tari`
+non-writable. The browser selects an embedded provider only for the Universe
+path; it will not mistake the non-embedded connector bridge for Sapient.
 
 In a plain browser tab with neither wallet present, both adapters report an
 honest "no wallet answered" state. Inside the Tauri desktop shell the browser
@@ -110,12 +115,9 @@ forms, and bounded strings. On import the workflow additionally checks:
    bundle's network, and
 2. the connected wallet's network matches the bundle's network **by byte**
    (`tari_getNetwork` name → Ootle network byte), and
-3. mainnet publishing stays disabled until a configured mainnet V2 template
-   address exists (`MAINNET_V2_TEMPLATE_ADDRESS` in
-   `gui/src/wallet/anchorDeploymentConfig.ts` is empty in this build). The
-   Esmeralda template address and artifact digest are pinned from the
-   verified deployment record; the two networks' configurations are kept
-   separate and one is never used as a fallback for the other.
+3. the bundle must match the unique `Current` Mainnet V2 release entry. The
+   prior Esmeralda deployment remains in the registry as `Historical` evidence
+   only and can never be used as a fallback or a new publish target.
 
 ## Verification
 
@@ -150,28 +152,29 @@ because local state was lost.
 
 ## The read-only indexer proxy
 
-`deploy/indexer-proxy/` contains a Cloudflare Worker that forwards a fixed
+`deploy/indexer-proxy/` contains a separately configured Cloudflare Worker that forwards a fixed
 allowlist of read-only indexer routes to a server-configured upstream. It
 serves no write path, forwards no query strings, caps response size and time,
 never caches, and enables CORS only for the exact server-configured origin.
-With `INDEXER_UPSTREAM` unset it fails closed (503). No production deployment
-was performed; see `deploy/indexer-proxy/README.md`.
+Its staging Worker configuration is `deploy/indexer-proxy/wrangler.toml`; it
+is not the organizer-capability API proxy in `hosted-web/wrangler.toml`. No
+production deployment was performed; see `deploy/indexer-proxy/README.md`.
 
 ## Mainnet requirements and readiness
 
-- Publishing to mainnet is hard-disabled in this build until a mainnet V2
-  template address is released and configured. The template artifact must be
-  the qualified mainnet artifact (BLAKE3-256
+- Mainnet publishing resolves only the checked-in Current V2 deployment. The
+  template artifact is the reviewed mainnet artifact (BLAKE3-256
   `6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830`); the
-  post-publish substitutions pending in the backend are listed in the
-  deployment runbook (`templates/ootle-anchor-event-template-v2/DEPLOYMENT_RUNBOOK.md`).
+  browser additionally requires the exact released template address, matching
+  wallet network byte, provider capabilities, and absence of ambiguous local
+  recovery before it can create a request.
 - Real-wallet testing with Sapient or Tari Universe has NOT been performed in
   this task (no real transactions, no template publish, no production
-  infrastructure). Before mainnet use, run the full flow once on Esmeralda
-  with a real wallet: export the bundle on desktop, import it in the browser
-  build, connect, approve, submit, and confirm the verified state; also
-  exercise the failure paths (declined approval, network mismatch, bundle
-  from a different network).
+  infrastructure). Before mainnet use, validate the full flow in a separately
+  approved staging release that has exactly one Current test deployment. The
+  historical Esmeralda record in this release is not a valid test target.
+  Exercise declined approval, network mismatch, and wrong-bundle failure paths
+  as well as the verified path.
 - The desktop walletd path is unchanged by this work. For mainnet walletd
   usage, use walletd v0.53.x in a separate environment (do not migrate or
   overwrite an existing wallet database); see the runbook for the exact
@@ -188,7 +191,7 @@ was performed; see `deploy/indexer-proxy/README.md`.
 | `gui/src/wallet/cbor.ts`, `cborLiteral.ts`, `executeResult.ts` | dependency-free CBOR encode/decode, pinned against Rust vectors (`gui/test/anchorVectors.generated.ts`) |
 | `gui/src/wallet/verifyReceipt.ts`, `verifyPoll.ts` | indexer-envelope parsing and the V2 anchor event verifier |
 | `gui/src/wallet/anchorBundle.ts` | bundle parse/validation, instruction building, desktop export composition |
-| `gui/src/wallet/anchorDeploymentConfig.ts` | per-network template configuration (mainnet disabled) |
+| `gui/src/wallet/anchorDeploymentConfig.ts` | Current/Historical browser release registry projection |
 | `gui/src/wallet/anchorWorkflow.ts`, `recoveryStore.ts` | fail-closed workflow gates and id-only recovery |
 | `gui/src/anchor/browserAnchorPublish.ts` | publish driver (approval → submit → verify) and recovery writer |
 | `gui/src/screens/anchor/BrowserAnchorPublishPanel.tsx` | the browser publish panel |

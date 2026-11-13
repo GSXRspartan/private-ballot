@@ -16,12 +16,14 @@ interface FakeProviderInit {
   handlers: Record<string, Handler>;
   on?: (event: string, listener: (payload: unknown) => void) => unknown;
   isEmbedded?: boolean;
+  info?: TariProviderLike["info"];
 }
 
 function fakeProvider(init: FakeProviderInit): TariProviderLike {
   return {
     isTariWallet: true,
     isEmbedded: init.isEmbedded,
+    info: init.info,
     request(args: { method: string; params?: unknown }) {
       const handler = init.handlers[args.method];
       if (!handler) {
@@ -56,6 +58,15 @@ describe("sapient discovery", () => {
     assert.match(found.reason ?? "", /Sapient|universe\.tari\.mw/);
   });
 
+  it("does not mistake the non-embedded Universe bridge for Sapient", () => {
+    const provider = fakeProvider({
+      handlers: {},
+      info: { name: "Tari Universe", rdns: "mw.tari.universe", embedded: true },
+    });
+    const found = sapientDiscovery(scopeWith(provider));
+    assert.equal(found.provider, null);
+  });
+
   it("reports absent wallets honestly", () => {
     const found = sapientDiscovery(scopeWith(undefined));
     assert.equal(found.provider, null);
@@ -73,6 +84,28 @@ describe("universe discovery", () => {
     const provider = fakeProvider({ handlers: {}, isEmbedded: true });
     const found = universeDiscovery(scopeWith(provider));
     assert.equal(found.provider, provider);
+  });
+
+  it("uses the named connector fallback when an extension already owns window.tari", () => {
+    const extension = fakeProvider({ handlers: {} });
+    const universe = fakeProvider({
+      handlers: {},
+      isEmbedded: true,
+      info: { name: "Tari Universe", rdns: "mw.tari.universe", embedded: true },
+    });
+    const found = universeDiscovery({ tari: extension, tariUniverse: universe });
+    assert.equal(found.provider, universe);
+  });
+
+  it("uses the connector registry fallback when the named global is unavailable", () => {
+    const extension = fakeProvider({ handlers: {} });
+    const universe = fakeProvider({
+      handlers: {},
+      isEmbedded: true,
+      info: { name: "Tari Universe", rdns: "mw.tari.universe", embedded: true },
+    });
+    const found = universeDiscovery({ tari: extension, tariProviders: [universe] });
+    assert.equal(found.provider, universe);
   });
 
   it("refuses a provider when the page is not embedded", () => {
