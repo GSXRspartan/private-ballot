@@ -23,6 +23,28 @@
 import { buildUpstreamHeaders, isAdminPath } from "./headers.mjs";
 
 const UNIVERSE_ORIGIN = "https://universe.tari.mw";
+const DAPP_DOCUMENT_PATHS = new Set([
+  "/",
+  "/index.html",
+  "/manage",
+  "/manage.html",
+  "/create",
+  "/create.html",
+  "/enroll",
+  "/enroll.html",
+  "/vote",
+  "/vote.html",
+  "/archive",
+  "/archive.html",
+  "/evidence",
+  "/evidence.html",
+  "/guide",
+  "/guide.html",
+  "/about",
+  "/about.html",
+  "/settings",
+  "/settings.html",
+]);
 
 const BASE_CSP =
   "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'";
@@ -47,9 +69,9 @@ const SECURITY_HEADERS_WITH_UNIVERSE_FRAME: ReadonlyArray<readonly [string, stri
 ];
 
 function isDappRoute(pathname: string): boolean {
-  // Routes that serve the browser-hosted dApp and must be embeddable by Web Tari Universe
-  const dappPaths = ["/", "/manage", "/create", "/enroll", "/vote", "/archive", "/evidence", "/guide", "/about", "/settings"];
-  return dappPaths.some((p) => pathname === p || pathname.startsWith(p + "/"));
+  // Both forms are accepted because Workers Static Assets may redirect the
+  // explicit .html form to the extensionless canonical document path.
+  return DAPP_DOCUMENT_PATHS.has(pathname);
 }
 
 interface Env {
@@ -74,7 +96,7 @@ function applySecurityHeaders(response: Response, headers: ReadonlyArray<readonl
 }
 
 function chooseSecurityHeaders(pathname: string): ReadonlyArray<readonly [string, string]> {
-  if (isDappRoute(new URL(pathname).pathname)) {
+  if (isDappRoute(pathname)) {
     return SECURITY_HEADERS_WITH_UNIVERSE_FRAME;
   }
   return SECURITY_HEADERS_NO_FRAME;

@@ -19,10 +19,10 @@ workers_dev = true
 directory = "./dist/"
 not_found_handling = "single-page-application"
 binding = "ASSETS"
-# Worker-first for API paths so the edge can block /api/v1/admin/* and
-# inject the origin token before anything reaches the staging backend.
-# Static/hashed assets are still served from the edge.
-run_worker_first = ["/api/*"]
+# Every request runs through the Worker before the Static Assets binding. The
+# Worker delegates assets straight to ASSETS.fetch(), preserving edge asset
+# delivery while ensuring HTTP security headers cover every HTML document.
+run_worker_first = true
 
 [[routes]]
 pattern = "private-ballot-staging.ghostgate.boo"
