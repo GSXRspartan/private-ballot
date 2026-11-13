@@ -7,7 +7,8 @@
  */
 
 import { hostedShell } from "./shell";
-import { startManage, renderCredentialEntry } from "./organizer";
+import { startManage, renderCredentialEntry, setManageExtensionRenderer } from "./organizer";
+import { mountBrowserAnchorPanel } from "./browserAnchor";
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -18,6 +19,8 @@ const notice = `
     <strong>Organizer console.</strong> You need the organizer secret created
     together with the election. It is not recoverable from the server.
   </div>`;
+
+setManageExtensionRenderer(mountBrowserAnchorPanel);
 
 renderCredentialEntry(
   (access) => {

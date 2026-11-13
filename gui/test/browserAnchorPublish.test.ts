@@ -207,10 +207,16 @@ describe("recovery writer", () => {
     const first = store.load("bundle-key");
     assert.equal(first?.phase, "submitted_awaiting_approval");
     assert.equal(first?.requestId, "req_1");
+    writer.saveSubmitInFlight("req_1");
+    const inFlight = store.load("bundle-key");
+    assert.equal(inFlight?.phase, "submit_in_flight");
+    assert.equal(inFlight?.requestId, "req_1");
     writer.saveApprovedSubmitted("44".repeat(32));
     const second = store.load("bundle-key");
     assert.equal(second?.phase, "approved_submitted");
     assert.equal(second?.transactionId, "44".repeat(32));
+    writer.saveVerified("44".repeat(32));
+    assert.equal(store.load("bundle-key")?.phase, "verified");
     writer.clear();
     assert.equal(store.load("bundle-key"), null);
   });

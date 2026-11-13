@@ -8,6 +8,7 @@ import {
 } from "../../wallet/anchorBundle.ts";
 import { createBrowserWalletRuntime } from "../../wallet/browserWalletRuntime.ts";
 import { browserRecoveryStore } from "../../wallet/recoveryStore.ts";
+import type { AnchorRecoveryRecord } from "../../wallet/recoveryStore.ts";
 import {
   assessAnchorWorkflow,
   phaseLabel,
@@ -17,7 +18,7 @@ import {
   defaultPublishDriver,
   providerErrorMessage,
   recoveryWriterFor,
-} from "../browserAnchorPublish.ts";
+} from "../../anchor/browserAnchorPublish.ts";
 import { Notice } from "../../components/ui";
 import type { WalletEntry } from "../../wallet/settingsState.ts";
 import { initialWalletEntries, walletEntryButton, walletEntryStatus } from "../../wallet/settingsState.ts";
@@ -33,6 +34,7 @@ export function BrowserAnchorPublishPanel() {
   const [entries, setEntries] = useState<WalletEntry[]>(initialWalletEntries);
   const [phaseOverride, setPhaseOverride] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recovery, setRecovery] = useState<AnchorRecoveryRecord | null>(null);
   const runtimeRef = useRef<ReturnType<typeof createBrowserWalletRuntime> | null>(null);
   const recoveryRef = useRef<ReturnType<typeof browserRecoveryStore> | null>(null);
 
@@ -57,7 +59,9 @@ export function BrowserAnchorPublishPanel() {
     const text = await file.text();
     setBundleText(text);
     try {
-      setBundle(parseAnchorBundleJson(text));
+      const parsed = parseAnchorBundleJson(text);
+      setBundle(parsed);
+      setRecovery(recoveryRef.current?.load(bundleDigestKey(parsed)) ?? null);
     } catch (error) {
       setBundleError(
         error instanceof AnchorBundleError
@@ -79,7 +83,7 @@ export function BrowserAnchorPublishPanel() {
         bundleInvalidReason: null,
         walletConnected,
         walletNetworkName,
-        recovery: null,
+        recovery,
       })
     : null;
 
@@ -95,6 +99,10 @@ export function BrowserAnchorPublishPanel() {
 
   const onPublish = useCallback(async () => {
     if (!bundle || !recoveryRef.current) return;
+    if (recovery !== null) {
+      setPhaseOverride("A saved anchor request or transaction exists. Resolve it before creating another request.");
+      return;
+    }
     const connectedEntry = entries.find((entry) => entry.phase.kind === "connected");
     if (!connectedEntry) {
       setPhaseOverride("Connect a Tari wallet first.");
@@ -121,23 +129,27 @@ export function BrowserAnchorPublishPanel() {
         requestId,
         APPROVAL_TIMEOUT_MS,
       );
-      if (summary.status !== "approved" && summary.status !== "submitted") {
+      if (summary.status !== "approved") {
         const detail =
           typeof summary.error === "string" && summary.error.length > 0
             ? summary.error
             : `the wallet ${summary.status} the request`;
-        writer.clear();
-        setPhaseOverride(`${detail} Nothing was resubmitted; check the wallet history before trying again.`);
+        setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));
+        setPhaseOverride(`${detail} The saved request remains blocked; check wallet history before any further action.`);
         setBusy(false);
         return;
       }
       setPhaseOverride("Submitting the approved transaction…");
+      writer.saveSubmitInFlight(requestId);
+      setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));
       const transactionId = await driver.submit(adapter, requestId);
       writer.saveApprovedSubmitted(transactionId);
+      setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));
       setPhaseOverride("Verifying the on-chain anchor event against this election…");
       const outcome = await driver.verify(adapter, bundle, transactionId);
       if (outcome.kind === "verified") {
-        writer.clear();
+        writer.saveVerified(transactionId);
+        setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));
         setPhaseOverride(
           `Verified: the on-chain anchor matches this election (transaction ${transactionId.slice(0, 16)}…). The anchor is published.`,
         );
@@ -146,7 +158,7 @@ export function BrowserAnchorPublishPanel() {
           `The anchor transaction ${transactionId} is not final yet. Reopen this page later to re-verify; nothing is ever resubmitted automatically.`,
         );
       } else {
-        writer.clear();
+        setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));
         setPhaseOverride(
           `${outcome.message} (transaction ${transactionId}) Nothing was resubmitted; check the wallet history before trying again.`,
         );
@@ -158,7 +170,7 @@ export function BrowserAnchorPublishPanel() {
     } finally {
       setBusy(false);
     }
-  }, [bundle, entries]);
+  }, [bundle, entries, recovery]);
 
   return (
     <div className="browser-anchor-panel">

@@ -1,5 +1,5 @@
 export interface AnchorRecoveryRecord {
-  phase: "submitted_awaiting_approval" | "approved_submitted" | "verifying" | "verified";
+  phase: "submitted_awaiting_approval" | "submit_in_flight" | "approved_submitted" | "verifying" | "verified";
   requestId: string | null;
   transactionId: string | null;
   updatedAtMs: number;
@@ -27,6 +27,7 @@ export class AnchorRecoveryStore {
       const parsed = JSON.parse(raw) as Partial<AnchorRecoveryRecord>;
       if (
         (parsed.phase !== "submitted_awaiting_approval" &&
+          parsed.phase !== "submit_in_flight" &&
           parsed.phase !== "approved_submitted" &&
           parsed.phase !== "verifying" &&
           parsed.phase !== "verified") ||

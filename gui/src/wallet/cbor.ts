@@ -1,6 +1,6 @@
 export interface CborNode {
   type: "uint" | "negint" | "bytes" | "text" | "array" | "map" | "tag" | "simple" | "float";
-  value: number | bigint | string | boolean | null;
+  value: number | bigint | string | Uint8Array | boolean | null;
   rawStart: number;
   rawEnd: number;
   children: CborNode[];

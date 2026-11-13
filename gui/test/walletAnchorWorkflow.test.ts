@@ -143,6 +143,18 @@ describe("recovery resume", () => {
     assert.deepEqual(phase, { kind: "awaiting_approval", requestId: "req_1" });
   });
 
+  it("blocks resubmission when a saved submit call may already have reached the wallet", () => {
+    const recovery: AnchorRecoveryRecord = {
+      phase: "submit_in_flight",
+      requestId: "req_1",
+      transactionId: null,
+      updatedAtMs: 1,
+    };
+    const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
+    assert.deepEqual(phase, { kind: "submission_unknown", requestId: "req_1" });
+    assert.match(phaseLabel(phase), /never be submitted again automatically/);
+  });
+
   it("re-verifies even a locally-verified record after a reload", () => {
     const recovery: AnchorRecoveryRecord = {
       phase: "verified",

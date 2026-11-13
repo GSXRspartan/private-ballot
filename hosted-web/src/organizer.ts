@@ -189,6 +189,14 @@ type ConsoleState = {
 };
 
 let cs: ConsoleState | null = null;
+let manageExtensionRenderer: ((container: HTMLElement) => void) | null = null;
+
+/** Lets the hosted Manage entry point attach optional browser-only tooling. */
+export function setManageExtensionRenderer(
+  renderer: ((container: HTMLElement) => void) | null,
+): void {
+  manageExtensionRenderer = renderer;
+}
 
 function clearTransientSecret() {
   if (cs) cs.lastInvitation = null;
@@ -303,8 +311,13 @@ function renderConsole() {
       <p><small>Freezing locks the voter registry permanently. Closing stops new
       ballots. Finalizing publishes the archive. These actions are irreversible.</small></p>
     </div>
+    ${election.election_state === "finalized" ? '<section id="browser-anchor-root"></section>' : ""}
   `, "manage");
   bindConsole();
+  const extensionRoot = document.getElementById("browser-anchor-root");
+  if (extensionRoot && manageExtensionRenderer) {
+    manageExtensionRenderer(extensionRoot);
+  }
 }
 
 function bindConsole() {

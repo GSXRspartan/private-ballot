@@ -22,6 +22,7 @@ export type AnchorWorkflowPhase =
   | { kind: "wallet_network_mismatch"; message: string }
   | { kind: "ready" }
   | { kind: "awaiting_approval"; requestId: string }
+  | { kind: "submission_unknown"; requestId: string }
   | { kind: "submitted"; transactionId: string }
   | { kind: "verifying"; transactionId: string }
   | { kind: "verified"; evidence: VerifiedAnchorEvidence }
@@ -93,6 +94,10 @@ function resumePhase(recovery: AnchorRecoveryRecord): AnchorWorkflowPhase {
       return recovery.requestId === null
         ? { kind: "failed_no_publish", message: "the saved anchor state is incomplete" }
         : { kind: "awaiting_approval", requestId: recovery.requestId };
+    case "submit_in_flight":
+      return recovery.requestId === null
+        ? { kind: "failed_no_publish", message: "the saved anchor state is incomplete" }
+        : { kind: "submission_unknown", requestId: recovery.requestId };
   }
 }
 
@@ -150,6 +155,8 @@ export function phaseLabel(phase: AnchorWorkflowPhase): string {
       return "The wallet can be asked to review and approve the anchor transaction.";
     case "awaiting_approval":
       return "Waiting for the wallet to approve the anchor transaction.";
+    case "submission_unknown":
+      return "The saved request may have been submitted. Check the wallet history; it will never be submitted again automatically.";
     case "submitted":
       return "Submitted to the network. Waiting for finalization.";
     case "verifying":

@@ -81,7 +81,9 @@ export function defaultPublishDriver(options: {
 
 export interface RecoveryWriter {
   saveSubmittedAwaitingApproval(requestId: string): void;
+  saveSubmitInFlight(requestId: string): void;
   saveApprovedSubmitted(transactionId: string): void;
+  saveVerified(transactionId: string): void;
   clear(): void;
 }
 
@@ -98,9 +100,25 @@ export function recoveryWriterFor(
         updatedAtMs: Date.now(),
       });
     },
+    saveSubmitInFlight(requestId: string): void {
+      store.save(bundleKey, {
+        phase: "submit_in_flight",
+        requestId,
+        transactionId: null,
+        updatedAtMs: Date.now(),
+      });
+    },
     saveApprovedSubmitted(transactionId: string): void {
       store.save(bundleKey, {
         phase: "approved_submitted",
+        requestId: null,
+        transactionId,
+        updatedAtMs: Date.now(),
+      });
+    },
+    saveVerified(transactionId: string): void {
+      store.save(bundleKey, {
+        phase: "verified",
         requestId: null,
         transactionId,
         updatedAtMs: Date.now(),
