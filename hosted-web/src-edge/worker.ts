@@ -18,25 +18,39 @@
  *
  * No analytics, no trackers, no remote scripts. No voter secret, wallet
  * credential, or admin token ever touches this Worker.
- */
+ *  */
 
 import { buildUpstreamHeaders, isAdminPath } from "./headers.mjs";
 
-const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = [
-  [
-    "content-security-policy",
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
-  ],
+const UNIVERSE_ORIGIN = "https://universe.tari.mw";
+
+const BASE_CSP =
+  "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'";
+
+const SECURITY_HEADERS_NO_FRAME: ReadonlyArray<readonly [string, string]> = [
+  [`content-security-policy`, `${BASE_CSP}; frame-ancestors 'none'`],
   ["x-content-type-options", "nosniff"],
   ["referrer-policy", "strict-origin-when-cross-origin"],
   ["permissions-policy", "camera=(), microphone=(), geolocation=()"],
-  // Staging is HTTPS-only (Cloudflare terminates TLS). Browsers accept
-  // this on the workers.dev hostname and any staging custom hostname.
   ["strict-transport-security", "max-age=31536000; includeSubDomains"],
   // COOP/COEP deliberately omitted: the WASM proof generator is
   // single-threaded and needs no cross-origin isolation; requiring it
   // would only risk asset-loading regressions on older browsers.
 ];
+
+const SECURITY_HEADERS_WITH_UNIVERSE_FRAME: ReadonlyArray<readonly [string, string]> = [
+  [`content-security-policy`, `${BASE_CSP}; frame-ancestors ${UNIVERSE_ORIGIN}`],
+  ["x-content-type-options", "nosniff"],
+  ["referrer-policy", "strict-origin-when-cross-origin"],
+  ["permissions-policy", "camera=(), microphone=(), geolocation=()"],
+  ["strict-transport-security", "max-age=31536000; includeSubDomains"],
+];
+
+function isDappRoute(pathname: string): boolean {
+  // Routes that serve the browser-hosted dApp and must be embeddable by Web Tari Universe
+  const dappPaths = ["/", "/manage", "/create", "/enroll", "/vote", "/archive", "/evidence", "/guide", "/about", "/settings"];
+  return dappPaths.some((p) => pathname === p || pathname.startsWith(p + "/"));
+}
 
 interface Env {
   ASSETS: { fetch: (request: Request) => Promise<Response> };
@@ -51,12 +65,19 @@ function errorResponse(status: number, code: string): Response {
   });
 }
 
-function applySecurityHeaders(response: Response): Response {
-  const headers = new Headers(response.headers);
-  for (const [name, value] of SECURITY_HEADERS) {
-    headers.set(name, value);
+function applySecurityHeaders(response: Response, headers: ReadonlyArray<readonly [string, string]>): Response {
+  const headersObj = new Headers(response.headers);
+  for (const [name, value] of headers) {
+    headersObj.set(name, value);
   }
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers: headersObj });
+}
+
+function chooseSecurityHeaders(pathname: string): ReadonlyArray<readonly [string, string]> {
+  if (isDappRoute(new URL(pathname).pathname)) {
+    return SECURITY_HEADERS_WITH_UNIVERSE_FRAME;
+  }
+  return SECURITY_HEADERS_NO_FRAME;
 }
 
 async function proxyApi(request: Request, env: Env, url: URL): Promise<Response> {
@@ -76,7 +97,7 @@ async function proxyApi(request: Request, env: Env, url: URL): Promise<Response>
     statusText: upstream.statusText,
     headers: responseHeaders,
   });
-  return applySecurityHeaders(response);
+  return applySecurityHeaders(response, chooseSecurityHeaders(url.pathname));
 }
 
 async function handleAssets(request: Request, env: Env, url: URL): Promise<Response> {
@@ -92,14 +113,14 @@ async function handleAssets(request: Request, env: Env, url: URL): Promise<Respo
     statusText: response.statusText,
     headers,
   });
-  return applySecurityHeaders(withCache);
+  return applySecurityHeaders(withCache, chooseSecurityHeaders(url.pathname));
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (isAdminPath(url.pathname)) {
-      return applySecurityHeaders(errorResponse(404, "not_found"));
+      return applySecurityHeaders(errorResponse(404, "not_found"), chooseSecurityHeaders(url.pathname));
     }
     if (url.pathname.startsWith("/api/")) {
       return proxyApi(request, env, url);
