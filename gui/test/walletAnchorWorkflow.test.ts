@@ -29,15 +29,20 @@ function memoryStorage(): RecoveryStorage {
 }
 
 function bundleFixture(network: string): AnchorBundleV1 {
+  const isMainnet = network === "mainnet";
   return parseAnchorBundle({
     schemaVersion: 1,
     network,
     template: {
-      address: "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee",
+      address: isMainnet
+        ? "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb"
+        : "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee",
       module: "tari_private_ballot_anchor_v2",
       function: "publish_anchor_v2",
       eventTopic: "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2",
-      artifactDigestHex: "ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908",
+      artifactDigestHex: isMainnet
+        ? "6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830"
+        : "ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908",
     },
     anchorArgs: {
       anchorDigestHex: "67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7",
@@ -73,10 +78,9 @@ describe("anchor workflow assessment", () => {
     assert.deepEqual(invalid, { kind: "bundle_invalid", reason: "anchor_digest" });
   });
 
-  it("blocks mainnet publishing while the mainnet template address is unreleased", () => {
+  it("allows mainnet publishing with the configured mainnet template address", () => {
     const phase = assessAnchorWorkflow(baseInput("mainnet"));
-    assert.equal(phase.kind, "mainnet_disabled");
-    assert.match(phaseLabel(phase), /disabled in this build/);
+    assert.equal(phase.kind, "ready");
   });
 
   it("blocks a bundle that does not match the configured deployment", () => {

@@ -1,4 +1,4 @@
-# V2 Public-Summary Anchor — Deployment Runbook
+﻿# V2 Public-Summary Anchor — Deployment Runbook
 
 > **Network generation: Tari Ootle mainnet, current cohort (walletd/indexer
 > v0.53.x, `tari_template_lib = "=0.40.0"`).** All esmeralda/v0.42-generation
@@ -6,11 +6,9 @@
 > evidence only: that generation was a testnet and its deployment address is no
 > longer authoritative for anything.
 >
-> Status: **V2 template source built, ABI-verified, and path-clean for mainnet;
-> no mainnet publish has been performed.** The mainnet deployment address is
-> recorded in the Identity table once the operator publishes. This repository
-> does not itself perform, authorize, or verify an on-chain publish: step 3 is a
-> fee-bearing outward action that only the operator may take.
+> Status: **V2 template published on Ootle mainnet.** The mainnet deployment
+> address and provenance are recorded below. This repository does not itself
+> perform, authorize, or verify a second on-chain publish.
 >
 > **Controlled-alpha only.** The V2 live path is a controlled-alpha capability.
 > V2 template publish is allowed **only after** the V1/V2 isolation blocker is
@@ -18,8 +16,8 @@
 > approve control may be triggered from any visible or advanced UI control
 > (enforced both at each disabled button and at the shared `onAnchorStep` /
 > `onPublishTariAnchor` entry points; guard-tested in
-> `gui/test/anchorVersionGating.test.ts`). This blocker is fixed. No live
-> publish was performed by that fix.
+> `gui/test/anchorVersionGating.test.ts`). This blocker is fixed. The mainnet
+> publish recorded below was performed by the operator after review.
 
 The V2 anchor publishes a richer *public election summary* derived only from the
 independently verified, finalized archive. It uses the **digest + detached
@@ -37,7 +35,14 @@ on-chain digest.
 | Function | `publish_anchor_v2` |
 | Event topic | `TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2` |
 | Network | `mainnet` (Tari Ootle mainnet, v0.53.x cohort) |
-| Mainnet deployment address | **PENDING — not yet published.** Do not use any testnet address for mainnet. |
+| Mainnet deployment address | `template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb` |
+| Mainnet publish transaction | `a898f8daaa0ae25095a02f69e5753e38dfe4a9c99c546d26297e08b81a3aa79c` |
+| Mainnet publish timestamp | `2026-11-12T22:15:46Z` |
+| Mainnet publish fee | 583883 microTARI |
+| Qualified source commit | `c3ad6e6` |
+| Qualified pre-walletd-optimization WASM | 61605 bytes |
+| Mainnet SHA256 | `67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7` |
+| Mainnet BLAKE3-256 | `6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830` |
 | Historical esmeralda address (v0.42 cohort, reference only) | `template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee` |
 
 The V2 function signature (compact on-chain summary):
@@ -261,34 +266,35 @@ Publish procedure (walletd JSON-RPC at `<walletd>/json_rpc`):
    taking four `String` arguments and returning `Unit`, `is_mut: false`. Any
    mismatch is a hard stop.
 
-## 3a. Post-publish substitutions (fail-closed app wiring)
+## 3a. Post-publish substitutions (applied)
 
-Until these are applied, the GUI's fail-closed posture means: V2 live publish is
-**refused** for the new artifact (digest-lock mismatch), and mainnet is not
-accepted by the app's network mapping. Apply each substitution in one reviewed
-change after the publish is confirmed:
+The following substitutions have been applied in a single reviewed change after the
+mainnet publish was confirmed. The GUI's fail-closed posture now accepts the
+mainnet artifact and network:
 
 1. **Artifact digest lock.**
    `crates/gui-core/src/trusted_anchor_deployment.rs`:
    `TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX` →
    `6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830`
    (BLAKE3-256 of the reviewed pre-optimisation build).
+
 2. **Mainnet network mapping.**
-   `crates/ootle-anchor-adapter/src/network.rs`: extend
-   `map_ootle_network` to accept mainnet (currently deliberately testnet-only:
-   esmeralda/igor/localnet). Audit every caller of the mapping before the
-   change; the indexer endpoint mapping (next item) must land together with it.
+   `crates/ootle-anchor-adapter/src/network.rs`: extended
+   `map_ootle_network` to accept `mainnet` (was deliberately testnet-only:
+   esmeralda/igor/localnet). Every caller of the mapping was audited before the
+   change; the indexer endpoint mapping landed together with it.
+
 3. **Mainnet indexer endpoint.**
-   `crates/ootle-anchor-network-adapters/src/endpoint.rs` pins
-   `TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1` only. Add and pin the trusted
-   mainnet indexer endpoint after it is decided on-chain-operably (the GUI
-   verifies the indexer's reported network fail-closed, so a wrong endpoint is
-   refused, not mis-trusted).
+   `crates/ootle-anchor-network-adapters/src/endpoint.rs` now pins
+   `TRUSTED_MAINNET_INDEXER_ENDPOINT_V1`. The GUI verifies the indexer's
+   reported network fail-closed, so a wrong endpoint is refused, not mis-trusted.
+
 4. **Deployment registry entry.**
-   Record the mainnet deployment in `crates/deployment-registry`
+   The mainnet deployment is recorded in `crates/deployment-registry`
    (`TARI_CC_PRIVATE_BALLOT_DEPLOYMENT_REGISTRY_V1`): network `mainnet`,
-   template address from §3 step 4, artifact BLAKE3-256 above, status
-   `Current`, with the esmeralda address marked `Historical`.
+   template address `template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb`,
+   artifact BLAKE3-256 `6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830`,
+   status `Current`, with the esmeralda address marked `Historical`.
 
 ## 4. Lock the V2 deployment
 
@@ -421,3 +427,4 @@ nullifiers, credentials, per-voter packages/receipts, transport routing, wallet
 tokens, private keys, local filesystem paths, or machine/user names. Both a
 structural bound and a textual leak guard
 (`assert_v2_public_payload_is_leak_free`) enforce this, and are covered by tests.
+

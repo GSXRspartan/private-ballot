@@ -22,7 +22,8 @@ use crate::errors::OotleAnchorAdapterError;
 
 /// Exhaustive supported mapping from an exact lowercase canonical project
 /// network identifier to the pinned Ootle [`Network`].
-const SUPPORTED_TESTNET_MAPPINGS: &[(&str, Network)] = &[
+const SUPPORTED_NETWORK_MAPPINGS: &[(&str, Network)] = &[
+    ("mainnet", Network::Mainnet),
     ("esmeralda", Network::Esmeralda),
     ("igor", Network::Igor),
     ("localnet", Network::LocalNet),
@@ -39,7 +40,7 @@ pub fn map_ootle_network(
 ) -> Result<Network, OotleAnchorAdapterError> {
     let requested = network_id.as_str();
 
-    for (name, network) in SUPPORTED_TESTNET_MAPPINGS {
+    for (name, network) in SUPPORTED_NETWORK_MAPPINGS {
         if requested == *name {
             return Ok(*network);
         }
@@ -54,6 +55,6 @@ pub fn map_ootle_network(
 ///
 /// This is the single source of truth for the supported mapping, exposed so
 /// tests and diagnostics enumerate the same identifiers the mapper accepts.
-pub fn supported_testnet_network_ids() -> impl Iterator<Item = &'static str> {
-    SUPPORTED_TESTNET_MAPPINGS.iter().map(|(name, _)| *name)
+pub fn supported_network_ids() -> impl Iterator<Item = &'static str> {
+    SUPPORTED_NETWORK_MAPPINGS.iter().map(|(name, _)| *name)
 }

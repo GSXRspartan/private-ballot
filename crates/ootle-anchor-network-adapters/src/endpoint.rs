@@ -47,6 +47,9 @@ pub fn ensure_walletd_jsonrpc_path(base: &str) -> String {
 /// The Tari-hosted Esmeralda indexer trusted by the normal anchor UI.
 pub const TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1: &str = "https://ootle-indexer-a.tari.com/";
 
+/// The Tari-hosted Mainnet indexer trusted by the normal anchor UI.
+pub const TRUSTED_MAINNET_INDEXER_ENDPOINT_V1: &str = "https://ootle-indexer-a.tari.com/";
+
 /// Returns whether a parsed URL's host is a loopback address.
 ///
 /// True for the IPv4 loopback block `127.0.0.0/8`, the IPv6 loopback `::1`, and
@@ -317,6 +320,19 @@ impl IndexerEndpoint {
             && self.url.port().is_none_or(|port| port == 443)
             && self.path().is_empty()
     }
+
+    /// Returns whether this endpoint is the application-trusted hosted
+    /// Mainnet indexer.
+    #[must_use]
+    pub fn is_trusted_mainnet_remote(&self) -> bool {
+        self.url.scheme() == "https"
+            && self
+                .url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case("ootle-indexer-a.tari.com"))
+            && self.url.port().is_none_or(|port| port == 443)
+            && self.path().is_empty()
+    }
 }
 
 impl FromStr for IndexerEndpoint {
@@ -567,6 +583,38 @@ mod tests {
             let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
             assert!(
                 !endpoint.is_trusted_esmeralda_remote(),
+                "{raw} must not be trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_mainnet_remote_indexer_is_recognized() {
+        for raw in [
+            TRUSTED_MAINNET_INDEXER_ENDPOINT_V1,
+            "https://ootle-indexer-a.tari.com:443/",
+            "https://OOTLE-INDEXER-A.TARI.COM/",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                endpoint.is_trusted_mainnet_remote(),
+                "{raw} must be trusted"
+            );
+            assert!(!endpoint.is_loopback());
+        }
+    }
+
+    #[test]
+    fn arbitrary_remote_indexers_are_not_trusted_mainnet() {
+        for raw in [
+            "http://ootle-indexer-a.tari.com/",
+            "https://indexer.example.com/",
+            "https://ootle-indexer-a.tari.com/api",
+            "http://127.0.0.1:12500",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                !endpoint.is_trusted_mainnet_remote(),
                 "{raw} must not be trusted"
             );
         }

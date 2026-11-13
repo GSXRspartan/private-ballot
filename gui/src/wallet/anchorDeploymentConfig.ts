@@ -18,7 +18,8 @@ export const ESMERALDA_V2_ARTIFACT_DIGEST_HEX =
 
 export const MAINNET_V2_ARTIFACT_DIGEST_HEX =
   "6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830";
-export const MAINNET_V2_TEMPLATE_ADDRESS = "";
+export const MAINNET_V2_TEMPLATE_ADDRESS =
+  "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb";
 
 export const V2_TEMPLATE_MODULE = "tari_private_ballot_anchor_v2";
 export const V2_TEMPLATE_FUNCTION = "publish_anchor_v2";

@@ -11,6 +11,8 @@ import {
 } from "../src/wallet/anchorBundle.ts";
 import {
   ESMERALDA_V2_TEMPLATE_ADDRESS,
+  MAINNET_V2_TEMPLATE_ADDRESS,
+  MAINNET_V2_ARTIFACT_DIGEST_HEX,
   anchorDeploymentConfig,
   deploymentForNetwork,
   mainnetPublishBlocker,
@@ -144,14 +146,11 @@ describe("deployment configuration", () => {
     );
   });
 
-  it("disables mainnet publishing while no mainnet template address is configured", () => {
+  it("enables mainnet publishing with the configured mainnet template address", () => {
     const config = anchorDeploymentConfig();
-    assert.equal(config.mainnet, null);
-    assert.match(
-      mainnetPublishBlocker(config) ?? "",
-      /disabled until a configured mainnet V2 template address/,
-    );
-    assert.equal(deploymentForNetwork(config, "mainnet"), null);
-    assert.equal(mainnetPublishBlocker(config) !== null, true);
+    assert.notEqual(config.mainnet, null);
+    assert.equal(mainnetPublishBlocker(config), null);
+    assert.deepEqual(deploymentForNetwork(config, "mainnet")?.address, MAINNET_V2_TEMPLATE_ADDRESS);
+    assert.equal(deploymentForNetwork(config, "mainnet")?.artifactDigestHex, MAINNET_V2_ARTIFACT_DIGEST_HEX);
   });
 });
