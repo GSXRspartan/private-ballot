@@ -11,7 +11,7 @@ use tari_ootle_transaction::Network;
 #[test]
 fn every_supported_identifier_maps_to_its_ootle_network() {
     let expected = [
-        ("mainnet", Network::Mainnet),
+        ("mainnet", Network::MainNet),
         ("esmeralda", Network::Esmeralda),
         ("igor", Network::Igor),
         ("localnet", Network::LocalNet),

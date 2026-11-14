@@ -22,7 +22,7 @@ use crate::errors::OotleAnchorAdapterError;
 /// Exhaustive supported mapping from an exact lowercase canonical project
 /// network identifier to the pinned Ootle [`Network`].
 const SUPPORTED_NETWORK_MAPPINGS: &[(&str, Network)] = &[
-    ("mainnet", Network::Mainnet),
+    ("mainnet", Network::MainNet),
     ("esmeralda", Network::Esmeralda),
     ("igor", Network::Igor),
     ("localnet", Network::LocalNet),
