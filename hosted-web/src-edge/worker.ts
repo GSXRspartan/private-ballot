@@ -78,7 +78,11 @@ interface Env {
   ASSETS: { fetch: (request: Request) => Promise<Response> };
   STAGING_ORIGIN: string;
   ORIGIN_TOKEN?: string;
+  /** Separate, read-only Worker service binding; never the organizer proxy. */
+  INDEXER_PROXY?: { fetch: (request: Request) => Promise<Response> };
 }
+
+const INDEXER_ROUTE_PREFIX = "/chain";
 
 function errorResponse(status: number, code: string): Response {
   return new Response(JSON.stringify({ code, message: code }), {
@@ -122,6 +126,30 @@ async function proxyApi(request: Request, env: Env, url: URL): Promise<Response>
   return applySecurityHeaders(response, chooseSecurityHeaders(url.pathname));
 }
 
+/** Routes a narrow same-origin read-only path to the dedicated chain Worker. */
+export async function proxyIndexer(request: Request, env: Env, url: URL): Promise<Response> {
+  if (!env.INDEXER_PROXY) return applySecurityHeaders(errorResponse(503, "indexer_proxy_unavailable"), SECURITY_HEADERS_NO_FRAME);
+  if ((request.method !== "GET" && request.method !== "HEAD") || url.search) {
+    return applySecurityHeaders(errorResponse(404, "not_found"), SECURITY_HEADERS_NO_FRAME);
+  }
+  const suffix = url.pathname.slice(INDEXER_ROUTE_PREFIX.length);
+  if (!suffix.startsWith("/")) return applySecurityHeaders(errorResponse(404, "not_found"), SECURITY_HEADERS_NO_FRAME);
+  const target = new URL(request.url);
+  target.pathname = suffix;
+  target.search = "";
+  const upstream = await env.INDEXER_PROXY.fetch(new Request(target, {
+    method: request.method,
+    headers: { Accept: "application/json" },
+  }));
+  const headers = new Headers(upstream.headers);
+  headers.set("cache-control", "no-store");
+  return applySecurityHeaders(new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  }), SECURITY_HEADERS_NO_FRAME);
+}
+
 async function handleAssets(request: Request, env: Env, url: URL): Promise<Response> {
   const response = await env.ASSETS.fetch(request);
   const headers = new Headers(response.headers);
@@ -143,6 +171,9 @@ export default {
     const url = new URL(request.url);
     if (isAdminPath(url.pathname)) {
       return applySecurityHeaders(errorResponse(404, "not_found"), chooseSecurityHeaders(url.pathname));
+    }
+    if (url.pathname === INDEXER_ROUTE_PREFIX || url.pathname.startsWith(`${INDEXER_ROUTE_PREFIX}/`)) {
+      return proxyIndexer(request, env, url);
     }
     if (url.pathname.startsWith("/api/")) {
       return proxyApi(request, env, url);

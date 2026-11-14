@@ -10,14 +10,11 @@ import {
   buildUpstreamUrl,
   handleRequest,
   matchAllowedPath,
+  readLimitedBody,
 } from "./worker.js";
 
 function fakeResponse(status, body, headers = {}) {
-  return {
-    status,
-    headers: new Map(Object.entries({ "Content-Type": "application/json", ...headers })),
-    arrayBuffer: async () => body,
-  };
+  return new Response(body, { status, headers: { "Content-Type": "application/json", ...headers } });
 }
 
 describe("allowed paths", () => {
@@ -68,12 +65,12 @@ describe("allowed paths", () => {
 describe("upstream URL building", () => {
   it("appends the allowed path to the configured upstream and strips queries", () => {
     const upstream = buildUpstreamUrl(
-      "https://ootle-indexer-a.tari.com/",
+      "https://indexer-a.ootle.tari.com/",
       { kind: "result", transactionId: "ab".repeat(32) },
     );
     assert.equal(
       upstream.toString(),
-      `https://ootle-indexer-a.tari.com/transactions/${"ab".repeat(32)}/result`,
+      `https://indexer-a.ootle.tari.com/transactions/${"ab".repeat(32)}/result`,
     );
     assert.equal(upstream.search, "");
   });
@@ -145,6 +142,32 @@ describe("request handler", () => {
   it("answers an oversized upstream response with 502", async () => {
     globalThis.fetch = async () =>
       fakeResponse(200, new ArrayBuffer(512 * 1024 + 1));
+    const response = await handleRequest(
+      new Request("https://proxy.test/network"),
+      { INDEXER_UPSTREAM: "https://upstream.test" },
+    );
+    assert.equal(response.status, 502);
+  });
+
+  it("cancels a chunked response without Content-Length once it exceeds the cap", async () => {
+    let cancelled = false;
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(400 * 1024));
+        controller.enqueue(new Uint8Array(200 * 1024));
+      },
+      cancel() { cancelled = true; },
+    });
+    const body = await readLimitedBody(new Response(stream), 512 * 1024);
+    assert.equal(body, null);
+    assert.equal(cancelled, true);
+  });
+
+  it("treats a body-read error as an upstream failure", async () => {
+    const stream = new ReadableStream({
+      pull(controller) { controller.error(new Error("read failed")); },
+    });
+    globalThis.fetch = async () => new Response(stream);
     const response = await handleRequest(
       new Request("https://proxy.test/network"),
       { INDEXER_UPSTREAM: "https://upstream.test" },

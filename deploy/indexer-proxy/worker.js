@@ -96,32 +96,73 @@ export async function handleRequest(request, env) {
   if (!upstream) {
     return jsonResponse(503, { error: "the indexer proxy is misconfigured" }, cors);
   }
-  let response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    response = await fetch(upstream.toString(), {
+    const response = await fetch(upstream.toString(), {
       method: request.method === "HEAD" ? "GET" : request.method,
       headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal: controller.signal,
+    });
+    if (request.method === "HEAD") {
+      await response.body?.cancel().catch(() => {});
+      return new Response(null, {
+        status: response.status,
+        headers: { "Content-Type": response.headers.get("Content-Type") ?? "application/json", ...NO_STORE, ...cors },
+      });
+    }
+    const body = await readLimitedBody(response, MAX_RESPONSE_BYTES);
+    if (body === null) {
+      return jsonResponse(502, { error: "the indexer response exceeds the proxy size limit" }, cors);
+    }
+    return new Response(body, {
+      status: response.status,
+      headers: {
+        "Content-Type": response.headers.get("Content-Type") ?? "application/json",
+        ...NO_STORE,
+        ...cors,
+      },
     });
   } catch {
     return jsonResponse(502, { error: "the indexer could not be reached" }, cors);
+  } finally {
+    clearTimeout(timeout);
   }
-  const body = await response.arrayBuffer();
-  if (body.byteLength > MAX_RESPONSE_BYTES) {
-    return jsonResponse(
-      502,
-      { error: "the indexer response exceeds the proxy size limit" },
-      cors,
-    );
+}
+
+/** Reads no more than limit bytes and actively cancels an oversized stream. */
+export async function readLimitedBody(response, limit) {
+  const advertised = response.headers.get("Content-Length");
+  if (advertised !== null && (!/^\d+$/.test(advertised) || Number(advertised) > limit)) {
+    await response.body?.cancel().catch(() => {});
+    return null;
   }
-  return new Response(body, {
-    status: response.status,
-    headers: {
-      "Content-Type": response.headers.get("Content-Type") ?? "application/json",
-      ...NO_STORE,
-      ...cors,
-    },
-  });
+  if (!response.body) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) throw new Error("upstream body chunk is not bytes");
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel("response limit exceeded");
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 function jsonResponse(status, body, extraHeaders) {

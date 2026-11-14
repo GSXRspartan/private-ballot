@@ -54,6 +54,11 @@ export interface PublishDriver {
 export function defaultPublishDriver(options: {
   verifyAttempts: number;
   verifyIntervalMs: number;
+  verifyWithEvidence?: (
+    adapter: WindowTariProvider,
+    bundle: AnchorBundleV1,
+    transactionId: string,
+  ) => Promise<AnchorVerificationOutcome>;
 }): PublishDriver {
   return {
     connect: (adapter) => adapter.connect(),
@@ -65,8 +70,23 @@ export function defaultPublishDriver(options: {
       const submitted = await adapter.submitTransactionRequest(requestId);
       return submitted.transactionId;
     },
-    verify: async (adapter, bundle, transactionId) =>
-      pollUntilVerified(
+    verify: async (adapter, bundle, transactionId) => {
+      if (options.verifyWithEvidence) {
+        for (let attempt = 0; attempt < options.verifyAttempts; attempt += 1) {
+          let outcome: AnchorVerificationOutcome;
+          try {
+            outcome = await options.verifyWithEvidence(adapter, bundle, transactionId);
+          } catch {
+            outcome = { kind: "pending" };
+          }
+          if (outcome.kind !== "pending") return outcome;
+          if (attempt + 1 < options.verifyAttempts) {
+            await new Promise<void>((resolve) => setTimeout(resolve, options.verifyIntervalMs));
+          }
+        }
+        return { kind: "pending" };
+      }
+      return pollUntilVerified(
         () => adapter.getTransactionResult(transactionId),
         transactionId,
         bundleExpectedTemplate(bundle),
@@ -75,7 +95,8 @@ export function defaultPublishDriver(options: {
           attempts: options.verifyAttempts,
           intervalMs: options.verifyIntervalMs,
         },
-      ),
+      );
+    },
   };
 }
 

@@ -31,7 +31,7 @@ change.
 
 | Variable | Meaning |
 |---|---|
-| `INDEXER_UPSTREAM` | the upstream indexer base URL (e.g. `https://ootle-indexer-a.tari.com/`). **Required**; without it the worker answers 503 to everything. |
+| `INDEXER_UPSTREAM` | the upstream indexer base URL (e.g. `https://indexer-a.ootle.tari.com/`). **Required**; without it the worker answers 503 to everything. |
 | `ALLOWED_ORIGIN` | the exact browser origin allowed to read responses (CORS). Optional; when unset no cross-origin page can read any response. |
 
 Never put secrets in client-visible configuration. The upstream URL and the

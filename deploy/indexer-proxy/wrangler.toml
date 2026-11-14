@@ -10,7 +10,7 @@ workers_dev = true
 # Fixed, public Mainnet indexer upstream. The worker accepts only its small
 # read-only allowlist and never lets a caller select an upstream or forward a
 # query string.
-INDEXER_UPSTREAM = "https://ootle-indexer-a.tari.com/"
+INDEXER_UPSTREAM = "https://indexer-a.ootle.tari.com/"
 # Exact public hosted dApp origin allowed to read this Worker response. This
 # must change together with the hosted public origin before a human deploys.
 ALLOWED_ORIGIN = "https://private-ballot-staging.ghostgate.boo"

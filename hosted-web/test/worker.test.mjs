@@ -53,3 +53,20 @@ test("worker.ts delegates header policy to headers.mjs (no inline duplicates)", 
   assert.doesNotMatch(worker, /headers\.delete\("x-admin-token"\)/, "strip logic lives only in headers.mjs");
   assert.doesNotMatch(worker, /headers\.delete\(ORIGIN_TOKEN_HEADER\)/, "strip logic lives only in headers.mjs");
 });
+
+test("the same-origin chain route uses only the dedicated indexer Worker binding", async () => {
+  const { proxyIndexer } = await import("../src-edge/worker.ts");
+  let requested = null;
+  const response = await proxyIndexer(
+    new Request("https://app.test/chain/transactions/" + "ab".repeat(32) + "/result"),
+    { INDEXER_PROXY: { fetch: async (request) => {
+      requested = request;
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    } } },
+    new URL("https://app.test/chain/transactions/" + "ab".repeat(32) + "/result"),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(requested.url, "https://app.test/transactions/" + "ab".repeat(32) + "/result");
+  assert.equal(requested.headers.get("x-private-ballot-organizer"), null);
+  assert.equal(response.headers.get("content-security-policy").includes("frame-ancestors 'none'"), true);
+});

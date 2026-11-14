@@ -36,5 +36,10 @@ custom_domain = true
 STAGING_ORIGIN = "https://private-ballot-origin-staging.ghostgate.boo"
 
 # The separate read-only chain-data cross-check Worker is configured in
-# ../deploy/indexer-proxy/wrangler.toml. Do not add its routes or upstream to
-# this organizer-capability backend proxy.
+# ../deploy/indexer-proxy/wrangler.toml. It is reached only through the narrow
+# same-origin /chain/* route below; do not add its upstream to this organizer
+# capability backend proxy.
+
+[[services]]
+binding = "INDEXER_PROXY"
+service = "private-ballot-indexer-proxy-staging"

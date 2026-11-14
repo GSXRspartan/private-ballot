@@ -66,7 +66,7 @@ describe("result envelope parsing", () => {
     assert.equal(finalized.kind, "finalized");
     if (finalized.kind === "finalized") {
       assert.equal(finalized.committed, true);
-      assert.equal(finalized.executionResultBase64, EXEC_RESULT_BASE64);
+      assert.equal(finalized.executionResult, EXEC_RESULT_BASE64);
     }
   });
 
@@ -84,6 +84,7 @@ describe("result envelope parsing", () => {
     assert.equal(parseResultEnvelope({}).kind, "malformed");
     assert.equal(parseResultEnvelope({ result: "Weird" }).kind, "malformed");
     assert.equal(parseResultEnvelope({ result: { Mystery: {} } }).kind, "malformed");
+    assert.equal(parseResultEnvelope({ result: { Pending: {}, Finalized: {} } }).kind, "malformed");
   });
 });
 
@@ -199,6 +200,35 @@ describe("V2 anchor execution-result verification (Rust vectors)", () => {
 });
 
 describe("end-to-end transaction verification", () => {
+  it("verifies Sapient's decoded ExecuteResult JSON representation", () => {
+    const decoded = decodeExecuteResultBase64(EXEC_RESULT_BASE64);
+    const sapientExecuteResult = {
+      finalize: {
+        transaction_hash: decoded.transactionHashHex,
+        events: decoded.events.map((event) => ({
+          substate_id: null,
+          template_address: event.templateAddressHex,
+          topic: event.topic,
+          payload: Object.fromEntries(event.metadata.map((entry) => [entry.key, entry.value])),
+        })),
+        logs: [],
+        result: { Accept: {} },
+        fee_receipt: {},
+        total_fees_required: 0,
+      },
+      execution_time: { secs: 0, nanos: 0 },
+      execute_epoch: decoded.epoch,
+      wasm_execution_points: 0,
+      native_execution_points: 0,
+    };
+    const result = envelope(RESULT_JSON_FINALIZED_COMMIT) as { result: { Finalized: Record<string, unknown> } };
+    result.result.Finalized.execution_result = sapientExecuteResult;
+    assert.equal(
+      verifyV2AnchorTransaction(TRANSACTION_HEX, TEMPLATE, PAYLOAD, result).kind,
+      "verified",
+    );
+  });
+
   it("verifies the real committed vector end to end", () => {
     const outcome = verifyV2AnchorTransaction(
       TRANSACTION_HEX,

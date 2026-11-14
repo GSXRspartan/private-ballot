@@ -1,5 +1,6 @@
 import {
   decodeExecuteResultBase64,
+  decodeExecuteResultJson,
   ExecutionResultDecodeError,
   type DecodedEventMetadataEntry,
   type DecodedExecuteResult,
@@ -89,7 +90,7 @@ export function parseResultEnvelope(json: unknown):
   | {
       kind: "finalized";
       committed: boolean;
-      executionResultBase64: string | null;
+      executionResult: string | Record<string, unknown> | null;
       abortDetails: string | null;
     }
   | { kind: "malformed" } {
@@ -103,19 +104,27 @@ export function parseResultEnvelope(json: unknown):
   if (typeof result !== "object" || result === null) {
     return { kind: "malformed" };
   }
-  const [variantKey] = Object.keys(result as Record<string, unknown>);
+  const variantKeys = Object.keys(result as Record<string, unknown>);
+  if (variantKeys.length !== 1) {
+    return { kind: "malformed" };
+  }
+  const [variantKey] = variantKeys;
   const variant = (result as Record<string, unknown>)[variantKey];
   if (variantKey === "Finalized" && typeof variant === "object" && variant !== null) {
     const record = variant as Record<string, unknown>;
     const committed = record.final_decision === "Commit";
-    const executionResult =
-      typeof record.execution_result === "string" ? record.execution_result : null;
+    const rawExecutionResult = record.execution_result;
+    const executionResult = typeof rawExecutionResult === "string"
+      ? rawExecutionResult
+      : typeof rawExecutionResult === "object" && rawExecutionResult !== null && !Array.isArray(rawExecutionResult)
+        ? rawExecutionResult as Record<string, unknown>
+        : null;
     const abortDetails =
       typeof record.abort_details === "string" ? record.abort_details : null;
     return {
       kind: "finalized",
       committed,
-      executionResultBase64: executionResult,
+      executionResult,
       abortDetails,
     };
   }
@@ -261,7 +270,7 @@ export function verifyV2AnchorTransaction(
         : anchorFailureMessage("rejected_transaction"),
     };
   }
-  if (envelope.executionResultBase64 === null) {
+  if (envelope.executionResult === null) {
     return {
       kind: "terminal_failure",
       failure: "malformed_result",
@@ -270,7 +279,9 @@ export function verifyV2AnchorTransaction(
   }
   let decoded: DecodedExecuteResult;
   try {
-    decoded = decodeExecuteResultBase64(envelope.executionResultBase64);
+    decoded = typeof envelope.executionResult === "string"
+      ? decodeExecuteResultBase64(envelope.executionResult)
+      : decodeExecuteResultJson(envelope.executionResult);
   } catch (error) {
     return {
       kind: "terminal_failure",

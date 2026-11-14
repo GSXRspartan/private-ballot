@@ -195,3 +195,64 @@ export function decodeExecuteResultBase64(value: string): DecodedExecuteResult {
   }
   return decodeExecuteResultCbor(bytes);
 }
+
+/**
+ * Strictly narrows the object returned by Sapient after its published BOR
+ * decoder has already expanded `execution_result`. This is deliberately not a
+ * best-effort JSON mapper: only the pinned `ExecuteResult` fields needed for
+ * the canonical verifier are accepted, and fee-only/reject variants remain
+ * terminal failures.
+ */
+export function decodeExecuteResultJson(value: unknown): DecodedExecuteResult {
+  const root = expectJsonRecord(value, "decoded execution result");
+  const finalize = expectJsonRecord(root.finalize, "decoded finalize result");
+  const transactionHashHex = expectJsonHex(finalize.transaction_hash, "decoded transaction hash");
+  const eventsValue = finalize.events;
+  if (!Array.isArray(eventsValue)) throw new ExecutionResultDecodeError("decoded events must be an array");
+  const events = eventsValue.map((value, eventIndex) => {
+    const event = expectJsonRecord(value, "decoded event");
+    const templateAddressHex = expectJsonHex(event.template_address, "decoded event template address");
+    const topic = expectJsonText(event.topic, "decoded event topic");
+    const payload = expectJsonRecord(event.payload, "decoded event metadata");
+    const metadata = Object.entries(payload).map(([key, entry]) => ({
+      key,
+      value: expectJsonText(entry, "decoded event metadata value"),
+    }));
+    return { eventIndex, templateAddressHex, topic, metadata };
+  });
+  const result = expectJsonRecord(finalize.result, "decoded transaction result");
+  const variants = Object.keys(result);
+  if (variants.length !== 1) throw new ExecutionResultDecodeError("decoded transaction result has conflicting variants");
+  const resultVariant: AnchorResultVariant = variants[0] === "Accept"
+    ? "accept"
+    : variants[0] === "AcceptFeeRejectRest"
+      ? "fee_only"
+      : variants[0] === "Reject"
+        ? "reject"
+        : (() => { throw new ExecutionResultDecodeError("unknown decoded transaction result variant"); })();
+  const epochValue = root.execute_epoch;
+  const epoch = epochValue === null || epochValue === undefined
+    ? null
+    : typeof epochValue === "number" && Number.isSafeInteger(epochValue) && epochValue >= 0
+      ? epochValue
+      : (() => { throw new ExecutionResultDecodeError("decoded execution epoch is out of range"); })();
+  return { transactionHashHex, epoch, resultVariant, events };
+}
+
+function expectJsonRecord(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ExecutionResultDecodeError(`expected ${what} to be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function expectJsonText(value: unknown, what: string): string {
+  if (typeof value !== "string") throw new ExecutionResultDecodeError(`expected ${what} to be text`);
+  return value;
+}
+
+function expectJsonHex(value: unknown, what: string): string {
+  const text = expectJsonText(value, what);
+  if (!/^[0-9a-f]{64}$/.test(text)) throw new ExecutionResultDecodeError(`expected ${what} to be 32 lowercase bytes`);
+  return text;
+}

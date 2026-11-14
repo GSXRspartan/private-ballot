@@ -16,6 +16,8 @@ import { browserRecoveryStore, type AnchorRecoveryRecord } from "../../gui/src/w
 import { newRecoveryOwnerToken, type RecoveryLoadState } from "../../gui/src/wallet/recoveryStore.ts";
 import { withExclusiveAnchorOperation } from "../../gui/src/wallet/browserOperationLock.ts";
 import { parseCanonicalPublicSummaryV2 } from "../../gui/src/wallet/publicSummary.ts";
+import { verifyBrowserAnchorEvidence } from "../../gui/src/wallet/chainEvidence.ts";
+import { bundleExpectedPayload, bundleExpectedTemplate } from "../../gui/src/wallet/anchorBundle.ts";
 import { hasCapability, type WindowTariProvider } from "../../gui/src/wallet/provider.ts";
 import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
 import {
@@ -76,7 +78,16 @@ function sameAccounts(left: readonly string[], right: readonly string[]): boolea
 export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: ManagedFinalizedElectionIdentity): void {
   const store = browserRecoveryStore();
   const ownerToken = newRecoveryOwnerToken();
-  const driver = defaultPublishDriver({ verifyAttempts: VERIFY_ATTEMPTS, verifyIntervalMs: VERIFY_INTERVAL_MS });
+  const driver = defaultPublishDriver({
+    verifyAttempts: VERIFY_ATTEMPTS,
+    verifyIntervalMs: VERIFY_INTERVAL_MS,
+    verifyWithEvidence: (adapter, bundle, transactionId) => verifyBrowserAnchorEvidence(
+      adapter,
+      transactionId,
+      bundleExpectedTemplate(bundle),
+      bundleExpectedPayload(bundle),
+    ),
+  });
   let bundle: AnchorBundleV1 | null = null;
   let bundleError: string | null = null;
   let wallet: WalletConnection | null = null;
