@@ -4,8 +4,8 @@
  * recreates its arguments nor stores organizer or voter material.
  */
 import {
-  AnchorBundleError,
   bundleDigestKey,
+  canonicalEventTopicFromBindingTopic,
   parseAnchorBundleJson,
   type AnchorBundleV1,
 } from "../../gui/src/wallet/anchorBundle.ts";
@@ -13,15 +13,18 @@ import { anchorDeploymentConfig, deploymentForNetwork } from "../../gui/src/wall
 import { assessAnchorWorkflow, phaseLabel } from "../../gui/src/wallet/anchorWorkflow.ts";
 import { networkVerdict } from "../../gui/src/wallet/network.ts";
 import { browserRecoveryStore, type AnchorRecoveryRecord } from "../../gui/src/wallet/recoveryStore.ts";
+import { newRecoveryOwnerToken, type RecoveryLoadState } from "../../gui/src/wallet/recoveryStore.ts";
+import { withExclusiveAnchorOperation } from "../../gui/src/wallet/browserOperationLock.ts";
+import { parseCanonicalPublicSummaryV2 } from "../../gui/src/wallet/publicSummary.ts";
 import { hasCapability, type WindowTariProvider } from "../../gui/src/wallet/provider.ts";
 import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
 import {
   adapterForKind,
   defaultPublishDriver,
   providerErrorMessage,
-  recoveryWriterFor,
   type BrowserWalletKind,
 } from "../../gui/src/anchor/browserAnchorPublish.ts";
+import type { ManagedFinalizedElectionIdentity } from "./organizer.ts";
 
 const REQUIRED_CAPABILITIES = ["transactionRequests", "transactionResultLookup"] as const;
 const VERIFY_ATTEMPTS = 30;
@@ -70,26 +73,63 @@ function sameAccounts(left: readonly string[], right: readonly string[]): boolea
 }
 
 /** Mounts only after the existing organizer lifecycle has finalized the election. */
-export function mountBrowserAnchorPanel(root: HTMLElement): void {
+export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: ManagedFinalizedElectionIdentity): void {
   const store = browserRecoveryStore();
+  const ownerToken = newRecoveryOwnerToken();
   const driver = defaultPublishDriver({ verifyAttempts: VERIFY_ATTEMPTS, verifyIntervalMs: VERIFY_INTERVAL_MS });
   let bundle: AnchorBundleV1 | null = null;
   let bundleError: string | null = null;
   let wallet: WalletConnection | null = null;
   let recovery: AnchorRecoveryRecord | null = null;
+  let recoveryState: RecoveryLoadState = { kind: "absent" };
   let status = "Import the canonical bundle exported by the desktop application.";
   let busy = false;
   let approvedRequestId: string | null = null;
 
-  const loadRecovery = () => {
-    recovery = bundle === null ? null : store.load(bundleDigestKey(bundle));
-  };
-  const writer = () => {
+  const bundleKey = () => {
     if (!bundle) throw new Error("Import the canonical bundle first.");
-    return recoveryWriterFor(store, bundleDigestKey(bundle));
+    return bundleDigestKey(bundle);
+  };
+  const loadRecovery = () => {
+    recoveryState = bundle === null ? { kind: "absent" } : store.loadState(bundleDigestKey(bundle));
+    recovery = recoveryState.kind === "record" ? recoveryState.record : null;
+  };
+  const saveOwned = (phase: AnchorRecoveryRecord["phase"], requestId: string | null, transactionId: string | null) =>
+    store.saveOwned(bundleKey(), ownerToken, { phase, requestId, transactionId });
+  const bundleIdentityError = (): string | null => {
+    if (!bundle) return "Import the canonical bundle first.";
+    try {
+      const summary = parseCanonicalPublicSummaryV2(bundle.anchorArgs.publicSummary);
+      const sameTemplate = summary.template.address === bundle.template.address &&
+        summary.template.module === bundle.template.module &&
+        summary.template.function === bundle.template.function &&
+        canonicalEventTopicFromBindingTopic(summary.template.eventTopic) === bundle.template.eventTopic &&
+        summary.template.artifactDigestHex === bundle.template.artifactDigestHex;
+      if (bundle.network !== bundle.anchorArgs.network || summary.network !== bundle.network) {
+        return "The outer, event, and canonical-summary networks must agree.";
+      }
+      if (bundle.anchorArgs.electionId !== summary.electionId || summary.electionId !== managedElection.electionId) {
+        return "The bundle does not belong to this finalized managed election.";
+      }
+      if (summary.archiveHashHex !== managedElection.archiveHashHex) {
+        return "The bundle's finalized archive identity does not match this managed election.";
+      }
+      if (bundle.anchorArgs.anchorDigestHex !== managedElection.anchorDigestHex) {
+        return "The bundle's anchor digest does not match the native finalized election identity.";
+      }
+      if (bundle.anchorArgs.publicSummary !== managedElection.publicSummary) {
+        return "The bundle's canonical public summary does not match the native finalized election identity.";
+      }
+      if (!sameTemplate) return "The canonical public summary does not bind this deployment identity.";
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : "The public summary is invalid.";
+    }
   };
   const deploymentError = (): string | null => {
     if (!bundle) return "Import the canonical bundle first.";
+    const identity = bundleIdentityError();
+    if (identity) return identity;
     const deployment = deploymentForNetwork(anchorDeploymentConfig(), bundle.network);
     if (!deployment) return `No current anchor deployment is configured for ${bundle.network}.`;
     const matches = bundle.template.address === deployment.address &&
@@ -103,6 +143,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
   async function revalidate(allowRecovery: boolean): Promise<WindowTariProvider> {
     if (!bundle) throw new Error("Import the canonical bundle first.");
     loadRecovery();
+    if (recoveryState.kind === "corrupt") throw new Error(`${recoveryState.message}; browser publishing is blocked.`);
     if (!allowRecovery && recovery !== null) {
       throw new Error("A saved request or transaction exists. Resolve it before creating another request.");
     }
@@ -136,21 +177,31 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     render();
     const outcome = await driver.verify(adapter, bundle, transactionId);
     if (outcome.kind === "verified") {
-      store.save(bundleDigestKey(bundle), { phase: "verified", requestId: null, transactionId, updatedAtMs: Date.now() });
+      saveOwned("verified", null, transactionId);
       status = `Verified: the public V2 anchor matches this election (${transactionId.slice(0, 16)}…).`;
     } else if (outcome.kind === "pending") {
-      store.save(bundleDigestKey(bundle), { phase: "verifying", requestId: null, transactionId, updatedAtMs: Date.now() });
+      saveOwned("verifying", null, transactionId);
       status = "The transaction is not final yet. It remains saved for verification and will never be submitted again automatically.";
     } else {
       // Preserve the identity after a terminal verification failure so the
       // bundle cannot create another request that could duplicate a spend.
-      store.save(bundleDigestKey(bundle), { phase: "verifying", requestId: null, transactionId, updatedAtMs: Date.now() });
+      saveOwned("verifying", null, transactionId);
       status = `${outcome.message}. The saved transaction remains blocked from resubmission.`;
     }
     loadRecovery();
   }
 
   async function submitApproved(requestId: string): Promise<void> {
+    try {
+      await withExclusiveAnchorOperation(bundleKey(), () => submitApprovedUnlocked(requestId));
+    } catch (error) {
+      status = `${providerErrorMessage(error)} Check wallet history; this request will not be submitted again.`;
+      busy = false;
+      render();
+    }
+  }
+
+  async function submitApprovedUnlocked(requestId: string): Promise<void> {
     if (!bundle) return;
     busy = true;
     render();
@@ -160,7 +211,21 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
       if (recovery?.phase !== "submitted_awaiting_approval" || recovery.requestId !== requestId) {
         throw new Error("The saved request changed; do not submit it again.");
       }
-      writer().saveSubmitInFlight(requestId);
+      const claimed = store.claim(bundleKey(), ownerToken);
+      if (claimed.kind !== "claimed") throw new Error("Another tab owns this saved anchor operation; do not submit it twice.");
+      const current = await adapter.pollTransactionRequest(requestId, { timeoutMs: 1, intervalMs: 0 });
+      const existingTransactionId = current.status === "submitted" ? submittedTransactionId(current) : null;
+      if (existingTransactionId) {
+        saveOwned("approved_submitted", null, existingTransactionId);
+        await verifyExisting(adapter, existingTransactionId);
+        return;
+      }
+      if (current.status !== "approved") {
+        throw new Error(`The current wallet request is ${current.status}; it will not be submitted.`);
+      }
+      // Account/network are read again after status polling and immediately before submit.
+      await revalidate(true);
+      saveOwned("submit_in_flight", requestId, null);
       loadRecovery();
       status = "Submitting the approved request once…";
       render();
@@ -168,7 +233,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
       if (!TRANSACTION_ID.test(transactionId)) {
         throw new Error("The wallet returned a malformed transaction id; the request remains blocked.");
       }
-      writer().saveApprovedSubmitted(transactionId);
+      saveOwned("approved_submitted", null, transactionId);
       loadRecovery();
       await verifyExisting(adapter, transactionId);
     } catch (error) {
@@ -180,11 +245,30 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
   }
 
   async function checkRecovery(): Promise<void> {
+    try {
+      await withExclusiveAnchorOperation(bundleKey(), checkRecoveryUnlocked);
+    } catch (error) {
+      status = providerErrorMessage(error);
+      busy = false;
+      render();
+    }
+  }
+
+  async function checkRecoveryUnlocked(): Promise<void> {
     if (!bundle || !recovery) return;
     busy = true;
     approvedRequestId = null;
     render();
     try {
+      loadRecovery();
+      if (!recovery) throw new Error("No saved request or transaction exists.");
+      if (recovery.phase === "creating_request") {
+        status = "The wallet request may have been created but its reply was lost. Check wallet history; a new request is blocked.";
+        return;
+      }
+      const claimed = store.claim(bundleKey(), ownerToken);
+      if (claimed.kind !== "claimed") throw new Error("Another tab owns this saved anchor operation; wait before trying again.");
+      loadRecovery();
       const adapter = await revalidate(true);
       if (recovery.transactionId && TRANSACTION_ID.test(recovery.transactionId)) {
         await verifyExisting(adapter, recovery.transactionId);
@@ -210,7 +294,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
       }
       const transactionId = summary.status === "submitted" ? submittedTransactionId(summary) : null;
       if (transactionId) {
-        writer().saveApprovedSubmitted(transactionId);
+        saveOwned("approved_submitted", null, transactionId);
         loadRecovery();
         await verifyExisting(adapter, transactionId);
         return;
@@ -228,6 +312,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     busy = true;
     render();
     try {
+      if (!bundle || deploymentError() !== null) throw new Error("Import a bundle that matches this finalized election before connecting a wallet.");
       const adapter = adapterForKind(kind, window).pin();
       const accounts = await adapter.connect();
       if (accounts.length === 0) throw new Error("The wallet did not authorize an account.");
@@ -252,6 +337,16 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
   }
 
   async function publish(): Promise<void> {
+    try {
+      await withExclusiveAnchorOperation(bundleKey(), publishUnlocked);
+    } catch (error) {
+      status = `${providerErrorMessage(error)} No request or transaction will be retried automatically.`;
+      busy = false;
+      render();
+    }
+  }
+
+  async function publishUnlocked(): Promise<void> {
     if (!bundle) return;
     busy = true;
     render();
@@ -261,20 +356,24 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
         bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet?.network ?? null, recovery: null,
       });
       if (phase.kind !== "ready") throw new Error(phaseLabel(phase));
+      const reservation = store.reserve(bundleKey(), ownerToken);
+      if (reservation.kind === "busy") throw new Error("A saved anchor operation already exists. Resolve it before creating another request.");
+      if (reservation.kind === "corrupt") throw new Error(`${reservation.message}; no wallet request was created.`);
+      if (reservation.kind !== "claimed") throw new Error("The anchor reservation is ambiguous; no wallet request was created.");
       const requestId = await driver.createRequest(adapter, bundle);
-      writer().saveSubmittedAwaitingApproval(requestId);
+      saveOwned("submitted_awaiting_approval", requestId, null);
       loadRecovery();
       status = "Waiting for the wallet to approve the saved request…";
       render();
       const summary = await driver.waitForApproval(adapter, requestId, APPROVAL_TIMEOUT_MS);
       if (summary.status === "approved") {
-        await submitApproved(requestId);
+        await submitApprovedUnlocked(requestId);
         return;
       }
       if (summary.status === "submitted") {
         const transactionId = submittedTransactionId(summary);
         if (!transactionId) throw new Error("The wallet reported submission without a verifiable transaction id.");
-        writer().saveApprovedSubmitted(transactionId);
+        saveOwned("approved_submitted", null, transactionId);
         loadRecovery();
         await verifyExisting(adapter, transactionId);
         return;
@@ -291,17 +390,22 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
   function importBundle(file: File): void {
     void file.text().then((text) => {
       try {
-        bundle = parseAnchorBundleJson(text);
+        const imported = parseAnchorBundleJson(text);
+        bundle = imported;
+        const identity = deploymentError();
+        if (identity) throw new Error(identity);
         bundleError = null;
         approvedRequestId = null;
         loadRecovery();
-        status = recovery
+        status = recoveryState.kind === "corrupt"
+          ? `${recoveryState.message}. The existing state is blocked and cannot be treated as absent.`
+          : recovery
           ? "A saved request or transaction identity was loaded. Resolve it before creating anything new."
-          : "Bundle imported. Connect a wallet and review the deployment checks.";
+          : "Bundle imported for this finalized election. Connect a wallet and review the deployment checks.";
       } catch (error) {
         bundle = null;
         recovery = null;
-        bundleError = error instanceof AnchorBundleError ? error.message : "The bundle file is not valid JSON.";
+        bundleError = error instanceof Error ? error.message : "The bundle file is not valid JSON.";
       }
       render();
     });
@@ -313,6 +417,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     card.className = "card browser-anchor-panel";
     card.append(element("h2", "Tari Anchor"));
     card.append(element("p", "Import the canonical bundle exported after the desktop application verified the final archive. This page never rebuilds its anchor arguments."));
+    card.append(element("p", `Finalized election: ${managedElection.electionId} · archive ${managedElection.archiveHashHex.slice(0, 16)}… · anchor ${managedElection.anchorDigestHex.slice(0, 16)}…`));
     const label = element("label", "Canonical anchor bundle (JSON)");
     label.htmlFor = "browser-anchor-bundle";
     card.append(label);
@@ -346,9 +451,14 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     card.append(state);
     const actions = element("div");
     actions.className = "action-row";
-    actions.append(action("Connect Sapient", () => connect("sapient"), busy));
-    actions.append(action("Connect Tari Universe", () => connect("universe"), busy));
-    if (recovery) {
+    const readyToConnect = !!bundle && deploymentError() === null;
+    actions.append(action("Connect Sapient", () => connect("sapient"), busy || !readyToConnect));
+    actions.append(action("Connect Tari Universe", () => connect("universe"), busy || !readyToConnect));
+    if (recoveryState.kind === "corrupt") {
+      const error = element("p", `${recoveryState.message}. Treat this as ambiguous; browser publishing is blocked.`);
+      error.className = "error";
+      card.append(error);
+    } else if (recovery) {
       actions.append(action("Check saved request / transaction", checkRecovery, busy));
       if (approvedRequestId) actions.append(action("Submit saved approved request once", () => submitApproved(approvedRequestId!), busy));
     } else if (bundle && wallet && deploymentError() === null) {

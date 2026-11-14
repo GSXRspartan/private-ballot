@@ -33,6 +33,7 @@ export type AnchorBundleInvalid =
   | "artifact_digest"
   | "anchor_digest"
   | "event_network"
+  | "network_mismatch"
   | "election_id"
   | "public_summary";
 
@@ -101,6 +102,9 @@ export function parseAnchorBundle(json: unknown): AnchorBundleV1 {
   }
   if (typeof a.network !== "string" || !bounded(a.network, 32)) {
     throw new AnchorBundleError("event_network");
+  }
+  if (a.network !== network) {
+    throw new AnchorBundleError("network_mismatch");
   }
   if (typeof a.electionId !== "string" || !bounded(a.electionId, 128)) {
     throw new AnchorBundleError("election_id");

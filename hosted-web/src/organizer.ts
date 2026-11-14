@@ -40,6 +40,16 @@ type ElectionView = {
   proof_suite_id: string;
   created_at_ms: number;
   candidates: { id_hex: string; id_text: string; display_name: string }[];
+  finalized_archive_hash_hex: string | null;
+  finalized_anchor_digest_hex: string | null;
+  finalized_public_summary_json: string | null;
+};
+
+export type ManagedFinalizedElectionIdentity = {
+  electionId: string;
+  archiveHashHex: string;
+  anchorDigestHex: string;
+  publicSummary: string;
 };
 
 type SlotView = {
@@ -189,11 +199,11 @@ type ConsoleState = {
 };
 
 let cs: ConsoleState | null = null;
-let manageExtensionRenderer: ((container: HTMLElement) => void) | null = null;
+let manageExtensionRenderer: ((container: HTMLElement, identity: ManagedFinalizedElectionIdentity) => void) | null = null;
 
 /** Lets the hosted Manage entry point attach optional browser-only tooling. */
 export function setManageExtensionRenderer(
-  renderer: ((container: HTMLElement) => void) | null,
+  renderer: ((container: HTMLElement, identity: ManagedFinalizedElectionIdentity) => void) | null,
 ): void {
   manageExtensionRenderer = renderer;
 }
@@ -316,7 +326,21 @@ function renderConsole() {
   bindConsole();
   const extensionRoot = document.getElementById("browser-anchor-root");
   if (extensionRoot && manageExtensionRenderer) {
-    manageExtensionRenderer(extensionRoot);
+    const archiveHash = election.finalized_archive_hash_hex;
+    const anchorDigest = election.finalized_anchor_digest_hex;
+    const publicSummary = election.finalized_public_summary_json;
+    if (typeof archiveHash !== "string" || !/^[0-9a-f]{64}$/.test(archiveHash) ||
+        typeof anchorDigest !== "string" || !/^[0-9a-f]{64}$/.test(anchorDigest) ||
+        typeof publicSummary !== "string") {
+      extensionRoot.textContent = "The native finalized anchor identity is unavailable. Browser anchoring is blocked.";
+    } else {
+      manageExtensionRenderer(extensionRoot, {
+        electionId: election.election_id,
+        archiveHashHex: archiveHash,
+        anchorDigestHex: anchorDigest,
+        publicSummary,
+      });
+    }
   }
 }
 

@@ -81,6 +81,8 @@ export function assessAnchorWorkflow(
 
 function resumePhase(recovery: AnchorRecoveryRecord): AnchorWorkflowPhase {
   switch (recovery.phase) {
+    case "creating_request":
+      return { kind: "failed_no_publish", message: "the wallet request may have been created but its identity was not received" };
     case "verified":
     case "approved_submitted":
     case "verifying":

@@ -3638,6 +3638,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tari-cc-private-ballot-anchor",
  "tari-cc-private-ballot-archive",
  "tari-cc-private-ballot-ballot",
  "tari-cc-private-ballot-crypto",

@@ -52,10 +52,14 @@ use axum::{
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_archive::{
-    ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveFileCatalogV1, ArchiveFileEntryV1,
+    ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveHashV1, ArchiveFileCatalogV1, ArchiveFileEntryV1,
     ArchiveManifestV1, ArchivePathV1, verify_archive_directory_v1,
     ELECTION_MANIFEST_ARCHIVE_PATH, CANDIDATE_SET_ARCHIVE_PATH, VOTER_REGISTRY_ARCHIVE_PATH,
     SUBMISSIONS_ARCHIVE_DIR,
+};
+use tari_cc_private_ballot_anchor::{
+    OotleAnchorPublicPayloadV2, OotleAnchorTallyEntryV2, OotleAnchorTemplateBindingV2,
+    OotleNetworkIdV1,
 };
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, CandidateId, CandidateSet,
@@ -1287,6 +1291,85 @@ struct OrganizerElectionBody {
     proof_suite_id: String,
     created_at_ms: i64,
     candidates: Vec<CandidateJson>,
+    /// Recomputed only for a finalized election; this is the archive identity
+    /// the hosted anchor panel must bind before it contacts a wallet.
+    finalized_archive_hash_hex: Option<String>,
+    /// Native-derived identity that the browser must match byte-for-byte. It
+    /// prevents an imported bundle from substituting a different digest or
+    /// merely well-formed public summary for this managed finalized election.
+    finalized_anchor_digest_hex: Option<String>,
+    finalized_public_summary_json: Option<String>,
+}
+
+struct FinalizedAnchorIdentity {
+    archive_hash_hex: String,
+    anchor_digest_hex: String,
+    public_summary_json: String,
+}
+
+fn finalized_anchor_identity(
+    loaded: &LoadedElection,
+    storage: &dyn HostedStorage,
+) -> Result<FinalizedAnchorIdentity, Response> {
+    let (_, archive_hash_hex) = build_archive_files(loaded, &storage.list_ballots(&loaded.record.id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive identity unavailable"))?)?;
+    let archive_hash: [u8; 32] = hex_decode(&archive_hash_hex)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive identity unavailable"))?;
+    let (ledger, _) = loaded.replay_ledger(storage)?;
+    let payloads: Vec<ApprovalBallotPayload> = ledger.accepted_ballots().iter().map(|ballot| ballot.payload().clone()).collect();
+    let tally = ApprovalTally::from_ballots(&loaded.candidates, payloads.iter())
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?;
+    let mut entries = Vec::with_capacity(tally.counts().len());
+    for count in tally.counts() {
+        let candidate = loaded.candidates.candidates().iter()
+            .find(|candidate| candidate.id() == count.candidate_id())
+            .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?;
+        entries.push(OotleAnchorTallyEntryV2 {
+            display_label: candidate.display_name().to_owned(),
+            machine_id: count.candidate_id().as_bytes().to_vec(),
+            count: count.approvals(),
+        });
+    }
+    let artifact_digest: [u8; 32] = hex_decode(deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor deployment unavailable"))?;
+    let manifest_hash = loaded.manifest.canonical_hash(&Blake3HashProviderV1)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?;
+    let payload = OotleAnchorPublicPayloadV2 {
+        network: OotleNetworkIdV1::new("mainnet".to_owned())
+            .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?,
+        election_id: loaded.manifest.election_id().as_bytes().to_vec(),
+        ballot_question: loaded.manifest.proposal_question().unwrap_or_default().to_owned(),
+        ballot_kind: loaded.manifest.ballot_kind().as_str().to_owned(),
+        confidentiality_mode: loaded.manifest.ballot_confidentiality().as_str().to_owned(),
+        proof_suite: loaded.manifest.proof_suite_id().to_owned(),
+        manifest_hash,
+        archive_hash: ArchiveHashV1::new(archive_hash),
+        registry_commitment: *loaded.manifest.registry_commitment().as_bytes(),
+        option_set_commitment: *loaded.manifest.candidate_set_commitment().as_bytes(),
+        eligible_voter_count: loaded.registry.entries().len() as u64,
+        accepted_ballot_count: tally.accepted_ballots(),
+        rejected_ballot_count: 0,
+        tally: entries,
+        archive_finalized: true,
+        finalized_timestamp_unix_secs: None,
+        template: OotleAnchorTemplateBindingV2 {
+            template_address: deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+            template_module: "tari_private_ballot_anchor_v2".to_owned(),
+            template_function: deployment_registry::ABI_FUNCTION_V2.to_owned(),
+            event_topic: format!("tari_private_ballot_anchor_v2.{}", deployment_registry::ABI_EVENT_TOPIC_V2),
+            artifact_digest,
+        },
+    };
+    let public_summary_json = String::from_utf8(payload.to_canonical_json_bytes()
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?;
+    let anchor_digest_hex = hex_encode(&payload.canonical_digest(&Blake3HashProviderV1)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?);
+    Ok(FinalizedAnchorIdentity { archive_hash_hex, anchor_digest_hex, public_summary_json })
 }
 
 async fn organizer_create_election(
@@ -1439,6 +1522,19 @@ async fn organizer_get_election(
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored election is invalid"),
     };
+    let finalized_anchor_identity = match election.as_ref().filter(|e| e.state == "finalized") {
+        Some(_) => {
+            let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+                Ok(loaded) => loaded,
+                Err(response) => return response,
+            };
+            match finalized_anchor_identity(&loaded, state.storage.as_ref()) {
+                Ok(identity) => Some(identity),
+                Err(response) => return response,
+            }
+        }
+        None => None,
+    };
     let body = OrganizerElectionBody {
         election_id: id,
         eligibility_state: draft.eligibility_state,
@@ -1456,6 +1552,9 @@ async fn organizer_get_election(
             id_text: String::from_utf8_lossy(c.id().as_bytes()).into_owned(),
             display_name: c.display_name().to_owned(),
         }).collect(),
+        finalized_archive_hash_hex: finalized_anchor_identity.as_ref().map(|identity| identity.archive_hash_hex.clone()),
+        finalized_anchor_digest_hex: finalized_anchor_identity.as_ref().map(|identity| identity.anchor_digest_hex.clone()),
+        finalized_public_summary_json: finalized_anchor_identity.map(|identity| identity.public_summary_json),
     };
     Json(body).into_response()
 }

@@ -127,6 +127,8 @@ describe("recovery resume", () => {
       phase: "approved_submitted",
       requestId: "req_1",
       transactionId: "11".repeat(32),
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 2,
       updatedAtMs: 1,
     };
     const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
@@ -141,6 +143,8 @@ describe("recovery resume", () => {
       phase: "submitted_awaiting_approval",
       requestId: "req_1",
       transactionId: null,
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 2,
       updatedAtMs: 1,
     };
     const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
@@ -152,6 +156,8 @@ describe("recovery resume", () => {
       phase: "submit_in_flight",
       requestId: "req_1",
       transactionId: null,
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 2,
       updatedAtMs: 1,
     };
     const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
@@ -164,6 +170,8 @@ describe("recovery resume", () => {
       phase: "verified",
       requestId: "req_1",
       transactionId: "22".repeat(32),
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 2,
       updatedAtMs: 1,
     };
     const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
@@ -178,6 +186,8 @@ describe("recovery resume", () => {
       phase: "verifying",
       requestId: null,
       transactionId: null,
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 2,
       updatedAtMs: 1,
     };
     const phase = assessAnchorWorkflow({ ...baseInput(), recovery });
@@ -193,6 +203,8 @@ describe("recovery store", () => {
       phase: "approved_submitted",
       requestId: "req_1",
       transactionId: "33".repeat(32),
+      ownerToken: "a".repeat(32),
+      leaseExpiresAtMs: 43,
       updatedAtMs: 42,
     });
     const loaded = store.load(key);
@@ -201,12 +213,45 @@ describe("recovery store", () => {
     assert.equal(store.load(key), null);
   });
 
-  it("returns null for corrupt JSON or unknown phases", () => {
+  it("distinguishes corrupt JSON from an absent recovery record", () => {
     const storage = memoryStorage();
     const store = new AnchorRecoveryStore(storage);
     storage.setItem("k", "{not json");
     assert.equal(store.load("k"), null);
+    assert.equal(store.loadState("k").kind, "corrupt");
     storage.setItem("k", JSON.stringify({ phase: "mystery", updatedAtMs: 1 }));
     assert.equal(store.load("k"), null);
+    assert.equal(store.loadState("k").kind, "corrupt");
+  });
+
+  it("durably reserves before create and only lets one tab win", () => {
+    const store = new AnchorRecoveryStore(memoryStorage());
+    const first = store.reserve("bundle", "a".repeat(32), 10);
+    const second = store.reserve("bundle", "b".repeat(32), 10);
+    assert.equal(first.kind, "claimed");
+    assert.equal(second.kind, "busy");
+    assert.equal(store.loadState("bundle").kind, "record");
+  });
+
+  it("keeps the pre-create ambiguity when the post-create save fails", () => {
+    const map = new Map<string, string>();
+    let writes = 0;
+    const store = new AnchorRecoveryStore({
+      getItem: (key) => map.get(key) ?? null,
+      setItem: (key, value) => {
+        writes += 1;
+        if (writes > 1) throw new Error("quota");
+        map.set(key, value);
+      },
+      removeItem: (key) => map.delete(key),
+    });
+    const owner = "a".repeat(32);
+    assert.equal(store.reserve("bundle", owner, 10).kind, "claimed");
+    assert.throws(() => store.saveOwned("bundle", owner, {
+      phase: "submitted_awaiting_approval", requestId: "req_1", transactionId: null,
+    }, 11));
+    const state = store.loadState("bundle");
+    assert.equal(state.kind, "record");
+    if (state.kind === "record") assert.equal(state.record.phase, "creating_request");
   });
 });

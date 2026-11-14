@@ -10,7 +10,7 @@ import {
 import type { TransactionRequestSummary } from "../wallet/types.ts";
 import { pollUntilVerified } from "../wallet/verifyPoll.ts";
 import type { AnchorVerificationOutcome } from "../wallet/verifyReceipt.ts";
-import type { AnchorRecoveryStore } from "../wallet/recoveryStore.ts";
+import { newRecoveryOwnerToken, type AnchorRecoveryStore } from "../wallet/recoveryStore.ts";
 import type { WalletScope } from "../wallet/browserWalletRuntime.ts";
 
 export type BrowserWalletKind = "sapient" | "universe";
@@ -91,38 +91,31 @@ export function recoveryWriterFor(
   store: AnchorRecoveryStore,
   bundleKey: string,
 ): RecoveryWriter {
+  const ownerToken = newRecoveryOwnerToken();
+  const record = (
+    phase: "submitted_awaiting_approval" | "submit_in_flight" | "approved_submitted" | "verified",
+    requestId: string | null,
+    transactionId: string | null,
+  ) => ({
+    phase,
+    requestId,
+    transactionId,
+    ownerToken,
+    leaseExpiresAtMs: Date.now() + 5 * 60 * 1000,
+    updatedAtMs: Date.now(),
+  });
   return {
     saveSubmittedAwaitingApproval(requestId: string): void {
-      store.save(bundleKey, {
-        phase: "submitted_awaiting_approval",
-        requestId,
-        transactionId: null,
-        updatedAtMs: Date.now(),
-      });
+      store.save(bundleKey, record("submitted_awaiting_approval", requestId, null));
     },
     saveSubmitInFlight(requestId: string): void {
-      store.save(bundleKey, {
-        phase: "submit_in_flight",
-        requestId,
-        transactionId: null,
-        updatedAtMs: Date.now(),
-      });
+      store.save(bundleKey, record("submit_in_flight", requestId, null));
     },
     saveApprovedSubmitted(transactionId: string): void {
-      store.save(bundleKey, {
-        phase: "approved_submitted",
-        requestId: null,
-        transactionId,
-        updatedAtMs: Date.now(),
-      });
+      store.save(bundleKey, record("approved_submitted", null, transactionId));
     },
     saveVerified(transactionId: string): void {
-      store.save(bundleKey, {
-        phase: "verified",
-        requestId: null,
-        transactionId,
-        updatedAtMs: Date.now(),
-      });
+      store.save(bundleKey, record("verified", null, transactionId));
     },
     clear(): void {
       store.clear(bundleKey);
