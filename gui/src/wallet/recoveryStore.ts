@@ -36,6 +36,20 @@ export interface RecoveryStorage {
 }
 
 const LEASE_MS = 5 * 60 * 1000;
+const TRANSACTION_ID = /^[0-9a-f]{64}$/;
+
+/**
+ * A canonical transaction id means the wallet write has completed. These
+ * phases can only verify an existing transaction; they never create or submit
+ * another one. Keep the request id null so a malformed mixed state cannot use
+ * this read-only recovery path.
+ */
+function isReadOnlySubmittedRecovery(record: AnchorRecoveryRecord): boolean {
+  return (record.phase === "approved_submitted" || record.phase === "verifying" || record.phase === "verified") &&
+    record.requestId === null &&
+    typeof record.transactionId === "string" &&
+    TRANSACTION_ID.test(record.transactionId);
+}
 
 function isPhase(value: unknown): value is AnchorRecoveryPhase {
   return value === "creating_request" ||
@@ -128,7 +142,11 @@ export class AnchorRecoveryStore {
   claim(bundleKey: string, ownerToken: string, nowMs: number = Date.now()): RecoveryClaim {
     const state = this.loadState(bundleKey);
     if (state.kind !== "record") return state;
-    if (state.record.ownerToken !== ownerToken && state.record.leaseExpiresAtMs > nowMs) {
+    if (
+      state.record.ownerToken !== ownerToken &&
+      state.record.leaseExpiresAtMs > nowMs &&
+      !isReadOnlySubmittedRecovery(state.record)
+    ) {
       return { kind: "busy", record: state.record };
     }
     const record: AnchorRecoveryRecord = {
@@ -149,6 +167,42 @@ export class AnchorRecoveryStore {
     return confirmed.record.ownerToken === ownerToken
       ? { kind: "claimed", record: confirmed.record }
       : { kind: "busy", record: confirmed.record };
+  }
+
+  /**
+   * Relinquishes the mutation lease only after a canonical transaction id is
+   * durably stored. Reloaded tabs may then verify that exact transaction, but
+   * no create or submit path accepts these phases.
+   */
+  releaseSubmittedRecoveryLease(
+    bundleKey: string,
+    ownerToken: string,
+    nowMs: number = Date.now(),
+  ): AnchorRecoveryRecord {
+    const current = this.loadState(bundleKey);
+    if (
+      current.kind !== "record" ||
+      current.record.ownerToken !== ownerToken ||
+      !isReadOnlySubmittedRecovery(current.record)
+    ) {
+      throw new Error("only an owned canonical submitted transaction can release its recovery lease");
+    }
+    const released: AnchorRecoveryRecord = {
+      ...current.record,
+      leaseExpiresAtMs: 0,
+      updatedAtMs: nowMs,
+    };
+    this.storage.setItem(bundleKey, JSON.stringify(released));
+    const confirmed = this.loadState(bundleKey);
+    if (
+      confirmed.kind !== "record" ||
+      confirmed.record.ownerToken !== ownerToken ||
+      !isReadOnlySubmittedRecovery(confirmed.record) ||
+      confirmed.record.leaseExpiresAtMs !== 0
+    ) {
+      throw new Error("the submitted transaction recovery lease could not be released");
+    }
+    return confirmed.record;
   }
 
   saveOwned(

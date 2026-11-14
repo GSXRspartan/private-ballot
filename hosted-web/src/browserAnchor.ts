@@ -105,8 +105,20 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     recoveryState = bundle === null ? { kind: "absent" } : store.loadState(bundleDigestKey(bundle));
     recovery = recoveryState.kind === "record" ? recoveryState.record : null;
   };
-  const saveOwned = (phase: AnchorRecoveryRecord["phase"], requestId: string | null, transactionId: string | null) =>
-    store.saveOwned(bundleKey(), ownerToken, { phase, requestId, transactionId });
+  const saveOwned = (phase: AnchorRecoveryRecord["phase"], requestId: string | null, transactionId: string | null) => {
+    const saved = store.saveOwned(bundleKey(), ownerToken, { phase, requestId, transactionId });
+    if (
+      transactionId !== null &&
+      TRANSACTION_ID.test(transactionId) &&
+      (phase === "approved_submitted" || phase === "verifying" || phase === "verified")
+    ) {
+      // The write has completed and this record can only resolve the exact
+      // transaction id. Releasing this mutation lease cannot enable another
+      // create or submit, but allows a reloaded panel to verify immediately.
+      store.releaseSubmittedRecoveryLease(bundleKey(), ownerToken);
+    }
+    return saved;
+  };
   const bundleIdentityError = (): string | null => {
     if (!bundle) return "Import the canonical bundle first.";
     try {

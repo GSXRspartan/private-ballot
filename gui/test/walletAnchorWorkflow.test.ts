@@ -254,4 +254,51 @@ describe("recovery store", () => {
     assert.equal(state.kind, "record");
     if (state.kind === "record") assert.equal(state.record.phase, "creating_request");
   });
+
+  it("releases only canonical submitted transaction recovery for immediate read-only reload", () => {
+    const store = new AnchorRecoveryStore(memoryStorage());
+    const firstOwner = "a".repeat(32);
+    const reloadedOwner = "b".repeat(32);
+    assert.equal(store.reserve("bundle", firstOwner, 10).kind, "claimed");
+    store.saveOwned("bundle", firstOwner, {
+      phase: "approved_submitted",
+      requestId: null,
+      transactionId: "11".repeat(32),
+    }, 11);
+
+    // This models a legacy or interrupted browser record whose prior lease has
+    // not yet expired. It is safe to take over only for transaction lookup.
+    const immediateRecovery = store.claim("bundle", reloadedOwner, 12);
+    assert.equal(immediateRecovery.kind, "claimed");
+    if (immediateRecovery.kind === "claimed") {
+      assert.equal(immediateRecovery.record.transactionId, "11".repeat(32));
+      assert.equal(immediateRecovery.record.requestId, null);
+    }
+
+    store.releaseSubmittedRecoveryLease("bundle", reloadedOwner, 13);
+    const released = store.loadState("bundle");
+    assert.equal(released.kind, "record");
+    if (released.kind === "record") assert.equal(released.record.leaseExpiresAtMs, 0);
+  });
+
+  it("retains unexpired leases for approval and uncertain-submit records", () => {
+    const cases: Array<{
+      phase: "submitted_awaiting_approval" | "submit_in_flight";
+      requestId: string;
+    }> = [
+      { phase: "submitted_awaiting_approval", requestId: "req_approved" },
+      { phase: "submit_in_flight", requestId: "req_unknown" },
+    ];
+    for (const scenario of cases) {
+      const store = new AnchorRecoveryStore(memoryStorage());
+      const firstOwner = "a".repeat(32);
+      assert.equal(store.reserve("bundle", firstOwner, 10).kind, "claimed");
+      store.saveOwned("bundle", firstOwner, {
+        phase: scenario.phase,
+        requestId: scenario.requestId,
+        transactionId: null,
+      }, 11);
+      assert.equal(store.claim("bundle", "b".repeat(32), 12).kind, "busy", scenario.phase);
+    }
+  });
 });
