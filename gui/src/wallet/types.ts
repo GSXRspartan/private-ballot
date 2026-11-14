@@ -38,7 +38,9 @@ export interface SubmitTransactionRequestResult {
 }
 
 export interface TariCapabilities {
-  capabilities: string[];
+  /** Published Sapient / Tari Universe capability response fields. */
+  transactionRequests: boolean;
+  transactionResultLookup: boolean;
 }
 
 export interface TariNetworkAnswer {

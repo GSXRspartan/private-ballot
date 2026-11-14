@@ -3671,6 +3671,7 @@ name = "tari-cc-private-ballot-ootle-anchor-adapter"
 version = "0.1.0"
 dependencies = [
  "minicbor",
+ "serde_json",
  "tari-cc-private-ballot-anchor",
  "tari-cc-private-ballot-anchor-transport",
  "tari-cc-private-ballot-archive",

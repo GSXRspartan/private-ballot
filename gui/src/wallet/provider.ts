@@ -38,7 +38,10 @@ export interface WindowTariProvider {
   kind: ProviderKind;
   label: string;
   probe(): Promise<WalletProbeOutcome>;
+  /** Resolves and fixes the provider identity for one wallet operation. */
+  pin(): WindowTariProvider;
   connect(): Promise<string[]>;
+  getAccounts(): Promise<string[]>;
   getNetwork(): Promise<TariNetworkAnswer>;
   getCapabilities(): Promise<TariCapabilities>;
   createTransactionRequest(
@@ -84,15 +87,6 @@ function throwProviderError(error: unknown, context: string): never {
   throw new WalletProviderError(message, code);
 }
 
-function expectRecordSafe(
-  value: unknown,
-): Record<string, unknown> | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
-
 export function expectRecord(value: unknown, context: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new WalletProviderError(`the wallet returned a malformed ${context}`, null);
@@ -129,7 +123,9 @@ export function windowTariProvider(
   label: string,
   discover: () => ProviderDiscoveryResult,
 ): WindowTariProvider {
-  function get(): TariProviderLike {
+  let pinnedProvider: TariProviderLike | null = null;
+
+  function resolve(): TariProviderLike {
     const found = discover();
     if (!found.provider) {
       throw new WalletProviderError(
@@ -140,9 +136,43 @@ export function windowTariProvider(
     return found.provider;
   }
 
+  function get(): TariProviderLike {
+    return pinnedProvider ?? resolve();
+  }
+
+  function accountsAnswer(answer: unknown): string[] {
+    if (!Array.isArray(answer) || !answer.every((a) => typeof a === "string" && a.length > 0)) {
+      throw new WalletProviderError(
+        "the wallet returned a malformed accounts answer",
+        null,
+      );
+    }
+    return answer as string[];
+  }
+
+  function capabilitiesAnswer(answer: unknown): TariCapabilities {
+    const record = expectRecord(answer, "capabilities answer");
+    const transactionRequests = record.transactionRequests;
+    const transactionResultLookup = record.transactionResultLookup;
+    if (typeof transactionRequests !== "boolean" || typeof transactionResultLookup !== "boolean") {
+      throw new WalletProviderError(
+        "the wallet returned a malformed capabilities answer",
+        null,
+      );
+    }
+    return { transactionRequests, transactionResultLookup };
+  }
+
   return {
     kind,
     label,
+    pin(): WindowTariProvider {
+      // Discovery is deliberately deferred until a user action so the existing
+      // delayed-injection and Universe fallback paths remain usable. Once this
+      // operation starts, every request below is sent to this exact object.
+      pinnedProvider ??= resolve();
+      return this;
+    },
     async probe(): Promise<WalletProbeOutcome> {
       let provider: TariProviderLike | null = null;
       let discoveryReason: string | null = null;
@@ -188,18 +218,10 @@ export function windowTariProvider(
           capabilities: null,
         };
       }
-      const record = expectRecordSafe(answer);
-      if (!record) {
-        return {
-          available: false,
-          state: "unavailable",
-          unavailableReason: "the wallet returned a malformed capabilities answer",
-          unusableReason: null,
-          capabilities: null,
-        };
-      }
-      const list = record.capabilities;
-      if (!Array.isArray(list) || !list.every((c) => typeof c === "string")) {
+      let capabilities: TariCapabilities;
+      try {
+        capabilities = capabilitiesAnswer(answer);
+      } catch {
         return {
           available: false,
           state: "unavailable",
@@ -213,7 +235,7 @@ export function windowTariProvider(
         state: "available",
         unavailableReason: null,
         unusableReason: null,
-        capabilities: { capabilities: list as string[] },
+        capabilities,
       };
     },
     async connect(): Promise<string[]> {
@@ -224,13 +246,17 @@ export function windowTariProvider(
       } catch (e) {
         throwProviderError(e, "connect");
       }
-      if (!Array.isArray(answer) || !answer.every((a) => typeof a === "string" && a.length > 0)) {
-        throw new WalletProviderError(
-          "the wallet returned a malformed accounts answer",
-          null,
-        );
+      return accountsAnswer(answer);
+    },
+    async getAccounts(): Promise<string[]> {
+      const provider = get();
+      let answer: unknown;
+      try {
+        answer = await provider.request({ method: "tari_getAccounts" });
+      } catch (e) {
+        throwProviderError(e, "authorized account check");
       }
-      return answer as string[];
+      return accountsAnswer(answer);
     },
     async getNetwork(): Promise<TariNetworkAnswer> {
       const provider = get();
@@ -240,8 +266,7 @@ export function windowTariProvider(
       } catch (e) {
         throwProviderError(e, "network check");
       }
-      const record = expectRecord(answer, "network answer");
-      const network = expectString(record.network, "network answer");
+      const network = expectString(answer, "network answer");
       return { network };
     },
     async getCapabilities(): Promise<TariCapabilities> {
@@ -252,15 +277,7 @@ export function windowTariProvider(
       } catch (e) {
         throwProviderError(e, "capabilities");
       }
-      const record = expectRecord(answer, "capabilities answer");
-      const list = record.capabilities;
-      if (!Array.isArray(list) || !list.every((c) => typeof c === "string")) {
-        throw new WalletProviderError(
-          "the wallet returned a malformed capabilities answer",
-          null,
-        );
-      }
-      return { capabilities: list as string[] };
+      return capabilitiesAnswer(answer);
     },
     async createTransactionRequest(
       instructions: unknown,
@@ -369,7 +386,9 @@ export function hasCapability(
   capabilities: TariCapabilities | null,
   name: string,
 ): boolean {
-  return !!capabilities && capabilities.capabilities.includes(name);
+  return !!capabilities &&
+    (name === "transactionRequests" || name === "transactionResultLookup") &&
+    capabilities[name] === true;
 }
 
 function asTariProvider(candidate: unknown): TariProviderLike | null {

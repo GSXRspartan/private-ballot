@@ -18,6 +18,7 @@ use tari_cc_private_ballot_ootle_anchor_adapter::{
     build_v2_anchor_call_function,
 };
 use tari_ootle_transaction::{Instruction, Network, UnsignedTransaction};
+use tari_template_lib_types::TemplateAddress;
 
 /// Asserts the sole instruction is the pinned `publish_anchor` call.
 fn assert_sole_publish_anchor_call(unsigned: &UnsignedTransaction) {
@@ -204,4 +205,54 @@ fn v2_instruction_uses_the_four_string_template_abi() {
         }
         _ => panic!("V2 must use CallFunction"),
     }
+}
+
+#[test]
+fn browser_emitted_v2_instruction_decodes_with_the_pinned_transaction_schema() {
+    // This is the complete JSON instruction emitted by gui/src/wallet/anchorBundle.ts:
+    // a bare serialized TemplateAddress and four `InstructionArg::Literal` CBOR text values.
+    // Keep it as the wire fixture rather than rebuilding it with Rust helpers, so a browser
+    // display-address regression cannot be hidden by the native transaction builder.
+    const BROWSER_INSTRUCTIONS: &str = r#"[
+      {"CallFunction":{"address":"bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee","function":"publish_anchor_v2","args":[
+        {"Literal":"784036376539393563646263303037373936376538656435356163366633336236633764663061333639393338623461343062633435653366653762323737386337"},
+        {"Literal":"6965736d6572616c6461"},
+        {"Literal":"78203565353065313763343031363832666233386462656133343961346332373133"},
+        {"Literal":"78327b22656c656374696f6e5f6964223a223565353065313763343031363832666233386462656133343961346332373133227d"}
+      ]}}
+    ]"#;
+
+    let instructions: Vec<Instruction> =
+        serde_json::from_str(BROWSER_INSTRUCTIONS).expect("browser instruction must deserialize");
+    let [Instruction::CallFunction {
+        address,
+        function,
+        args,
+    }] = instructions.as_slice()
+    else {
+        panic!("expected exactly one browser CallFunction instruction");
+    };
+
+    assert_eq!(
+        address,
+        &TemplateAddress::from_hex("bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee")
+            .expect("fixture address"),
+    );
+    assert_eq!(&**function, "publish_anchor_v2");
+    let values: Vec<String> = args
+        .iter()
+        .map(|arg| {
+            let bytes = arg.as_literal_bytes().expect("all four arguments are literals");
+            minicbor::decode(bytes).unwrap_or_else(|error| panic!("literal is CBOR text ({bytes:02x?}): {error}"))
+        })
+        .collect();
+    assert_eq!(
+        values,
+        [
+            "67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7",
+            "esmeralda",
+            "5e50e17c401682fb38dbea349a4c2713",
+            r#"{"election_id":"5e50e17c401682fb38dbea349a4c2713"}"#,
+        ],
+    );
 }

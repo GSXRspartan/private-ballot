@@ -114,7 +114,7 @@ describe("anchor bundle parsing", () => {
     assert.equal(instructions.length, 1);
     const call = instructions[0] as { CallFunction: Record<string, unknown> };
     const callFn = call.CallFunction;
-    assert.equal(callFn.address, ESMERALDA_V2_TEMPLATE_ADDRESS);
+    assert.equal(callFn.address, ESMERALDA_V2_TEMPLATE_ADDRESS.slice("template_".length));
     assert.equal(callFn.function, "publish_anchor_v2");
     const args = callFn.args as Array<{ Literal: string }>;
     assert.equal(args.length, 4);

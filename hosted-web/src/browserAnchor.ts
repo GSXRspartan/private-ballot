@@ -13,8 +13,8 @@ import { anchorDeploymentConfig, deploymentForNetwork } from "../../gui/src/wall
 import { assessAnchorWorkflow, phaseLabel } from "../../gui/src/wallet/anchorWorkflow.ts";
 import { networkVerdict } from "../../gui/src/wallet/network.ts";
 import { browserRecoveryStore, type AnchorRecoveryRecord } from "../../gui/src/wallet/recoveryStore.ts";
-import type { WindowTariProvider } from "../../gui/src/wallet/provider.ts";
-import type { TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
+import { hasCapability, type WindowTariProvider } from "../../gui/src/wallet/provider.ts";
+import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
 import {
   adapterForKind,
   defaultPublishDriver,
@@ -31,9 +31,10 @@ const TRANSACTION_ID = /^[0-9a-f]{64}$/;
 
 type WalletConnection = {
   kind: BrowserWalletKind;
+  adapter: WindowTariProvider;
   accounts: string[];
   network: string;
-  capabilities: string[];
+  capabilities: TariCapabilities;
 };
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): HTMLElementTagNameMap[K] {
@@ -60,8 +61,12 @@ export function submittedTransactionId(summary: TransactionRequestSummary): stri
   return typeof value === "string" && TRANSACTION_ID.test(value) ? value : null;
 }
 
-function missingCapability(capabilities: string[]): string | null {
-  return REQUIRED_CAPABILITIES.find((capability) => !capabilities.includes(capability)) ?? null;
+function missingCapability(capabilities: TariCapabilities): string | null {
+  return REQUIRED_CAPABILITIES.find((capability) => !hasCapability(capabilities, capability)) ?? null;
+}
+
+function sameAccounts(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((account, index) => account === right[index]);
 }
 
 /** Mounts only after the existing organizer lifecycle has finalized the election. */
@@ -104,17 +109,24 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     if (!wallet) throw new Error("Connect a Tari wallet first.");
     const deployment = deploymentError();
     if (deployment) throw new Error(deployment);
-    const adapter = adapterForKind(wallet.kind, window);
-    const accounts = await adapter.connect();
-    if (accounts.length === 0) throw new Error("The wallet did not authorize an account.");
+    const adapter = wallet.adapter;
+    const accounts = await adapter.getAccounts();
+    if (accounts.length === 0 || !sameAccounts(accounts, wallet.accounts)) {
+      wallet = null;
+      throw new Error("The wallet's authorized account changed. Reconnect before any anchor action.");
+    }
     const capabilities = await adapter.getCapabilities();
-    const missing = missingCapability(capabilities.capabilities);
+    const missing = missingCapability(capabilities);
     if (missing) throw new Error(`The wallet does not support required capability ${missing}.`);
     const network = (await adapter.getNetwork()).network;
+    if (network !== wallet.network) {
+      wallet = null;
+      throw new Error("The wallet network changed. Reconnect before any anchor action.");
+    }
     if (networkVerdict(bundle.network, network).kind !== "match") {
       throw new Error("The wallet network does not match the bundle network.");
     }
-    wallet = { kind: wallet.kind, accounts, network, capabilities: capabilities.capabilities };
+    wallet = { ...wallet, accounts, network, capabilities };
     return adapter;
   }
 
@@ -216,14 +228,14 @@ export function mountBrowserAnchorPanel(root: HTMLElement): void {
     busy = true;
     render();
     try {
-      const adapter = adapterForKind(kind, window);
+      const adapter = adapterForKind(kind, window).pin();
       const accounts = await adapter.connect();
       if (accounts.length === 0) throw new Error("The wallet did not authorize an account.");
       const capabilities = await adapter.getCapabilities();
-      const missing = missingCapability(capabilities.capabilities);
+      const missing = missingCapability(capabilities);
       if (missing) throw new Error(`The wallet does not support required capability ${missing}.`);
       const network = (await adapter.getNetwork()).network;
-      wallet = { kind, accounts, network, capabilities: capabilities.capabilities };
+      wallet = { kind, adapter, accounts, network, capabilities };
       adapter.onAccountsChanged(() => {
         wallet = null;
         status = "Wallet accounts changed. Reconnect before any anchor action.";

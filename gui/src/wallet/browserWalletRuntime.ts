@@ -89,7 +89,7 @@ export function createBrowserWalletRuntime(
       }
     },
     async connect(kind, onEntry) {
-      const adapter = adapterFor(kind);
+      const adapter = adapterFor(kind).pin();
       const base = freshEntry(kind);
       onEntry(kind, connectStarted(base));
       try {

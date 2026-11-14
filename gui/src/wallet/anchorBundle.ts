@@ -159,7 +159,9 @@ export function buildAnchorInstructions(bundle: AnchorBundleV1): unknown[] {
   return [
     {
       CallFunction: {
-        address: bundle.template.address,
+        // The display form is `template_<hex>`, while the transaction schema
+        // serializes TemplateAddress itself as the bare 32-byte hex value.
+        address: bundle.template.address.slice("template_".length),
         function: bundle.template.function,
         args: bundleAnchorArgsAsLiterals(bundle).map((value) => ({
           Literal: encodeCborTextLiteral(value),

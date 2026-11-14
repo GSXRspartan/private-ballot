@@ -138,7 +138,8 @@ describe("probe", () => {
     const provider = fakeProvider({
       handlers: {
         tari_getCapabilities: () => ({
-          capabilities: ["transactionRequests", "transactionResultLookup"],
+          transactionRequests: true,
+          transactionResultLookup: true,
         }),
       },
     });
@@ -148,10 +149,10 @@ describe("probe", () => {
     const probe = await adapter.probe();
     assert.equal(probe.available, true);
     assert.equal(probe.state, "available");
-    assert.deepEqual(probe.capabilities?.capabilities, [
-      "transactionRequests",
-      "transactionResultLookup",
-    ]);
+    assert.deepEqual(probe.capabilities, {
+      transactionRequests: true,
+      transactionResultLookup: true,
+    });
   });
 
   it("treats 4100 as available but needing connect, never as absent", async () => {
@@ -192,7 +193,7 @@ describe("probe", () => {
   });
 
   it("surfaces a malformed capabilities answer as unavailable, never a throw", async () => {
-    for (const bad of [{}, null, [], { capabilities: "nope" }, { capabilities: [42] }]) {
+    for (const bad of [{}, null, [], { capabilities: ["transactionRequests"] }, { transactionRequests: true }, { transactionRequests: "true", transactionResultLookup: true }]) {
       const provider = fakeProvider({
         handlers: { tari_getCapabilities: () => bad },
       });
@@ -208,6 +209,29 @@ describe("probe", () => {
 });
 
 describe("connect", () => {
+  it("pins one discovered provider for the operation", async () => {
+    const first = fakeProvider({
+      handlers: { tari_requestAccounts: () => ["component_first"] },
+    });
+    const second = fakeProvider({
+      handlers: { tari_requestAccounts: () => ["component_second"] },
+    });
+    let current: TariProviderLike = first;
+    const adapter = windowTariProvider("sapient", "Sapient", () => ({ provider: current, reason: null })).pin();
+    current = second;
+    assert.deepEqual(await adapter.connect(), ["component_first"]);
+  });
+
+  it("reads already-authorized accounts without a second connection prompt", async () => {
+    const provider = fakeProvider({
+      handlers: { tari_getAccounts: () => ["component_abc"] },
+    });
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(provider)),
+    ).pin();
+    assert.deepEqual(await adapter.getAccounts(), ["component_abc"]);
+  });
+
   it("requests accounts and returns them", async () => {
     let requestCount = 0;
     const provider = fakeProvider({
@@ -266,9 +290,9 @@ describe("connect", () => {
 });
 
 describe("getNetwork and getCapabilities", () => {
-  it("returns the wallet network answer", async () => {
+  it("returns the published string wallet network answer", async () => {
     const provider = fakeProvider({
-      handlers: { tari_getNetwork: () => ({ network: "mainnet" }) },
+      handlers: { tari_getNetwork: () => "mainnet" },
     });
     const adapter = windowTariProvider("sapient", "Sapient", () =>
       sapientDiscovery(scopeWith(provider)),
@@ -286,11 +310,12 @@ describe("getNetwork and getCapabilities", () => {
     await assert.rejects(adapter.getNetwork(), /malformed network answer/);
   });
 
-  it("hasCapability checks the list", async () => {
+  it("hasCapability checks the published boolean fields", async () => {
     const provider = fakeProvider({
       handlers: {
         tari_getCapabilities: () => ({
-          capabilities: ["transactionRequests"],
+          transactionRequests: true,
+          transactionResultLookup: false,
         }),
       },
     });
