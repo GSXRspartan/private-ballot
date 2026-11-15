@@ -48,7 +48,6 @@ import {
   buildBundleFromDesktop,
   copyBundleToClipboard,
 } from "../wallet/anchorBundle";
-import { BrowserAnchorPublishPanel } from "./anchor/BrowserAnchorPublishPanel";
 import { boundArchiveResult } from "../archive/archiveBinding";
 import {
   canShowTally,
@@ -3093,7 +3092,16 @@ export function ManageElection() {
             non-binding — the independently verified offline archive remains authoritative.
           </Notice>
 
-          {!isDesktopShell() && <BrowserAnchorPublishPanel />}
+          {!isDesktopShell() && (
+            <Notice tone="warn">
+              <p>
+                Anchoring from a web browser is done on the hosted organizer's
+                Manage Election page, which is the only reviewed browser publish
+                path. Import the anchor bundle exported by the desktop
+                application there; this page cannot publish anchors.
+              </p>
+            </Notice>
+          )}
 
           {anchorLockedUntilVerifiedArchive && (
             <Notice tone="warn">

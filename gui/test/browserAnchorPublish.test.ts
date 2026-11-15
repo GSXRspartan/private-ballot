@@ -229,8 +229,9 @@ describe("recovery writer", () => {
 const MANAGE = readProjectFile("src/screens/ManageElection.tsx");
 const FLAT = MANAGE.replace(/\s+/g, " ");
 
-it("the browser publish panel renders only outside the desktop shell", () => {
-  assert.match(FLAT, /!isDesktopShell\(\) && <BrowserAnchorPublishPanel \/>/);
+it("the browser publish panel is replaced with a hosted-web pointer outside the desktop shell", () => {
+  assert.match(FLAT, /hosted organizer's Manage Election page/);
+  assert.match(FLAT, /this page cannot publish anchors/);
 });
 
 it("the desktop bundle export copies verified arguments to the clipboard", () => {
