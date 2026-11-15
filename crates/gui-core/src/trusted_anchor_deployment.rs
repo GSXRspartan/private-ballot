@@ -16,6 +16,7 @@ use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V1, ANCHOR_TEMPLATE_MODULE_V2,
     AnchorTemplateBindingV1, AnchorTemplateBindingV2,
 };
+use tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS;
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 
 use crate::error::GuiCoreError;
@@ -49,6 +50,15 @@ pub const TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2: &str = "trusted-ootle-anchor-dep
 /// - the earlier six-argument WASM (`e0bdf9c4…`).
 pub const TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX: &str =
     "6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830";
+/// The exact Ootle network name the V2 deployment lock accepts. Mainnet is the
+/// only release-supported network; the historical pre-reset Esmeralda
+/// deployment is evidence-only and can never satisfy this lock.
+pub const TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK: &str = "mainnet";
+/// The exact template address the V2 lock accepts: the single `CURRENT`
+/// Mainnet entry of the checked-in release registry
+/// ([`tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS`]).
+/// Any other template — including the historical Esmeralda V2 deployment — is
+/// rejected at lock time and rejected again when a saved record is loaded.
 pub const TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1: &str = "BLAKE3-256";
 pub const MAX_TEMPLATE_WASM_BYTES_V1: usize = 16 * 1024 * 1024;
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -281,10 +291,19 @@ pub fn lock_trusted_ootle_deployment_v2(
     if request.template_artifact_digest_hex != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
+    // The lock is exact: only the reviewed Mainnet network name and the
+    // registry-`CURRENT` Mainnet V2 template address can ever be locked.
+    let network = request.network.trim();
+    let template_address = request.template_address.trim();
+    if network != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK
+        || template_address != MAINNET_V2_TEMPLATE_ADDRESS
+    {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
     let deployment = GuiTrustedOotleDeploymentV2 {
         schema: TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2.to_owned(),
-        network: request.network.trim().to_owned(),
-        template_address: request.template_address.trim().to_owned(),
+        network: network.to_owned(),
+        template_address: template_address.to_owned(),
         template_artifact_digest_hex: crate::hex::to_lower_hex(&artifact_digest),
         template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
         template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
@@ -424,6 +443,8 @@ fn validate_saved_deployment_v2(
         || deployment.template_event_topic != trusted_ootle_deployment_event_topic_v2()
         || deployment.network.trim() != deployment.network
         || deployment.template_address.trim() != deployment.template_address
+        || deployment.network != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK
+        || deployment.template_address != MAINNET_V2_TEMPLATE_ADDRESS
         || deployment.template_artifact_digest_hex
             != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX
     {

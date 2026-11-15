@@ -7,11 +7,13 @@ use serde_json::Value;
 use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V1, ANCHOR_TEMPLATE_MODULE_V1,
 };
+use tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS;
 use tari_cc_private_ballot_gui_core::{
     GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
     TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
-    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, inspect_template_wasm_v1,
+    load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
     lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
     template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
     trusted_ootle_deployment_path_v1, trusted_ootle_deployment_path_v2,
@@ -289,8 +291,8 @@ fn corrupt_or_unsupported_saved_record_fails_closed() {
 
 fn valid_v2_request() -> GuiTrustedOotleDeploymentLockRequestV2 {
     GuiTrustedOotleDeploymentLockRequestV2 {
-        network: "esmeralda".to_owned(),
-        template_address: format!("template_{}", "66".repeat(32)),
+        network: TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK.to_owned(),
+        template_address: MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
         template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
     }
 }
@@ -415,5 +417,70 @@ fn v2_lock_rejects_wrong_abi_or_artifact_digest() {
         )
         .expect("write V2 mutation");
         assert!(load_trusted_ootle_deployment_v2(dir.path()).is_err());
+    }
+}
+
+#[test]
+fn v2_lock_artifact_digest_matches_release_registry_current_entry() {
+    // Drift guard: the lock constant and the checked-in release registry must
+    // keep naming the same reviewed Mainnet V2 artifact.
+    assert_eq!(
+        TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3
+    );
+}
+
+#[test]
+fn v2_lock_refuses_non_mainnet_network_and_historical_template() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let wrong_network = GuiTrustedOotleDeploymentLockRequestV2 {
+        network: "esmeralda".to_owned(),
+        template_address: MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+    };
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &wrong_network)
+            .expect_err("esmeralda lock is refused")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+
+    let historical_template = GuiTrustedOotleDeploymentLockRequestV2 {
+        network: TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK.to_owned(),
+        template_address: format!("template_{}", "bb".repeat(32)),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+    };
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &historical_template)
+            .expect_err("non-current template lock is refused")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert!(!trusted_ootle_deployment_path_v2(dir.path()).exists());
+}
+
+#[test]
+fn v2_saved_record_refuses_non_mainnet_identity() {
+    let dir = TempDir::new().expect("temp dir");
+    for (network, template_address) in [
+        ("esmeralda", MAINNET_V2_TEMPLATE_ADDRESS),
+        (TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee"),
+    ] {
+        fs::write(
+            trusted_ootle_deployment_path_v2(dir.path()),
+            format!(
+                r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2","network":"{network}","template_address":"{template_address}","template_artifact_digest_hex":"{digest}","template_module":"tari_private_ballot_anchor_v2","template_function":"publish_anchor_v2","template_event_topic":"tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2","locked_at_unix_ms":1}}"#,
+                digest = TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+            ),
+        )
+        .expect("write saved V2 record");
+        assert_eq!(
+            load_trusted_ootle_deployment_v2(dir.path())
+                .expect_err("saved record outside the exact Mainnet identity is refused")
+                .code(),
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+        );
+        fs::remove_file(trusted_ootle_deployment_path_v2(dir.path())).expect("remove record");
     }
 }

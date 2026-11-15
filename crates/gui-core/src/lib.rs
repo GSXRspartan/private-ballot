@@ -191,7 +191,7 @@ pub use trusted_anchor_deployment::{
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1,
     TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
     TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
-    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
     lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
     template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
     trusted_ootle_deployment_event_topic_v2, trusted_ootle_deployment_fixed_v1,
