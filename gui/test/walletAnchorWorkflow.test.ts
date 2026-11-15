@@ -301,4 +301,84 @@ describe("recovery store", () => {
       assert.equal(store.claim("bundle", "b".repeat(32), 12).kind, "busy", scenario.phase);
     }
   });
+
+  it("rejects saveOwned that violates phase/ID invariants without persisting", () => {
+    const map = new Map<string, string>();
+    let writeCount = 0;
+    const store = new AnchorRecoveryStore({
+      getItem: (key) => map.get(key) ?? null,
+      setItem: (key, value) => {
+        writeCount += 1;
+        map.set(key, value);
+      },
+      removeItem: (key) => map.delete(key),
+    });
+    const owner = "a".repeat(32);
+    // First, establish a valid creating_request record
+    assert.equal(store.reserve("bundle", owner, 10).kind, "claimed");
+    const originalBytes = map.get("bundle");
+    assert.ok(originalBytes);
+    const originalRecord = JSON.parse(originalBytes);
+    assert.equal(originalRecord.phase, "creating_request");
+
+    // Attempt to save an invalid transition: creating_request with requestId (violates invariant)
+    assert.throws(
+      () => store.saveOwned("bundle", owner, {
+        phase: "creating_request",
+        requestId: "req_1",
+        transactionId: null,
+      }, 11),
+      /violates phase\/ID invariants/
+    );
+    // Write should not have been called (no additional write)
+    assert.equal(writeCount, 1, "setItem must not be called for invalid save");
+    // Original bytes must be preserved exactly
+    assert.equal(map.get("bundle"), originalBytes, "original valid bytes must be unchanged");
+
+    // Attempt another invalid transition: submitted_awaiting_approval with transactionId (violates invariant)
+    assert.throws(
+      () => store.saveOwned("bundle", owner, {
+        phase: "submitted_awaiting_approval",
+        requestId: "req_1",
+        transactionId: "11".repeat(32),
+      }, 12),
+      /violates phase\/ID invariants/
+    );
+    assert.equal(writeCount, 1, "setItem must not be called for invalid save");
+    assert.equal(map.get("bundle"), originalBytes, "original valid bytes must be unchanged after second attempt");
+  });
+
+  it("rejects saveOwned with approved_submitted missing canonical transactionId", () => {
+    const map = new Map<string, string>();
+    let writeCount = 0;
+    const store = new AnchorRecoveryStore({
+      getItem: (key) => map.get(key) ?? null,
+      setItem: (key, value) => {
+        writeCount += 1;
+        map.set(key, value);
+      },
+      removeItem: (key) => map.delete(key),
+    });
+    const owner = "a".repeat(32);
+    assert.equal(store.reserve("bundle", owner, 10).kind, "claimed");
+    store.saveOwned("bundle", owner, {
+      phase: "submitted_awaiting_approval",
+      requestId: "req_1",
+      transactionId: null,
+    }, 11);
+    const originalBytes = map.get("bundle");
+    assert.ok(originalBytes);
+
+    // approved_submitted requires null requestId AND valid 64-hex transactionId
+    assert.throws(
+      () => store.saveOwned("bundle", owner, {
+        phase: "approved_submitted",
+        requestId: null,
+        transactionId: "short",
+      }, 12),
+      /violates phase\/ID invariants/
+    );
+    assert.equal(writeCount, 2, "setItem must not be called for invalid save");
+    assert.equal(map.get("bundle"), originalBytes, "original valid bytes must be unchanged");
+  });
 });

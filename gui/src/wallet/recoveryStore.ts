@@ -238,6 +238,11 @@ export class AnchorRecoveryStore {
       leaseExpiresAtMs: nowMs + LEASE_MS,
       updatedAtMs: nowMs,
     };
+    // Validate ALL invariants before any persistence. If invalid, do NOT call setItem
+    // and preserve the original stored bytes.
+    if (!validRecord(next)) {
+      throw new Error("the anchor state violates phase/ID invariants and cannot be saved");
+    }
     this.storage.setItem(bundleKey, JSON.stringify(next));
     const confirmed = this.loadState(bundleKey);
     if (confirmed.kind !== "record" || confirmed.record.ownerToken !== ownerToken || confirmed.record.phase !== next.phase) {

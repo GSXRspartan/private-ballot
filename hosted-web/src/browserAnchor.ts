@@ -484,7 +484,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     } else if (recovery) {
       actions.append(action("Check saved request / transaction", checkRecovery, busy));
       if (approvedRequestId) actions.append(action("Submit saved approved request once", () => submitApproved(approvedRequestId!), busy));
-    } else if (bundle && wallet && deploymentError() === null && recoveryState.kind !== "corrupt") {
+    } else if (bundle && wallet && deploymentError() === null) {
       const phase = assessAnchorWorkflow({ bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet.network, recovery: null });
       if (phase.kind === "ready") actions.append(action("Ask wallet to publish anchor", publish, busy));
     }
