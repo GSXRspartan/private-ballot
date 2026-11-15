@@ -210,10 +210,16 @@ export function verifyV2AnchorExecutionResult(
     [ANCHOR_EVENT_PUBLIC_SUMMARY_KEY_V2, expectedPayload.publicSummary],
   ];
   for (const [key, value] of expected) {
-    if (candidate.metadata.filter((entry) => entry.key === key).length !== 1) {
+    const entries = candidate.metadata.filter((entry) => entry.key === key);
+    if (entries.length !== 1) {
       throw new VerificationFailure("malformed_anchor_event");
     }
-    if (!candidate.metadata.some((entry) => entry.key === key && entry.value === value)) {
+    // The matching anchor event's fields are strictly typed strings. A number
+    // or any other decoded value is never string-compared or normalized.
+    if (typeof entries[0].value !== "string") {
+      throw new VerificationFailure("malformed_anchor_event");
+    }
+    if (entries[0].value !== value) {
       throw new VerificationFailure(
         key === ANCHOR_EVENT_DIGEST_KEY_V2 ? "wrong_anchor_digest" : "malformed_anchor_event",
       );

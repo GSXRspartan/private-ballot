@@ -4,7 +4,13 @@ export type AnchorResultVariant = "accept" | "fee_only" | "reject";
 
 export interface DecodedEventMetadataEntry {
   key: string;
-  value: string;
+  /**
+   * The decoded metadata value with its type preserved. Unrelated engine/fee
+   * events may legally carry numbers, bytes, or any other CBOR value; only the
+   * matching V2 anchor event is required to hold the exact four text values,
+   * and the verifier enforces that strictly (fail-closed).
+   */
+  value: unknown;
 }
 
 export interface DecodedExecutionEvent {
@@ -69,9 +75,48 @@ function toHex(bytes: Uint8Array): string {
 
 const METADATA_TAG = 129;
 
+function bytesToValue(bytes: Uint8Array): Uint8Array {
+  return bytes.slice();
+}
+
+/**
+ * Preserves the decoded CBOR value's type. Metadata on unrelated events is
+ * never coerced into strings: numbers stay numbers, bytes stay bytes, and
+ * anything unexpected keeps a typed representation.
+ */
+export function cborNodeToValue(node: CborNode): unknown {
+  switch (node.type) {
+    case "uint":
+    case "negint":
+      return node.value;
+    case "bytes":
+      return bytesToValue(node.value as Uint8Array);
+    case "text":
+      return node.value;
+    case "array":
+      return node.children.map(cborNodeToValue);
+    case "map": {
+      const out: Record<string, unknown> = {};
+      for (const entry of node.entries) {
+        const key = entry.key.type === "text"
+          ? entry.key.value as string
+          : entry.key.type === "bytes"
+          ? `cbor:${toHex(entry.key.value as Uint8Array)}`
+          : `cbor:${JSON.stringify(entry.key.value)}`;
+        out[key] = cborNodeToValue(entry.value);
+      }
+      return out;
+    }
+    case "tag":
+      return { tag: node.tag, value: cborNodeToValue(node.children[0]) };
+    case "simple":
+    case "float":
+      return node.value;
+  }
+}
+
 function decodeMetadata(
   node: CborNode,
-  bytes: Uint8Array,
 ): DecodedEventMetadataEntry[] {
   expectType(node, "tag", "event metadata");
   if (node.tag !== METADATA_TAG) {
@@ -84,13 +129,7 @@ function decodeMetadata(
   const metadata: DecodedEventMetadataEntry[] = [];
   for (const entry of map.entries) {
     const key = expectText(entry.key, "event metadata key");
-    let value: string;
-    if (entry.value.type === "text") {
-      value = entry.value.value as string;
-    } else {
-      value = toHex(bytes.subarray(entry.value.rawStart, entry.value.rawEnd));
-    }
-    metadata.push({ key, value });
+    metadata.push({ key, value: cborNodeToValue(entry.value) });
   }
   return metadata;
 }
@@ -128,12 +167,11 @@ function decodeTransactionResult(node: CborNode): AnchorResultVariant {
 function decodeEvent(
   node: CborNode,
   eventIndex: number,
-  bytes: Uint8Array,
 ): DecodedExecutionEvent {
   const fields = expectArray(node, 4, "event");
   const templateAddressHex = expectBytes32(fields[1], "event template address");
   const topic = expectText(fields[2], "event topic");
-  const metadata = decodeMetadata(fields[3], bytes);
+  const metadata = decodeMetadata(fields[3]);
   return { eventIndex, templateAddressHex, topic, metadata };
 }
 
@@ -166,7 +204,7 @@ export function decodeExecuteResultCbor(bytes: Uint8Array): DecodedExecuteResult
     throw new ExecutionResultDecodeError("expected events to be an array");
   }
   const events = finalize[1].children.map((node, index) =>
-    decodeEvent(node, index, bytes),
+    decodeEvent(node, index),
   );
   const resultVariant = decodeTransactionResult(finalize[3]);
   const epoch = decodeEpoch(top[2]);
@@ -202,6 +240,12 @@ export function decodeExecuteResultBase64(value: string): DecodedExecuteResult {
  * best-effort JSON mapper: only the pinned `ExecuteResult` fields needed for
  * the canonical verifier are accepted, and fee-only/reject variants remain
  * terminal failures.
+ *
+ * Event metadata values keep whatever type the BOR decoder produced. Unrelated
+ * engine/fee events may legally carry numbers (e.g. `std.vault.pay_fee.amount`)
+ * and must not fail the whole result; only the matching V2 anchor event is
+ * required to hold the exact four text values, which the canonical verifier
+ * checks strictly.
  */
 export function decodeExecuteResultJson(value: unknown): DecodedExecuteResult {
   const root = expectJsonRecord(value, "decoded execution result");
@@ -216,7 +260,7 @@ export function decodeExecuteResultJson(value: unknown): DecodedExecuteResult {
     const payload = expectJsonRecord(event.payload, "decoded event metadata");
     const metadata = Object.entries(payload).map(([key, entry]) => ({
       key,
-      value: expectJsonText(entry, "decoded event metadata value"),
+      value: entry,
     }));
     return { eventIndex, templateAddressHex, topic, metadata };
   });

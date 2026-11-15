@@ -122,8 +122,9 @@ describe("execute result decoding", () => {
     ]);
     const engine = decoded.events[1];
     assert.equal(engine.topic, "std.vault.pay_fee");
+    // Native CBOR types stay native: the pay_fee amount decodes to a number.
     assert.deepEqual(engine.metadata, [
-      { key: "amount", value: "187b" },
+      { key: "amount", value: 123 },
       { key: "note", value: "engine event" },
     ]);
   });

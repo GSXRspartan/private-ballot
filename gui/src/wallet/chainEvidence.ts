@@ -1,10 +1,16 @@
 import type { WindowTariProvider } from "./provider.ts";
 import {
   verifyV2AnchorTransaction,
+  VerificationFailure,
   type AnchorVerificationOutcome,
   type ExpectedAnchorEventPayload,
   type ExpectedAnchorTemplate,
 } from "./verifyReceipt.ts";
+import {
+  decodeTransactionReceiptBase64,
+  verifyDurableTransactionReceipt,
+  TransactionReceiptDecodeError,
+} from "./transactionReceipt.ts";
 
 const CHAIN_PREFIX = "/chain";
 
@@ -18,14 +24,44 @@ function sameEvidence(left: Extract<AnchorVerificationOutcome, { kind: "verified
     left.evidence.eventIndex === right.evidence.eventIndex;
 }
 
-function receiptEnvelope(value: unknown): unknown {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if ("result" in record) return value;
-  if (typeof record.transaction_result === "object" && record.transaction_result !== null) {
-    return record.transaction_result;
+/**
+ * Decodes and verifies the durable receipt response. The Mainnet indexer
+ * returns `{ "receipt": "<base64 CBOR TransactionReceipt>" }` (HTTP 200) even
+ * when the transient transaction-result route answers 404. The receipt is
+ * decoded and verified in the pinned v0.53.x wire format; a FeeIntentCommit
+ * outcome is never a full anchor success. A legacy response carrying a
+ * canonical result envelope instead is still verified through the same
+ * canonical verifier, and a receipt response with neither shape is terminal.
+ */
+function verifyDurableReceiptResponse(
+  transactionId: string,
+  template: ExpectedAnchorTemplate,
+  payload: ExpectedAnchorEventPayload,
+  json: unknown,
+): AnchorVerificationOutcome {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    return terminal("the durable transaction receipt response is not an object");
   }
-  return null;
+  const record = json as Record<string, unknown>;
+  const receiptField = record.receipt;
+  if (typeof receiptField === "string") {
+    try {
+      const decoded = decodeTransactionReceiptBase64(receiptField);
+      return { kind: "verified", evidence: verifyDurableTransactionReceipt(transactionId, template, payload, decoded) };
+    } catch (error) {
+      if (error instanceof TransactionReceiptDecodeError) {
+        return terminal(error.message);
+      }
+      if (error instanceof VerificationFailure) {
+        return { kind: "terminal_failure", failure: error.kind, message: error.message };
+      }
+      throw error;
+    }
+  }
+  if ("result" in record) {
+    return verifyV2AnchorTransaction(transactionId, template, payload, record);
+  }
+  return terminal("the durable transaction receipt has no canonical result envelope");
 }
 
 async function readJson(path: string): Promise<{ status: number; json: unknown | null }> {
@@ -42,6 +78,9 @@ async function readJson(path: string): Promise<{ status: number; json: unknown |
  * Requires one wallet result plus one independent read-only chain response.
  * A transient result endpoint can be replaced by the durable receipt endpoint;
  * any finalized conflicting or malformed response is terminal and fail-closed.
+ * The wallet result, the transient result, and the durable receipt must all
+ * agree; disagreement between any of them is terminal. Local verified state is
+ * never accepted as a substitute for chain evidence.
  */
 export async function verifyBrowserAnchorEvidence(
   adapter: WindowTariProvider,
@@ -73,9 +112,8 @@ export async function verifyBrowserAnchorEvidence(
     evidence.push(outcome);
   }
   if (receipt.status === 200) {
-    const envelope = receiptEnvelope(receipt.json);
-    if (envelope === null) return terminal("the durable transaction receipt has no canonical result envelope");
-    const outcome = verifyV2AnchorTransaction(transactionId, template, payload, envelope);
+    if (receipt.json === null) return terminal("the durable receipt response is not JSON");
+    const outcome = verifyDurableReceiptResponse(transactionId, template, payload, receipt.json);
     if (outcome.kind !== "verified") return outcome;
     evidence.push(outcome);
   }
