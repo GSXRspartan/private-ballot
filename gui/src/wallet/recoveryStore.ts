@@ -67,12 +67,29 @@ function validStringOrNull(value: unknown): value is string | null {
 function validRecord(value: unknown): value is AnchorRecoveryRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value as Partial<AnchorRecoveryRecord>;
-  return isPhase(record.phase) &&
-    validStringOrNull(record.requestId) &&
-    validStringOrNull(record.transactionId) &&
-    typeof record.ownerToken === "string" && record.ownerToken.length >= 16 && record.ownerToken.length <= 256 &&
-    Number.isSafeInteger(record.leaseExpiresAtMs) && (record.leaseExpiresAtMs ?? 0) >= 0 &&
-    Number.isSafeInteger(record.updatedAtMs) && (record.updatedAtMs ?? 0) >= 0;
+  if (!isPhase(record.phase)) return false;
+  if (!validStringOrNull(record.requestId)) return false;
+  if (!validStringOrNull(record.transactionId)) return false;
+  if (typeof record.ownerToken !== "string" || record.ownerToken.length < 16 || record.ownerToken.length > 256) return false;
+  if (!Number.isSafeInteger(record.leaseExpiresAtMs) || (record.leaseExpiresAtMs ?? 0) < 0) return false;
+  if (!Number.isSafeInteger(record.updatedAtMs) || (record.updatedAtMs ?? 0) < 0) return false;
+
+  // Cross-field phase/ID validation: reject mixed or impossible states.
+  switch (record.phase) {
+    case "creating_request":
+      if (record.requestId !== null || record.transactionId !== null) return false;
+      break;
+    case "submitted_awaiting_approval":
+    case "submit_in_flight":
+      if (record.requestId === null || record.transactionId !== null) return false;
+      break;
+    case "approved_submitted":
+    case "verifying":
+    case "verified":
+      if (record.requestId !== null || typeof record.transactionId !== "string" || !TRANSACTION_ID.test(record.transactionId)) return false;
+      break;
+  }
+  return true;
 }
 
 export class AnchorRecoveryStore {
