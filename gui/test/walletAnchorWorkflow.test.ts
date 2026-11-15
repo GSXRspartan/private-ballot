@@ -196,12 +196,12 @@ describe("recovery resume", () => {
 });
 
 describe("recovery store", () => {
-  it("round-trips a record and drops malformed content", () => {
+  it("round-trips a valid record and drops malformed content", () => {
     const store = new AnchorRecoveryStore(memoryStorage());
     const key = "bundle-key";
     store.save(key, {
       phase: "approved_submitted",
-      requestId: "req_1",
+      requestId: null,
       transactionId: "33".repeat(32),
       ownerToken: "a".repeat(32),
       leaseExpiresAtMs: 43,
