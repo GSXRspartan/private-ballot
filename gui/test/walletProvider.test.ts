@@ -602,3 +602,116 @@ describe("delayed provider injection", () => {
     assert.equal(await waitForTariInit({}, 20), false);
   });
 });
+
+describe("provider identity guard before money-moving calls", () => {
+  it("refuses to create a request after the page's wallet object was swapped", async () => {
+    // Built directly so the counters stay inspectable.
+    let createCalls = 0;
+    const pinned = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => {
+          createCalls += 1;
+          return { requestId: "req_pinned" };
+        },
+      },
+    });
+    const impostor = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => {
+          createCalls += 1;
+          return { requestId: "req_impostor" };
+        },
+      },
+    });
+    const holder: { tari?: unknown } = { tari: pinned };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = impostor;
+
+    await assert.rejects(
+      () => adapter.createTransactionRequest([]),
+      /changed while this operation was in progress/,
+    );
+    // Neither the pinned (stale) object nor the impostor is trusted.
+    assert.equal(createCalls, 0);
+  });
+
+  it("refuses to submit after the page's wallet object was swapped", async () => {
+    let submitCalls = 0;
+    const pinned = fakeProvider({
+      handlers: {
+        tari_submitTransactionRequest: () => {
+          submitCalls += 1;
+          return { transactionId: "tx_pinned" };
+        },
+      },
+    });
+    const impostor = fakeProvider({
+      handlers: {
+        tari_submitTransactionRequest: () => {
+          submitCalls += 1;
+          return { transactionId: "tx_impostor" };
+        },
+      },
+    });
+    const holder: { tari?: unknown } = { tari: pinned };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = impostor;
+
+    await assert.rejects(
+      () => adapter.submitTransactionRequest("req_1"),
+      /changed while this operation was in progress/,
+    );
+    assert.equal(submitCalls, 0);
+  });
+
+  it("proceeds when discovery still resolves the pinned provider", async () => {
+    const provider = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => ({ requestId: "req_1" }),
+      },
+    });
+    const holder: { tari?: unknown } = { tari: provider };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = provider;
+    const created = await adapter.createTransactionRequest([]);
+    assert.equal(created.requestId, "req_1");
+  });
+
+  it("keeps using the pinned reference when discovery finds nothing (injection race)", async () => {
+    const provider = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => ({ requestId: "req_1" }),
+      },
+    });
+    const holder: { tari?: unknown } = { tari: provider };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = undefined;
+    const created = await adapter.createTransactionRequest([]);
+    assert.equal(created.requestId, "req_1");
+  });
+
+  it("never runs the guard when nothing was pinned", async () => {
+    const provider = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => ({ requestId: "req_1" }),
+      },
+    });
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(provider)),
+    );
+    const created = await adapter.createTransactionRequest([]);
+    assert.equal(created.requestId, "req_1");
+  });
+});

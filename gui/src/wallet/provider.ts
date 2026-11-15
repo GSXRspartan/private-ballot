@@ -140,6 +140,26 @@ export function windowTariProvider(
     return pinnedProvider ?? resolve();
   }
 
+  /**
+   * Re-runs discovery right before a money-moving call and refuses to
+   * continue when the page now hosts a different wallet object than the one
+   * the user pinned and connected to. A provider swap mid-flow means either
+   * the real extension re-injected or an impostor displaced it; in both cases
+   * the only safe action is to stop and make the user restart the flow.
+   */
+  function ensurePinnedProviderIsCurrent(operation: string): void {
+    if (pinnedProvider === null) {
+      return;
+    }
+    const found = discover();
+    if (found.provider !== null && found.provider !== pinnedProvider) {
+      throw new WalletProviderError(
+        `${operation} was cancelled: the Tari wallet on this page changed while this operation was in progress; reload the page and start again`,
+        null,
+      );
+    }
+  }
+
   function accountsAnswer(answer: unknown): string[] {
     if (!Array.isArray(answer) || !answer.every((a) => typeof a === "string" && a.length > 0)) {
       throw new WalletProviderError(
@@ -283,6 +303,7 @@ export function windowTariProvider(
       instructions: unknown,
       maxFee?: unknown,
     ): Promise<CreateTransactionRequestResult> {
+      ensurePinnedProviderIsCurrent("creating the transaction request");
       const provider = get();
       const params: Record<string, unknown> = {
         kind: "instructions",
@@ -351,6 +372,7 @@ export function windowTariProvider(
     async submitTransactionRequest(
       requestId,
     ): Promise<SubmitTransactionRequestResult> {
+      ensurePinnedProviderIsCurrent("submitting the transaction request");
       const provider = get();
       let answer: unknown;
       try {
