@@ -16,7 +16,10 @@ use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V1, ANCHOR_TEMPLATE_MODULE_V2,
     AnchorTemplateBindingV1, AnchorTemplateBindingV2,
 };
-use tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS;
+use tari_cc_private_ballot_deployment_registry::{
+    DeploymentRegistry, DeploymentStatus, MAINNET_V2_ARTIFACT_BLAKE3, MAINNET_V2_TEMPLATE_ADDRESS,
+    released_v2_deployment_registry,
+};
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 
 use crate::error::GuiCoreError;
@@ -276,7 +279,9 @@ pub fn load_trusted_ootle_deployment_v2(
 }
 
 /// Creates the independent V2 deployment lock. The immutable V2 ABI is
-/// derived here, never supplied by the GUI.
+/// derived here, never supplied by the GUI. The lock must match the unique
+/// `CURRENT` V2 deployment for the requested network as resolved by the
+/// checked-in release registry.
 pub fn lock_trusted_ootle_deployment_v2(
     app_data_dir: &Path,
     request: &GuiTrustedOotleDeploymentLockRequestV2,
@@ -291,19 +296,36 @@ pub fn lock_trusted_ootle_deployment_v2(
     if request.template_artifact_digest_hex != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
-    // The lock is exact: only the reviewed Mainnet network name and the
-    // registry-`CURRENT` Mainnet V2 template address can ever be locked.
-    let network = request.network.trim();
-    let template_address = request.template_address.trim();
-    if network != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK
-        || template_address != MAINNET_V2_TEMPLATE_ADDRESS
-    {
+    // Resolve the unique Current deployment for the requested network from the
+    // checked-in release registry. This enforces: exact network match, single
+    /// Current entry, correct ABI, correct template address, and correct artifact
+    /// digest. Historical (non-Current) deployments are rejected.
+    let registry = released_v2_deployment_registry();
+    let entry = registry
+        .resolve_current(
+            &request.network.trim(),
+            "TariPrivateBallotAnchorV2",
+            Some(TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX),
+        )
+        .map_err(|e| match e {
+            tari_cc_private_ballot_deployment_registry::RegistryError::NoCurrentDeployment
+            | tari_cc_private_ballot_deployment_registry::RegistryError::MultipleCurrentDeployments
+            | tari_cc_private_ballot_deployment_registry::RegistryError::NetworkMismatch
+            | tari_cc_private_ballot_deployment_registry::RegistryError::AbiMismatch
+            | tari_cc_private_ballot_deployment_registry::RegistryError::HashMismatch => {
+                GuiCoreError::trusted_ootle_deployment_invalid()
+            }
+            _ => GuiCoreError::trusted_ootle_deployment_invalid(),
+        })?;
+    // The registry resolution already guarantees the template address and digest
+    // match the unique Current entry. Verify the request matches exactly.
+    if request.template_address.trim() != entry.template_address {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
     let deployment = GuiTrustedOotleDeploymentV2 {
         schema: TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2.to_owned(),
-        network: network.to_owned(),
-        template_address: template_address.to_owned(),
+        network: request.network.trim().to_owned(),
+        template_address: request.template_address.trim().to_owned(),
         template_artifact_digest_hex: crate::hex::to_lower_hex(&artifact_digest),
         template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
         template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
@@ -443,11 +465,27 @@ fn validate_saved_deployment_v2(
         || deployment.template_event_topic != trusted_ootle_deployment_event_topic_v2()
         || deployment.network.trim() != deployment.network
         || deployment.template_address.trim() != deployment.template_address
-        || deployment.network != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK
-        || deployment.template_address != MAINNET_V2_TEMPLATE_ADDRESS
         || deployment.template_artifact_digest_hex
             != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX
     {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
+    // Additionally, validate against the release registry: the saved deployment
+    // must correspond to the unique Current entry for its network. If the
+    // registry no longer has this deployment as Current (e.g., it was
+    // superseded), the saved lock is rejected.
+    let registry = released_v2_deployment_registry();
+    let entry = registry
+        .resolve_current(
+            &deployment.network,
+            "TariPrivateBallotAnchorV2",
+            Some(TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX),
+        )
+        .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
+    // The template address in the saved deployment must match the Current
+    // entry's template address. A saved lock with a superseded/historical
+    // template address is rejected.
+    if deployment.template_address != entry.template_address {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
     OotleNetworkIdV1::new(deployment.network.clone())
