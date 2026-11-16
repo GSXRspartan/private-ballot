@@ -3489,6 +3489,36 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     ).await;
     assert_eq!(saltered, axum::http::StatusCode::CONFLICT, "{valtered}");
     assert_eq!(valtered["code"], "transport_binding_required");
+    // A different *canonical* binding with the same election and accepted
+    // count cannot win a first-write race: its accepted digest set is not the
+    // authenticated history held by Hosted.
+    let (same_count_different_binding, _) =
+        authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_c.clone()]);
+    let (sdifferent, vdifferent) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&same_count_different_binding), "transport_descriptor_cbor_hex": hex_encode(&descriptor)}).to_string()),
+        Some(&secret),
+    ).await;
+    assert_eq!(sdifferent, axum::http::StatusCode::CONFLICT, "{vdifferent}");
+    assert_eq!(vdifferent["code"], "transport_binding_required");
+    let mut altered_descriptor = descriptor.clone();
+    let descriptor_last = altered_descriptor.len() - 1;
+    altered_descriptor[descriptor_last] ^= 1;
+    let (sdescriptor, vdescriptor) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&binding), "transport_descriptor_cbor_hex": hex_encode(&altered_descriptor)}).to_string()),
+        Some(&secret),
+    ).await;
+    assert_eq!(
+        sdescriptor,
+        axum::http::StatusCode::CONFLICT,
+        "{vdescriptor}"
+    );
+    assert_eq!(vdescriptor["code"], "transport_binding_required");
     let (sbinding, vbinding) = organizer_call(
         &public,
         "POST",
