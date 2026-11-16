@@ -33,6 +33,7 @@ import {
   anchorFormStorageKey,
   applyConnectedWallet,
   clearAnchorFormState,
+  DEFAULT_MAINNET_INDEXER_ENDPOINT,
   defaultAnchorFormState,
   loadAnchorFormState,
   saveAnchorFormState,
@@ -194,12 +195,12 @@ export function ManageElection() {
     useState<boolean | null>(null);
   const [anchorSignerMode, setAnchorSignerMode] =
     useState<AnchorSignerMode>(DEFAULT_ANCHOR_SIGNER_MODE);
-  const [anchorNetwork, setAnchorNetwork] = useState("esmeralda");
+  const [anchorNetwork, setAnchorNetwork] = useState("mainnet");
   const [anchorWalletdEndpoint, setAnchorWalletdEndpoint] = useState(
     "http://127.0.0.1:5100",
   );
   const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
-    "https://ootle-indexer-a.tari.com/",
+    DEFAULT_MAINNET_INDEXER_ENDPOINT,
   );
   // Per-network published V2 event-template deployment. The operator supplies
   // only the address and (optionally) an artifact digest override; the backend

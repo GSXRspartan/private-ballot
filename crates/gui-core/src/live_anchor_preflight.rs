@@ -470,7 +470,7 @@ fn validate_indexer_endpoint(raw: &str, network: Option<&OotleNetworkIdV1>) -> I
             return IndexerVerdict::Rejected(GuiFieldRejectionV1::new(
                 "GUI_LIVE_ANCHOR_INDEXER_ENDPOINT_INVALID",
                 "the indexer endpoint is not a valid http/https URL",
-                "enter the indexer URL, for example https://ootle-indexer-a.tari.com/",
+                "for Mainnet use https://indexer-a.ootle.tari.com/; for Esmeralda use https://esme-indexer-a.ootle.tari.com/",
             ));
         }
     };
@@ -481,7 +481,7 @@ fn validate_indexer_endpoint(raw: &str, network: Option<&OotleNetworkIdV1>) -> I
         Some(_) => IndexerVerdict::Rejected(GuiFieldRejectionV1::new(
             "GUI_LIVE_ANCHOR_INDEXER_NETWORK_MISMATCH",
             "the indexer endpoint is not allowed for the selected network",
-            "use a loopback indexer or the trusted hosted Esmeralda indexer for this network",
+            "use a loopback indexer or the current trusted hosted indexer for the selected network (Mainnet: indexer-a; Esmeralda: esme-indexer-a)",
         )),
         // Network could not be parsed; the format is valid but the allow-list
         // verdict is blocked on the network field being fixed first.
@@ -506,14 +506,14 @@ pub fn validate_indexer_endpoint_typed(
         GuiFieldRejectionV1::new(
             "GUI_LIVE_ANCHOR_INDEXER_ENDPOINT_INVALID",
             "the indexer endpoint is not a valid http/https URL",
-            "enter the indexer URL, for example https://ootle-indexer-a.tari.com/",
+            "for Mainnet use https://indexer-a.ootle.tari.com/; for Esmeralda use https://esme-indexer-a.ootle.tari.com/",
         )
     })?;
     if !indexer_endpoint_allowed_for_network_v1(network, &endpoint) {
         return Err(GuiFieldRejectionV1::new(
             "GUI_LIVE_ANCHOR_INDEXER_NETWORK_MISMATCH",
             "the indexer endpoint is not allowed for the selected network",
-            "use a loopback indexer or the trusted hosted Esmeralda indexer for this network",
+            "use a loopback indexer or the current trusted hosted indexer for the selected network (Mainnet: indexer-a; Esmeralda: esme-indexer-a)",
         ));
     }
     Ok(endpoint)

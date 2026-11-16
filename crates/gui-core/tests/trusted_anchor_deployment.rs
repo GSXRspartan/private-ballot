@@ -7,14 +7,18 @@ use serde_json::Value;
 use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V1, ANCHOR_TEMPLATE_MODULE_V1,
 };
-use tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS;
+use tari_cc_private_ballot_deployment_registry::{
+    DeploymentStatus, MAINNET_V2_TEMPLATE_ADDRESS, released_v2_deployment_registry,
+};
 use tari_cc_private_ballot_gui_core::{
     GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
     TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
     TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, inspect_template_wasm_v1,
     load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    load_trusted_ootle_deployment_v2_with_registry_for_test,
     lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
+    lock_trusted_ootle_deployment_v2_with_registry_for_test,
     template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
     trusted_ootle_deployment_path_v1, trusted_ootle_deployment_path_v2,
     unlock_trusted_ootle_deployment_v1,
@@ -519,12 +523,24 @@ fn v2_lock_rejects_historical_template_via_registry() {
 
 #[test]
 fn v2_lock_rejects_missing_current_in_registry() {
-    // This test is implicitly covered: if the registry had no Current entry
-    // for the requested network, resolve_current would return NoCurrentDeployment.
-    // Since our checked-in registry has a Current entry for mainnet, we can't
-    // easily test the missing case without modifying the registry. The logic
-    // is exercised by the resolver's unit tests in deployment-registry.
-    assert!(true);
+    let dir = TempDir::new().expect("temp dir");
+    let mut registry = released_v2_deployment_registry();
+    for entry in &mut registry.entries {
+        if entry.network == TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK {
+            entry.status = DeploymentStatus::Superseded;
+        }
+    }
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2_with_registry_for_test(
+            dir.path(),
+            &valid_v2_request(),
+            &registry,
+        )
+        .expect_err("no uniquely Current registry entry must refuse the lock")
+        .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert!(!trusted_ootle_deployment_path_v2(dir.path()).exists());
 }
 
 #[test]
@@ -556,8 +572,39 @@ fn v2_saved_lock_invalidated_when_registry_entry_no_longer_current() {
 
 #[test]
 fn v2_lock_rejects_multiple_current_in_registry() {
-    // The checked-in registry has exactly one Current entry per network.
-    // Testing multiple Current entries would require constructing a custom
-    // registry, which is covered by deployment-registry's own tests.
-    assert!(true);
+    let dir = TempDir::new().expect("temp dir");
+    lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+    let saved_bytes = fs::read(trusted_ootle_deployment_path_v2(dir.path()))
+        .expect("saved lock bytes");
+
+    let mut retired = released_v2_deployment_registry();
+    for entry in &mut retired.entries {
+        if entry.network == TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK {
+            entry.status = DeploymentStatus::Superseded;
+        }
+    }
+    assert_eq!(
+        load_trusted_ootle_deployment_v2_with_registry_for_test(dir.path(), &retired)
+            .expect_err("unchanged lock must fail after its deployment retires")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert_eq!(
+        fs::read(trusted_ootle_deployment_path_v2(dir.path())).expect("saved lock remains"),
+        saved_bytes
+    );
+
+    let mut ambiguous = released_v2_deployment_registry();
+    let duplicate = ambiguous.entries[0].clone();
+    ambiguous.entries.push(duplicate);
+    assert_eq!(
+        load_trusted_ootle_deployment_v2_with_registry_for_test(dir.path(), &ambiguous)
+            .expect_err("unchanged lock must fail with multiple Current deployments")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert_eq!(
+        fs::read(trusted_ootle_deployment_path_v2(dir.path())).expect("saved lock remains"),
+        saved_bytes
+    );
 }

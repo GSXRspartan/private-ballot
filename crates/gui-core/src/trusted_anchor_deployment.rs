@@ -17,8 +17,7 @@ use tari_cc_private_ballot_anchor_transport::{
     AnchorTemplateBindingV1, AnchorTemplateBindingV2,
 };
 use tari_cc_private_ballot_deployment_registry::{
-    DeploymentRegistry, DeploymentStatus, MAINNET_V2_ARTIFACT_BLAKE3, MAINNET_V2_TEMPLATE_ADDRESS,
-    released_v2_deployment_registry,
+    DeploymentRegistry, released_v2_deployment_registry,
 };
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 
@@ -262,6 +261,13 @@ pub fn unlock_trusted_ootle_deployment_v1(
 pub fn load_trusted_ootle_deployment_v2(
     app_data_dir: &Path,
 ) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    load_trusted_ootle_deployment_v2_with_registry(app_data_dir, &released_v2_deployment_registry())
+}
+
+fn load_trusted_ootle_deployment_v2_with_registry(
+    app_data_dir: &Path,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
     let path = trusted_ootle_deployment_path_v2(app_data_dir);
     if !path.exists() {
         return Ok(unlocked_status_v2());
@@ -270,12 +276,22 @@ pub fn load_trusted_ootle_deployment_v2(
         fs::read(&path).map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
     let deployment: GuiTrustedOotleDeploymentV2 = serde_json::from_slice(&bytes)
         .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
-    validate_saved_deployment_v2(&deployment)?;
+    validate_saved_deployment_v2_with_registry(&deployment, registry)?;
     Ok(GuiTrustedOotleDeploymentStatusV2 {
         locked: true,
         deployment: Some(deployment),
         fixed: trusted_ootle_deployment_fixed_v2(),
     })
+}
+
+/// Test-only registry injection for proving that an unchanged saved lock fails
+/// if release state no longer has exactly one matching `CURRENT` deployment.
+#[cfg(feature = "test-support")]
+pub fn load_trusted_ootle_deployment_v2_with_registry_for_test(
+    app_data_dir: &Path,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    load_trusted_ootle_deployment_v2_with_registry(app_data_dir, registry)
 }
 
 /// Creates the independent V2 deployment lock. The immutable V2 ABI is
@@ -286,9 +302,21 @@ pub fn lock_trusted_ootle_deployment_v2(
     app_data_dir: &Path,
     request: &GuiTrustedOotleDeploymentLockRequestV2,
 ) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    lock_trusted_ootle_deployment_v2_with_registry(
+        app_data_dir,
+        request,
+        &released_v2_deployment_registry(),
+    )
+}
+
+fn lock_trusted_ootle_deployment_v2_with_registry(
+    app_data_dir: &Path,
+    request: &GuiTrustedOotleDeploymentLockRequestV2,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
     let path = trusted_ootle_deployment_path_v2(app_data_dir);
     if path.exists() {
-        let _ = load_trusted_ootle_deployment_v2(app_data_dir)?;
+        let _ = load_trusted_ootle_deployment_v2_with_registry(app_data_dir, registry)?;
         return Err(GuiCoreError::trusted_ootle_deployment_locked());
     }
 
@@ -298,9 +326,8 @@ pub fn lock_trusted_ootle_deployment_v2(
     }
     // Resolve the unique Current deployment for the requested network from the
     // checked-in release registry. This enforces: exact network match, single
-    /// Current entry, correct ABI, correct template address, and correct artifact
-    /// digest. Historical (non-Current) deployments are rejected.
-    let registry = released_v2_deployment_registry();
+    // Current entry, correct ABI, correct template address, and correct artifact
+    // digest. Historical (non-Current) deployments are rejected.
     let entry = registry
         .resolve_current(
             &request.network.trim(),
@@ -332,7 +359,7 @@ pub fn lock_trusted_ootle_deployment_v2(
         template_event_topic: trusted_ootle_deployment_event_topic_v2(),
         locked_at_unix_ms: now_unix_ms()?,
     };
-    validate_saved_deployment_v2(&deployment)?;
+    validate_saved_deployment_v2_with_registry(&deployment, registry)?;
     fs::create_dir_all(app_data_dir)
         .map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
     write_deployment_create_new(&path, &deployment)?;
@@ -341,6 +368,17 @@ pub fn lock_trusted_ootle_deployment_v2(
         deployment: Some(deployment),
         fixed: trusted_ootle_deployment_fixed_v2(),
     })
+}
+
+/// Test-only registry injection for lock-resolution regression coverage. This
+/// is feature-gated so release code has no runtime registry override.
+#[cfg(feature = "test-support")]
+pub fn lock_trusted_ootle_deployment_v2_with_registry_for_test(
+    app_data_dir: &Path,
+    request: &GuiTrustedOotleDeploymentLockRequestV2,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    lock_trusted_ootle_deployment_v2_with_registry(app_data_dir, request, registry)
 }
 
 pub fn unlock_trusted_ootle_deployment_v2(
@@ -459,6 +497,13 @@ fn validate_saved_deployment(
 fn validate_saved_deployment_v2(
     deployment: &GuiTrustedOotleDeploymentV2,
 ) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
+    validate_saved_deployment_v2_with_registry(deployment, &released_v2_deployment_registry())
+}
+
+fn validate_saved_deployment_v2_with_registry(
+    deployment: &GuiTrustedOotleDeploymentV2,
+    registry: &DeploymentRegistry,
+) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
     if deployment.schema != TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2
         || deployment.template_module != ANCHOR_TEMPLATE_MODULE_V2
         || deployment.template_function != ANCHOR_EVENT_FUNCTION_V2
@@ -474,7 +519,6 @@ fn validate_saved_deployment_v2(
     // must correspond to the unique Current entry for its network. If the
     // registry no longer has this deployment as Current (e.g., it was
     // superseded), the saved lock is rejected.
-    let registry = released_v2_deployment_registry();
     let entry = registry
         .resolve_current(
             &deployment.network,

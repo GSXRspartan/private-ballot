@@ -20,6 +20,7 @@ import {
   RESULT_JSON_MEMPOOL_REJECTED,
   RESULT_JSON_PENDING,
 } from "./anchorVectors.generated.ts";
+import { SAPIENT_EXECUTE_RESULT_JSON } from "./sapientExecuteResult.generated.ts";
 
 const TEMPLATE: ExpectedAnchorTemplate = {
   templateAddressHex: "5f1ecbe69b1c6e8b64b97b37f32f6975be4b1e2a1d9c4a5e3f2b6c8d0a9e7f41",
@@ -200,27 +201,16 @@ describe("V2 anchor execution-result verification (Rust vectors)", () => {
 });
 
 describe("end-to-end transaction verification", () => {
-  it("verifies Sapient's decoded ExecuteResult JSON representation", () => {
-    const decoded = decodeExecuteResultBase64(EXEC_RESULT_BASE64);
-    const sapientExecuteResult = {
-      finalize: {
-        transaction_hash: decoded.transactionHashHex,
-        events: decoded.events.map((event) => ({
-          substate_id: null,
-          template_address: event.templateAddressHex,
-          topic: event.topic,
-          payload: Object.fromEntries(event.metadata.map((entry) => [entry.key, entry.value])),
-        })),
-        logs: [],
-        result: { Accept: {} },
-        fee_receipt: {},
-        total_fees_required: 0,
-      },
-      execution_time: { secs: 0, nanos: 0 },
-      execute_epoch: decoded.epoch,
-      wasm_execution_points: 0,
-      native_execution_points: 0,
+  it("verifies frozen actual Sapient decoder output with numeric fee metadata", () => {
+    const sapientExecuteResult = JSON.parse(SAPIENT_EXECUTE_RESULT_JSON) as {
+      finalize: { events: Array<{ payload: Record<string, unknown> }> };
+      execution_time: { secs: number; nanos: number };
+      wasm_execution_points: number;
     };
+    assert.equal(sapientExecuteResult.execution_time.secs, 1);
+    assert.equal(sapientExecuteResult.execution_time.nanos, 500000000);
+    assert.equal(sapientExecuteResult.wasm_execution_points, 12345);
+    assert.equal(sapientExecuteResult.finalize.events[1]?.payload.amount, 123);
     const result = envelope(RESULT_JSON_FINALIZED_COMMIT) as { result: { Finalized: Record<string, unknown> } };
     result.result.Finalized.execution_result = sapientExecuteResult;
     assert.equal(

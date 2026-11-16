@@ -417,7 +417,7 @@ impl GuiCoreError {
             "GUI_LIVE_ANCHOR_ENDPOINT_NOT_LOOPBACK",
             GuiErrorCategory::InvalidInput,
             Some("live-anchor-config"),
-            "the walletd endpoint must be organizer-local loopback, and the indexer endpoint must be loopback or the trusted hosted Esmeralda indexer",
+            "the walletd endpoint must be organizer-local loopback, and the indexer endpoint must be loopback or the trusted current host for the selected network",
         )
     }
 
@@ -540,7 +540,7 @@ impl GuiCoreError {
             "ANCHOR_PUBLISH_ENDPOINT_NOT_LOOPBACK",
             GuiErrorCategory::InvalidInput,
             Some("anchor-publish"),
-            "publishing requires organizer-local loopback walletd and a loopback or trusted hosted Esmeralda indexer endpoint",
+            "publishing requires organizer-local loopback walletd and a loopback or trusted current indexer endpoint for the selected network",
         )
     }
 

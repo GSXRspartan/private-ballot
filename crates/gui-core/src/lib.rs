@@ -200,6 +200,11 @@ pub use trusted_anchor_deployment::{
     trusted_ootle_deployment_to_live_anchor_v2_request_v1, trusted_ootle_deployment_v2_binding,
     unlock_trusted_ootle_deployment_v1, unlock_trusted_ootle_deployment_v2,
 };
+#[cfg(feature = "test-support")]
+pub use trusted_anchor_deployment::{
+    load_trusted_ootle_deployment_v2_with_registry_for_test,
+    lock_trusted_ootle_deployment_v2_with_registry_for_test,
+};
 pub use verified_session_cache::{
     DEFAULT_VERIFIED_SESSION_CACHE_CAPACITY_V1, VERIFIED_SESSION_CACHE_EPOCH_V1,
     VerifiedElectionSessionCacheV1, VerifiedElectionSessionV1, VerifiedSessionCacheSnapshotV1,
