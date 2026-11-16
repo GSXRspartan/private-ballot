@@ -199,6 +199,12 @@ export const api = {
       requireTransportBinding,
     }),
 
+  writeHostedBindingHandoff: (requestPath: string, targetPath: string) =>
+    call<import("./types").GuiHostedBindingHandoffResultV1>("write_hosted_binding_handoff", {
+      requestPath,
+      targetPath,
+    }),
+
   anchorDeploymentCapabilities: () =>
     call<GuiAnchorDeploymentCapabilitiesV1>("anchor_deployment_capabilities"),
 

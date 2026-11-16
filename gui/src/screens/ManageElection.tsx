@@ -7,6 +7,8 @@ import {
   pickElectionArtifact,
   pickElectionStatusExportPath,
   pickGovernanceDocument,
+  pickHostedBindingHandoffPath,
+  pickHostedBindingRequest,
   pickTorExecutable,
 } from "../api/dialog";
 import {
@@ -170,6 +172,7 @@ export function ManageElection() {
   );
   const [remoteTestStatus, setRemoteTestStatus] = useState<OrganizerIntakeStatusV1 | null>(null);
   const [bundleExportPath, setBundleExportPath] = useState<string | null>(null);
+  const [hostedBindingHandoffPath, setHostedBindingHandoffPath] = useState<string | null>(null);
   // Bounded automatic inbox sync: a single in-flight guard and the last observed
   // intake-worker accepted count. Auto-sync calls the SAME authoritative
   // sync_private_intake path only when a NEW Tor delivery is observed, so it
@@ -1083,6 +1086,22 @@ export function ManageElection() {
       recordAction(
         `Exported signed election status (${result.lifecycle_state}, generation ${result.generation})`,
       );
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onWriteHostedBindingHandoff = async () => {
+    clearLocalError();
+    setHostedBindingHandoffPath(null);
+    const requestPath = await pickHostedBindingRequest();
+    if (requestPath === null) return;
+    const targetPath = await pickHostedBindingHandoffPath();
+    if (targetPath === null) return;
+    try {
+      const result = await api.writeHostedBindingHandoff(requestPath, targetPath);
+      setHostedBindingHandoffPath(result.written_path);
+      recordAction("Exported verified Desktop binding handoff for Hosted");
     } catch (error) {
       showError(error);
     }
@@ -2555,6 +2574,38 @@ export function ManageElection() {
               Voter transport bundle exported
               <br />
               <span className="hash">{bundleExportPath}</span>
+            </Notice>
+          )}
+
+          <h3 className="card-section-heading">Hosted finalization handoff</h3>
+          <p className="card-body">
+            After Hosted Manage closes the matching election, download its binding request there.
+            Select that request here only after this Desktop election is finalized; this app checks
+            the election ID and manifest hash, then writes a verified response from the signed
+            transport history. Return the response file to Hosted Manage. No organizer credential
+            or raw binding bytes are copied through this step.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || lifecycle !== "FINALIZED"}
+              onClick={() => void onWriteHostedBindingHandoff()}
+            >
+              Export verified Hosted binding handoff
+            </button>
+          </div>
+          {lifecycle !== "FINALIZED" && (
+            <p className="form-hint">
+              Finalize this Desktop election first; the handoff never seals an in-progress
+              transport history.
+            </p>
+          )}
+          {hostedBindingHandoffPath && (
+            <Notice tone="ok">
+              Verified Desktop binding handoff exported
+              <br />
+              <span className="hash">{hostedBindingHandoffPath}</span>
             </Notice>
           )}
 

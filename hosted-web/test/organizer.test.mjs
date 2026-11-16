@@ -113,6 +113,21 @@ test("organizer API calls hit only the public organizer namespace", async () => 
   assert.match(organizer, /apiPath\(access, ""\)/);
 });
 
+test("closed elections use the file-based Desktop binding handoff before finalization", async () => {
+  const organizer = await read("../src/organizer.ts");
+  assert.match(organizer, /"\/binding-handoff"/, "Hosted request endpoint is used");
+  assert.match(organizer, /"\/transport-binding"/, "Desktop response is returned through the organizer endpoint");
+  assert.match(organizer, /btn-download-binding-request/);
+  assert.match(organizer, /desktop-binding-handoff-file/);
+  assert.match(organizer, /transport_binding_status === "verified"/);
+  assert.match(organizer, /Desktop binding required before finalization/);
+  assert.match(organizer, /no binding bytes need to be copied or pasted/);
+  assert.match(organizer, /a\.download = `private-ballot-\$\{access\.election_id\}\.hosted-binding-request\.json`/);
+  // The handoff uses the same capability-authenticated fetch helper, whose
+  // only credential carrier is the dedicated header checked above.
+  assert.match(organizer, /organizerFetch\(cs\.access, "POST", apiPath\(cs\.access, "\/transport-binding"\), handoff\)/);
+});
+
 test("guide documents the self-service organizer flow without Tor-equivalence claims", async () => {
   const guide = await read("../src/guide.ts");
   assert.match(guide, /create\.html/);

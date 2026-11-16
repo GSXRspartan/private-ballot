@@ -42,6 +42,7 @@ pub mod error;
 pub mod governance;
 mod hex;
 pub mod historical_replay;
+pub mod hosted_binding_handoff;
 pub mod inspect;
 pub mod instrumentation;
 pub mod intake;
@@ -107,6 +108,10 @@ pub use governance::{
 pub use historical_replay::{
     DEFAULT_HISTORICAL_REPLAY_BATCH_SIZE_V1, DEFAULT_HISTORICAL_REPLAY_PARALLEL_THRESHOLD_V1,
     HISTORICAL_REPLAY_HARD_WORKER_CAP_V1, HistoricalReplayConfigV1, global_crypto_worker_budget_v1,
+};
+pub use hosted_binding_handoff::{
+    DESKTOP_BINDING_HANDOFF_SCHEMA_V1, DesktopBindingHandoffV1, HOSTED_BINDING_REQUEST_SCHEMA_V1,
+    HostedBindingRequestV1,
 };
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,

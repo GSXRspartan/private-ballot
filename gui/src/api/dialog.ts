@@ -228,6 +228,30 @@ export async function pickV2AnchorEvidenceJson(
   );
 }
 
+/** Picks the public request downloaded from Hosted Manage. */
+export async function pickHostedBindingRequest(): Promise<string | null> {
+  return openFile(
+    "Import Hosted binding request",
+    [{ name: "Hosted binding request", extensions: ["hosted-binding-request.json", "json"] }],
+    "electionExport",
+  );
+}
+
+/** Chooses where the public, verified Desktop response will be written. */
+export async function pickHostedBindingHandoffPath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const rememberedDir = recallDirectory("electionExport");
+  const picked = await save({
+    title: "Export verified Desktop binding handoff",
+    defaultPath: rememberedDir
+      ? joinDefaultPath(rememberedDir, "desktop-binding-handoff.json")
+      : "desktop-binding-handoff.json",
+    filters: [{ name: "Desktop binding handoff", extensions: ["json"] }],
+  });
+  if (picked !== null) rememberDirectoryFromFile("electionExport", picked);
+  return picked;
+}
+
 /**
  * Opens a native single-file picker for a governance document (Slice 5A8). The
  * document is treated as immutable raw bytes; no semantic parsing happens in

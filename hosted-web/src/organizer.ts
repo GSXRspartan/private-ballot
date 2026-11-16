@@ -43,6 +43,7 @@ type ElectionView = {
   finalized_archive_hash_hex: string | null;
   finalized_anchor_digest_hex: string | null;
   finalized_public_summary_json: string | null;
+  transport_binding_status: string;
 };
 
 export type ManagedFinalizedElectionIdentity = {
@@ -274,7 +275,7 @@ function renderConsole() {
   if (election.election_state === "open") {
     actions.push(`<button id="btn-close" class="danger">Close voting…</button>`);
   }
-  if (election.election_state === "closed") {
+  if (election.election_state === "closed" && election.transport_binding_status === "verified") {
     actions.push(`<button id="btn-finalize" class="danger">Finalize and publish archive…</button>`);
   }
   if (election.election_state === "finalized") {
@@ -318,6 +319,7 @@ function renderConsole() {
     <div class="card">
       <h2>Lifecycle</h2>
       <div class="action-row">${actions.join("\n")}</div>
+      ${election.election_state === "closed" ? bindingHandoffMarkup(election) : ""}
       <p><small>Freezing locks the voter registry permanently. Closing stops new
       ballots. Finalizing publishes the archive. These actions are irreversible.</small></p>
     </div>
@@ -342,6 +344,25 @@ function renderConsole() {
       });
     }
   }
+}
+
+function bindingHandoffMarkup(election: ElectionView): string {
+  if (election.transport_binding_status === "verified") {
+    return `<div class="card ok">
+      <h3>Desktop binding verified</h3>
+      <p>The Hosted service has authenticated the Desktop-produced transport binding for this exact election. You can now finalize and publish the archive.</p>
+    </div>`;
+  }
+  return `<div class="card">
+    <h3>Desktop binding required before finalization</h3>
+    <p>Download the election-bound request, open it in Desktop after Desktop has finalized and verified the transport history, then import the Desktop handoff file here. The organizer secret is never put in either handoff file, and no binding bytes need to be copied or pasted.</p>
+    <div class="action-row">
+      <button id="btn-download-binding-request">1. Download Desktop request</button>
+      <label class="btn-link" for="desktop-binding-handoff-file">2. Import Desktop handoff</label>
+      <input id="desktop-binding-handoff-file" type="file" accept="application/json,.json" hidden />
+    </div>
+    <p><small>Finalization remains blocked until Hosted independently verifies the imported binding against its closed election.</small></p>
+  </div>`;
 }
 
 function bindConsole() {
@@ -381,6 +402,14 @@ function bindConsole() {
   const finalizeBtn = document.getElementById("btn-finalize") as HTMLButtonElement | null;
   finalizeBtn?.addEventListener("click", lifecycleAction("finalize", true, () => "Election finalized; archive published."));
 
+  const bindingRequestBtn = document.getElementById("btn-download-binding-request") as HTMLButtonElement | null;
+  bindingRequestBtn?.addEventListener("click", () => { void downloadBindingRequest(); });
+  const bindingHandoffInput = document.getElementById("desktop-binding-handoff-file") as HTMLInputElement | null;
+  bindingHandoffInput?.addEventListener("change", () => {
+    const file = bindingHandoffInput.files?.[0];
+    if (file) void importDesktopBindingHandoff(file);
+  });
+
   const autoBtn = document.getElementById("btn-issue-auto") as HTMLButtonElement | null;
   autoBtn?.addEventListener("click", () => issueInvitation(null));
   for (const el of Array.from(document.querySelectorAll("button[data-issue]"))) {
@@ -389,6 +418,62 @@ function bindConsole() {
   for (const el of Array.from(document.querySelectorAll("button[data-void]"))) {
     el.addEventListener("click", () => voidInvitation((el as HTMLElement).dataset.void ?? ""));
   }
+}
+
+async function downloadBindingRequest() {
+  if (!cs || cs.busy) return;
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const access = cs.access;
+  const res = await organizerFetch(access, "GET", apiPath(access, "/binding-handoff"));
+  cs.busy = false;
+  if (!res.ok || !res.json) {
+    if (res.status === 401) setError("Organizer credential rejected (401).");
+    else if (res.status === 409) setError("The binding request is only available after voting is closed and before finalization.");
+    else setError(`Could not download the Desktop binding request (${res.status}).`);
+    renderConsole();
+    return;
+  }
+  const blob = new Blob([JSON.stringify(res.json, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `private-ballot-${access.election_id}.hosted-binding-request.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  cs.infoMsg = "Desktop binding request downloaded. In Desktop, select it after the transport history is finalized and verified.";
+  renderConsole();
+}
+
+async function importDesktopBindingHandoff(file: File) {
+  if (!cs || cs.busy) return;
+  let handoff: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(await file.text());
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    handoff = parsed as Record<string, unknown>;
+  } catch {
+    setError("The selected Desktop binding handoff is not valid JSON.");
+    renderConsole();
+    return;
+  }
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const res = await organizerFetch(cs.access, "POST", apiPath(cs.access, "/transport-binding"), handoff);
+  cs.busy = false;
+  if (res.ok) {
+    cs.infoMsg = "Desktop binding accepted and independently verified. You can now finalize the election.";
+  } else if (res.status === 401) {
+    setError("Organizer credential rejected (401).");
+  } else {
+    const code = typeof res.json?.["code"] === "string" ? res.json["code"] : "";
+    setError(`Desktop binding handoff rejected (${code || res.status}). The election identity, state, and binding provenance must all match.`);
+  }
+  await refreshConsole();
 }
 
 async function refreshConsole() {

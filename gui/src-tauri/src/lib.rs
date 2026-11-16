@@ -2218,6 +2218,136 @@ async fn write_finalized_archive(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GuiHostedBindingHandoffResultV1 {
+    written_path: String,
+    election_id: String,
+    manifest_hash_hex: String,
+}
+
+/// Reads one Hosted request artifact and writes the paired Desktop response
+/// from this organizer's real verified transport history.  This command never
+/// contacts Hosted and never sees an organizer credential: the organizer
+/// returns the public response through Hosted Manage, which authenticates it.
+#[tauri::command]
+async fn write_hosted_binding_handoff(
+    request_path: String,
+    target_path: String,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<GuiHostedBindingHandoffResultV1, CommandError> {
+    run_blocking_command(move || {
+        state.ensure_organizer_authority()?;
+        let request_bytes = std::fs::read(Path::new(&request_path)).map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_READ_FAILED",
+                "FILE_IO",
+                "the Hosted binding request file could not be read",
+            )
+        })?;
+        let request: tari_cc_private_ballot_gui_core::HostedBindingRequestV1 =
+            serde_json::from_slice(&request_bytes).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                    "INVALID_INPUT",
+                    "the Hosted binding request file is invalid",
+                )
+            })?;
+        request.validate()?;
+        let (live_handoff, election_id, manifest_hash_hex, accepted_count, lifecycle) = state
+            .with_session(|session| {
+                let manifest = session.artifacts().manifest();
+                let election_id = String::from_utf8(manifest.election_id().as_bytes().to_vec())
+                    .map_err(|_| {
+                        CommandError::new(
+                            "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                            "BINDING_MISMATCH",
+                            "the active Desktop election cannot be matched to Hosted",
+                        )
+                    })?;
+                let manifest_hash_hex = session.summary().manifest_hash_hex;
+                let live_handoff =
+                    finalized_transport_handoff_for_active_intake(state.inner(), session)?;
+                Ok((
+                    live_handoff,
+                    election_id,
+                    manifest_hash_hex,
+                    session.accepted_count() as u64,
+                    session.lifecycle_state_v1(),
+                ))
+            })?;
+        if lifecycle != ElectionLifecycleStateV1::Finalized
+            || request.election_id != election_id
+            || request.manifest_hash_hex != manifest_hash_hex
+        {
+            return Err(CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                "BINDING_MISMATCH",
+                "the Hosted request does not match this finalized Desktop election",
+            ));
+        }
+        let material = match live_handoff {
+            Some(material) => Some(material),
+            None => durable_recovered_transport_binding_handoff(
+                &app,
+                &manifest_hash_hex,
+                accepted_count,
+            )?,
+        }
+        .ok_or_else(|| {
+            CommandError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport history has no finalized binding for this election",
+            )
+        })?;
+        let binding_cbor = material.0.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport binding could not be encoded",
+            )
+        })?;
+        let descriptor_cbor = material.1.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport descriptor could not be encoded",
+            )
+        })?;
+        let handoff = tari_cc_private_ballot_gui_core::DesktopBindingHandoffV1::new(
+            election_id.clone(),
+            manifest_hash_hex.clone(),
+            hex_lower(&binding_cbor),
+            hex_lower(&descriptor_cbor),
+        );
+        handoff.validate()?;
+        std::fs::write(
+            Path::new(&target_path),
+            serde_json::to_vec_pretty(&handoff).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_WRITE_FAILED",
+                    "FILE_IO",
+                    "the Desktop binding handoff could not be written",
+                )
+            })?,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_WRITE_FAILED",
+                "FILE_IO",
+                "the Desktop binding handoff could not be written",
+            )
+        })?;
+        Ok(GuiHostedBindingHandoffResultV1 {
+            written_path: target_path,
+            election_id,
+            manifest_hash_hex,
+        })
+    })
+    .await
+}
+
 /// Runs the full offline archive replay verifier over one archive directory.
 /// The archive is authoritative; no organizer state is consulted.
 #[tauri::command]
@@ -2278,6 +2408,69 @@ fn durable_recovered_transport_binding(
         let _ = (app, manifest_hash_hex, accepted_count);
         Ok(None)
     }
+}
+
+fn durable_recovered_transport_binding_handoff(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    accepted_count: u64,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        organizer_tor_intake::recover_finalized_transport_binding_handoff_from_durable_state(
+            app,
+            manifest_hash_hex,
+            accepted_count,
+        )
+    }
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = (app, manifest_hash_hex, accepted_count);
+        Ok(None)
+    }
+}
+
+fn finalized_transport_handoff_for_active_intake(
+    state: &AppState,
+    session: &GuiElectionSessionV1,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        let manifest_hash_hex = session.summary().manifest_hash_hex;
+        let managed = state
+            .organizer_intake
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(intake) = managed.as_ref() else {
+            return Ok(None);
+        };
+        if !intake.is_bound_to_manifest(&manifest_hash_hex) {
+            return Ok(None);
+        }
+        let handoff = intake.finalized_transport_binding_handoff()?;
+        if handoff.is_none() && intake.accepted_unique_count() > 0 {
+            return Err(CommandError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_UNAVAILABLE",
+                "ARCHIVE_INTEGRITY",
+                "the active private transport history could not produce a finalized archive binding",
+            ));
+        }
+        return Ok(handoff);
+    }
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = (state, session);
+        Ok(None)
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn finalized_transport_binding_for_active_intake(
@@ -5814,6 +6007,7 @@ pub fn run() {
             participation_summary,
             write_archive,
             write_finalized_archive,
+            write_hosted_binding_handoff,
             anchor_deployment_capabilities,
             verify_archive,
             verify_transport_archive_anchor,

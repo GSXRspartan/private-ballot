@@ -624,6 +624,13 @@ export interface GuiV2AnchorPublishPreparationV1 {
   public_summary_json: string;
 }
 
+/** Public Desktop response to an authenticated Hosted binding-request file. */
+export interface GuiHostedBindingHandoffResultV1 {
+  written_path: string;
+  election_id: string;
+  manifest_hash_hex: string;
+}
+
 /** One manually-gated V2 walletd lifecycle transition. */
 export interface GuiV2LiveAnchorStepRequestV1 {
   archive_directory: string;

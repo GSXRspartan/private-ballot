@@ -298,6 +298,16 @@ impl OrganizerIntakeState {
                 )
             })
     }
+
+    /// Returns the exact public descriptor paired with the live sealed
+    /// binding.  The descriptor is not a secret; exporting it lets Hosted
+    /// authenticate the binding under its independently configured root.
+    pub(crate) fn finalized_transport_binding_handoff(
+        &self,
+    ) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+        self.finalize_transport_archive_binding()
+            .map(|binding| binding.map(|binding| (binding, self.descriptor.clone())))
+    }
 }
 
 /// Reconciles one running intake's authoritative lifecycle fence with the
@@ -507,13 +517,13 @@ fn binding_recovery_count_mismatch() -> CommandError {
 ///     gate would catch).
 ///
 /// The `app_data_root`-based core keeps this unit-testable without a Tauri
-/// runtime; [`recover_finalized_transport_binding_from_durable_state`] wraps it
-/// with the live [`AppHandle`].
-pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
+/// runtime; [`recover_finalized_transport_binding_handoff_from_durable_state`]
+/// wraps it with the live [`AppHandle`].
+pub(crate) fn recover_finalized_transport_binding_handoff_from_durable_state_under(
     app_data_root: &Path,
     manifest_hash_hex: &str,
     authoritative_accepted_count: u64,
-) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
     let private_dir =
         election_transport_subpath(app_data_root, manifest_hash_hex)?.join("organizer-private");
     // Absent / unreadable bundle => no authoritative transport for this election.
@@ -554,8 +564,23 @@ pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
     if digests.len() as u64 != authoritative_accepted_count {
         return Err(binding_recovery_count_mismatch());
     }
-    finalized_transport_archive_binding_from_accepted_digests_v1(&bundle.descriptor, &digests)
-        .map_err(|_| binding_recovery_unavailable())
+    let binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(&bundle.descriptor, &digests)
+            .map_err(|_| binding_recovery_unavailable())?;
+    Ok(binding.map(|binding| (binding, bundle.descriptor)))
+}
+
+pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
+    app_data_root: &Path,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    recover_finalized_transport_binding_handoff_from_durable_state_under(
+        app_data_root,
+        manifest_hash_hex,
+        authoritative_accepted_count,
+    )
+    .map(|handoff| handoff.map(|(binding, _)| binding))
 }
 
 /// [`AppHandle`] wrapper around
@@ -567,6 +592,19 @@ pub(crate) fn recover_finalized_transport_binding_from_durable_state(
 ) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
     let app_data_root = app_data_root(app)?;
     recover_finalized_transport_binding_from_durable_state_under(
+        &app_data_root,
+        manifest_hash_hex,
+        authoritative_accepted_count,
+    )
+}
+
+pub(crate) fn recover_finalized_transport_binding_handoff_from_durable_state(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    let app_data_root = app_data_root(app)?;
+    recover_finalized_transport_binding_handoff_from_durable_state_under(
         &app_data_root,
         manifest_hash_hex,
         authoritative_accepted_count,

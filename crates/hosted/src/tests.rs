@@ -304,6 +304,22 @@ fn authoritative_transport_proof(f: &Fixture, packages: &[Vec<u8>]) -> (Vec<u8>,
     )
 }
 
+fn desktop_binding_handoff_json(f: &Fixture, binding: &[u8], descriptor: &[u8]) -> String {
+    let (manifest, _, _) = load_fixture(f);
+    let manifest_hash = manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("manifest hash"));
+    serde_json::to_string(
+        &tari_cc_private_ballot_gui_core::DesktopBindingHandoffV1::new(
+            f.election_id.clone(),
+            hex_encode(manifest_hash.as_bytes()),
+            hex_encode(binding),
+            hex_encode(descriptor),
+        ),
+    )
+    .unwrap_or_else(|_| panic!("desktop binding handoff json"))
+}
+
 fn record_desktop_transport_binding(
     storage: &InMemoryStorage,
     f: &Fixture,
@@ -3455,6 +3471,36 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     .await;
     assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
     assert_eq!(vc["state"], "closed");
+    // The shipped bridge starts with a capability-protected, public request
+    // that carries only the exact Hosted election identity.  It is not
+    // available to another organizer and it is not available before close.
+    let (srequest_unauthorized, _) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/binding-handoff"),
+        None,
+        Some(&organizer_secret(0x32)),
+    )
+    .await;
+    assert_eq!(srequest_unauthorized, axum::http::StatusCode::UNAUTHORIZED);
+    let (srequest, vrequest) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/binding-handoff"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(srequest, axum::http::StatusCode::OK, "{vrequest}");
+    assert_eq!(
+        vrequest["schema"].as_str(),
+        Some(tari_cc_private_ballot_gui_core::HOSTED_BINDING_REQUEST_SCHEMA_V1)
+    );
+    assert_eq!(vrequest["election_id"].as_str(), Some(election_id));
+    assert_eq!(
+        vrequest["manifest_hash_hex"].as_str().unwrap_or("").len(),
+        64
+    );
     let pkg_c = make_package(&f2, 3, b"candidate-c");
     let body_c = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111114", "package_cbor_hex": hex_encode(&pkg_c), "api_version": "v1"}).to_string();
     let (s4, r4) = req(
@@ -3477,6 +3523,38 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     assert_eq!(smissing, axum::http::StatusCode::CONFLICT, "{vmissing}");
     assert_eq!(vmissing["code"], "transport_binding_required");
     let (binding, descriptor) = authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_b.clone()]);
+    let mut wrong_election_handoff: serde_json::Value =
+        serde_json::from_str(&desktop_binding_handoff_json(&f2, &binding, &descriptor))
+            .unwrap_or_else(|_| panic!("desktop binding handoff json"));
+    wrong_election_handoff["election_id"] = serde_json::Value::String("other-election".to_owned());
+    let (swrong_election, vwrong_election) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(wrong_election_handoff.to_string()),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(
+        swrong_election,
+        axum::http::StatusCode::CONFLICT,
+        "{vwrong_election}"
+    );
+    assert_eq!(vwrong_election["code"], "transport_binding_required");
+    let (smalformed_handoff, vmalformed_handoff) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some("{\"schema\":\"wrong\"}".to_owned()),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(
+        smalformed_handoff,
+        axum::http::StatusCode::BAD_REQUEST,
+        "{vmalformed_handoff}"
+    );
+    assert_eq!(vmalformed_handoff["code"], "invalid_request");
     let mut altered_binding = binding.clone();
     let last = altered_binding.len() - 1;
     altered_binding[last] ^= 1;
@@ -3484,9 +3562,14 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
         &public,
         "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
-        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&altered_binding), "transport_descriptor_cbor_hex": hex_encode(&descriptor)}).to_string()),
+        Some(desktop_binding_handoff_json(
+            &f2,
+            &altered_binding,
+            &descriptor,
+        )),
         Some(&secret),
-    ).await;
+    )
+    .await;
     assert_eq!(saltered, axum::http::StatusCode::CONFLICT, "{valtered}");
     assert_eq!(valtered["code"], "transport_binding_required");
     // A different *canonical* binding with the same election and accepted
@@ -3498,9 +3581,14 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
         &public,
         "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
-        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&same_count_different_binding), "transport_descriptor_cbor_hex": hex_encode(&descriptor)}).to_string()),
+        Some(desktop_binding_handoff_json(
+            &f2,
+            &same_count_different_binding,
+            &descriptor,
+        )),
         Some(&secret),
-    ).await;
+    )
+    .await;
     assert_eq!(sdifferent, axum::http::StatusCode::CONFLICT, "{vdifferent}");
     assert_eq!(vdifferent["code"], "transport_binding_required");
     let mut altered_descriptor = descriptor.clone();
@@ -3510,9 +3598,14 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
         &public,
         "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
-        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&binding), "transport_descriptor_cbor_hex": hex_encode(&altered_descriptor)}).to_string()),
+        Some(desktop_binding_handoff_json(
+            &f2,
+            &binding,
+            &altered_descriptor,
+        )),
         Some(&secret),
-    ).await;
+    )
+    .await;
     assert_eq!(
         sdescriptor,
         axum::http::StatusCode::CONFLICT,
@@ -3523,9 +3616,10 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
         &public,
         "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
-        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&binding), "transport_descriptor_cbor_hex": hex_encode(&descriptor)}).to_string()),
+        Some(desktop_binding_handoff_json(&f2, &binding, &descriptor)),
         Some(&secret),
-    ).await;
+    )
+    .await;
     assert_eq!(sbinding, axum::http::StatusCode::CREATED, "{vbinding}");
     assert!(
         storage
@@ -3533,6 +3627,113 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
             .unwrap()
             .is_some()
     );
+    let (sreplay, vreplay) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(desktop_binding_handoff_json(&f2, &binding, &descriptor)),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sreplay, axum::http::StatusCode::CONFLICT, "{vreplay}");
+    assert_eq!(vreplay["code"], "transport_binding_already_recorded");
+    let (sconflict, vconflict) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(desktop_binding_handoff_json(
+            &f2,
+            &same_count_different_binding,
+            &descriptor,
+        )),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sconflict, axum::http::StatusCode::CONFLICT, "{vconflict}");
+    assert_eq!(vconflict["code"], "transport_binding_already_recorded");
+    let (sverified_status, vverified_status) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(
+        sverified_status,
+        axum::http::StatusCode::OK,
+        "{vverified_status}"
+    );
+    assert_eq!(vverified_status["transport_binding_status"], "verified");
+
+    // A separately authorized, normally closed election cannot accept A's
+    // Desktop file merely because it carries otherwise authentic bytes.
+    let election_b = "org-full-e2e-002";
+    let secret_b = organizer_secret(0x33);
+    organizer_create_ok(&public, election_b, &secret_b, 1).await;
+    let (sopen_b, vopen_b) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/open-enrollment"),
+        None,
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(sopen_b, axum::http::StatusCode::OK, "{vopen_b}");
+    let (sinvite_b, vinvite_b) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/invitations"),
+        None,
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(sinvite_b, axum::http::StatusCode::CREATED, "{vinvite_b}");
+    let (senroll_b, venroll_b) = enroll(
+        &public,
+        election_b,
+        vinvite_b["invitation_secret_hex"].as_str().unwrap_or(""),
+        &enroll_key(7),
+    )
+    .await;
+    assert_eq!(senroll_b, axum::http::StatusCode::CREATED, "{venroll_b}");
+    let (sfreeze_b, vfreeze_b) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/freeze"),
+        None,
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(sfreeze_b, axum::http::StatusCode::OK, "{vfreeze_b}");
+    let (svote_b, vvote_b) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/open-voting"),
+        None,
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(svote_b, axum::http::StatusCode::CREATED, "{vvote_b}");
+    let (sclose_b, vclose_b) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/close"),
+        None,
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(sclose_b, axum::http::StatusCode::OK, "{vclose_b}");
+    let (scross, vcross) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_b}/transport-binding"),
+        Some(desktop_binding_handoff_json(&f2, &binding, &descriptor)),
+        Some(&secret_b),
+    )
+    .await;
+    assert_eq!(scross, axum::http::StatusCode::CONFLICT, "{vcross}");
+    assert_eq!(vcross["code"], "transport_binding_required");
     let (sfin, vfin) = organizer_call(
         &public,
         "POST",
@@ -3576,6 +3777,85 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
             .iter()
             .any(|f| f["path"].as_str().unwrap_or("").contains("manifest"))
     );
+
+    // Continue through the real offline Desktop V2 preparation boundary using
+    // only the archive that the normal organizer endpoint just finalized.
+    // This intentionally does not construct an archive or insert a binding
+    // through storage helpers.
+    let dir = std::env::temp_dir().join(format!(
+        "pb-hosted-organizer-handoff-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    let archive_manifest = hex_decode(varch["archive_manifest_cbor_hex"].as_str().unwrap_or(""))
+        .unwrap_or_else(|_| panic!("archive manifest"));
+    let archive_files = varch["files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("archive files"));
+    write_archive_from_endpoint(&dir, &archive_files, &archive_manifest);
+    assert!(verify_archive_dir_for_test(&dir));
+    let desktop_payload =
+        build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            network: "mainnet".to_owned(),
+            template_address:
+                tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+            template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+            template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+            template_event_topic: format!(
+                "{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"
+            ),
+            template_artifact_digest_hex:
+                tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+        })
+        .expect("Desktop V2 payload from normal Hosted organizer archive");
+    let artifact_digest: [u8; 32] =
+        hex_decode(tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3)
+            .unwrap_or_else(|_| panic!("release digest"))
+            .try_into()
+            .unwrap_or_else(|_| panic!("release digest length"));
+    let deployment = AnchorTemplateBindingV2::new(
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        artifact_digest,
+    )
+    .expect("release deployment binding");
+    let prepared = prepare_v2_anchor_publish_from_verified_evidence_v1(
+        &GuiV2AnchorPublishPreparationRequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            payload_hex: desktop_payload.payload_hex.clone(),
+            expected_digest_hex: desktop_payload.v2_anchor_digest_hex.clone(),
+        },
+        &deployment,
+    )
+    .expect("Desktop V2 preparation from normal Hosted organizer archive");
+    let loaded = crate::LoadedElection::load(storage.as_ref(), election_id)
+        .unwrap_or_else(|_| panic!("finalized election loads"));
+    let hosted_identity = crate::finalized_anchor_identity(&loaded, storage.as_ref())
+        .unwrap_or_else(|_| panic!("Hosted identity derives"));
+    assert_eq!(desktop_payload.election_id, election_id);
+    assert_eq!(
+        desktop_payload.archive_hash_hex,
+        hosted_identity.archive_hash_hex
+    );
+    assert_eq!(
+        desktop_payload.v2_anchor_digest_hex,
+        hosted_identity.anchor_digest_hex
+    );
+    assert_eq!(
+        prepared.arguments,
+        vec![
+            hosted_identity.anchor_digest_hex,
+            "mainnet".to_owned(),
+            election_id.to_owned(),
+            hosted_identity.public_summary_json,
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

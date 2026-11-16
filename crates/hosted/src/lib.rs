@@ -67,7 +67,8 @@ use tari_cc_private_ballot_ballot::{
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
-    TransportAuthorityRootV1, TransportDescriptorV1, production_transport_authority_root_v1,
+    DesktopBindingHandoffV1, HostedBindingRequestV1, TransportAuthorityRootV1,
+    TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
 use tari_cc_private_ballot_protocol::{
@@ -2754,17 +2755,6 @@ struct OrganizerIssueInvitationRequest {
     slot_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct OrganizerTransportBindingRequest {
-    /// Exact canonical bytes emitted by the Desktop organizer after it has
-    /// verified its signed, durable transport history.
-    transport_binding_cbor_hex: String,
-    /// Canonical signed descriptor from the same verified transport history.
-    /// Hosted verifies it against its release-pinned public root and then
-    /// derives the one permitted binding from the accepted package set.
-    transport_descriptor_cbor_hex: String,
-}
-
 #[derive(Debug, Serialize)]
 struct OrganizerSlotBody {
     slot_id: String,
@@ -2795,6 +2785,7 @@ struct OrganizerElectionBody {
     /// merely well-formed public summary for this managed finalized election.
     finalized_anchor_digest_hex: Option<String>,
     finalized_public_summary_json: Option<String>,
+    transport_binding_status: String,
 }
 
 struct FinalizedAnchorIdentity {
@@ -3244,19 +3235,30 @@ async fn organizer_get_election(
             );
         }
     };
+    let transport_binding_status = match state.storage.get_finalized_transport_binding(&id) {
+        Ok(Some(_)) => "verified".to_owned(),
+        Ok(None) => "missing".to_owned(),
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "transport binding unavailable",
+            );
+        }
+    };
     let finalized_anchor_identity = match election.as_ref().filter(|e| e.state == "finalized") {
         Some(_) => {
             let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
                 Ok(loaded) => loaded,
                 Err(response) => return response,
             };
-            let has_binding = match state.storage.get_finalized_transport_binding(&id) {
-                Ok(Some(_)) => true,
+            let has_binding = match transport_binding_status.as_str() {
+                "verified" => true,
                 // A V4 finalized election legitimately has no V5 transport
                 // provenance.  It remains viewable and downloadable, but is
                 // deliberately not exposed to the browser-anchor workflow.
-                Ok(None) => false,
-                Err(_) => {
+                "missing" => false,
+                _ => {
                     return error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "service_unavailable",
@@ -3304,6 +3306,7 @@ async fn organizer_get_election(
             .map(|identity| identity.anchor_digest_hex.clone()),
         finalized_public_summary_json: finalized_anchor_identity
             .map(|identity| identity.public_summary_json),
+        transport_binding_status,
     };
     Json(body).into_response()
 }
@@ -3540,7 +3543,7 @@ async fn organizer_close(
 fn do_store_finalized_transport_binding(
     state: &AppState,
     id: &str,
-    req: OrganizerTransportBindingRequest,
+    req: DesktopBindingHandoffV1,
 ) -> Result<Response, Response> {
     let loaded = LoadedElection::load(state.storage.as_ref(), id)?;
     if loaded.record.state != "closed" {
@@ -3548,6 +3551,23 @@ fn do_store_finalized_transport_binding(
             StatusCode::CONFLICT,
             "invalid_state",
             "transport binding can be recorded only after voting closes",
+        ));
+    }
+    req.validate()
+        .map_err(|_| binding_error("the Desktop binding handoff is invalid"))?;
+    let manifest_hash = loaded
+        .manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "archive identity unavailable",
+            )
+        })?;
+    if req.election_id != id || req.manifest_hash_hex != hex_encode(manifest_hash.as_bytes()) {
+        return Err(binding_error(
+            "the Desktop binding handoff belongs to another election",
         ));
     }
     let binding_cbor = hex_decode(&req.transport_binding_cbor_hex).map_err(|_| {
@@ -3566,16 +3586,6 @@ fn do_store_finalized_transport_binding(
     })?;
     let descriptor = TransportDescriptorV1::from_canonical_cbor(&descriptor_cbor)
         .map_err(|_| binding_error("the supplied transport descriptor is not canonical"))?;
-    let manifest_hash = loaded
-        .manifest
-        .canonical_hash(&Blake3HashProviderV1)
-        .map_err(|_| {
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "service_unavailable",
-                "archive identity unavailable",
-            )
-        })?;
     descriptor.verify(&state.config.transport_authority_root, manifest_hash)
         .map_err(|_| binding_error("the supplied transport descriptor is not authenticated by the configured transport authority"))?;
     if descriptor.election_id() != loaded.manifest.election_id().as_bytes() {
@@ -3676,7 +3686,7 @@ async fn organizer_store_transport_binding(
             "request too large",
         );
     }
-    let req: OrganizerTransportBindingRequest = match serde_json::from_slice(&body) {
+    let req: DesktopBindingHandoffV1 = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
             return error_response(
@@ -3690,6 +3700,49 @@ async fn organizer_store_transport_binding(
         Ok(resp) => resp,
         Err(r) => r,
     }
+}
+
+/// Produces the public request file that a Desktop organizer uses to prove it
+/// is deriving a binding for this exact closed Hosted election.  The request
+/// is capability-protected here; the returned response is capability-protected
+/// again on import, and contains no organizer secret.
+async fn organizer_get_binding_handoff_request(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) {
+        return r;
+    }
+    if let Err(r) = organizer_rate(&state, &id) {
+        return r;
+    }
+    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+        Ok(loaded) => loaded,
+        Err(response) => return response,
+    };
+    if loaded.record.state != "closed" {
+        return error_response(
+            StatusCode::CONFLICT,
+            "invalid_state",
+            "Desktop binding handoff is available only while the election is closed",
+        );
+    }
+    let manifest_hash = match loaded.manifest.canonical_hash(&Blake3HashProviderV1) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "archive identity unavailable",
+            );
+        }
+    };
+    Json(HostedBindingRequestV1::new(
+        id,
+        hex_encode(manifest_hash.as_bytes()),
+    ))
+    .into_response()
 }
 
 async fn organizer_finalize(
@@ -3820,6 +3873,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/freeze", post(organizer_freeze))
         .route("/api/v1/organizer/elections/{id}/open-voting", post(organizer_open_voting))
         .route("/api/v1/organizer/elections/{id}/close", post(organizer_close))
+        .route("/api/v1/organizer/elections/{id}/binding-handoff", get(organizer_get_binding_handoff_request))
         .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
         .with_state(state.clone())
