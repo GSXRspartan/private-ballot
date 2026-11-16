@@ -630,9 +630,9 @@ describe("provider identity guard before money-moving calls", () => {
     adapter.pin();
     holder.tari = impostor;
 
-    await assert.rejects(
+await assert.rejects(
       () => adapter.createTransactionRequest([]),
-      /changed while this operation was in progress/,
+      /no longer the same provider/,
     );
     // Neither the pinned (stale) object nor the impostor is trusted.
     assert.equal(createCalls, 0);
@@ -663,9 +663,9 @@ describe("provider identity guard before money-moving calls", () => {
     adapter.pin();
     holder.tari = impostor;
 
-    await assert.rejects(
+await assert.rejects(
       () => adapter.submitTransactionRequest("req_1"),
-      /changed while this operation was in progress/,
+      /no longer the same provider/,
     );
     assert.equal(submitCalls, 0);
   });
@@ -686,7 +686,7 @@ describe("provider identity guard before money-moving calls", () => {
     assert.equal(created.requestId, "req_1");
   });
 
-  it("keeps using the pinned reference when discovery finds nothing (injection race)", async () => {
+it("fails closed when provider disappears before create", async () => {
     const provider = fakeProvider({
       handlers: {
         tari_createTransactionRequest: () => ({ requestId: "req_1" }),
@@ -698,20 +698,111 @@ describe("provider identity guard before money-moving calls", () => {
     );
     adapter.pin();
     holder.tari = undefined;
-    const created = await adapter.createTransactionRequest([]);
-    assert.equal(created.requestId, "req_1");
+
+    await assert.rejects(
+      () => adapter.createTransactionRequest([]),
+      /no longer the same provider/,
+    );
   });
 
-  it("never runs the guard when nothing was pinned", async () => {
+  it("fails closed when provider disappears after approval before submit", async () => {
+    const provider = fakeProvider({
+      handlers: {
+        tari_submitTransactionRequest: () => ({ transactionId: "txn_1" }),
+      },
+    });
+    const holder: { tari?: unknown } = { tari: provider };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = undefined;
+
+    await assert.rejects(
+      () => adapter.submitTransactionRequest("req_1"),
+      /no longer the same provider/,
+    );
+  });
+
+  it("fails closed when replacement provider appears before create", async () => {
+    let createCalls = 0;
+    const pinned = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => {
+          createCalls += 1;
+          return { requestId: "req_pinned" };
+        },
+      },
+    });
+    const impostor = fakeProvider({
+      handlers: {
+        tari_createTransactionRequest: () => {
+          createCalls += 1;
+          return { requestId: "req_impostor" };
+        },
+      },
+    });
+    const holder: { tari?: unknown } = { tari: pinned };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = impostor;
+
+    await assert.rejects(
+      () => adapter.createTransactionRequest([]),
+      /no longer the same provider/,
+    );
+    assert.equal(createCalls, 0);
+  });
+
+  it("fails closed when replacement provider appears after approval before submit", async () => {
+    let submitCalls = 0;
+    const pinned = fakeProvider({
+      handlers: {
+        tari_submitTransactionRequest: () => {
+          submitCalls += 1;
+          return { transactionId: "tx_pinned" };
+        },
+      },
+    });
+    const impostor = fakeProvider({
+      handlers: {
+        tari_submitTransactionRequest: () => {
+          submitCalls += 1;
+          return { transactionId: "tx_impostor" };
+        },
+      },
+    });
+    const holder: { tari?: unknown } = { tari: pinned };
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(holder),
+    );
+    adapter.pin();
+    holder.tari = impostor;
+
+    await assert.rejects(
+      () => adapter.submitTransactionRequest("req_1"),
+      /no longer the same provider/,
+    );
+    assert.equal(submitCalls, 0);
+  });
+
+  it("proceeds normally when provider/account/network/capabilities unchanged", async () => {
     const provider = fakeProvider({
       handlers: {
         tari_createTransactionRequest: () => ({ requestId: "req_1" }),
+        tari_submitTransactionRequest: () => ({ transactionId: "txn_1" }),
       },
     });
+    const holder: { tari?: unknown } = { tari: provider };
     const adapter = windowTariProvider("sapient", "Sapient", () =>
-      sapientDiscovery(scopeWith(provider)),
+      sapientDiscovery(holder),
     );
+    adapter.pin();
     const created = await adapter.createTransactionRequest([]);
     assert.equal(created.requestId, "req_1");
+    const submitted = await adapter.submitTransactionRequest(created.requestId);
+    assert.equal(submitted.transactionId, "txn_1");
   });
 });

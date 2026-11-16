@@ -142,19 +142,19 @@ export function windowTariProvider(
 
   /**
    * Re-runs discovery right before a money-moving call and refuses to
-   * continue when the page now hosts a different wallet object than the one
-   * the user pinned and connected to. A provider swap mid-flow means either
-   * the real extension re-injected or an impostor displaced it; in both cases
-   * the only safe action is to stop and make the user restart the flow.
+   * continue unless the page still hosts the EXACT SAME pinned provider object.
+   * If discovery returns null, undefined, or a different provider object,
+   * the operation fails closed. This prevents wallet writes against a
+   * disappeared or swapped provider.
    */
   function ensurePinnedProviderIsCurrent(operation: string): void {
     if (pinnedProvider === null) {
       return;
     }
     const found = discover();
-    if (found.provider !== null && found.provider !== pinnedProvider) {
+    if (found.provider !== pinnedProvider) {
       throw new WalletProviderError(
-        `${operation} was cancelled: the Tari wallet on this page changed while this operation was in progress; reload the page and start again`,
+        `${operation} was cancelled: the Tari wallet on this page is no longer the same provider that was pinned; reload the page and start again`,
         null,
       );
     }
