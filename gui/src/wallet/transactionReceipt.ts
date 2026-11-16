@@ -99,8 +99,12 @@ function decodeOutcome(node: CborNode): DurableReceiptOutcome {
   const fields = expectArrayLength(node, 2, "receipt outcome");
   const variant = fields[0];
   expectType(variant, "uint", "receipt outcome variant");
-  if (fields[1].value !== 0) {
-    throw new TransactionReceiptDecodeError("expected receipt outcome variant without fields");
+  const fieldsArray = fields[1];
+  // The outcome variant must carry an EMPTY CBOR array as its payload.
+  // The pinned wire format is [variant, []] - NOT [variant, 0] or [variant, {}].
+  expectType(fieldsArray, "array", "receipt outcome fields array");
+  if (fieldsArray.children.length !== 0) {
+    throw new TransactionReceiptDecodeError("receipt outcome variant fields array must be empty");
   }
   if (variant.value === 0) return "Commit";
   if (variant.value === 1) return "FeeIntentCommit";
