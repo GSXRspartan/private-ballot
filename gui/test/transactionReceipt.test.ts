@@ -80,6 +80,21 @@ describe("durable TransactionReceipt wire decode (v0.53.x fixture)", () => {
     assert.throws(() => decodeTransactionReceiptBase64("hg=="), TransactionReceiptDecodeError);
     assert.throws(() => decodeTransactionReceiptBase64("nw=="), TransactionReceiptDecodeError);
   });
+
+  it("rejects a non-empty outcome fields array", () => {
+    // array(7), outcome [Commit, [0]], then structurally valid empty
+    // remaining fields.  Only an empty outcome payload is valid on the
+    // pinned TransactionReceipt wire format.
+    const malformed = Uint8Array.from([
+      0x87, 0x82, 0x00, 0x81, 0x00,
+      0x82, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00, 0x58, 0x20,
+      ...new Uint8Array(32),
+    ]);
+    assert.throws(
+      () => decodeTransactionReceiptBase64(Buffer.from(malformed).toString("base64")),
+      TransactionReceiptDecodeError,
+    );
+  });
 });
 
 describe("durable receipt verification", () => {

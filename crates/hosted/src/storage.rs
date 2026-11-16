@@ -269,10 +269,7 @@ pub trait HostedStorage: Send + Sync {
     ) -> Result<EnrollmentCompletion, StorageError>;
 
     // Frozen registry evidence
-    fn put_frozen_registry(
-        &self,
-        record: FrozenRegistryRecord,
-    ) -> Result<(), StorageError>;
+    fn put_frozen_registry(&self, record: FrozenRegistryRecord) -> Result<(), StorageError>;
     fn get_frozen_registry(
         &self,
         election_id: &str,
@@ -370,12 +367,7 @@ impl HostedStorage for InMemoryStorage {
             .cloned())
     }
 
-    fn set_election_state(
-        &self,
-        id: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<bool, StorageError> {
+    fn set_election_state(&self, id: &str, from: &str, to: &str) -> Result<bool, StorageError> {
         let mut g = self.elections.lock().unwrap_or_else(|e| e.into_inner());
         match g.get_mut(id) {
             None => Err(StorageError::ElectionNotFound),
@@ -572,7 +564,10 @@ impl HostedStorage for InMemoryStorage {
 
     fn void_active_slot_invitations(&self, slot_id: &str) -> Result<(), StorageError> {
         let mut g = self.invitations.lock().unwrap_or_else(|e| e.into_inner());
-        for inv in g.iter_mut().filter(|i| i.slot_id == slot_id && i.state == "ACTIVE") {
+        for inv in g
+            .iter_mut()
+            .filter(|i| i.slot_id == slot_id && i.state == "ACTIVE")
+        {
             inv.state = "VOIDED".to_owned();
         }
         Ok(())
@@ -583,9 +578,9 @@ impl HostedStorage for InMemoryStorage {
         record: EnrolledCredentialRecord,
     ) -> Result<(), StorageError> {
         let mut g = self.credentials.lock().unwrap_or_else(|e| e.into_inner());
-        if g.iter()
-            .any(|c| c.election_id == record.election_id && c.public_key_hex == record.public_key_hex)
-        {
+        if g.iter().any(|c| {
+            c.election_id == record.election_id && c.public_key_hex == record.public_key_hex
+        }) {
             return Err(StorageError::DuplicatePublicKey);
         }
         g.push(record);
@@ -610,10 +605,7 @@ impl HostedStorage for InMemoryStorage {
     ) -> Result<Option<EnrolledCredentialRecord>, StorageError> {
         let g = self.credentials.lock().unwrap_or_else(|e| e.into_inner());
         Ok(g.iter()
-            .find(|c| {
-                c.election_id == election_id
-                    && c.slot_id.as_deref() == Some(slot_id)
-            })
+            .find(|c| c.election_id == election_id && c.slot_id.as_deref() == Some(slot_id))
             .cloned())
     }
 
@@ -660,20 +652,34 @@ impl HostedStorage for InMemoryStorage {
             Some(invitation) => invitation,
             None => return Ok(EnrollmentCompletion::InvitationNotFound),
         };
-        if invitation.election_id != election_id { return Ok(EnrollmentCompletion::WrongElection); }
-        if invitation.state == "VOIDED" { return Ok(EnrollmentCompletion::InvitationVoided); }
-        if invitation.state == "CONSUMED" {
-            return Ok(match self.get_enrolled_credential_by_slot(election_id, &invitation.slot_id)? {
-                Some(credential) if credential.public_key_hex == public_key_hex => EnrollmentCompletion::Idempotent(credential),
-                Some(_) => EnrollmentCompletion::CredentialConflict,
-                None => EnrollmentCompletion::EnrollmentClosed,
-            });
+        if invitation.election_id != election_id {
+            return Ok(EnrollmentCompletion::WrongElection);
         }
-        if self.get_enrolled_credential_by_key(election_id, public_key_hex)?.is_some() {
+        if invitation.state == "VOIDED" {
+            return Ok(EnrollmentCompletion::InvitationVoided);
+        }
+        if invitation.state == "CONSUMED" {
+            return Ok(
+                match self.get_enrolled_credential_by_slot(election_id, &invitation.slot_id)? {
+                    Some(credential) if credential.public_key_hex == public_key_hex => {
+                        EnrollmentCompletion::Idempotent(credential)
+                    }
+                    Some(_) => EnrollmentCompletion::CredentialConflict,
+                    None => EnrollmentCompletion::EnrollmentClosed,
+                },
+            );
+        }
+        if self
+            .get_enrolled_credential_by_key(election_id, public_key_hex)?
+            .is_some()
+        {
             return Ok(EnrollmentCompletion::CredentialConflict);
         }
         let slots = self.list_slots(election_id)?;
-        if !slots.iter().any(|slot| slot.slot_id == invitation.slot_id && !slot.consumed) {
+        if !slots
+            .iter()
+            .any(|slot| slot.slot_id == invitation.slot_id && !slot.consumed)
+        {
             return Ok(EnrollmentCompletion::EnrollmentRace);
         }
         if !self.set_invitation_state(&invitation.invitation_id, "ACTIVE", "CONSUMED")? {
@@ -681,8 +687,11 @@ impl HostedStorage for InMemoryStorage {
         }
         self.mark_slot_consumed(&invitation.slot_id)?;
         let credential = EnrolledCredentialRecord {
-            election_id: election_id.to_owned(), public_key_hex: public_key_hex.to_owned(),
-            slot_id: Some(invitation.slot_id), invitation_id: Some(invitation.invitation_id), enrolled_at_ms: now_ms,
+            election_id: election_id.to_owned(),
+            public_key_hex: public_key_hex.to_owned(),
+            slot_id: Some(invitation.slot_id),
+            invitation_id: Some(invitation.invitation_id),
+            enrolled_at_ms: now_ms,
         };
         self.insert_enrolled_credential(credential.clone())?;
         Ok(EnrollmentCompletion::Created(credential))
@@ -738,9 +747,7 @@ impl HostedStorage for InMemoryStorage {
         invitation_id: &str,
     ) -> Result<Option<InvitationRecord>, StorageError> {
         let g = self.invitations.lock().unwrap_or_else(|e| e.into_inner());
-        Ok(g.iter()
-            .find(|i| i.invitation_id == invitation_id)
-            .cloned())
+        Ok(g.iter().find(|i| i.invitation_id == invitation_id).cloned())
     }
 
     fn list_invitations(&self, election_id: &str) -> Result<Vec<InvitationRecord>, StorageError> {
@@ -961,7 +968,8 @@ impl SqliteStorage {
 
     #[cfg(test)]
     pub(crate) fn set_enrollment_failpoint(&self, failpoint: EnrollmentFailpoint) {
-        self.enrollment_failpoint.store(failpoint as u8, Ordering::SeqCst);
+        self.enrollment_failpoint
+            .store(failpoint as u8, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -973,9 +981,7 @@ impl SqliteStorage {
 impl HostedStorage for SqliteStorage {
     fn append_ballot_envelope(&self, _election_id: &str, _envelope: Vec<u8>) {}
     fn ballot_envelope_count(&self, election_id: &str) -> usize {
-        self.list_ballots(election_id)
-            .map(|v| v.len())
-            .unwrap_or(0)
+        self.list_ballots(election_id).map(|v| v.len()).unwrap_or(0)
     }
 
     fn put_election(&self, record: ElectionRecord) -> Result<(), StorageError> {
@@ -1014,12 +1020,7 @@ impl HostedStorage for SqliteStorage {
         Ok(out)
     }
 
-    fn set_election_state(
-        &self,
-        id: &str,
-        from: &str,
-        to: &str,
-    ) -> Result<bool, StorageError> {
+    fn set_election_state(&self, id: &str, from: &str, to: &str) -> Result<bool, StorageError> {
         let g = self.lock();
         if g.query_row(
             "SELECT state FROM elections WHERE id = ?1",
@@ -1536,38 +1537,64 @@ impl HostedStorage for SqliteStorage {
         let mut connection = self.lock();
         // An IMMEDIATE transaction gives this enrollment attempt the writer lock before any
         // validation or mutation, so every early return rolls back and leaves no partial state.
-        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| StorageError::Db)?;
-        let state: Option<String> = tx.query_row(
-            "SELECT eligibility_state FROM election_drafts WHERE election_id = ?1",
-            params![election_id], |row| row.get(0),
-        ).optional().map_err(|_| StorageError::Db)?;
-        let Some(state) = state else { return Ok(EnrollmentCompletion::ElectionNotFound); };
-        if state != "ENROLLMENT_OPEN" { return Ok(EnrollmentCompletion::EnrollmentClosed); }
+        let state: Option<String> = tx
+            .query_row(
+                "SELECT eligibility_state FROM election_drafts WHERE election_id = ?1",
+                params![election_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| StorageError::Db)?;
+        let Some(state) = state else {
+            return Ok(EnrollmentCompletion::ElectionNotFound);
+        };
+        if state != "ENROLLMENT_OPEN" {
+            return Ok(EnrollmentCompletion::EnrollmentClosed);
+        }
         let invitation: Option<InvitationRecord> = tx.query_row(
             "SELECT invitation_id, slot_id, election_id, verifier_hex, state, created_at_ms FROM enrollment_invitations WHERE verifier_hex = ?1",
             params![verifier_hex], |row| Ok(InvitationRecord { invitation_id: row.get(0)?, slot_id: row.get(1)?, election_id: row.get(2)?, verifier_hex: row.get(3)?, state: row.get(4)?, created_at_ms: row.get(5)? }),
         ).optional().map_err(|_| StorageError::Db)?;
-        let invitation = match invitation { Some(value) => value, None => return Ok(EnrollmentCompletion::InvitationNotFound) };
-        if invitation.election_id != election_id { return Ok(EnrollmentCompletion::WrongElection); }
-        if invitation.state == "VOIDED" { return Ok(EnrollmentCompletion::InvitationVoided); }
+        let invitation = match invitation {
+            Some(value) => value,
+            None => return Ok(EnrollmentCompletion::InvitationNotFound),
+        };
+        if invitation.election_id != election_id {
+            return Ok(EnrollmentCompletion::WrongElection);
+        }
+        if invitation.state == "VOIDED" {
+            return Ok(EnrollmentCompletion::InvitationVoided);
+        }
         let existing_for_slot: Option<EnrolledCredentialRecord> = tx.query_row(
             "SELECT election_id, public_key_hex, slot_id, invitation_id, enrolled_at_ms FROM enrolled_credentials WHERE election_id = ?1 AND slot_id = ?2",
             params![election_id, invitation.slot_id], |row| Ok(EnrolledCredentialRecord { election_id: row.get(0)?, public_key_hex: row.get(1)?, slot_id: row.get(2)?, invitation_id: row.get(3)?, enrolled_at_ms: row.get(4)? }),
         ).optional().map_err(|_| StorageError::Db)?;
         if invitation.state == "CONSUMED" {
-            return Ok(match existing_for_slot { Some(credential) if credential.public_key_hex == public_key_hex => EnrollmentCompletion::Idempotent(credential), Some(_) => EnrollmentCompletion::CredentialConflict, None => EnrollmentCompletion::EnrollmentClosed });
+            return Ok(match existing_for_slot {
+                Some(credential) if credential.public_key_hex == public_key_hex => {
+                    EnrollmentCompletion::Idempotent(credential)
+                }
+                Some(_) => EnrollmentCompletion::CredentialConflict,
+                None => EnrollmentCompletion::EnrollmentClosed,
+            });
         }
         let key_exists: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM enrolled_credentials WHERE election_id = ?1 AND public_key_hex = ?2)",
             params![election_id, public_key_hex], |row| row.get(0),
         ).map_err(|_| StorageError::Db)?;
-        if key_exists { return Ok(EnrollmentCompletion::CredentialConflict); }
+        if key_exists {
+            return Ok(EnrollmentCompletion::CredentialConflict);
+        }
         let slot_available: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM eligibility_slots WHERE slot_id = ?1 AND election_id = ?2 AND consumed = 0)",
             params![invitation.slot_id, election_id], |row| row.get(0),
         ).map_err(|_| StorageError::Db)?;
-        if !slot_available { return Ok(EnrollmentCompletion::EnrollmentRace); }
+        if !slot_available {
+            return Ok(EnrollmentCompletion::EnrollmentRace);
+        }
         if tx.execute("UPDATE enrollment_invitations SET state = 'CONSUMED' WHERE invitation_id = ?1 AND state = 'ACTIVE'", params![invitation.invitation_id]).map_err(|_| StorageError::Db)? != 1 { return Ok(EnrollmentCompletion::EnrollmentRace); }
         #[cfg(test)]
         if self.enrollment_failpoint_active(EnrollmentFailpoint::AfterInvitationMutation) {
@@ -1578,7 +1605,13 @@ impl HostedStorage for SqliteStorage {
         if self.enrollment_failpoint_active(EnrollmentFailpoint::AfterSlotMutation) {
             return Err(StorageError::Db);
         }
-        let credential = EnrolledCredentialRecord { election_id: election_id.to_owned(), public_key_hex: public_key_hex.to_owned(), slot_id: Some(invitation.slot_id), invitation_id: Some(invitation.invitation_id), enrolled_at_ms: now_ms };
+        let credential = EnrolledCredentialRecord {
+            election_id: election_id.to_owned(),
+            public_key_hex: public_key_hex.to_owned(),
+            slot_id: Some(invitation.slot_id),
+            invitation_id: Some(invitation.invitation_id),
+            enrolled_at_ms: now_ms,
+        };
         #[cfg(test)]
         if self.enrollment_failpoint_active(EnrollmentFailpoint::BeforeCredentialInsertion) {
             return Err(StorageError::Db);

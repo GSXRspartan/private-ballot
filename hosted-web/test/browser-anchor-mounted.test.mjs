@@ -465,6 +465,29 @@ test("mounted panels use Web Locks to exclude concurrent create and keep recover
   }
 });
 
+test("a live outstanding submit excludes a second mounted panel", async () => {
+  const harness = installBrowser();
+  try {
+    const second = harness.mountAnother();
+    const submitGate = deferred();
+    harness.wallet.status = "approved";
+    harness.wallet.submitGate = submitGate;
+    await importAndConnect(harness);
+    await importAndConnect(harness, second);
+
+    button(harness.root, "Ask wallet to publish anchor").click();
+    await waitFor(() => harness.wallet.calls.submit === 1, "first panel never reached wallet submit");
+    await click(second, "Ask wallet to publish anchor");
+    assert.match(panelText(second), /Another tab is already handling this anchor operation/);
+    assert.equal(harness.wallet.calls.create, 1);
+    assert.equal(harness.wallet.calls.submit, 1);
+    submitGate.resolve({ transactionId: TRANSACTION_ID });
+    await settle();
+  } finally {
+    harness.cleanup();
+  }
+});
+
 test("mounted recovery action matrix checks every persisted phase without mutation", async () => {
   const cases = [
     {
@@ -472,6 +495,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       record: recoveryRecord("creating_request", { requestId: null }),
       connect: false,
       expected: /may have been created but its reply was lost/,
+      statusLookups: 0,
       resultLookups: 0,
     },
     {
@@ -480,6 +504,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       connect: true,
       status: "pending",
       expected: /saved request is pending or unknown/,
+      statusLookups: 2,
       resultLookups: 0,
     },
     {
@@ -489,6 +514,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       status: "submitted",
       result: { transactionId: "not-a-transaction-id" },
       expected: /may already have been submitted/,
+      statusLookups: 1,
       resultLookups: 0,
     },
     {
@@ -497,6 +523,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       connect: true,
       status: "approved",
       expected: /cannot be proven after recovery/,
+      statusLookups: 1,
       resultLookups: 0,
     },
     {
@@ -505,6 +532,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       connect: true,
       status: "rejected",
       expected: /terminally rejected/,
+      statusLookups: 1,
       resultLookups: 0,
     },
     {
@@ -513,6 +541,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       connect: true,
       status: "failed",
       expected: /terminally failed/,
+      statusLookups: 1,
       resultLookups: 0,
     },
     {
@@ -520,6 +549,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       record: recoveryRecord("verified", { requestId: null, transactionId: TRANSACTION_ID }),
       connect: true,
       expected: /transaction was rejected/,
+      statusLookups: 0,
       resultLookups: 1,
     },
   ];
@@ -538,6 +568,7 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       assert.equal(hasButton(harness.root, "Ask wallet to publish anchor"), false, scenario.name);
       assert.equal(harness.wallet.calls.create, 0, scenario.name);
       assert.equal(harness.wallet.calls.submit, 0, scenario.name);
+      assert.equal(harness.wallet.calls.status, scenario.statusLookups, scenario.name);
       assert.equal(harness.wallet.calls.result, scenario.resultLookups, scenario.name);
     } finally {
       harness.cleanup();
