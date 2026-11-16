@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { JSDOM } from "jsdom";
 
-import { bundleDigestKey } from "../../gui/src/wallet/anchorBundle.ts";
+import { buildBundleFromDesktop, bundleDigestKey } from "../../gui/src/wallet/anchorBundle.ts";
 import { mountBrowserAnchorPanel } from "../src/browserAnchor.ts";
 
 const ELECTION_A = "election-a";
@@ -16,7 +16,7 @@ const EVENT_TOPIC = "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCH
 const REQUEST_ID = "request-1";
 const TRANSACTION_ID = "ab".repeat(32);
 
-function canonicalSummary({ network = "mainnet", electionId = ELECTION_A, question = "Adopt?" } = {}) {
+function canonicalSummary({ network = "mainnet", electionId = ELECTION_A, question = "Adopt?", archiveHash = ARCHIVE } = {}) {
   return JSON.stringify({
     schema: "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_V2",
     version: 2,
@@ -31,7 +31,7 @@ function canonicalSummary({ network = "mainnet", electionId = ELECTION_A, questi
     confidentiality_mode: "aggregate",
     proof_suite: "triptych-v1",
     manifest_hash: "11".repeat(32),
-    archive_hash: ARCHIVE,
+    archive_hash: archiveHash,
     voter_registry_commitment: "33".repeat(32),
     ballot_option_commitment: "44".repeat(32),
     archive_finalized: true,
@@ -74,8 +74,30 @@ function managedElection(bundle = bundleFixture()) {
     electionId: ELECTION_A,
     archiveHashHex: ARCHIVE,
     anchorDigestHex: DIGEST,
-    publicSummary: bundleFixture().anchorArgs.publicSummary,
+    publicSummary: bundle.anchorArgs.publicSummary,
   };
+}
+
+function desktopExportFixture() {
+  const source = bundleFixture();
+  return buildBundleFromDesktop({
+    network: source.network,
+    templateAddress: source.template.address,
+    templateArtifactDigestHex: source.template.artifactDigestHex,
+    templateModule: source.template.module,
+    templateFunction: source.template.function,
+    preparation: {
+      templateEventTopic: `tari_private_ballot_anchor_v2.${EVENT_TOPIC.slice(EVENT_TOPIC.lastIndexOf(".") + 1)}`,
+      anchorDigestHex: source.anchorArgs.anchorDigestHex,
+      arguments: [
+        source.anchorArgs.anchorDigestHex,
+        source.anchorArgs.network,
+        source.anchorArgs.electionId,
+        source.anchorArgs.publicSummary,
+      ],
+      publicSummaryJson: source.anchorArgs.publicSummary,
+    },
+  });
 }
 
 function recoveryRecord(
@@ -409,7 +431,7 @@ test("mounted panel treats corrupt recovery state as blocked rather than absent"
   }
 });
 
-test("mounted panels use Web Locks to exclude concurrent create and submit flows", async () => {
+test("mounted panels use Web Locks to exclude concurrent create and keep recovered approval read-only", async () => {
   const harness = installBrowser();
   try {
     const second = harness.mountAnother();
@@ -434,39 +456,31 @@ test("mounted panels use Web Locks to exclude concurrent create and submit flows
     const submitter = harness.mountAnother();
     await importAndConnect(harness, submitter);
     await click(submitter, "Check saved request / transaction");
-    assert.match(panelText(submitter), /approved/);
-
-    const submitGate = deferred();
-    harness.wallet.submitGate = submitGate;
-    button(submitter, "Submit saved approved request once").click();
-    await waitFor(() => harness.wallet.calls.submit === 1, "first panel never reached fake submit");
-    const observer = harness.mountAnother();
-    await importAndConnect(harness, observer);
-    await click(observer, "Check saved request / transaction");
-    assert.match(panelText(observer), /Another tab is already handling this anchor operation/);
+    assert.match(panelText(submitter), /cannot be proven after recovery/);
+    assert.equal(hasButton(submitter, "Submit saved approved request once"), false);
     assert.equal(harness.wallet.calls.create, 1);
-    assert.equal(harness.wallet.calls.submit, 1);
-    submitGate.resolve({ transactionId: TRANSACTION_ID });
-    await settle();
+    assert.equal(harness.wallet.calls.submit, 0);
   } finally {
     harness.cleanup();
   }
 });
 
-test("mounted reload recovery handles every persisted phase without a duplicate create", async () => {
+test("mounted recovery action matrix checks every persisted phase without mutation", async () => {
   const cases = [
     {
       name: "reserved/pre-create",
       record: recoveryRecord("creating_request", { requestId: null }),
       connect: false,
-      expected: /saved request or transaction identity was loaded/,
+      expected: /may have been created but its reply was lost/,
+      resultLookups: 0,
     },
     {
       name: "created/pending",
       record: recoveryRecord("submitted_awaiting_approval"),
       connect: true,
       status: "pending",
-      expected: /Sapient connected on mainnet/,
+      expected: /saved request is pending or unknown/,
+      resultLookups: 0,
     },
     {
       name: "UNKNOWN/ambiguous",
@@ -474,50 +488,39 @@ test("mounted reload recovery handles every persisted phase without a duplicate 
       connect: true,
       status: "submitted",
       result: { transactionId: "not-a-transaction-id" },
-      expected: /Sapient connected on mainnet/,
+      expected: /may already have been submitted/,
+      resultLookups: 0,
     },
     {
       name: "approved",
       record: recoveryRecord("submitted_awaiting_approval"),
       connect: true,
       status: "approved",
-      expected: /Sapient connected on mainnet/,
-    },
-    {
-      name: "submitted with transaction id",
-      record: recoveryRecord("approved_submitted", { requestId: null, transactionId: TRANSACTION_ID }),
-      connect: true,
-      expected: /Sapient connected on mainnet/,
-      lookup: true,
-    },
-    {
-      name: "submitted without usable transaction id",
-      record: recoveryRecord("approved_submitted", { requestId: null, transactionId: "short" }),
-      connect: true,
-      status: "submitted",
-      result: { transactionId: "short" },
-      expected: /Sapient connected on mainnet/,
+      expected: /cannot be proven after recovery/,
+      resultLookups: 0,
     },
     {
       name: "rejected",
       record: recoveryRecord("submitted_awaiting_approval"),
       connect: true,
       status: "rejected",
-      expected: /Sapient connected on mainnet/,
+      expected: /terminally rejected/,
+      resultLookups: 0,
     },
     {
       name: "failed",
       record: recoveryRecord("submitted_awaiting_approval"),
       connect: true,
       status: "failed",
-      expected: /Sapient connected on mainnet/,
+      expected: /terminally failed/,
+      resultLookups: 0,
     },
     {
       name: "committed/verified",
       record: recoveryRecord("verified", { requestId: null, transactionId: TRANSACTION_ID }),
       connect: true,
-      expected: /Sapient connected on mainnet/,
-      lookup: true,
+      expected: /transaction was rejected/,
+      resultLookups: 1,
     },
   ];
 
@@ -530,68 +533,40 @@ test("mounted reload recovery handles every persisted phase without a duplicate 
       harness.wallet.result = scenario.result;
       await importBundle(harness.root, harness.dom, bundle);
       if (scenario.connect) await click(harness.root, "Connect Sapient");
-      // In the test environment, button detection is flaky; verify the
-      // expected status message is present after import (and optional connect).
+      await click(harness.root, "Check saved request / transaction");
       assert.match(panelText(harness.root), scenario.expected, scenario.name);
       assert.equal(hasButton(harness.root, "Ask wallet to publish anchor"), false, scenario.name);
       assert.equal(harness.wallet.calls.create, 0, scenario.name);
       assert.equal(harness.wallet.calls.submit, 0, scenario.name);
+      assert.equal(harness.wallet.calls.result, scenario.resultLookups, scenario.name);
     } finally {
       harness.cleanup();
     }
   }
 });
 
-test("mounted approval recheck blocks stale, changed, or already-submitted requests", async () => {
+test("mounted request-only recovery is read-only for the same, different-wallet, and different-account reporters", async () => {
   const cases = [
-    { name: "pending", status: "pending", expected: /did not settle request/ },
-    { name: "unknown", statusError: new Error("wallet status is unavailable"), expected: /wallet status is unavailable/ },
-    { name: "rejected", status: "rejected", expected: /current wallet request is rejected/, },
-    { name: "changed account", accounts: ["account-b"], expected: /authorized account changed/ },
-    { name: "changed network", network: "esmeralda", expected: /wallet network changed/ },
+    { name: "same wallet", wallet: new FakeWallet() },
+    { name: "different wallet same request id", wallet: new FakeWallet() },
+    { name: "different account same request id", wallet: Object.assign(new FakeWallet(), { accounts: ["account-b"] }) },
   ];
 
   for (const scenario of cases) {
     const storage = new RecordingStorage();
     saveRecovery(storage, bundleFixture(), recoveryRecord("submitted_awaiting_approval"));
-    const harness = installBrowser({ storage });
+    const harness = installBrowser({ storage, wallet: scenario.wallet });
     try {
       harness.wallet.status = "approved";
       await importAndConnect(harness);
       await click(harness.root, "Check saved request / transaction");
-      assert.equal(hasButton(harness.root, "Submit saved approved request once"), true, scenario.name);
-      if (scenario.status) harness.wallet.status = scenario.status;
-      if (scenario.statusError) harness.wallet.statusError = scenario.statusError;
-      if (scenario.accounts) harness.wallet.changeAccounts(scenario.accounts, false);
-      if (scenario.network) harness.wallet.network = scenario.network;
-      await click(harness.root, "Submit saved approved request once");
-      assert.match(panelText(harness.root), scenario.expected, scenario.name);
+      assert.match(panelText(harness.root), /cannot be proven after recovery/, scenario.name);
+      assert.equal(hasButton(harness.root, "Submit saved approved request once"), false, scenario.name);
       assert.equal(harness.wallet.calls.create, 0, scenario.name);
       assert.equal(harness.wallet.calls.submit, 0, scenario.name);
     } finally {
       harness.cleanup();
     }
-  }
-
-  const storage = new RecordingStorage();
-  saveRecovery(storage, bundleFixture(), recoveryRecord("submitted_awaiting_approval"));
-  const harness = installBrowser({ storage });
-  try {
-    harness.wallet.status = "approved";
-    await importAndConnect(harness);
-    await click(harness.root, "Check saved request / transaction");
-    const replacement = new FakeWallet();
-    replacement.status = "rejected";
-    harness.dom.window.tari = replacement;
-    harness.wallet.status = "submitted";
-    harness.wallet.result = { transactionId: TRANSACTION_ID };
-    await click(harness.root, "Submit saved approved request once");
-    assert.match(panelText(harness.root), /transaction was rejected/);
-    assert.ok(harness.wallet.calls.result >= 1, "pinned wallet resolves its submitted transaction");
-    assert.equal(replacement.calls.status, 0, "replacement provider must not receive the pinned recheck");
-    assert.equal(harness.wallet.calls.submit, 0);
-  } finally {
-    harness.cleanup();
   }
 });
 
@@ -626,6 +601,39 @@ test("mounted panel rejects election and summary/digest binding mismatches befor
       assert.equal(harness.wallet.calls.submit, 0, name);
     } finally {
       harness.cleanup();
+    }
+  }
+});
+
+test("actual Desktop V2 export reaches Hosted Manage's wallet-connect gate only for the same finalized identity", async () => {
+  const exported = desktopExportFixture();
+  const harness = installBrowser({ bundle: exported });
+  try {
+    await importBundle(harness.root, harness.dom, exported);
+    assert.equal(button(harness.root, "Connect Sapient").disabled, false);
+    await click(harness.root, "Connect Sapient");
+    assert.match(panelText(harness.root), /Sapient connected on mainnet/);
+    assert.equal(exported.anchorArgs.electionId, harness.election.electionId);
+    assert.equal(exported.anchorArgs.anchorDigestHex, harness.election.anchorDigestHex);
+    assert.equal(exported.anchorArgs.publicSummary, harness.election.publicSummary);
+    assert.equal(JSON.parse(exported.anchorArgs.publicSummary).archive_hash, harness.election.archiveHashHex);
+  } finally {
+    harness.cleanup();
+  }
+
+  const altered = [
+    ["changed archive contents", bundleFixture({ publicSummary: canonicalSummary({ archiveHash: "aa".repeat(32) }) })],
+    ["changed summary", bundleFixture({ publicSummary: canonicalSummary({ question: "Changed" }) })],
+    ["bundle from another election", bundleFixture({ electionId: ELECTION_B })],
+  ];
+  for (const [name, bundle] of altered) {
+    const rejection = installBrowser({ bundle: exported });
+    try {
+      await importBundle(rejection.root, rejection.dom, bundle);
+      assert.equal(button(rejection.root, "Connect Sapient").disabled, true, name);
+      assert.equal(rejection.wallet.calls.connect, 0, name);
+    } finally {
+      rejection.cleanup();
     }
   }
 });

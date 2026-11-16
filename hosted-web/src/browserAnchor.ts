@@ -95,7 +95,6 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
   let recoveryState: RecoveryLoadState = { kind: "absent" };
   let status = "Import the canonical bundle exported by the desktop application.";
   let busy = false;
-  let approvedRequestId: string | null = null;
 
   const bundleKey = () => {
     if (!bundle) throw new Error("Import the canonical bundle first.");
@@ -214,16 +213,6 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     loadRecovery();
   }
 
-  async function submitApproved(requestId: string): Promise<void> {
-    try {
-      await withExclusiveAnchorOperation(bundleKey(), () => submitApprovedUnlocked(requestId));
-    } catch (error) {
-      status = `${providerErrorMessage(error)} Check wallet history; this request will not be submitted again.`;
-      busy = false;
-      render();
-    }
-  }
-
   async function submitApprovedUnlocked(requestId: string): Promise<void> {
     if (!bundle) return;
     busy = true;
@@ -280,7 +269,6 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
   async function checkRecoveryUnlocked(): Promise<void> {
     if (!bundle || !recovery) return;
     busy = true;
-    approvedRequestId = null;
     render();
     try {
       loadRecovery();
@@ -311,8 +299,11 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
         return;
       }
       if (summary.status === "approved" && saved.phase === "submitted_awaiting_approval") {
-        approvedRequestId = saved.requestId!;
-        status = "The saved request is approved. You may explicitly submit it once.";
+        // A durable request id alone does not prove that this newly connected
+        // provider/account owns the original request or its four V2 anchor
+        // arguments. The currently supported provider API cannot supply that
+        // proof, so remount recovery is deliberately status-only.
+        status = "The saved request is approved, but its original wallet, account, and anchor instructions cannot be proven after recovery. It will not be submitted from this panel.";
         return;
       }
       const transactionId = summary.status === "submitted" ? submittedTransactionId(summary) : null;
@@ -418,7 +409,6 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
         const identity = deploymentError();
         if (identity) throw new Error(identity);
         bundleError = null;
-        approvedRequestId = null;
         loadRecovery();
         status = recoveryState.kind === "corrupt"
           ? `${recoveryState.message}. The existing state is blocked and cannot be treated as absent.`
@@ -483,7 +473,6 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       card.append(error);
     } else if (recovery) {
       actions.append(action("Check saved request / transaction", checkRecovery, busy));
-      if (approvedRequestId) actions.append(action("Submit saved approved request once", () => submitApproved(approvedRequestId!), busy));
     } else if (bundle && wallet && deploymentError() === null) {
       const phase = assessAnchorWorkflow({ bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet.network, recovery: null });
       if (phase.kind === "ready") actions.append(action("Ask wallet to publish anchor", publish, busy));
