@@ -48,7 +48,7 @@ function withRoutes(routes: (path: string) => RouteAnswer): void {
   };
 }
 
-function withTransientFailure(mode: "throw" | "hang", adapter: WindowTariProvider): () => void {
+function withTransientFailure(mode: "throw" | "hang"): () => void {
   const original = globalThis.fetch;
   globalThis.fetch = (async (input) => {
     const path = new URL(input.toString(), "https://app.test").pathname;
@@ -60,7 +60,18 @@ function withTransientFailure(mode: "throw" | "hang", adapter: WindowTariProvide
     }
     throw new Error(`unexpected route ${path}`);
   }) as typeof fetch;
-  void adapter;
+  return () => { globalThis.fetch = original; };
+}
+
+function withRawDurableEnvelope(source: string): () => void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    const path = new URL(input.toString(), "https://app.test").pathname;
+    if (path === "/chain/network") return Response.json({ network: "mainnet", network_byte: 0 });
+    if (path.endsWith("/result")) return new Response(null, { status: 404 });
+    if (path.includes("/transaction-receipts/")) return new Response(source, { headers: { "content-type": "application/json" } });
+    throw new Error(`unexpected route ${path}`);
+  }) as typeof fetch;
   return () => { globalThis.fetch = original; };
 }
 
@@ -163,7 +174,7 @@ describe("browser chain evidence", () => {
 
   for (const mode of ["throw", "hang"] as const) {
     it(`keeps agreeing final wallet and durable evidence authoritative when transient fetch ${mode}s`, async () => {
-      const restore = withTransientFailure(mode, WALLET_ADAPTER);
+      const restore = withTransientFailure(mode);
       const started = Date.now();
       try {
         const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
@@ -176,7 +187,7 @@ describe("browser chain evidence", () => {
 
     it(`reports a known final conflict when transient fetch ${mode}s`, async () => {
       const adapter = { getTransactionResult: async () => sapientResultWith({ epoch: 8 }) } as unknown as WindowTariProvider;
-      const restore = withTransientFailure(mode, adapter);
+      const restore = withTransientFailure(mode);
       try {
         const outcome = await verifyBrowserAnchorEvidence(adapter, transactionId, template, payload);
         assert.equal(outcome.kind, "terminal_failure");
@@ -477,6 +488,32 @@ describe("browser chain evidence", () => {
       if (outcome.kind === "terminal_failure") assert.match(outcome.message, /exactly one supported receipt evidence field/);
     } finally {
       restore();
+    }
+  });
+
+  it("rejects duplicate receipt names before JSON parsing collapses them", async () => {
+    const restore = withRawDurableEnvelope(`{"receipt":"${ALIGNED_RECEIPT.base64}","receipt":"${ALIGNED_RECEIPT.base64}"}`);
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /exactly one supported receipt evidence field/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects duplicate competing evidence names and malformed durable JSON", async () => {
+    for (const source of [
+      `{"receipt":"${ALIGNED_RECEIPT.base64}","result":{},"result":{}}`,
+      `{"receipt":"${ALIGNED_RECEIPT.base64}"`,
+    ]) {
+      const restore = withRawDurableEnvelope(source);
+      try {
+        const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+        assert.equal(outcome.kind, "terminal_failure");
+      } finally {
+        restore();
+      }
     }
   });
 });

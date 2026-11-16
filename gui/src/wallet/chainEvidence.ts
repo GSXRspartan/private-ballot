@@ -40,6 +40,7 @@ function verifyDurableReceiptResponse(
   template: ExpectedAnchorTemplate,
   payload: ExpectedAnchorEventPayload,
   json: unknown,
+  wireFields: readonly string[] | null,
 ): AnchorVerificationOutcome {
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     return terminal("the durable transaction receipt response is not an object");
@@ -49,7 +50,10 @@ function verifyDurableReceiptResponse(
   // `receipt` is the only documented, supported durable representation. Do
   // not select it by precedence from a larger envelope: doing so would hide a
   // competing result from an independently observable source.
-  if (fields.length !== 1 || fields[0] !== "receipt" || typeof record.receipt !== "string") {
+  if (
+    wireFields === null || wireFields.length !== 1 || wireFields[0] !== "receipt" ||
+    fields.length !== 1 || fields[0] !== "receipt" || typeof record.receipt !== "string"
+  ) {
     return terminal("the durable receipt response must contain exactly one supported receipt evidence field");
   }
   try {
@@ -66,6 +70,88 @@ function verifyDurableReceiptResponse(
   }
 }
 
+function skipWhitespace(source: string, index: number): number {
+  while (index < source.length && /[\t\n\r ]/.test(source[index]!)) index += 1;
+  return index;
+}
+
+function readJsonString(source: string, index: number): { value: string; next: number } | null {
+  if (source[index] !== '"') return null;
+  let cursor = index + 1;
+  let escaped = false;
+  while (cursor < source.length) {
+    const character = source[cursor]!;
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === '"') {
+      try {
+        return { value: JSON.parse(source.slice(index, cursor + 1)) as string, next: cursor + 1 };
+      } catch {
+        return null;
+      }
+    } else if (character < " ") {
+      return null;
+    }
+    cursor += 1;
+  }
+  return null;
+}
+
+/**
+ * Returns top-level member names without interpreting member values. Durable
+ * receipts have a fixed one-member envelope, so this small scanner lets us
+ * detect duplicate names before JSON.parse collapses them.
+ */
+function topLevelJsonMemberNames(source: string): string[] | null {
+  let cursor = skipWhitespace(source, 0);
+  if (source[cursor] !== "{") return null;
+  cursor = skipWhitespace(source, cursor + 1);
+  const names: string[] = [];
+  if (source[cursor] === "}") return names;
+  while (cursor < source.length) {
+    const key = readJsonString(source, cursor);
+    if (key === null) return null;
+    names.push(key.value);
+    cursor = skipWhitespace(source, key.next);
+    if (source[cursor] !== ":") return null;
+    cursor = skipWhitespace(source, cursor + 1);
+
+    let nesting = 0;
+    let inString = false;
+    let escaped = false;
+    while (cursor < source.length) {
+      const character = source[cursor]!;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+      } else if (character === '"') {
+        inString = true;
+      } else if (character === "{" || character === "[") {
+        nesting += 1;
+      } else if (character === "}" || character === "]") {
+        if (nesting === 0) {
+          if (character !== "}") return null;
+          break;
+        }
+        nesting -= 1;
+      } else if (character === "," && nesting === 0) {
+        break;
+      }
+      cursor += 1;
+    }
+    if (cursor >= source.length || inString || nesting !== 0) return null;
+    if (source[cursor] === "}") {
+      cursor = skipWhitespace(source, cursor + 1);
+      return cursor === source.length ? names : null;
+    }
+    cursor = skipWhitespace(source, cursor + 1);
+  }
+  return null;
+}
+
 type JsonResponse = { status: number; json: unknown | null };
 
 async function readJson(path: string, signal?: AbortSignal): Promise<JsonResponse> {
@@ -80,6 +166,28 @@ async function readJson(path: string, signal?: AbortSignal): Promise<JsonRespons
     return { status: response.status, json: await response.json() };
   } catch {
     return { status: response.status, json: null };
+  }
+}
+
+async function readDurableReceipt(path: string): Promise<JsonResponse & { wireFields: string[] | null }> {
+  let response: Response;
+  try {
+    response = await fetch(`${CHAIN_PREFIX}${path}`, { headers: { Accept: "application/json" } });
+  } catch {
+    return { status: 0, json: null, wireFields: null };
+  }
+  if (!response.ok) return { status: response.status, json: null, wireFields: null };
+  let source: string;
+  try {
+    source = await response.text();
+  } catch {
+    return { status: response.status, json: null, wireFields: null };
+  }
+  const wireFields = topLevelJsonMemberNames(source);
+  try {
+    return { status: response.status, json: JSON.parse(source) as unknown, wireFields };
+  } catch {
+    return { status: response.status, json: null, wireFields: null };
   }
 }
 
@@ -131,7 +239,7 @@ export async function verifyBrowserAnchorEvidence(
   // independently. A failed or slow transient route must not hide a known
   // final conflict between the wallet and the durable receipt.
   const transient = readTransientJson(`/transactions/${transactionId}/result`);
-  const receipt = await readJson(`/transaction-receipts/${transactionId}`);
+  const receipt = await readDurableReceipt(`/transaction-receipts/${transactionId}`);
 
   // Durable receipt is REQUIRED for final verification.
   if (receipt.status !== 200) {
@@ -140,7 +248,7 @@ export async function verifyBrowserAnchorEvidence(
   if (receipt.json === null) {
     return terminal("the durable receipt response is not JSON");
   }
-  const receiptOutcome = verifyDurableReceiptResponse(transactionId, template, payload, receipt.json);
+  const receiptOutcome = verifyDurableReceiptResponse(transactionId, template, payload, receipt.json, receipt.wireFields);
   if (receiptOutcome.kind !== "verified") return receiptOutcome;
 
   // These are independent final sources. Their disagreement is already
