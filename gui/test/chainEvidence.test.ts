@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 
 import { verifyBrowserAnchorEvidence } from "../src/wallet/chainEvidence.ts";
 import type { WindowTariProvider } from "../src/wallet/provider.ts";
-import { RESULT_JSON_FINALIZED_COMMIT } from "./anchorVectors.generated.ts";
+import { RESULT_JSON_FINALIZED_COMMIT, RESULT_JSON_PENDING } from "./anchorVectors.generated.ts";
 import { RECEIPT_VECTORS } from "./receiptVectors.generated.ts";
+import { SAPIENT_EXECUTE_RESULT_JSON } from "./sapientExecuteResult.generated.ts";
 
 const transactionId = "9a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b";
 const template = { templateAddressHex: "5f1ecbe69b1c6e8b64b97b37f32f6975be4b1e2a1d9c4a5e3f2b6c8d0a9e7f41", eventTopic: "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2" };
@@ -14,6 +15,19 @@ const ALIGNED_RECEIPT = RECEIPT_VECTORS.commit_receipt_aligned_with_exec_vector;
 const WALLET_ADAPTER = {
   getTransactionResult: async () => COMMITTED_RESULT,
 } as unknown as WindowTariProvider;
+
+function finalizedResultWithExecuteResult(executeResult: Record<string, unknown>): Record<string, unknown> {
+  const result = structuredClone(COMMITTED_RESULT) as { result: { Finalized: Record<string, unknown> } };
+  result.result.Finalized.execution_result = executeResult;
+  return result;
+}
+
+function sapientResultWith({ epoch = 7, transactionId: id = transactionId }: { epoch?: number; transactionId?: string } = {}): Record<string, unknown> {
+  const executeResult = JSON.parse(SAPIENT_EXECUTE_RESULT_JSON) as { finalize: { transaction_hash: string }; execute_epoch: number };
+  executeResult.finalize.transaction_hash = id;
+  executeResult.execute_epoch = epoch;
+  return finalizedResultWithExecuteResult(executeResult as unknown as Record<string, unknown>);
+}
 
 interface RouteAnswer {
   status: number;
@@ -45,6 +59,70 @@ describe("browser chain evidence", () => {
     });
     try {
       assert.equal((await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload)).kind, "verified");
+    } finally {
+      restore();
+    }
+  });
+
+  it("retains independently verified final agreement before a transient Pending result", async () => {
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 200, body: JSON.parse(RESULT_JSON_PENDING) };
+      if (path.includes("/transaction-receipts/")) return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64 } };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      assert.equal((await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload)).kind, "pending");
+    } finally {
+      restore();
+    }
+  });
+
+  it("makes wallet and durable final disagreement terminal before transient Pending", async () => {
+    const adapter = { getTransactionResult: async () => sapientResultWith({ epoch: 8 }) } as unknown as WindowTariProvider;
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 200, body: JSON.parse(RESULT_JSON_PENDING) };
+      if (path.includes("/transaction-receipts/")) return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64 } };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(adapter, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /wallet and durable receipt evidence disagree/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("makes a wallet transaction mismatch terminal even when durable evidence is final and transient is Pending", async () => {
+    const adapter = { getTransactionResult: async () => sapientResultWith({ transactionId: "ab".repeat(32) }) } as unknown as WindowTariProvider;
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 200, body: JSON.parse(RESULT_JSON_PENDING) };
+      if (path.includes("/transaction-receipts/")) return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64 } };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(adapter, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.equal(outcome.failure, "wrong_transaction");
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects a later final transient result that disagrees with agreeing wallet and durable evidence", async () => {
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 200, body: sapientResultWith({ epoch: 8 }) };
+      if (path.includes("/transaction-receipts/")) return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64 } };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /transient indexer result disagrees/);
     } finally {
       restore();
     }
@@ -280,7 +358,7 @@ describe("browser chain evidence", () => {
       const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
       assert.equal(outcome.kind, "terminal_failure");
       if (outcome.kind === "terminal_failure") {
-        assert.match(outcome.message, /mixed evidence/);
+        assert.match(outcome.message, /exactly one supported receipt evidence field/);
       }
     } finally {
       restore();
@@ -300,24 +378,62 @@ describe("browser chain evidence", () => {
       const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
       assert.equal(outcome.kind, "terminal_failure");
       if (outcome.kind === "terminal_failure") {
-        assert.match(outcome.message, /mixed evidence/);
+        assert.match(outcome.message, /exactly one supported receipt evidence field/);
       }
     } finally {
       restore();
     }
   });
 
-  it("rejects conflicting transient result and durable receipt", async () => {
-    // This scenario is covered by "fails closed when any two sources disagree" test.
-    // Keeping this test as a documented requirement; the conflict is detected when
-    // the wallet and receipt epochs differ.
-    assert.ok(true, "conflict detection covered by existing test");
+  it("rejects receipt + transaction_receipt envelope", async () => {
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 404, body: null };
+      if (path.includes("/transaction-receipts/")) {
+        return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64, transaction_receipt: ALIGNED_RECEIPT.base64 } };
+      }
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /exactly one supported receipt evidence field/);
+    } finally {
+      restore();
+    }
   });
 
-  it("rejects malformed outcome CBOR (non-empty array)", async () => {
-    // This test requires a valid TransactionReceipt with malformed outcome.
-    // The strict decoder already rejects invalid outcome CBOR at the decoder level.
-    // Covered by transactionReceipt.test.ts "rejects outcome with non-empty CBOR array payload".
-    assert.ok(true, "malformed outcome rejection covered by decoder tests");
+  it("rejects an undocumented transaction_receipt-only envelope", async () => {
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 404, body: null };
+      if (path.includes("/transaction-receipts/")) return { status: 200, body: { transaction_receipt: ALIGNED_RECEIPT.base64 } };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /exactly one supported receipt evidence field/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("rejects any extra competing durable evidence field", async () => {
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 404, body: null };
+      if (path.includes("/transaction-receipts/")) {
+        return { status: 200, body: { receipt: ALIGNED_RECEIPT.base64, evidence: { source: "other" } } };
+      }
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "terminal_failure");
+      if (outcome.kind === "terminal_failure") assert.match(outcome.message, /exactly one supported receipt evidence field/);
+    } finally {
+      restore();
+    }
   });
 });

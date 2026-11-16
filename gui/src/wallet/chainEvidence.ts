@@ -29,10 +29,9 @@ function sameEvidence(left: Extract<AnchorVerificationOutcome, { kind: "verified
  * returns `{ "receipt": "<base64 CBOR TransactionReceipt>" }` (HTTP 200).
  * The receipt is decoded and verified in the pinned v0.53.x wire format;
  * a FeeIntentCommit outcome is never a full anchor success. A response
- * with an ambiguous mixed shape (receipt + result, receipt + transaction_result)
- * is rejected. A legacy response carrying only a canonical result envelope
- * is no longer accepted for final verification - a valid durable receipt
- * is REQUIRED for final "verified" success.
+ * returns exactly that one-field envelope. No alternate durable shape is
+ * documented or accepted. A legacy result envelope is not durable evidence
+ * and a response with extra evidence fields is ambiguous, so both fail closed.
  */
 function verifyDurableReceiptResponse(
   transactionId: string,
@@ -44,34 +43,25 @@ function verifyDurableReceiptResponse(
     return terminal("the durable transaction receipt response is not an object");
   }
   const record = json as Record<string, unknown>;
-  const receiptField = record.receipt;
-  const hasReceipt = typeof receiptField === "string";
-  const hasResult = "result" in record;
-  const hasTransactionResult = "transaction_result" in record;
-
-  // Reject ambiguous mixed responses
-  if (hasReceipt && (hasResult || hasTransactionResult)) {
-    return terminal("the durable receipt response contains mixed evidence fields; expected authoritative receipt only");
+  const fields = Object.keys(record);
+  // `receipt` is the only documented, supported durable representation. Do
+  // not select it by precedence from a larger envelope: doing so would hide a
+  // competing result from an independently observable source.
+  if (fields.length !== 1 || fields[0] !== "receipt" || typeof record.receipt !== "string") {
+    return terminal("the durable receipt response must contain exactly one supported receipt evidence field");
   }
-
-  if (hasReceipt) {
-    try {
-      const decoded = decodeTransactionReceiptBase64(receiptField);
-      return { kind: "verified", evidence: verifyDurableTransactionReceipt(transactionId, template, payload, decoded) };
-    } catch (error) {
-      if (error instanceof TransactionReceiptDecodeError) {
-        return terminal(error.message);
-      }
-      if (error instanceof VerificationFailure) {
-        return { kind: "terminal_failure", failure: error.kind, message: error.message };
-      }
-      throw error;
+  try {
+    const decoded = decodeTransactionReceiptBase64(record.receipt);
+    return { kind: "verified", evidence: verifyDurableTransactionReceipt(transactionId, template, payload, decoded) };
+  } catch (error) {
+    if (error instanceof TransactionReceiptDecodeError) {
+      return terminal(error.message);
     }
+    if (error instanceof VerificationFailure) {
+      return { kind: "terminal_failure", failure: error.kind, message: error.message };
+    }
+    throw error;
   }
-
-  // Legacy envelope-only responses are no longer sufficient for final verification.
-  // A valid durable receipt is REQUIRED for final "verified" success.
-  return terminal("the durable transaction receipt is missing or unavailable; final verification cannot proceed without it");
 }
 
 async function readJson(path: string): Promise<{ status: number; json: unknown | null }> {
@@ -125,6 +115,13 @@ export async function verifyBrowserAnchorEvidence(
   const receiptOutcome = verifyDurableReceiptResponse(transactionId, template, payload, receipt.json);
   if (receiptOutcome.kind !== "verified") return receiptOutcome;
 
+  // These are independent final sources. Their disagreement is already
+  // conclusive and must not be masked by a transient result route reporting
+  // Pending, a timeout, or an unavailable response.
+  if (!sameEvidence(wallet, receiptOutcome)) {
+    return terminal("wallet and durable receipt evidence disagree");
+  }
+
   // If transient result exists, it must agree with the durable receipt.
   if (result.status === 200) {
     if (result.json === null) return terminal("the indexer result response is not JSON");
@@ -133,11 +130,6 @@ export async function verifyBrowserAnchorEvidence(
     if (!sameEvidence(receiptOutcome, resultOutcome)) {
       return terminal("the transient indexer result disagrees with the durable receipt");
     }
-  }
-
-  // Wallet must agree with durable receipt.
-  if (!sameEvidence(wallet, receiptOutcome)) {
-    return terminal("wallet and durable receipt evidence disagree");
   }
 
   return receiptOutcome;
