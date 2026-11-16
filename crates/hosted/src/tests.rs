@@ -10,6 +10,11 @@ use std::sync::Arc;
 use axum::body::Body;
 use curve25519_dalek_v4::{constants::RISTRETTO_BASEPOINT_POINT, scalar::Scalar};
 use rusqlite::{Connection, params};
+use tari_cc_private_ballot_anchor_transport::{
+    ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V2,
+    AnchorTemplateBindingV2,
+};
+use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBindingV1};
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
@@ -17,6 +22,11 @@ use tari_cc_private_ballot_ballot::{
 };
 use tari_cc_private_ballot_crypto::{
     TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychSecretKeyV1, prove_tari_triptych_prototype_v1,
+};
+use tari_cc_private_ballot_gui_core::{
+    GuiLiveAnchorV2RequestV1, GuiV2AnchorPublishPreparationRequestV1,
+    build_v2_public_payload_from_verified_archive_v1,
+    prepare_v2_anchor_publish_from_verified_evidence_v1,
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, CanonicalCborWriter, PROTOCOL_VERSION_V1,
@@ -111,6 +121,37 @@ fn fixture() -> Fixture {
         governance_source_revision: "hosted-synthetic".to_owned(),
     }) { Ok(v) => v, Err(_) => panic!("manifest") };
     Fixture { manifest_cbor: match manifest.to_canonical_cbor() { Ok(v) => v, Err(_) => panic!("manifest cbor") }, registry_cbor, candidate_cbor, election_id: "hosted-synthetic-001".to_owned() }
+}
+
+/// Models the exact canonical public binding emitted by the Desktop organizer
+/// after it has verified signed, durable transport history. Hosted only stores
+/// this public evidence and never manufactures an alternative binding.
+fn desktop_transport_binding(f: &Fixture, accepted_ballot_count: u64) -> Vec<u8> {
+    let (manifest, _, _) = load_fixture(f);
+    let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("manifest hash"));
+    TransportArchiveBindingV1::new(
+        f.election_id.as_bytes().to_vec(),
+        manifest_hash,
+        [0x44; 32],
+        7,
+        vec![TransportArchiveBatchV1::new(7, [0x55; 32], accepted_ballot_count, false)],
+    )
+    .and_then(|binding| binding.to_canonical_cbor())
+    .unwrap_or_else(|_| panic!("desktop transport binding"))
+}
+
+fn record_desktop_transport_binding(
+    storage: &InMemoryStorage,
+    f: &Fixture,
+    accepted_ballot_count: u64,
+) {
+    storage
+        .put_finalized_transport_binding(crate::storage::FinalizedTransportBindingRecord {
+            election_id: f.election_id.clone(),
+            binding_cbor: desktop_transport_binding(f, accepted_ballot_count),
+        })
+        .unwrap_or_else(|_| panic!("record desktop transport binding"));
 }
 
 fn load_fixture(f: &Fixture) -> (tari_cc_private_ballot_ballot::ElectionManifest, CandidateSet, RegistrySnapshot) {
@@ -216,6 +257,7 @@ async fn end_to_end_hosted_flow_and_desktop_archive_verifier() {
     let body_c = serde_json::json!({"receipt_id": "00000000-0000-4000-8000-000000000005", "package_cbor_hex": hex_encode(&pkg_c), "api_version": "v1"}).to_string();
     let (s9, r9) = req(router.clone(), "POST", &format!("/api/v1/elections/{}/ballots", f.election_id), Some(body_c), &[("content-type", "application/json")]).await;
     assert_eq!(s9, axum::http::StatusCode::CONFLICT, "{r9}");
+    record_desktop_transport_binding(storage.as_ref(), &f, 2);
     let (s10, r10) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{}/finalize", f.election_id), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(s10, axum::http::StatusCode::OK, "{r10}");
     // Results: A->a, B->b => counts 1,1,0
@@ -236,6 +278,55 @@ async fn end_to_end_hosted_flow_and_desktop_archive_verifier() {
     // Need archive-manifest bytes: reconstruct by asking hosted to write? Instead use files + manifest from endpoint is not included. So fetch via internal: we re-derive using crate functions in lib tests is complex; here we write files and then generate manifest by calling the same logic through a second request is not possible. Workaround: the archive endpoint returns only content files; the test below writes them and also writes archive-manifest by recomputing with archive crate directly.
     write_archive_from_endpoint(&dir, &f, &files);
     assert!(verify_archive_dir_for_test(&dir), "desktop verifier must pass hosted archive");
+
+    // Exercise the production Desktop V2 payload/preparation boundary against
+    // Hosted's finalized files. This is offline and never contacts a wallet.
+    let desktop_payload = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: "mainnet".to_owned(),
+        template_address: tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        template_artifact_digest_hex:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+    }).expect("Desktop must build V2 payload from Hosted's verified archive");
+    let artifact_digest: [u8; 32] = hex_decode(
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3,
+    ).unwrap_or_else(|_| panic!("release digest"))
+        .try_into().unwrap_or_else(|_| panic!("release digest length"));
+    let deployment = AnchorTemplateBindingV2::new(
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        artifact_digest,
+    ).expect("release deployment binding");
+    let desktop_preparation = prepare_v2_anchor_publish_from_verified_evidence_v1(
+        &GuiV2AnchorPublishPreparationRequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            payload_hex: desktop_payload.payload_hex.clone(),
+            expected_digest_hex: desktop_payload.v2_anchor_digest_hex.clone(),
+        },
+        &deployment,
+    ).expect("Desktop must prepare exact V2 call");
+    let loaded = crate::LoadedElection::load(storage.as_ref(), &f.election_id)
+        .unwrap_or_else(|_| panic!("finalized election loads"));
+    let hosted_identity = crate::finalized_anchor_identity(&loaded, storage.as_ref())
+        .unwrap_or_else(|_| panic!("Hosted identity derives"));
+    assert_eq!(desktop_payload.archive_hash_hex, hosted_identity.archive_hash_hex);
+    assert_eq!(desktop_payload.election_id, f.election_id);
+    assert_eq!(desktop_payload.v2_anchor_digest_hex, hosted_identity.anchor_digest_hex);
+    assert_eq!(desktop_payload.public_summary_json, hosted_identity.public_summary_json);
+    assert_eq!(
+        desktop_preparation.arguments,
+        vec![
+            hosted_identity.anchor_digest_hex,
+            "mainnet".to_owned(),
+            f.election_id.clone(),
+            hosted_identity.public_summary_json,
+        ]
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -394,12 +485,12 @@ fn sqlite_schema_v2_upgrade_preserves_existing_data_and_is_idempotent() {
         assert_eq!(ballots[0].seq, 7);
     }
 
-    // The v4 tables/version exist after migration, and a second open is idempotent.
+    // The v5 tables/version exist after migration, and a second open is idempotent.
     {
         let migrated = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v3"));
         let version: String = migrated.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "4");
-        for table in ["election_drafts", "eligibility_slots", "enrollment_invitations", "enrolled_credentials", "frozen_registries", "organizer_credentials"] {
+        assert_eq!(version, "5");
+        for table in ["election_drafts", "eligibility_slots", "enrollment_invitations", "enrolled_credentials", "frozen_registries", "organizer_credentials", "finalized_transport_bindings"] {
             let exists: i64 = migrated.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
             assert_eq!(exists, 1, "missing {table}");
         }
@@ -1143,6 +1234,13 @@ async fn synthetic_full_election_3slots_enroll_2_freeze_vote_finalize() {
     // Close and finalize
     let (rc, _) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/close"), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(rc, axum::http::StatusCode::OK);
+    let closed_fixture = Fixture {
+        manifest_cbor: loaded.manifest_cbor.clone(),
+        registry_cbor: loaded.registry_cbor.clone(),
+        candidate_cbor: loaded.candidate_cbor.clone(),
+        election_id: election_id.to_owned(),
+    };
+    record_desktop_transport_binding(storage.as_ref(), &closed_fixture, 2);
     let (rfin, tfin) = req(routers.admin.clone(), "POST", &format!("/api/v1/admin/elections/{election_id}/finalize"), None, &[("x-admin-token", "test-admin-token")]).await;
     assert_eq!(rfin, axum::http::StatusCode::OK, "{tfin}");
     // Results: exactly 2 accepted ballots (A and B); C never voted
@@ -1564,7 +1662,7 @@ async fn organizer_freeze_rejects_post_freeze_mutations() {
 
 #[tokio::test]
 async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
-    let (routers, _storage) = test_routers();
+    let (routers, storage) = test_routers();
     let public = routers.public.clone();
     let secret = organizer_secret(0x31);
     let election_id = "org-full-e2e-001";
@@ -1626,6 +1724,31 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     let body_c = serde_json::json!({"receipt_id": "11111111-1111-4111-8111-111111111114", "package_cbor_hex": hex_encode(&pkg_c), "api_version": "v1"}).to_string();
     let (s4, r4) = req(public.clone(), "POST", &format!("/api/v1/elections/{election_id}/ballots"), Some(body_c), &[("content-type", "application/json")]).await;
     assert_eq!(s4, axum::http::StatusCode::CONFLICT, "{r4}");
+    let (smissing, vmissing) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/finalize"), None, Some(&secret)).await;
+    assert_eq!(smissing, axum::http::StatusCode::CONFLICT, "{vmissing}");
+    assert_eq!(vmissing["code"], "transport_binding_required");
+    let binding = desktop_transport_binding(&f2, 2);
+    let mut altered_binding = binding.clone();
+    let last = altered_binding.len() - 1;
+    altered_binding[last] ^= 1;
+    let (saltered, valtered) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&altered_binding)}).to_string()),
+        Some(&secret),
+    ).await;
+    assert_eq!(saltered, axum::http::StatusCode::CONFLICT, "{valtered}");
+    assert_eq!(valtered["code"], "transport_binding_required");
+    let (sbinding, vbinding) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(serde_json::json!({"transport_binding_cbor_hex": hex_encode(&binding)}).to_string()),
+        Some(&secret),
+    ).await;
+    assert_eq!(sbinding, axum::http::StatusCode::CREATED, "{vbinding}");
+    assert!(storage.get_finalized_transport_binding(election_id).unwrap().is_some());
     let (sfin, vfin) = organizer_call(&public, "POST", &format!("/api/v1/organizer/elections/{election_id}/finalize"), None, Some(&secret)).await;
     assert_eq!(sfin, axum::http::StatusCode::OK, "{vfin}");
     assert_eq!(vfin["state"], "finalized");
@@ -1886,16 +2009,16 @@ fn sqlite_migration_v3_to_v4_preserves_staging_data() {
         }).unwrap_or_else(|_| panic!("v4 insert after migration"));
     }
 
-    // Version bumped to 4 and organizer_credentials exists.
+    // Version bumped to 5 and the organizer and finalized-binding tables exist.
     {
         let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v4"));
         let version: String = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
         let exists: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'organizer_credentials'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
         assert_eq!(exists, 1);
     }
 
-    // Reopen is idempotent: data intact, version still 4.
+    // Reopen is idempotent: data intact, version still 5.
     {
         let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen v4"));
         assert!(storage.get_election_draft("legacy-draft").unwrap().is_some());
@@ -1903,7 +2026,7 @@ fn sqlite_migration_v3_to_v4_preserves_staging_data() {
         assert!(storage.get_organizer_credential("legacy-draft").unwrap().is_some());
         let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect after reopen"));
         let version: String = conn.query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

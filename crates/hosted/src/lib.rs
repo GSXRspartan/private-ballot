@@ -55,7 +55,7 @@ use tari_cc_private_ballot_archive::{
     ARCHIVE_MANIFEST_CANONICAL_PATH, ArchiveHashV1, ArchiveFileCatalogV1, ArchiveFileEntryV1,
     ArchiveManifestV1, ArchivePathV1, verify_archive_directory_v1,
     ELECTION_MANIFEST_ARCHIVE_PATH, CANDIDATE_SET_ARCHIVE_PATH, VOTER_REGISTRY_ARCHIVE_PATH,
-    SUBMISSIONS_ARCHIVE_DIR,
+    SUBMISSIONS_ARCHIVE_DIR, TRANSPORT_ARCHIVE_BINDING_PATH_V1, TransportArchiveBindingV1,
 };
 use tari_cc_private_ballot_anchor::{
     OotleAnchorPublicPayloadV2, OotleAnchorTallyEntryV2, OotleAnchorTemplateBindingV2,
@@ -100,7 +100,7 @@ pub const ORIGIN_TOKEN_HEADER: &str = "x-private-ballot-origin";
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Stricter per-route limit for ballot submissions.
 pub const MAX_BALLOT_BODY_BYTES: usize = 32 * 1024;
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 /// Domain separator for the election-scoped organizer capability verifier.
 /// The verifier is BLAKE3 over `{domain}\0{election_id}\0{secret_bytes}`;
 /// the plaintext organizer secret is never stored server-side.
@@ -499,7 +499,11 @@ async fn get_results(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<
     Json(ResultsBody { election_id: id, state: loaded.record.state.clone(), accepted_ballots: tally.accepted_ballots(), abstentions: tally.abstentions(), counts, leading }).into_response()
 }
 
-fn build_archive_files(loaded: &LoadedElection, ballots: &[storage::BallotRecord]) -> Result<(BTreeMap<String, Vec<u8>>, String), Response> {
+fn build_archive_files(
+    loaded: &LoadedElection,
+    ballots: &[storage::BallotRecord],
+    transport_binding_cbor: &[u8],
+) -> Result<(BTreeMap<String, Vec<u8>>, String), Response> {
     let p = Blake3HashProviderV1;
     let manifest_hash = loaded.manifest.canonical_hash(&p).map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive failed"))?;
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -507,6 +511,10 @@ fn build_archive_files(loaded: &LoadedElection, ballots: &[storage::BallotRecord
     files.insert(CANDIDATE_SET_ARCHIVE_PATH.to_owned(), loaded.record.candidate_cbor.clone());
     files.insert(VOTER_REGISTRY_ARCHIVE_PATH.to_owned(), loaded.record.registry_cbor.clone());
     for (i, b) in ballots.iter().enumerate() { files.insert(format!("{SUBMISSIONS_ARCHIVE_DIR}/{i:08}.cbor"), b.package_cbor.clone()); }
+    files.insert(
+        TRANSPORT_ARCHIVE_BINDING_PATH_V1.to_owned(),
+        transport_binding_cbor.to_vec(),
+    );
     let entries: Vec<ArchiveFileEntryV1> = files.iter().map(|(path, bytes)| {
         let ap = ArchivePathV1::new(path.clone()).map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive failed"))?;
         Ok(ArchiveFileEntryV1::for_bytes(ap, &p, bytes))
@@ -515,6 +523,51 @@ fn build_archive_files(loaded: &LoadedElection, ballots: &[storage::BallotRecord
     let manifest = ArchiveManifestV1::finalized_for_provider(manifest_hash, catalog, &p).map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive failed"))?;
     let hash = manifest.canonical_hash(&p).map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive failed"))?;
     Ok((files, hex_encode(hash.as_bytes())))
+}
+
+fn binding_error(message: &'static str) -> Response {
+    error_response(StatusCode::CONFLICT, "transport_binding_required", message)
+}
+
+/// The Desktop organizer is the authoritative transport-binding producer. This
+/// service only accepts its canonical public bytes after proving that they bind
+/// the same election, manifest, and accepted ballot count that Hosted holds.
+fn validate_transport_binding_bytes(
+    loaded: &LoadedElection,
+    binding_cbor: &[u8],
+    accepted_ballot_count: u64,
+) -> Result<(), Response> {
+    let binding = TransportArchiveBindingV1::from_canonical_cbor(binding_cbor)
+        .map_err(|_| binding_error("the supplied transport binding is not canonical"))?;
+    let manifest_hash = loaded.manifest.canonical_hash(&Blake3HashProviderV1).map_err(|_| {
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive identity unavailable")
+    })?;
+    if binding.election_id() != loaded.manifest.election_id().as_bytes()
+        || binding.manifest_hash() != manifest_hash
+    {
+        return Err(binding_error("the supplied transport binding belongs to another election"));
+    }
+    let binding_count = binding.batches().iter().try_fold(0_u64, |total, batch| {
+        total.checked_add(batch.accepted_unique_count())
+    }).ok_or_else(|| binding_error("the supplied transport binding has an invalid accepted count"))?;
+    if binding_count != accepted_ballot_count {
+        return Err(binding_error(
+            "the supplied transport binding does not match the finalized accepted ballot count",
+        ));
+    }
+    Ok(())
+}
+
+fn authoritative_transport_binding_bytes(
+    loaded: &LoadedElection,
+    storage: &dyn HostedStorage,
+    accepted_ballot_count: u64,
+) -> Result<Vec<u8>, Response> {
+    let record = storage.get_finalized_transport_binding(&loaded.record.id)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "transport binding unavailable"))?
+        .ok_or_else(|| binding_error("an authoritative finalized transport binding is required"))?;
+    validate_transport_binding_bytes(loaded, &record.binding_cbor, accepted_ballot_count)?;
+    Ok(record.binding_cbor)
 }
 
 pub fn write_archive_directory(loaded_files: &BTreeMap<String, Vec<u8>>, archive_manifest_bytes: &[u8], target_dir: &Path) -> Result<String, String> {
@@ -534,8 +587,13 @@ struct ArchiveFileJson { path: String, cbor_hex: String }
 async fn get_archive(State(state): State<Arc<AppState>>, AxumPath(id): AxumPath<String>) -> Response {
     let loaded = match LoadedElection::load(state.storage.as_ref(), &id) { Ok(v) => v, Err(r) => return r };
     if loaded.record.state != "finalized" { return error_response(StatusCode::CONFLICT, "election_not_finalized", "archive is available only after finalization"); }
-    let ballots = match state.storage.list_ballots(&id) { Ok(v) => v, Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable") };
-    let (files, archive_hash) = match build_archive_files(&loaded, &ballots) { Ok(v) => v, Err(r) => return r };
+    let (ledger, ballots) = match loaded.replay_ledger(state.storage.as_ref()) { Ok(v) => v, Err(r) => return r };
+    let binding = match authoritative_transport_binding_bytes(
+        &loaded,
+        state.storage.as_ref(),
+        ledger.accepted_ballots().len() as u64,
+    ) { Ok(v) => v, Err(r) => return r };
+    let (files, archive_hash) = match build_archive_files(&loaded, &ballots, &binding) { Ok(v) => v, Err(r) => return r };
     Json(ArchiveBody { election_id: id, archive_hash_hex: archive_hash, files: files.into_iter().map(|(path, bytes)| ArchiveFileJson { path, cbor_hex: hex_encode(&bytes) }).collect() }).into_response()
 }
 
@@ -1176,13 +1234,17 @@ fn do_finalize(state: &AppState, id: &str) -> Result<Response, Response> {
     let loaded = match LoadedElection::load(state.storage.as_ref(), id) { Ok(v) => v, Err(r) => return Err(r) };
     if loaded.record.state != "closed" { return Err(error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed")); }
     // Replay through canonical ledger (no secret needed; packages are public by protocol).
-    if let Err(r) = loaded.replay_ledger(state.storage.as_ref()) { return Err(r); }
+    let (ledger, ballots) = loaded.replay_ledger(state.storage.as_ref())?;
+    // Never let Hosted finalize an archive it cannot make bit-for-bit equal to
+    // the Desktop's verified, transport-bound archive.
+    let binding = authoritative_transport_binding_bytes(
+        &loaded,
+        state.storage.as_ref(),
+        ledger.accepted_ballots().len() as u64,
+    )?;
+    let (_, archive_hash) = build_archive_files(&loaded, &ballots, &binding)?;
     match state.storage.set_election_state(id, "closed", "finalized") {
-        Ok(true) => {
-            let ballots = state.storage.list_ballots(id).unwrap_or_default();
-            let (_, archive_hash) = build_archive_files(&loaded, &ballots).unwrap_or((BTreeMap::new(), String::new()));
-            Ok(Json(serde_json::json!({"election_id": id, "state": "finalized", "archive_hash_hex": archive_hash, "accepted_ballots": ballots.len()})).into_response())
-        }
+        Ok(true) => Ok(Json(serde_json::json!({"election_id": id, "state": "finalized", "archive_hash_hex": archive_hash, "accepted_ballots": ballots.len()})).into_response()),
         Ok(false) => Err(error_response(StatusCode::CONFLICT, "invalid_state", "election is not closed")),
         Err(_) => Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "storage unavailable")),
     }
@@ -1269,6 +1331,13 @@ struct OrganizerCreateElectionBody {
 #[derive(Debug, Deserialize)]
 struct OrganizerIssueInvitationRequest { slot_id: Option<String> }
 
+#[derive(Debug, Deserialize)]
+struct OrganizerTransportBindingRequest {
+    /// Exact canonical bytes emitted by the Desktop organizer after it has
+    /// verified its signed, durable transport history.
+    transport_binding_cbor_hex: String,
+}
+
 #[derive(Debug, Serialize)]
 struct OrganizerSlotBody {
     slot_id: String,
@@ -1311,13 +1380,17 @@ fn finalized_anchor_identity(
     loaded: &LoadedElection,
     storage: &dyn HostedStorage,
 ) -> Result<FinalizedAnchorIdentity, Response> {
-    let (_, archive_hash_hex) = build_archive_files(loaded, &storage.list_ballots(&loaded.record.id)
-        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive identity unavailable"))?)?;
+    let (ledger, ballots) = loaded.replay_ledger(storage)?;
+    let binding = authoritative_transport_binding_bytes(
+        loaded,
+        storage,
+        ledger.accepted_ballots().len() as u64,
+    )?;
+    let (_, archive_hash_hex) = build_archive_files(loaded, &ballots, &binding)?;
     let archive_hash: [u8; 32] = hex_decode(&archive_hash_hex)
         .ok()
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "archive identity unavailable"))?;
-    let (ledger, _) = loaded.replay_ledger(storage)?;
     let payloads: Vec<ApprovalBallotPayload> = ledger.accepted_ballots().iter().map(|ballot| ballot.payload().clone()).collect();
     let tally = ApprovalTally::from_ballots(&loaded.candidates, payloads.iter())
         .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "anchor identity unavailable"))?;
@@ -1710,6 +1783,90 @@ async fn organizer_close(
     }
 }
 
+fn do_store_finalized_transport_binding(
+    state: &AppState,
+    id: &str,
+    req: OrganizerTransportBindingRequest,
+) -> Result<Response, Response> {
+    let loaded = LoadedElection::load(state.storage.as_ref(), id)?;
+    if loaded.record.state != "closed" {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "invalid_state",
+            "transport binding can be recorded only after voting closes",
+        ));
+    }
+    let binding_cbor = hex_decode(&req.transport_binding_cbor_hex).map_err(|_| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_transport_binding",
+            "transport binding must be lowercase-or-uppercase hexadecimal",
+        )
+    })?;
+    let (ledger, _) = loaded.replay_ledger(state.storage.as_ref())?;
+    validate_transport_binding_bytes(&loaded, &binding_cbor, ledger.accepted_ballots().len() as u64)?;
+    match state.storage.put_finalized_transport_binding(storage::FinalizedTransportBindingRecord {
+        election_id: id.to_owned(),
+        binding_cbor,
+    }) {
+        Ok(()) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "election_id": id,
+                "state": "transport_binding_recorded",
+            })),
+        ).into_response()),
+        Err(storage::StorageError::ElectionNotFound) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "election_not_found",
+            "election not found",
+        )),
+        Err(storage::StorageError::InvalidState) => Err(error_response(
+            StatusCode::CONFLICT,
+            "invalid_state",
+            "transport binding can be recorded only while the election is closed",
+        )),
+        // Binding bytes are an immutable archive constituent. Replacing them
+        // after inspection would make the election identity mutable.
+        Err(storage::StorageError::ElectionExists) => Err(error_response(
+            StatusCode::CONFLICT,
+            "transport_binding_already_recorded",
+            "the finalized transport binding is immutable",
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "service_unavailable",
+            "transport binding storage unavailable",
+        )),
+    }
+}
+
+async fn organizer_store_transport_binding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) { return r; }
+    if let Err(r) = organizer_rate(&state, &id) { return r; }
+    if let Err(r) = check_content_type(&headers) { return r; }
+    if body.len() > MAX_BODY_BYTES {
+        return error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "request too large");
+    }
+    let req: OrganizerTransportBindingRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "malformed transport-binding request",
+        ),
+    };
+    match do_store_finalized_transport_binding(state.as_ref(), &id, req) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
 async fn organizer_finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1818,6 +1975,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/freeze", post(organizer_freeze))
         .route("/api/v1/organizer/elections/{id}/open-voting", post(organizer_open_voting))
         .route("/api/v1/organizer/elections/{id}/close", post(organizer_close))
+        .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, origin_token_middleware))

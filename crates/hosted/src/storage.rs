@@ -42,6 +42,15 @@ pub struct BallotRecord {
     pub seq: u64,
 }
 
+/// Canonical public binding exported by the organizer's verified Desktop
+/// transport history before the hosted election is finalized. The hosted
+/// service stores the exact canonical bytes and never derives a substitute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedTransportBindingRecord {
+    pub election_id: String,
+    pub binding_cbor: Vec<u8>,
+}
+
 // ── Enrollment draft records ─────────────────────────────────────────────────
 
 /// Draft election configuration stored before the registry is frozen.
@@ -171,6 +180,16 @@ pub trait HostedStorage: Send + Sync {
     fn put_election(&self, record: ElectionRecord) -> Result<(), StorageError>;
     fn get_election(&self, id: &str) -> Result<Option<ElectionRecord>, StorageError>;
     fn set_election_state(&self, id: &str, from: &str, to: &str) -> Result<bool, StorageError>;
+    /// Stores exactly one Desktop-exported canonical binding while the election
+    /// is closed. The value becomes part of the finalized archive identity.
+    fn put_finalized_transport_binding(
+        &self,
+        record: FinalizedTransportBindingRecord,
+    ) -> Result<(), StorageError>;
+    fn get_finalized_transport_binding(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<FinalizedTransportBindingRecord>, StorageError>;
 
     // Ballot records
     fn get_ballot_by_receipt(
@@ -304,6 +323,7 @@ pub(crate) enum EnrollmentFailpoint {
 #[derive(Debug, Default)]
 pub struct InMemoryStorage {
     elections: Mutex<HashMap<String, ElectionRecord>>,
+    finalized_transport_bindings: Mutex<HashMap<String, FinalizedTransportBindingRecord>>,
     ballots: Mutex<HashMap<String, Vec<BallotRecord>>>,
     legacy: Mutex<HashMap<String, Vec<Vec<u8>>>>,
     drafts: Mutex<HashMap<String, ElectionDraftRecord>>,
@@ -365,6 +385,40 @@ impl HostedStorage for InMemoryStorage {
             }
             Some(_) => Ok(false),
         }
+    }
+
+    fn put_finalized_transport_binding(
+        &self,
+        record: FinalizedTransportBindingRecord,
+    ) -> Result<(), StorageError> {
+        let elections = self.elections.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(election) = elections.get(&record.election_id) else {
+            return Err(StorageError::ElectionNotFound);
+        };
+        if election.state != "closed" {
+            return Err(StorageError::InvalidState);
+        }
+        let mut bindings = self
+            .finalized_transport_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if bindings.contains_key(&record.election_id) {
+            return Err(StorageError::ElectionExists);
+        }
+        bindings.insert(record.election_id.clone(), record);
+        Ok(())
+    }
+
+    fn get_finalized_transport_binding(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<FinalizedTransportBindingRecord>, StorageError> {
+        Ok(self
+            .finalized_transport_bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(election_id)
+            .cloned())
     }
 
     fn get_ballot_by_receipt(
@@ -795,6 +849,18 @@ impl SqliteStorage {
         )
         .map_err(|_| StorageError::Db)?;
 
+        // The binding is supplied by the Desktop organizer after it has
+        // recovered its sealed transport history. This service stores the
+        // canonical bytes and never attempts to reconstruct them from ballots.
+        g.execute_batch(
+            "CREATE TABLE IF NOT EXISTS finalized_transport_bindings (
+                election_id TEXT PRIMARY KEY,
+                binding_cbor BLOB NOT NULL,
+                FOREIGN KEY (election_id) REFERENCES elections(id)
+             );",
+        )
+        .map_err(|_| StorageError::Db)?;
+
         // Enrollment tables (schema v3, idempotent).
         g.execute_batch(
             "CREATE TABLE IF NOT EXISTS election_drafts (
@@ -869,21 +935,21 @@ impl SqliteStorage {
         match existing.as_deref() {
             None => {
                 g.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', '4')",
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '5')",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("2") | Some("3") => {
-                // Upgrade from v2/v3: the v4 organizer_credentials table was
-                // created idempotently above; existing rows are untouched.
+            Some("2") | Some("3") | Some("4") => {
+                // The v5 binding table is created idempotently above; existing
+                // rows are untouched.
                 g.execute(
-                    "UPDATE meta SET value = '4' WHERE key = 'schema_version'",
+                    "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("4") => {}
+            Some("5") => {}
             Some(_) => return Err(StorageError::Db),
         }
         Ok(())
@@ -973,6 +1039,54 @@ impl HostedStorage for SqliteStorage {
             )
             .map_err(|_| StorageError::Db)?;
         Ok(n == 1)
+    }
+
+    fn put_finalized_transport_binding(
+        &self,
+        record: FinalizedTransportBindingRecord,
+    ) -> Result<(), StorageError> {
+        let g = self.lock();
+        let state: Option<String> = g
+            .query_row(
+                "SELECT state FROM elections WHERE id = ?1",
+                params![record.election_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| StorageError::Db)?;
+        match state.as_deref() {
+            None => return Err(StorageError::ElectionNotFound),
+            Some("closed") => {}
+            Some(_) => return Err(StorageError::InvalidState),
+        }
+        g.execute(
+            "INSERT INTO finalized_transport_bindings (election_id, binding_cbor) VALUES (?1, ?2)",
+            params![record.election_id, record.binding_cbor],
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(_, _) => StorageError::ElectionExists,
+            _ => StorageError::Db,
+        })?;
+        Ok(())
+    }
+
+    fn get_finalized_transport_binding(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<FinalizedTransportBindingRecord>, StorageError> {
+        let g = self.lock();
+        g.query_row(
+            "SELECT election_id, binding_cbor FROM finalized_transport_bindings WHERE election_id = ?1",
+            params![election_id],
+            |row| {
+                Ok(FinalizedTransportBindingRecord {
+                    election_id: row.get(0)?,
+                    binding_cbor: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| StorageError::Db)
     }
 
     fn get_ballot_by_receipt(
