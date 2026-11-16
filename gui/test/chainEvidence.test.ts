@@ -6,6 +6,7 @@ import type { WindowTariProvider } from "../src/wallet/provider.ts";
 import { RESULT_JSON_FINALIZED_COMMIT, RESULT_JSON_PENDING } from "./anchorVectors.generated.ts";
 import { RECEIPT_VECTORS } from "./receiptVectors.generated.ts";
 import { SAPIENT_EXECUTE_RESULT_JSON } from "./sapientExecuteResult.generated.ts";
+import { TRANSIENT_RESULT_TIMEOUT_MS } from "../src/wallet/chainEvidence.ts";
 
 const transactionId = "9a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b";
 const template = { templateAddressHex: "5f1ecbe69b1c6e8b64b97b37f32f6975be4b1e2a1d9c4a5e3f2b6c8d0a9e7f41", eventTopic: "TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2" };
@@ -45,6 +46,22 @@ function withRoutes(routes: (path: string) => RouteAnswer): void {
   return () => {
     globalThis.fetch = original;
   };
+}
+
+function withTransientFailure(mode: "throw" | "hang", adapter: WindowTariProvider): () => void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    const path = new URL(input.toString(), "https://app.test").pathname;
+    if (path === "/chain/network") return Response.json({ network: "mainnet", network_byte: 0 });
+    if (path.includes("/transaction-receipts/")) return Response.json({ receipt: ALIGNED_RECEIPT.base64 });
+    if (path.endsWith("/result")) {
+      if (mode === "throw") throw new Error("transient unavailable");
+      return new Promise<Response>(() => {});
+    }
+    throw new Error(`unexpected route ${path}`);
+  }) as typeof fetch;
+  void adapter;
+  return () => { globalThis.fetch = original; };
 }
 
 describe("browser chain evidence", () => {
@@ -143,6 +160,32 @@ describe("browser chain evidence", () => {
       restore();
     }
   });
+
+  for (const mode of ["throw", "hang"] as const) {
+    it(`keeps agreeing final wallet and durable evidence authoritative when transient fetch ${mode}s`, async () => {
+      const restore = withTransientFailure(mode, WALLET_ADAPTER);
+      const started = Date.now();
+      try {
+        const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+        assert.equal(outcome.kind, "verified");
+        if (mode === "hang") assert.ok(Date.now() - started < TRANSIENT_RESULT_TIMEOUT_MS + 500);
+      } finally {
+        restore();
+      }
+    });
+
+    it(`reports a known final conflict when transient fetch ${mode}s`, async () => {
+      const adapter = { getTransactionResult: async () => sapientResultWith({ epoch: 8 }) } as unknown as WindowTariProvider;
+      const restore = withTransientFailure(mode, adapter);
+      try {
+        const outcome = await verifyBrowserAnchorEvidence(adapter, transactionId, template, payload);
+        assert.equal(outcome.kind, "terminal_failure");
+        if (outcome.kind === "terminal_failure") assert.match(outcome.message, /wallet and durable receipt evidence disagree/);
+      } finally {
+        restore();
+      }
+    });
+  }
 
   it("fails closed when any two sources disagree", async () => {
     // The wallet reports a different execution epoch than the durable receipt.

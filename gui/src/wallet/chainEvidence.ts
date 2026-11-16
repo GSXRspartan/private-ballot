@@ -13,6 +13,8 @@ import {
 } from "./transactionReceipt.ts";
 
 const CHAIN_PREFIX = "/chain";
+/** A transient indexer read may refine final evidence, but never blocks it. */
+export const TRANSIENT_RESULT_TIMEOUT_MS = 2_000;
 
 function terminal(message: string): AnchorVerificationOutcome {
   return { kind: "terminal_failure", failure: "malformed_result", message };
@@ -64,13 +66,38 @@ function verifyDurableReceiptResponse(
   }
 }
 
-async function readJson(path: string): Promise<{ status: number; json: unknown | null }> {
-  const response = await fetch(`${CHAIN_PREFIX}${path}`, { headers: { Accept: "application/json" } });
+type JsonResponse = { status: number; json: unknown | null };
+
+async function readJson(path: string, signal?: AbortSignal): Promise<JsonResponse> {
+  let response: Response;
+  try {
+    response = await fetch(`${CHAIN_PREFIX}${path}`, { headers: { Accept: "application/json" }, signal });
+  } catch {
+    return { status: 0, json: null };
+  }
   if (!response.ok) return { status: response.status, json: null };
   try {
     return { status: response.status, json: await response.json() };
   } catch {
     return { status: response.status, json: null };
+  }
+}
+
+async function readTransientJson(path: string): Promise<JsonResponse> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      readJson(path, controller.signal),
+      new Promise<JsonResponse>((resolve) => {
+        timeout = setTimeout(() => {
+          controller.abort();
+          resolve({ status: 0, json: null });
+        }, TRANSIENT_RESULT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -100,10 +127,11 @@ export async function verifyBrowserAnchorEvidence(
   const wallet = verifyV2AnchorTransaction(transactionId, template, payload, walletJson);
   if (wallet.kind !== "verified") return wallet;
 
-  const [result, receipt] = await Promise.all([
-    readJson(`/transactions/${transactionId}/result`),
-    readJson(`/transaction-receipts/${transactionId}`),
-  ]);
+  // Begin the optional lookup promptly, then establish durable authority
+  // independently. A failed or slow transient route must not hide a known
+  // final conflict between the wallet and the durable receipt.
+  const transient = readTransientJson(`/transactions/${transactionId}/result`);
+  const receipt = await readJson(`/transaction-receipts/${transactionId}`);
 
   // Durable receipt is REQUIRED for final verification.
   if (receipt.status !== 200) {
@@ -122,6 +150,7 @@ export async function verifyBrowserAnchorEvidence(
     return terminal("wallet and durable receipt evidence disagree");
   }
 
+  const result = await transient;
   // If transient result exists, it must agree with the durable receipt.
   if (result.status === 200) {
     if (result.json === null) return terminal("the indexer result response is not JSON");
