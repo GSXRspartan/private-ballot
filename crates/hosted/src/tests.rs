@@ -3650,7 +3650,16 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     )
     .await;
     assert_eq!(sconflict, axum::http::StatusCode::CONFLICT, "{vconflict}");
-    assert_eq!(vconflict["code"], "transport_binding_already_recorded");
+    assert_eq!(vconflict["code"], "transport_binding_required");
+    assert_eq!(
+        storage
+            .get_finalized_transport_binding(election_id)
+            .unwrap()
+            .expect("first finalized transport binding remains stored")
+            .binding_cbor,
+        binding,
+        "a mismatched replay must not replace the stored binding"
+    );
     let (sverified_status, vverified_status) = organizer_call(
         &public,
         "GET",
@@ -4114,6 +4123,32 @@ async fn organizer_malformed_and_oversized_requests_rejected() {
     // Slot count 0 rejected
     let (s12, _) = organizer_create(&public, "org-malformed-8", &secret, 0, &good_options).await;
     assert_eq!(s12, axum::http::StatusCode::BAD_REQUEST);
+    // Hosted self-service archives do not carry governance source bytes, so
+    // content-digest pins must be rejected rather than exported as unproven.
+    let content_pin_body = serde_json::json!({
+        "election_id": "org-content-pin-unsupported",
+        "options": good_options,
+        "organizer_secret_hex": secret,
+        "min_approvals": 1,
+        "max_approvals": 1,
+        "authorized_slot_count": 1,
+        "governance_revision": format!("blake3:{}", "0".repeat(64)),
+    })
+    .to_string();
+    let (content_pin_status, content_pin_response) = req(
+        public.clone(),
+        "POST",
+        "/api/v1/organizer/elections",
+        Some(content_pin_body),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(content_pin_status, axum::http::StatusCode::BAD_REQUEST);
+    let content_pin_json: serde_json::Value = serde_json::from_str(&content_pin_response).unwrap();
+    assert_eq!(
+        content_pin_json["code"],
+        "unsupported_governance_content_pin"
+    );
     // Oversized body (> 64 KiB) rejected
     let big_options: Vec<String> = (0..2000)
         .map(|i| format!("option-{i}-{}", "x".repeat(64)))

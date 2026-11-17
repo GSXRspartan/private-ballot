@@ -57,6 +57,7 @@ use tari_cc_private_ballot_gui_core::{
     ProductionTransportAuthorityConfigureRequestV1, ProductionTransportAuthorityReadinessV1,
     configure_production_transport_authority_root_v1,
     forget_production_transport_authority_root_v1, production_transport_authority_readiness_v1,
+    production_transport_authority_root_set_v1,
     mark_workspace_organizer_authority_v1, parse_decision, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
@@ -89,6 +90,7 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
+use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
     WalletdEndpoint,
@@ -498,6 +500,25 @@ impl AppState {
             .map_err(|_| CommandError::state_poisoned())?;
         match guard.as_ref() {
             Some(active) if active.authority == SessionAuthorityV1::Organizer => Ok(()),
+            Some(_) => Err(CommandError::organizer_authority_required()),
+            None => Err(CommandError::no_session()),
+        }
+    }
+
+    /// Runs one read against the active organizer session while authority and
+    /// election identity are protected by the same session lock.
+    fn with_organizer_session<T>(
+        &self,
+        f: impl FnOnce(&GuiElectionSessionV1) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        match guard.as_ref() {
+            Some(active) if active.authority == SessionAuthorityV1::Organizer => {
+                f(&active.session)
+            }
             Some(_) => Err(CommandError::organizer_authority_required()),
             None => Err(CommandError::no_session()),
         }
@@ -2234,10 +2255,8 @@ async fn write_hosted_binding_handoff(
     request_path: String,
     target_path: String,
     app: AppHandle,
-    state: tauri::State<'_, AppState>,
 ) -> Result<GuiHostedBindingHandoffResultV1, CommandError> {
     run_blocking_command(move || {
-        state.ensure_organizer_authority()?;
         let request_bytes = std::fs::read(Path::new(&request_path)).map_err(|_| {
             CommandError::new(
                 "GUI_HOSTED_BINDING_HANDOFF_READ_FAILED",
@@ -2254,8 +2273,9 @@ async fn write_hosted_binding_handoff(
                 )
             })?;
         request.validate()?;
-        let (live_handoff, election_id, manifest_hash_hex, accepted_count, lifecycle) = state
-            .with_session(|session| {
+        let state = app.state::<AppState>();
+        let (live_handoff, election_id, manifest_hash_hex, accepted_count) =
+            state.with_organizer_session(|session| {
                 let manifest = session.artifacts().manifest();
                 let election_id = String::from_utf8(manifest.election_id().as_bytes().to_vec())
                     .map_err(|_| {
@@ -2266,26 +2286,24 @@ async fn write_hosted_binding_handoff(
                         )
                     })?;
                 let manifest_hash_hex = session.summary().manifest_hash_hex;
+                if session.lifecycle_state_v1() != ElectionLifecycleStateV1::Finalized
+                    || request.election_id != election_id
+                    || request.manifest_hash_hex != manifest_hash_hex
+                {
+                    return Err(CommandError::new(
+                        "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                        "BINDING_MISMATCH",
+                        "the Hosted request does not match this finalized Desktop election",
+                    ));
+                }
+                // This is the first operation allowed to seal a live batch. It
+                // runs only after the schema, organizer role, exact identity,
+                // and finalized lifecycle checks above, while this session lock
+                // still prevents an election/role swap.
                 let live_handoff =
                     finalized_transport_handoff_for_active_intake(state.inner(), session)?;
-                Ok((
-                    live_handoff,
-                    election_id,
-                    manifest_hash_hex,
-                    session.accepted_count() as u64,
-                    session.lifecycle_state_v1(),
-                ))
+                Ok((live_handoff, election_id, manifest_hash_hex, session.accepted_count() as u64))
             })?;
-        if lifecycle != ElectionLifecycleStateV1::Finalized
-            || request.election_id != election_id
-            || request.manifest_hash_hex != manifest_hash_hex
-        {
-            return Err(CommandError::new(
-                "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
-                "BINDING_MISMATCH",
-                "the Hosted request does not match this finalized Desktop election",
-            ));
-        }
         let material = match live_handoff {
             Some(material) => Some(material),
             None => durable_recovered_transport_binding_handoff(
@@ -2301,6 +2319,38 @@ async fn write_hosted_binding_handoff(
                 "the verified Desktop transport history has no finalized binding for this election",
             )
         })?;
+        let app_data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| CommandError::app_data_unavailable())?;
+        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
+        let manifest_hash = state.with_organizer_session(|session| {
+            if session.summary().manifest_hash_hex != manifest_hash_hex {
+                return Err(CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                    "BINDING_MISMATCH",
+                    "the active Desktop election changed during the Hosted handoff",
+                ));
+            }
+            session
+                .artifacts()
+                .manifest()
+                .canonical_hash(&Blake3HashProviderV1)
+                .map_err(|_| {
+                    CommandError::new(
+                        "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                        "ARCHIVE_INTEGRITY",
+                        "the active Desktop manifest could not be hashed for the Hosted handoff",
+                    )
+                })
+        })?;
+        roots
+            .verify_descriptor(&material.1, manifest_hash)
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_UNTRUSTED_DESCRIPTOR",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport descriptor is not signed by the configured production authority",
+            ))?;
         let binding_cbor = material.0.to_canonical_cbor().map_err(|_| {
             CommandError::new(
                 "GUI_HOSTED_BINDING_HANDOFF_INVALID",

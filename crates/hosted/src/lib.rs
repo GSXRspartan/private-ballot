@@ -67,8 +67,8 @@ use tari_cc_private_ballot_ballot::{
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
-    DesktopBindingHandoffV1, HostedBindingRequestV1, TransportAuthorityRootV1,
-    TransportDescriptorV1, production_transport_authority_root_v1,
+    DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, HostedBindingRequestV1,
+    TransportAuthorityRootV1, TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
 use tari_cc_private_ballot_protocol::{
@@ -3048,6 +3048,17 @@ async fn organizer_create_election(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "governance_revision must be <= 256 bytes",
+        );
+    }
+    // Hosted self-service archives do not contain governance source bytes, so
+    // accepting a content-digest pin would advertise evidence the archive
+    // cannot prove. Keep that creation path on reference-only revisions until
+    // governance source bytes are included in the Hosted canonical archive.
+    if governance_revision.starts_with(GOVERNANCE_PIN_PREFIX_BLAKE3) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "unsupported_governance_content_pin",
+            "Hosted self-service elections do not yet archive governance content for blake3 pins",
         );
     }
     // Build the canonical CandidateSet server-side from validated display

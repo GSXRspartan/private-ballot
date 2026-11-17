@@ -90,7 +90,8 @@ pub fn classify_walletd_client_error(err: &PinnedWalletDaemonClientError) -> Wal
         E::RequestFailedWithStatus { .. }
         | E::DeserializeResponse { .. }
         | E::SerializeRequest { .. }
-        | E::InvalidResponse { .. } => WalletdCallClass::CallFailed,
+        | E::InvalidResponse { .. }
+        | E::CookieFileError { .. } => WalletdCallClass::CallFailed,
     }
 }
 

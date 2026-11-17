@@ -342,6 +342,12 @@ fn walletd_client_error_stage(
                 "the walletd JSON-RPC request could not be serialized",
             )
         }
+        PinnedWalletDaemonClientError::CookieFileError { .. } => {
+            WalletdDiagnosticStageResultV1::failed(
+                "walletd_cookie_file_error",
+                "the walletd authentication cookie file could not be read",
+            )
+        }
     }
 }
 

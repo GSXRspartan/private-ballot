@@ -620,6 +620,7 @@ describe("guided disclosure adds no backend surface", () => {
       "api.exportVoterTransportBundle(",
       "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",
+      "api.writeHostedBindingHandoff(",
       "api.anchorDeploymentCapabilities(",
       "api.verifyArchive(",
       "api.trustedOotleDeploymentStatus(",
