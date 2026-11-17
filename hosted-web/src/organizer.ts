@@ -312,6 +312,14 @@ function renderConsole() {
              <button id="btn-download-desktop-bootstrap">Download Desktop bootstrap</button>
            </details>`
         : ""}
+      ${election.election_state === "open"
+        ? `<details>
+             <summary>Authorize Desktop transport descriptor</summary>
+             <p>Choose the public descriptor-request file exported by Desktop for this exact election. Hosted authenticates you with the existing organizer session and returns a signed response file for Desktop. This file is not an organizer credential.</p>
+             <label class="btn-link" for="desktop-descriptor-request-file">Import Desktop descriptor request</label>
+             <input id="desktop-descriptor-request-file" type="file" accept="application/cbor,.cbor" hidden />
+           </details>`
+        : ""}
       <p><small>Organizer secret and issued invitations live only in this browser
       tab's memory and are never stored or logged.</small></p>
     </div>
@@ -406,6 +414,11 @@ function bindConsole() {
   openVoteBtn?.addEventListener("click", lifecycleAction("open-voting", true, () => "Voting is open."));
   const bootstrapBtn = document.getElementById("btn-download-desktop-bootstrap") as HTMLButtonElement | null;
   bootstrapBtn?.addEventListener("click", () => { void downloadDesktopBootstrap(); });
+  const descriptorRequestInput = document.getElementById("desktop-descriptor-request-file") as HTMLInputElement | null;
+  descriptorRequestInput?.addEventListener("change", () => {
+    const file = descriptorRequestInput.files?.[0];
+    if (file) void uploadDesktopDescriptorRequest(file);
+  });
   const closeBtn = document.getElementById("btn-close") as HTMLButtonElement | null;
   closeBtn?.addEventListener("click", lifecycleAction("close", true, () => "Voting closed."));
   const finalizeBtn = document.getElementById("btn-finalize") as HTMLButtonElement | null;
@@ -465,6 +478,56 @@ async function downloadDesktopBootstrap() {
   a.click();
   URL.revokeObjectURL(url);
   cs.infoMsg = "Signed Desktop organizer bootstrap downloaded. Import it in Desktop before provisioning transport.";
+  renderConsole();
+}
+
+async function uploadDesktopDescriptorRequest(file: File) {
+  if (!cs || cs.busy) return;
+  // Mirrors the Hosted route's global bounded body limit before reading the
+  // file. The canonical artifact remains opaque to browser code.
+  if (file.size === 0 || file.size > 64 * 1024) {
+    setError("The Desktop descriptor request must be a non-empty file no larger than 64 KiB.");
+    renderConsole();
+    return;
+  }
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const access = cs.access;
+  const base = access.service_url === "" ? "" : access.service_url;
+  let response: Response;
+  try {
+    response = await fetch(`${base}${apiPath(access, "/descriptor-issuance")}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/cbor",
+        "x-private-ballot-organizer": access.organizer_secret_hex,
+      },
+      body: await file.arrayBuffer(),
+    });
+  } catch {
+    cs.busy = false;
+    setError("Could not reach Hosted to authorize the Desktop descriptor request.");
+    renderConsole();
+    return;
+  }
+  cs.busy = false;
+  if (!response.ok) {
+    if (response.status === 401) setError("Organizer credential rejected (401).");
+    else if (response.status === 409) setError("The descriptor request does not match this open V2 election, its environment, or a prior request ID.");
+    else setError(`Desktop descriptor request rejected (${response.status}).`);
+    renderConsole();
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `private-ballot-${access.election_id}.descriptor-response.cbor`;
+  a.click();
+  URL.revokeObjectURL(url);
+  cs.infoMsg = "Signed descriptor response downloaded. Import it in the same Desktop organizer workspace that exported the request.";
   renderConsole();
 }
 
