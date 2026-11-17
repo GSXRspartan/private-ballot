@@ -64,6 +64,7 @@ use tari_cc_private_ballot_archive::{
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, CandidateId,
     CandidateSet, ElectionId, ElectionManifest, ElectionManifestV1, ElectionManifestV1Input,
+    ElectionManifestV2, ElectionManifestV2Input,
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
@@ -1389,6 +1390,7 @@ async fn admin_create_draft(
         max_approvals: req.max_approvals.unwrap_or(1),
         allow_abstention: req.allow_abstention.unwrap_or(true),
         governance_revision: req.governance_revision.clone().unwrap_or_default(),
+        proposal_question: String::new(),
         authorized_slot_count: req.authorized_slot_count,
         external_roster_commitment_hex: req.external_roster_commitment_hex.clone(),
         eligibility_state: "DRAFT".to_owned(),
@@ -2039,7 +2041,7 @@ fn do_open_voting(state: &AppState, id: &str) -> Result<Response, Response> {
             ));
         }
     };
-    let manifest_input = ElectionManifestV1Input {
+    let manifest_input = ElectionManifestV2Input {
         protocol_version: PROTOCOL_VERSION_V1,
         election_id: election_id_obj,
         ballot_kind: BallotKindV1::NonBindingApprovalPilot,
@@ -2049,18 +2051,60 @@ fn do_open_voting(state: &AppState, id: &str) -> Result<Response, Response> {
         proof_suite_id: draft.proof_suite_id.clone(),
         approval_limits,
         governance_source_revision: draft.governance_revision.clone(),
+        proposal_question: draft.proposal_question.clone(),
     };
-    let manifest_v1 = match ElectionManifestV1::new(manifest_input) {
-        Ok(v) => v,
-        Err(_) => {
-            return Err(error_response(
+    let manifest_v2 = if draft.proposal_question.is_empty() {
+        None
+    } else {
+        Some(ElectionManifestV2::new(manifest_input).map_err(|_| {
+            error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_election",
                 "manifest construction failed",
-            ));
-        }
+            )
+        })?)
     };
-    let manifest = ElectionManifest::V1(manifest_v1);
+    let manifest = if draft.proposal_question.is_empty() {
+        // Drafts written before V2 self-service creation are legacy V1. Their
+        // canonical identity must not change during a later lifecycle action.
+        let legacy_input = ElectionManifestV1Input {
+            protocol_version: PROTOCOL_VERSION_V1,
+            election_id: ElectionId::new(id.as_bytes().to_vec()).map_err(|_| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "service_unavailable",
+                    "stored legacy election id is invalid",
+                )
+            })?,
+            ballot_kind: BallotKindV1::NonBindingApprovalPilot,
+            ballot_confidentiality: BallotConfidentialityV1::Public,
+            registry_commitment,
+            candidate_set_commitment: candidate_commitment,
+            proof_suite_id: draft.proof_suite_id.clone(),
+            approval_limits: ApprovalLimits::new(
+                draft.min_approvals as usize,
+                draft.max_approvals as usize,
+                draft.allow_abstention,
+            )
+            .map_err(|_| {
+                error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "service_unavailable",
+                    "stored legacy approval limits are invalid",
+                )
+            })?,
+            governance_source_revision: draft.governance_revision.clone(),
+        };
+        ElectionManifest::V1(ElectionManifestV1::new(legacy_input).map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "stored legacy manifest is invalid",
+            )
+        })?)
+    } else {
+        ElectionManifest::V2(manifest_v2.expect("V2 manifest is present for non-legacy drafts"))
+    };
     let manifest_cbor = match manifest.to_canonical_cbor() {
         Ok(v) => v,
         Err(_) => {
@@ -2738,6 +2782,7 @@ struct OrganizerCreateElectionRequest {
     allow_abstention: Option<bool>,
     authorized_slot_count: i64,
     governance_revision: Option<String>,
+    proposal_question: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -3061,6 +3106,14 @@ async fn organizer_create_election(
             "Hosted self-service elections do not yet archive governance content for blake3 pins",
         );
     }
+    let proposal_question = req.proposal_question.trim().to_owned();
+    if proposal_question.is_empty() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "proposal_question is required for V2 elections",
+        );
+    }
     // Build the canonical CandidateSet server-side from validated display
     // names; candidate IDs are the trimmed names so duplicate names would
     // already have been rejected above.
@@ -3112,6 +3165,7 @@ async fn organizer_create_election(
         max_approvals,
         allow_abstention,
         governance_revision,
+        proposal_question,
         authorized_slot_count: req.authorized_slot_count,
         external_roster_commitment_hex: None,
         eligibility_state: "DRAFT".to_owned(),

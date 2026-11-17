@@ -63,6 +63,8 @@ pub struct ElectionDraftRecord {
     pub max_approvals: i64,
     pub allow_abstention: bool,
     pub governance_revision: String,
+    /// Required exact V2 manifest question for new Hosted elections.
+    pub proposal_question: String,
     pub authorized_slot_count: i64,
     pub external_roster_commitment_hex: Option<String>,
     /// DRAFT | ENROLLMENT_OPEN | REGISTRY_FROZEN
@@ -878,6 +880,7 @@ impl SqliteStorage {
                 max_approvals INTEGER NOT NULL DEFAULT 1,
                 allow_abstention INTEGER NOT NULL DEFAULT 1,
                 governance_revision TEXT NOT NULL DEFAULT '',
+                proposal_question TEXT NOT NULL DEFAULT '',
                 authorized_slot_count INTEGER NOT NULL,
                 external_roster_commitment_hex TEXT,
                 eligibility_state TEXT NOT NULL DEFAULT 'DRAFT',
@@ -942,21 +945,21 @@ impl SqliteStorage {
         match existing.as_deref() {
             None => {
                 g.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', '5')",
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '6')",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("2") | Some("3") | Some("4") => {
-                // The v5 binding table is created idempotently above; existing
-                // rows are untouched.
-                g.execute(
-                    "UPDATE meta SET value = '5' WHERE key = 'schema_version'",
-                    [],
+            Some("2") | Some("3") | Some("4") | Some("5") => {
+                // V6 adds only the V2 question field; existing V1 drafts keep
+                // their empty marker and therefore retain their V1 identity.
+                g.execute_batch(
+                    "ALTER TABLE election_drafts ADD COLUMN proposal_question TEXT NOT NULL DEFAULT '';
+                     UPDATE meta SET value = '6' WHERE key = 'schema_version';",
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("5") => {}
+            Some("6") => {}
             Some(_) => return Err(StorageError::Db),
         }
         Ok(())
@@ -1161,7 +1164,7 @@ impl HostedStorage for SqliteStorage {
     fn put_election_draft(&self, record: ElectionDraftRecord) -> Result<(), StorageError> {
         let g = self.lock();
         g.execute(
-            "INSERT INTO election_drafts (election_id, candidate_cbor, proof_suite_id, min_approvals, max_approvals, allow_abstention, governance_revision, authorized_slot_count, external_roster_commitment_hex, eligibility_state, created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO election_drafts (election_id, candidate_cbor, proof_suite_id, min_approvals, max_approvals, allow_abstention, governance_revision, proposal_question, authorized_slot_count, external_roster_commitment_hex, eligibility_state, created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 record.election_id,
                 record.candidate_cbor,
@@ -1170,10 +1173,9 @@ impl HostedStorage for SqliteStorage {
                 record.max_approvals,
                 record.allow_abstention as i64,
                 record.governance_revision,
-                record.authorized_slot_count,
-                record.external_roster_commitment_hex,
-                record.eligibility_state,
-                record.created_at_ms,
+                record.proposal_question,
+                record.authorized_slot_count, record.external_roster_commitment_hex,
+                record.eligibility_state, record.created_at_ms,
             ],
         )
         .map_err(|e| map_rusqlite(&e))?;
@@ -1184,7 +1186,7 @@ impl HostedStorage for SqliteStorage {
         let g = self.lock();
         let mut stmt = g
             .prepare(
-                "SELECT election_id, candidate_cbor, proof_suite_id, min_approvals, max_approvals, allow_abstention, governance_revision, authorized_slot_count, external_roster_commitment_hex, eligibility_state, created_at_ms FROM election_drafts WHERE election_id = ?1",
+                "SELECT election_id, candidate_cbor, proof_suite_id, min_approvals, max_approvals, allow_abstention, governance_revision, proposal_question, authorized_slot_count, external_roster_commitment_hex, eligibility_state, created_at_ms FROM election_drafts WHERE election_id = ?1",
             )
             .map_err(|_| StorageError::Db)?;
         let rows = stmt
@@ -1197,10 +1199,11 @@ impl HostedStorage for SqliteStorage {
                     max_approvals: r.get(4)?,
                     allow_abstention: r.get::<_, i64>(5)? != 0,
                     governance_revision: r.get(6)?,
-                    authorized_slot_count: r.get(7)?,
-                    external_roster_commitment_hex: r.get(8)?,
-                    eligibility_state: r.get(9)?,
-                    created_at_ms: r.get(10)?,
+                    proposal_question: r.get(7)?,
+                    authorized_slot_count: r.get(8)?,
+                    external_roster_commitment_hex: r.get(9)?,
+                    eligibility_state: r.get(10)?,
+                    created_at_ms: r.get(11)?,
                 })
             })
             .map_err(|_| StorageError::Db)?;

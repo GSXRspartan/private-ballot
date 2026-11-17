@@ -68,6 +68,10 @@ function render() {
       <input type="text" id="eid-input" placeholder="e.g. club-vote-2026-11" autocomplete="off" />
       <small>1..128 characters of A-Z a-z 0-9 . _ -</small>
 
+      <label for="proposal-question-input">Proposal question</label>
+      <textarea id="proposal-question-input" rows="2" placeholder="What decision should voters make?"></textarea>
+      <small>This exact question is bound into the V2 election manifest.</small>
+
       <label for="options-input">Ballot options (one per line)</label>
       <textarea id="options-input" rows="4" placeholder="Yes&#10;No&#10;Abstain"></textarea>
       <small>Up to 256 options; duplicates are rejected.</small>
@@ -110,6 +114,7 @@ function readOptions(): string[] {
 async function handleCreate() {
   errorMsg = "";
   const eid = (document.getElementById("eid-input") as HTMLInputElement).value.trim();
+  const proposalQuestion = (document.getElementById("proposal-question-input") as HTMLTextAreaElement).value.trim();
   const options = readOptions();
   const slots = Number((document.getElementById("slots-input") as HTMLInputElement).value);
   const minApprovals = Number((document.getElementById("min-approvals") as HTMLInputElement).value);
@@ -127,6 +132,11 @@ async function handleCreate() {
     render();
     return;
   }
+  if (!proposalQuestion) {
+    errorMsg = "Provide the proposal question bound to this election.";
+    render();
+    return;
+  }
 
   // 32 random bytes from the browser CSPRNG; memory-only, never persisted.
   const secret = generateOrganizerSecret();
@@ -138,6 +148,7 @@ async function handleCreate() {
 
   const body: Record<string, unknown> = {
     election_id: eid,
+    proposal_question: proposalQuestion,
     options,
     organizer_secret_hex: secret,
     min_approvals: Number.isFinite(minApprovals) ? minApprovals : undefined,

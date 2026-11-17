@@ -1128,6 +1128,7 @@ fn seed_sqlite_enrollment(
             max_approvals: 1,
             allow_abstention: true,
             governance_revision: "rollback-test".to_owned(),
+            proposal_question: String::new(),
             authorized_slot_count: 1,
             external_roster_commitment_hex: None,
             eligibility_state: "ENROLLMENT_OPEN".to_owned(),
@@ -2834,6 +2835,7 @@ async fn organizer_create(
         "allow_abstention": false,
         "authorized_slot_count": slot_count,
         "governance_revision": "self-service-test",
+        "proposal_question": "Should the self-service test proposal pass?",
     })
     .to_string();
     let (s, t) = req(
