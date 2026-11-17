@@ -26,7 +26,9 @@
 //! the signed descriptor onion; the service loop worker is only started after
 //! that equality; READY is reported only after the worker is confirmed alive.
 
+use std::io::Write;
 use std::net::SocketAddr;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -36,7 +38,10 @@ use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
-    GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
+    GuiElectionSessionV1, HostedDescriptorPendingStateV1, HostedDescriptorResponseV1,
+    HostedDescriptorRequestV1, PaddingPolicyV1, BatchPolicyV1, TransportDescriptorV1,
+    TransportRoutePolicyV1, production_transport_authority_root_set_v1,
+    ensure_private_intake_inbox_directory_v1,
     ensure_voter_election_status_directory_v1, private_intake_inbox_directory_v1,
     read_accepted_package_digests_v1, read_issued_status_generation_v1,
     reserve_next_status_generation_v1,
@@ -47,7 +52,11 @@ use tari_cc_private_ballot_transport_gateway::{
     TransportGatewaySimulatorV1, finalized_transport_archive_binding_from_accepted_digests_v1,
     generate_transport_authority_material_v1, load_organizer_private_bundle_v1,
     provision_organizer_transport_bundles_v1, validate_intake_startup_v1,
+    generate_hosted_pending_transport_material_v1, import_hosted_descriptor_response_v1,
+    load_hosted_pending_transport_v1, persist_hosted_pending_transport_v1,
+    new_retry_capability_v1,
 };
+use tari_cc_private_ballot_protocol::ManifestHash;
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
     RemoteSocksEndpointErrorV1, RemoteSocksEndpointV1, RemoteTorReadinessOutcomeV1,
@@ -78,6 +87,7 @@ const TOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const COLLECTOR_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Bounded collector shutdown join budget.
 const COLLECTOR_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+const HOSTED_DESCRIPTOR_NETWORK_V1: &str = "production";
 
 /// Which Tor hosting mode the ORGANIZER intake uses. `ManagedLocal` is the
 /// default and recommended mode (this application starts, owns, and stops the
@@ -412,6 +422,19 @@ pub struct OrganizerIntakeStatusV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoterBundleExportResultV1 {
     pub written_path: String,
+}
+
+/// Result of exporting the public-only Hosted descriptor request. The request
+/// itself contains no Desktop private transport material or Hosted credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostedDescriptorRequestExportResultV1 {
+    pub written_path: String,
+}
+
+/// Result of importing an authority-issued Hosted descriptor response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostedDescriptorResponseImportResultV1 {
+    pub already_completed: bool,
 }
 
 // -------------------------------------------------------------------------
@@ -1317,27 +1340,299 @@ pub async fn export_voter_transport_bundle(
     .await
 }
 
+/// Persists Desktop-owned transport keys and an outstanding request before
+/// exporting the public, canonical artifact for Hosted Manage. The artifact is
+/// deliberately only a request: possession of it authorizes nothing.
+#[tauri::command]
+pub async fn export_hosted_descriptor_request(
+    target_path: String,
+    tor_exe_path: Option<String>,
+    remote: Option<RemoteOrganizerIntakeInputV1>,
+    app: AppHandle,
+) -> Result<HostedDescriptorRequestExportResultV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_dir = app_data_root(&app)?;
+        let roots = production_transport_authority_root_set_v1(
+            &app_data_dir,
+            Some(HOSTED_DESCRIPTOR_NETWORK_V1),
+        )
+        .map_err(CommandError::from)?;
+        let target = checked_new_artifact_target(&target_path)?;
+        let remote_config = match &remote {
+            Some(input) => RemoteOrganizerIntakeConfigV1::from_input(input)?,
+            None => None,
+        };
+        let mode = if remote_config.is_some() {
+            OrganizerTorModeV1::ExternalRemote
+        } else {
+            OrganizerTorModeV1::ManagedLocal
+        };
+        let managed_tor = match mode {
+            OrganizerTorModeV1::ManagedLocal => {
+                let path = resolve_tor_executable(tor_exe_path.as_deref())?;
+                validate_tor_exe(&path)?;
+                Some(path)
+            }
+            OrganizerTorModeV1::ExternalRemote => None,
+        };
+        let bound = bound_election(state.inner())?;
+        let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
+        ensure_app_owned_directory(&root)?;
+        let paths = TransportPaths::under(&root);
+        ensure_app_owned_directory(&paths.organizer_private_dir)?;
+
+        let pending_dir = paths
+            .organizer_private_dir
+            .join("hosted-descriptor-pending-v1");
+        let request = if pending_dir.exists() {
+            let loaded = load_hosted_pending_transport_v1(&paths.organizer_private_dir).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_PENDING_INVALID",
+                    "BINDING_MISMATCH",
+                    "the existing Hosted descriptor request state is invalid",
+                )
+            })?;
+            if loaded.binding.election_id != bound.election_id
+                || loaded.binding.manifest_hash != bound.manifest_hash
+                || loaded.pending.request().network() != HOSTED_DESCRIPTOR_NETWORK_V1
+                || loaded.pending.completed_descriptor().is_some()
+            {
+                return Err(CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_REQUEST_CONFLICT",
+                    "INVALID_LIFECYCLE_TRANSITION",
+                    "the existing Hosted descriptor request cannot be reused for this election",
+                ));
+            }
+            loaded.pending.request().clone()
+        } else {
+            let onion_hostname = match mode {
+                OrganizerTorModeV1::ManagedLocal => discover_managed_onion_for_descriptor(
+                    managed_tor.as_deref().ok_or_else(tor_start_failed)?,
+                    &paths,
+                )?,
+                OrganizerTorModeV1::ExternalRemote => remote_config
+                    .as_ref()
+                    .ok_or_else(|| remote_config_error("the external-remote Tor configuration is missing"))?
+                    .onion_hostname
+                    .clone(),
+            };
+            let material = generate_hosted_pending_transport_material_v1().map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_MATERIAL_FAILED",
+                    "UNAVAILABLE",
+                    "Desktop could not generate the local transport material",
+                )
+            })?;
+            let descriptor = TransportDescriptorV1::unsigned_for_authority(
+                bound.election_id.clone(),
+                ManifestHash::new(bound.manifest_hash),
+                1,
+                TransportRoutePolicyV1::ManagedTorOrOffline,
+                vec![onion_hostname],
+                Vec::new(),
+                material.gateway_receiver_public_key,
+                "hosted-desktop-gateway-v1".to_owned(),
+                vec![material.receipt_signing_key.verifying_key().to_bytes()],
+                PaddingPolicyV1 {
+                    id: "hosted-fixed-padding-v1".to_owned(),
+                    padded_bytes: 2048,
+                },
+                BatchPolicyV1 {
+                    id: "hosted-batch-policy-v1".to_owned(),
+                    accepted_unique_floor: 1,
+                },
+                None,
+                roots.current_root_id().to_owned(),
+            )
+            .map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                    "INVALID_INPUT",
+                    "Desktop could not construct the Hosted descriptor request",
+                )
+            })?;
+            let request = HostedDescriptorRequestV1::new(
+                new_retry_capability_v1(),
+                HOSTED_DESCRIPTOR_NETWORK_V1.to_owned(),
+                descriptor,
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not construct the Hosted descriptor request",
+            ))?;
+            let pending = HostedDescriptorPendingStateV1::new(
+                request.clone(),
+                bound.election_id.clone(),
+                ManifestHash::new(bound.manifest_hash),
+                new_retry_capability_v1(),
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not bind the Hosted descriptor request",
+            ))?;
+            let binding = TransportElectionBindingV1 {
+                election_id: bound.election_id.clone(),
+                manifest_hash: bound.manifest_hash,
+            };
+            persist_hosted_pending_transport_v1(
+                &paths.organizer_private_dir,
+                &material,
+                &pending,
+                &binding,
+                &paths.tor_runs_base,
+                &paths.hidden_service_dir,
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_PERSIST_FAILED",
+                "FILE_IO",
+                "Desktop could not durably save the Hosted descriptor request",
+            ))?;
+            request
+        };
+
+        write_new_public_artifact(&target, &request.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not encode the Hosted descriptor request",
+            )
+        })?)?;
+        Ok(HostedDescriptorRequestExportResultV1 {
+            written_path: target.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+}
+
+/// Imports an authority-issued descriptor only after it has been checked against
+/// the exact durable Desktop request. It never accepts a merely valid signature
+/// as sufficient authorization for local intake provisioning.
+#[tauri::command]
+pub async fn import_hosted_descriptor_response(
+    response_path: String,
+    app: AppHandle,
+) -> Result<HostedDescriptorResponseImportResultV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let bound = bound_election(state.inner())?;
+        let path = checked_existing_artifact(&response_path)?;
+        let bytes = std::fs::read(&path).map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_READ_FAILED",
+            "FILE_IO",
+            "the signed Hosted descriptor response could not be read",
+        ))?;
+        let response = HostedDescriptorResponseV1::from_canonical_cbor(&bytes).map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_RESPONSE_INVALID",
+                "BINDING_MISMATCH",
+                "the selected Hosted descriptor response is malformed or untrusted",
+            )
+        })?;
+        let app_data_dir = app_data_root(&app)?;
+        let roots = production_transport_authority_root_set_v1(
+            &app_data_dir,
+            Some(HOSTED_DESCRIPTOR_NETWORK_V1),
+        )
+        .map_err(CommandError::from)?;
+        let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
+        let paths = TransportPaths::under(&root);
+        let (outcome, _) = import_hosted_descriptor_response_v1(
+            &paths.organizer_private_dir,
+            &response,
+            &roots,
+            &bound.election_id,
+            ManifestHash::new(bound.manifest_hash),
+        )
+        .map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REJECTED",
+            "BINDING_MISMATCH",
+            "the signed Hosted descriptor response does not match this outstanding Desktop request",
+        ))?;
+        Ok(HostedDescriptorResponseImportResultV1 {
+            already_completed: matches!(
+                outcome,
+                tari_cc_private_ballot_transport_gateway::HostedDescriptorResponseImportV1::AlreadyCompleted
+            ),
+        })
+    })
+    .await
+}
+
+fn checked_new_artifact_target(value: &str) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(value);
+    let Some(parent) = path.parent() else {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_PATH_INVALID",
+            "INVALID_INPUT",
+            "choose an absolute file path for the Hosted descriptor request",
+        ));
+    };
+    if !path.is_absolute()
+        || path.file_name().is_none()
+        || std::fs::symlink_metadata(parent)
+            .map(|meta| !meta.is_dir() || is_windows_reparse_point(&meta))
+            .unwrap_or(true)
+    {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_PATH_INVALID",
+            "INVALID_INPUT",
+            "choose a new file in an existing local folder for the Hosted descriptor request",
+        ));
+    }
+    Ok(path)
+}
+
+fn checked_existing_artifact(value: &str) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(value);
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| CommandError::new(
+        "GUI_HOSTED_DESCRIPTOR_RESPONSE_NOT_FOUND",
+        "FILE_IO",
+        "select the signed Hosted descriptor response file",
+    ))?;
+    if !path.is_absolute() || !meta.is_file() || is_windows_reparse_point(&meta) || meta.len() > 1_048_576 {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_PATH_INVALID",
+            "INVALID_INPUT",
+            "the signed Hosted descriptor response must be a regular local file no larger than 1 MiB",
+        ));
+    }
+    Ok(path)
+}
+
+fn write_new_public_artifact(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_WRITE_FAILED",
+            "FILE_IO",
+            "the Hosted descriptor request could not be written without overwriting an existing file",
+        ))?;
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|_| CommandError::new(
+        "GUI_HOSTED_DESCRIPTOR_EXPORT_WRITE_FAILED",
+        "FILE_IO",
+        "the Hosted descriptor request could not be written",
+    ))
+}
+
 // -------------------------------------------------------------------------
 // Orchestration (reuses the vetted library functions; no protocol logic here).
 // -------------------------------------------------------------------------
 
-/// First-time transport provisioning: start Tor to discover the persistent
-/// hidden-service hostname, stop Tor, then sign the descriptor and write both
-/// bundles. Mirrors `private-ballot-tor-test-provision` step-for-step, calling
-/// only reviewed library functions.
-fn provision_transport(
+/// Creates or reuses the persistent managed hidden-service identity solely to
+/// discover its public onion hostname. No descriptor is signed here. The
+/// caller must durably persist its pending request before exporting that public
+/// hostname to Hosted for authority issuance.
+fn discover_managed_onion_for_descriptor(
     tor_executable: &Path,
     paths: &TransportPaths,
-    bound: &BoundElection,
-) -> Result<(), CommandError> {
-    let binding = TransportElectionBindingV1 {
-        election_id: bound.election_id.clone(),
-        manifest_hash: bound.manifest_hash,
-    };
-    // A FRESH throwaway DataDirectory for the one-shot hostname-discovery run, so
-    // even first-time provisioning can never collide with an orphaned tor.exe
-    // that still holds a prior run directory's lock. The onion identity is
-    // written to the PERSISTENT hidden-service directory, not this run directory.
+) -> Result<String, CommandError> {
     ensure_app_owned_directory(&paths.tor_runs_base)?;
     let run_dir = fresh_run_directory(&paths.tor_runs_base)?;
     remove_stale_run_directories(&paths.tor_runs_base, &run_dir);
@@ -1345,7 +1640,7 @@ fn provision_transport(
     let stderr_log = run_dir.join("tor-stderr.log");
     let tor_config = OrganizerHiddenServiceTorConfigV1 {
         executable: tor_executable.to_path_buf(),
-        data_directory: run_dir.clone(),
+        data_directory: run_dir,
         config_file: provision_torrc.clone(),
         hidden_service_dir: paths.hidden_service_dir.clone(),
         collector_port: PROVISION_COLLECTOR_PORT,
@@ -1358,7 +1653,6 @@ fn provision_transport(
             "the organizer Tor configuration could not be written",
         )
     })?;
-
     let spawner = DiagnosticTorSpawnerV1 {
         stderr_log: stderr_log.clone(),
     };
@@ -1384,9 +1678,25 @@ fn provision_transport(
             }
         }
     };
-    // Stop Tor: the hostname/identity persists in the hidden-service directory.
     let _ = child.kill();
     let _ = child.wait();
+    Ok(hostname)
+}
+
+/// First-time transport provisioning: start Tor to discover the persistent
+/// hidden-service hostname, stop Tor, then sign the descriptor and write both
+/// bundles. Mirrors `private-ballot-tor-test-provision` step-for-step, calling
+/// only reviewed library functions.
+fn provision_transport(
+    tor_executable: &Path,
+    paths: &TransportPaths,
+    bound: &BoundElection,
+) -> Result<(), CommandError> {
+    let binding = TransportElectionBindingV1 {
+        election_id: bound.election_id.clone(),
+        manifest_hash: bound.manifest_hash,
+    };
+    let hostname = discover_managed_onion_for_descriptor(tor_executable, paths)?;
 
     let material = generate_transport_authority_material_v1("test-root".to_owned()).map_err(|_| {
         CommandError::new(

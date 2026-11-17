@@ -6239,6 +6239,10 @@ pub fn run() {
             #[cfg(feature = "managed-tor")]
             organizer_tor_intake::export_voter_transport_bundle,
             #[cfg(feature = "managed-tor")]
+            organizer_tor_intake::export_hosted_descriptor_request,
+            #[cfg(feature = "managed-tor")]
+            organizer_tor_intake::import_hosted_descriptor_response,
+            #[cfg(feature = "managed-tor")]
             election_status_commands::export_election_status_artifact,
             #[cfg(feature = "managed-tor")]
             election_status_commands::import_election_status_artifact,
