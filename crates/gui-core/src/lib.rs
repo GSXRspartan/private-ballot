@@ -51,6 +51,7 @@ pub mod live_anchor_driver;
 pub mod live_anchor_preflight;
 pub mod live_anchor_v2;
 pub mod live_anchor_v2_lifecycle;
+pub mod organizer_bootstrap;
 pub mod participation;
 pub mod private_intake_inbox;
 pub mod production_transport_authority_config;
@@ -147,6 +148,10 @@ pub use live_anchor_v2_lifecycle::{
     inspect_v2_live_anchor_state, read_v2_public_anchor_evidence_file,
     run_v2_live_anchor_recovery_step_with_indexer, run_v2_live_anchor_step_with_transports,
     v2_evidence_sidecar_path, v2_failure_sidecar_path, v2_lifecycle_sidecar_path,
+};
+pub use organizer_bootstrap::{
+    HOSTED_ORGANIZER_BOOTSTRAP_TYPE_V1, HOSTED_ORGANIZER_BOOTSTRAP_VERSION_V1,
+    HostedOrganizerBootstrapV1,
 };
 pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,

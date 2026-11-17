@@ -30,6 +30,7 @@ use tari_cc_private_ballot_gui_core::{
     GuiLiveAnchorStepResultV1, GuiLiveAnchorV2RequestV1, GuiLiveAnchorV2ResultV1,
     GuiV2LiveAnchorHydratedStateV1, GuiV2LiveAnchorStepRequestV1, GuiV2LiveAnchorStepResultV1,
     GuiV2AnchorPublishPreparationRequestV1, GuiV2AnchorPublishPreparationV1,
+    HostedOrganizerBootstrapV1,
     GuiParticipationSummaryV1, GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1,
     GuiPrivateIntakeSyncSummaryV1, GuiSavedVoterCredentialDeleteResultV1,
     GuiSavedVoterCredentialsV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
@@ -90,7 +91,7 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
-use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, ManifestHash};
+use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, MAX_CANONICAL_OBJECT_BYTES, ManifestHash};
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
     WalletdEndpoint,
@@ -1288,6 +1289,61 @@ async fn load_election_folder(
     let session =
         load_election_from_paths_blocking(manifest, registry, option_set, app_data_root).await?;
     install_imported_election_session(session, &state)
+}
+
+/// Imports a Hosted-issued organizer bootstrap only after its exact V2
+/// election and authority signature verify under the locally configured
+/// production trust root. Public election import remains voter-only.
+#[tauri::command]
+async fn import_hosted_organizer_bootstrap(
+    bootstrap_path: String,
+    app: AppHandle,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let bootstrap_path = PathBuf::from(bootstrap_path);
+        let metadata = std::fs::symlink_metadata(&bootstrap_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file could not be read",
+            )
+        })?;
+        let maximum_bytes = MAX_CANONICAL_OBJECT_BYTES
+            .saturating_mul(3)
+            .saturating_add(2048) as u64;
+        if !metadata.is_file() || metadata.len() > maximum_bytes {
+            return Err(CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file is not a supported size",
+            ));
+        }
+        let bytes = std::fs::read(&bootstrap_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file could not be read",
+            )
+        })?;
+        let bootstrap = HostedOrganizerBootstrapV1::from_canonical_cbor(&bytes)?;
+        let app_data_root = app_data_root(&app)?;
+        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
+        let artifacts = bootstrap.verify(&roots)?;
+        let session = GuiElectionSessionV1::new(artifacts)?;
+        let workspace_id = workspace_id_for_session_v1(&session);
+        let workspaces_dir = workspaces_directory(&app)?;
+        write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+        let state = app.state::<AppState>();
+        state.invalidate_verified_session_cache(&workspace_id);
+        // Signature verification above is the sole external provenance that
+        // may establish organizer authority for this imported Hosted election.
+        mark_workspace_organizer_authority_v1(&workspaces_dir, &workspace_id)?;
+        let summary = session.summary();
+        state.install_frozen_session(session, SessionAuthorityV1::Organizer)?;
+        state.set_session_workspace_id(workspace_id)?;
+        Ok(summary)
+    })
+    .await
 }
 
 /// Re-applies a persisted, previously accepted election-status record (if
@@ -6063,6 +6119,7 @@ pub fn run() {
             shell_info,
             load_election,
             load_election_folder,
+            import_hosted_organizer_bootstrap,
             unload_election,
             election_summary,
             active_election_authority,

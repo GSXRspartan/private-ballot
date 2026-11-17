@@ -98,6 +98,9 @@ interface AppStateValue {
   /** Loads an election from ONE folder containing the three canonical export
    *  files, reusing the same backend validation as the manual loader. */
   loadElectionFolder: (folderPath: string) => Promise<void>;
+  /** Imports a Hosted-signed bootstrap and establishes the verified local
+   * organizer workspace for that exact election. */
+  importHostedOrganizerBootstrap: (bootstrapPath: string) => Promise<void>;
   resumeElectionWorkspace: (
     workspaceId: string,
   ) => Promise<GuiElectionWorkspaceResumeResultV1>;
@@ -328,6 +331,27 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     [captureError, recordAction, refreshParticipation, refreshWorkspaces],
   );
 
+  const importHostedOrganizerBootstrap = useCallback(
+    async (bootstrapPath: string) => {
+      try {
+        const summary = await api.importHostedOrganizerBootstrap(bootstrapPath);
+        setElection(summary);
+        setElectionAuthority("organizer");
+        setTally(null);
+        setParticipation(null);
+        setBackendError(null);
+        setSelectedArtifactPaths(null);
+        recordAction(`Imported Hosted organizer bootstrap for ${summary.election_id_text ?? summary.election_id_hex}`);
+        void refreshParticipation();
+        void refreshWorkspaces();
+      } catch (error) {
+        captureError(error);
+        throw error;
+      }
+    },
+    [captureError, recordAction, refreshParticipation, refreshWorkspaces],
+  );
+
   const resumeElectionWorkspace = useCallback(
     async (workspaceId: string) => {
       try {
@@ -490,6 +514,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       runLifecycle,
       loadElection,
       loadElectionFolder,
+      importHostedOrganizerBootstrap,
       resumeElectionWorkspace,
       deleteElectionWorkspace,
       unloadElection,
@@ -520,6 +545,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       runLifecycle,
       loadElection,
       loadElectionFolder,
+      importHostedOrganizerBootstrap,
       resumeElectionWorkspace,
       deleteElectionWorkspace,
       unloadElection,

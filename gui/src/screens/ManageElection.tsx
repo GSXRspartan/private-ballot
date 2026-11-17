@@ -117,6 +117,7 @@ export function ManageElection() {
     shellAvailable,
     loadElection,
     loadElectionFolder,
+    importHostedOrganizerBootstrap,
     unloadElection,
     runLifecycle,
     recordAction,
@@ -613,6 +614,23 @@ export function ManageElection() {
     setFolderBusy(true);
     try {
       await loadElectionFolder(folder);
+      setTally(null);
+      setArchiveResult(null);
+      setLastIntake(null);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
+  const onImportHostedOrganizerBootstrap = async () => {
+    clearLocalError();
+    const bootstrap = await pickElectionArtifact("Choose signed Hosted organizer bootstrap");
+    if (bootstrap === null) return;
+    setFolderBusy(true);
+    try {
+      await importHostedOrganizerBootstrap(bootstrap);
       setTally(null);
       setArchiveResult(null);
       setLastIntake(null);
@@ -1549,6 +1567,14 @@ export function ManageElection() {
       <div className="btn-row">
         <button
           type="button"
+          className="btn btn-secondary"
+          disabled={!shellAvailable || folderBusy}
+          onClick={() => void onImportHostedOrganizerBootstrap()}
+        >
+          Import Hosted Organizer Bootstrap
+        </button>
+        <button
+          type="button"
           className="btn btn-primary"
           disabled={!shellAvailable || folderBusy}
           onClick={() => void onOpenElectionFolder()}
@@ -1567,6 +1593,11 @@ export function ManageElection() {
       <p className="form-hint">
         The folder must contain election-manifest.cbor, voter-registry.cbor, and
         candidate-set.cbor. Identity is derived from the decoded bytes, not the filenames.
+      </p>
+      <p className="form-hint">
+        A Hosted organizer bootstrap is a separately signed CBOR file. Desktop verifies its
+        exact V2 election binding under the configured authority root before creating a local
+        organizer workspace; a public election folder never grants organizer authority.
       </p>
       <DetailsSection summary="Advanced / manual load (choose three files)">
         <p className="card-body">

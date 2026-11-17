@@ -305,6 +305,13 @@ function renderConsole() {
         like a password; anyone with the file controls this election.</p>
         <button id="btn-download-access">Download access file</button>
       </details>
+      ${election.election_state
+        ? `<details>
+             <summary>Set up Desktop organizer workspace</summary>
+             <p>Download the signed bootstrap and import it in Desktop. It is bound to this exact V2 election and contains public election data only; it does not contain your organizer secret.</p>
+             <button id="btn-download-desktop-bootstrap">Download Desktop bootstrap</button>
+           </details>`
+        : ""}
       <p><small>Organizer secret and issued invitations live only in this browser
       tab's memory and are never stored or logged.</small></p>
     </div>
@@ -397,6 +404,8 @@ function bindConsole() {
   freezeBtn?.addEventListener("click", lifecycleAction("freeze", true, () => "Voter registry frozen."));
   const openVoteBtn = document.getElementById("btn-open-voting") as HTMLButtonElement | null;
   openVoteBtn?.addEventListener("click", lifecycleAction("open-voting", true, () => "Voting is open."));
+  const bootstrapBtn = document.getElementById("btn-download-desktop-bootstrap") as HTMLButtonElement | null;
+  bootstrapBtn?.addEventListener("click", () => { void downloadDesktopBootstrap(); });
   const closeBtn = document.getElementById("btn-close") as HTMLButtonElement | null;
   closeBtn?.addEventListener("click", lifecycleAction("close", true, () => "Voting closed."));
   const finalizeBtn = document.getElementById("btn-finalize") as HTMLButtonElement | null;
@@ -418,6 +427,45 @@ function bindConsole() {
   for (const el of Array.from(document.querySelectorAll("button[data-void]"))) {
     el.addEventListener("click", () => voidInvitation((el as HTMLElement).dataset.void ?? ""));
   }
+}
+
+async function downloadDesktopBootstrap() {
+  if (!cs || cs.busy) return;
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const access = cs.access;
+  const base = access.service_url === "" ? "" : access.service_url;
+  let response: Response;
+  try {
+    response = await fetch(`${base}${apiPath(access, "/desktop-bootstrap")}`, {
+      method: "GET",
+      headers: { "x-private-ballot-organizer": access.organizer_secret_hex },
+    });
+  } catch {
+    cs.busy = false;
+    setError("Could not reach Hosted to download the Desktop bootstrap.");
+    renderConsole();
+    return;
+  }
+  cs.busy = false;
+  if (!response.ok) {
+    if (response.status === 401) setError("Organizer credential rejected (401).");
+    else if (response.status === 409) setError("The Desktop bootstrap is available only after this V2 election has been opened.");
+    else setError(`Could not download the Desktop bootstrap (${response.status}).`);
+    renderConsole();
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `private-ballot-${access.election_id}.organizer-bootstrap.cbor`;
+  a.click();
+  URL.revokeObjectURL(url);
+  cs.infoMsg = "Signed Desktop organizer bootstrap downloaded. Import it in Desktop before provisioning transport.";
+  renderConsole();
 }
 
 async function downloadBindingRequest() {

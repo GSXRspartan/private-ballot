@@ -45,10 +45,11 @@ use axum::{
     body::Bytes,
     extract::DefaultBodyLimit,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, HeaderName, StatusCode},
+    http::{HeaderMap, HeaderName, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use crate::authority_signer::{AuthoritySigner, LocalEd25519AuthoritySigner};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_anchor::{
@@ -68,11 +69,11 @@ use tari_cc_private_ballot_ballot::{
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
-    DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, HostedBindingRequestV1,
-    TransportAuthorityRootV1, TransportDescriptorV1, production_transport_authority_root_v1,
+    DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GuiElectionArtifactsV1,
+    HostedBindingRequestV1, HostedOrganizerBootstrapV1, TransportAuthorityRootV1,
+    TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
-use crate::authority_signer::{AuthoritySigner, LocalEd25519AuthoritySigner};
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, HashProvider, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
     PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode, hash_domain_separated,
@@ -123,7 +124,7 @@ pub const DEFAULT_ORGANIZER_MAX_SLOTS: i64 = 1_000;
 /// configuration (matches the admin-plane maximum).
 pub const MAX_ORGANIZER_SLOTS_LIMIT: i64 = 100_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct HostedConfig {
     pub bind: String,
     pub admin_bind: String,
@@ -3851,6 +3852,110 @@ async fn organizer_get_binding_handoff_request(
     .into_response()
 }
 
+/// Issues the signed, exact-election organizer bootstrap for an authenticated
+/// organizer. This is intentionally unavailable for mutable drafts and legacy
+/// V1 elections. The browser receives no authority private material.
+async fn organizer_download_desktop_bootstrap(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) {
+        return r;
+    }
+    if let Err(r) = organizer_rate(&state, &id) {
+        return r;
+    }
+    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+        Ok(loaded) => loaded,
+        Err(response) => return response,
+    };
+    if !matches!(loaded.manifest, ElectionManifest::V2(_))
+        || !matches!(
+            loaded.record.state.as_str(),
+            "open" | "closed" | "finalized"
+        )
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "bootstrap_not_available",
+            "Desktop organizer bootstrap is available only for a persisted V2 election",
+        );
+    }
+    let artifacts = match GuiElectionArtifactsV1::from_bytes(
+        &loaded.record.manifest_cbor,
+        &loaded.record.registry_cbor,
+        &loaded.record.candidate_cbor,
+    ) {
+        Ok(artifacts) => artifacts,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "stored election is invalid",
+            );
+        }
+    };
+    let signer = match state.config.authority_signer() {
+        Ok(signer) => signer,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authority_unavailable",
+                "release authority is unavailable",
+            );
+        }
+    };
+    let payload = match HostedOrganizerBootstrapV1::signing_payload(signer.key_id(), &artifacts) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "bootstrap payload is unavailable",
+            );
+        }
+    };
+    let signature = match signer.sign_canonical(&payload) {
+        Ok(signature) => signature,
+        Err(_) => {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "authority_unavailable",
+                "release authority is unavailable",
+            );
+        }
+    };
+    let artifact = match HostedOrganizerBootstrapV1::new_signed(
+        signer.key_id().to_owned(),
+        &artifacts,
+        signature,
+    )
+    .and_then(|artifact| artifact.to_canonical_cbor())
+    {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "bootstrap artifact is unavailable",
+            );
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/cbor"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"private-ballot-organizer-bootstrap-v1.cbor\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        artifact,
+    )
+        .into_response()
+}
+
 async fn organizer_finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -3979,6 +4084,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/freeze", post(organizer_freeze))
         .route("/api/v1/organizer/elections/{id}/open-voting", post(organizer_open_voting))
         .route("/api/v1/organizer/elections/{id}/close", post(organizer_close))
+        .route("/api/v1/organizer/elections/{id}/desktop-bootstrap", get(organizer_download_desktop_bootstrap))
         .route("/api/v1/organizer/elections/{id}/binding-handoff", get(organizer_get_binding_handoff_request))
         .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))

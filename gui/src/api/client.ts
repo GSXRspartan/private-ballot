@@ -142,6 +142,10 @@ export const api = {
     call<GuiElectionSummaryV1>("load_election_folder", {
       folderPath,
     }),
+  importHostedOrganizerBootstrap: (bootstrapPath: string) =>
+    call<GuiElectionSummaryV1>("import_hosted_organizer_bootstrap", {
+      bootstrapPath,
+    }),
 
   unloadElection: () => call<void>("unload_election"),
 
