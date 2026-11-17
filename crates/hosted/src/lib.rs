@@ -90,6 +90,7 @@ use tari_cc_private_ballot_verifier::{
 pub use tari_cc_private_ballot_deployment_registry as deployment_registry;
 
 pub mod storage;
+pub mod authority_signer;
 pub use storage::{HostedStorage, InMemoryStorage, SqliteStorage, StorageError};
 
 /// Loopback bind address used when no configuration overrides it.
