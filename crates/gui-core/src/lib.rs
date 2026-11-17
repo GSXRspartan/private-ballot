@@ -43,6 +43,7 @@ pub mod governance;
 mod hex;
 pub mod historical_replay;
 pub mod hosted_descriptor_exchange;
+pub mod hosted_descriptor_pending;
 pub mod hosted_binding_handoff;
 pub mod inspect;
 pub mod instrumentation;
@@ -114,6 +115,10 @@ pub use historical_replay::{
 pub use hosted_descriptor_exchange::{
     HOSTED_DESCRIPTOR_EXCHANGE_VERSION_V1, HOSTED_DESCRIPTOR_REQUEST_TYPE_V1,
     HOSTED_DESCRIPTOR_RESPONSE_TYPE_V1, HostedDescriptorRequestV1, HostedDescriptorResponseV1,
+};
+pub use hosted_descriptor_pending::{
+    HOSTED_DESCRIPTOR_PENDING_STATE_TYPE_V1, HOSTED_DESCRIPTOR_PENDING_STATE_VERSION_V1,
+    HostedDescriptorPendingStateV1, HostedDescriptorPendingStatusV1,
 };
 pub use hosted_binding_handoff::{
     DESKTOP_BINDING_HANDOFF_SCHEMA_V1, DesktopBindingHandoffV1, HOSTED_BINDING_REQUEST_SCHEMA_V1,
