@@ -19,14 +19,15 @@ use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBi
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
-    ElectionManifestV1, ElectionManifestV1Input,
+    ElectionManifest, ElectionManifestV1, ElectionManifestV1Input,
 };
 use tari_cc_private_ballot_crypto::{
     TARI_TRIPTYCH_PROOF_SUITE_ID_V1, TariTriptychSecretKeyV1, prove_tari_triptych_prototype_v1,
 };
 use tari_cc_private_ballot_gui_core::{
     BatchPolicyV1, GuiLiveAnchorV2RequestV1, GuiV2AnchorPublishPreparationRequestV1,
-    HostedOrganizerBootstrapV1, PaddingPolicyV1, TransportAuthorityRootSetV1,
+    HostedDescriptorRequestV1, HostedDescriptorResponseV1, HostedOrganizerBootstrapV1,
+    PaddingPolicyV1, TransportAuthorityRootSetV1,
     TransportDescriptorV1, TransportRoutePolicyV1,
     build_v2_public_payload_from_verified_archive_v1,
     prepare_v2_anchor_publish_from_verified_evidence_v1,
@@ -468,6 +469,31 @@ async fn req_bytes(
     }
     let response = router
         .oneshot(builder.body(Body::empty()).unwrap_or_else(|_| panic!("request")))
+        .await
+        .unwrap_or_else(|_| panic!("oneshot"));
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_else(|_| panic!("body"));
+    (status, bytes.to_vec())
+}
+
+async fn req_cbor(
+    router: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Vec<u8>,
+    organizer_secret: &str,
+) -> (axum::http::StatusCode, Vec<u8>) {
+    let request = axum::http::Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("content-type", "application/cbor")
+        .header("x-private-ballot-organizer", organizer_secret)
+        .body(Body::from(body))
+        .unwrap_or_else(|_| panic!("request"));
+    let response = router
+        .oneshot(request)
         .await
         .unwrap_or_else(|_| panic!("oneshot"));
     let status = response.status();
@@ -1299,6 +1325,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        transport_environment: "test".to_owned(),
         authority_signing_key: None,
     };
     assert!(cfg.validate().is_err());
@@ -1314,6 +1341,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        transport_environment: "test".to_owned(),
         authority_signing_key: None,
     };
     assert!(
@@ -1332,6 +1360,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        transport_environment: "test".to_owned(),
         authority_signing_key: None,
     };
     assert!(
@@ -1500,8 +1529,6 @@ async fn health_status_and_no_secret_echo() {
 }
 
 // ── Enrollment tests ──────────────────────────────────────────────────────────
-
-use tari_cc_private_ballot_ballot::ElectionManifest;
 
 fn enroll_key(scalar: u64) -> String {
     hex_encode(&point_bytes(scalar))
@@ -3448,6 +3475,146 @@ async fn organizer_bootstrap_is_v2_bound_signed_and_capability_protected() {
         .unwrap_or_else(|error| panic!("signed bootstrap: {error}"));
     assert_eq!(artifacts.manifest().proposal_question(), Some("Should the self-service test proposal pass?"));
     assert_eq!(artifacts.manifest().election_id().as_bytes(), election_id.as_bytes());
+}
+
+#[tokio::test]
+async fn organizer_descriptor_issuance_is_authenticated_exact_and_replay_safe() {
+    let (routers, storage) = test_routers();
+    let public = routers.public;
+    let election_id = "org-descriptor-001";
+    let organizer = organizer_secret(0x68);
+    organizer_create_ok(&public, election_id, &organizer, 1).await;
+    assert_eq!(
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+            None,
+            Some(&organizer),
+        )
+        .await
+        .0,
+        axum::http::StatusCode::OK
+    );
+    let (_, invitation) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let invitation_secret = invitation["invitation_secret_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("invitation secret"));
+    assert_eq!(
+        enroll(&public, election_id, invitation_secret, &enroll_key(1)).await.0,
+        axum::http::StatusCode::CREATED
+    );
+    for action in ["freeze", "open-voting"] {
+        assert!(matches!(
+            organizer_call(
+                &public,
+                "POST",
+                &format!("/api/v1/organizer/elections/{election_id}/{action}"),
+                None,
+                Some(&organizer),
+            )
+            .await
+            .0,
+            axum::http::StatusCode::OK | axum::http::StatusCode::CREATED
+        ));
+    }
+    let record = storage
+        .get_election(election_id)
+        .unwrap_or_else(|_| panic!("storage"))
+        .unwrap_or_else(|| panic!("election"));
+    let manifest = ElectionManifest::from_canonical_cbor(&record.manifest_cbor)
+        .unwrap_or_else(|_| panic!("manifest"));
+    let descriptor = TransportDescriptorV1::unsigned_for_authority(
+        election_id.as_bytes().to_vec(),
+        manifest
+            .canonical_hash(&Blake3HashProviderV1)
+            .unwrap_or_else(|_| panic!("hash")),
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["http://test.invalid".to_owned()],
+        Vec::new(),
+        [7; 32],
+        "desktop-generated-gateway".to_owned(),
+        vec![[8; 32]],
+        PaddingPolicyV1 {
+            id: "test-padding".to_owned(),
+            padded_bytes: 2048,
+        },
+        BatchPolicyV1 {
+            id: "test-batch".to_owned(),
+            accepted_unique_floor: 1,
+        },
+        None,
+        "hosted-test-root".to_owned(),
+    )
+    .unwrap_or_else(|_| panic!("draft"));
+    let request = HostedDescriptorRequestV1::new([0x23; 32], "test".to_owned(), descriptor)
+        .unwrap_or_else(|_| panic!("request"));
+    let bytes = request.to_canonical_cbor().unwrap_or_else(|_| panic!("cbor"));
+    let path = format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance");
+    assert_eq!(
+        req_cbor(public.clone(), "POST", &path, bytes.clone(), &organizer_secret(0x69))
+            .await
+            .0,
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+    let (status, issued) = req_cbor(public.clone(), "POST", &path, bytes.clone(), &organizer).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let response = HostedDescriptorResponseV1::from_canonical_cbor(&issued)
+        .unwrap_or_else(|_| panic!("response"));
+    assert_eq!(response.request_id(), request.request_id());
+    response
+        .descriptor()
+        .verify(
+            &test_transport_root(),
+            manifest
+                .canonical_hash(&Blake3HashProviderV1)
+                .unwrap_or_else(|_| panic!("hash")),
+        )
+        .unwrap_or_else(|_| panic!("authority descriptor"));
+
+    // Exact retries return the original canonical response, while a changed
+    // public parameter under the same request ID is rejected.
+    let (replay_status, replay) = req_cbor(public.clone(), "POST", &path, bytes, &organizer).await;
+    assert_eq!(replay_status, axum::http::StatusCode::OK);
+    assert_eq!(replay, issued);
+    let conflicting = HostedDescriptorRequestV1::new(
+        request.request_id(),
+        "test".to_owned(),
+        TransportDescriptorV1::unsigned_for_authority(
+            election_id.as_bytes().to_vec(),
+            manifest.canonical_hash(&Blake3HashProviderV1).unwrap_or_else(|_| panic!("hash")),
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec!["http://test.invalid".to_owned()],
+            Vec::new(),
+            [9; 32],
+            "desktop-generated-gateway".to_owned(),
+            vec![[8; 32]],
+            PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+            BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: 1 },
+            None,
+            "hosted-test-root".to_owned(),
+        )
+        .unwrap_or_else(|_| panic!("conflicting draft")),
+    )
+    .unwrap_or_else(|_| panic!("conflicting request"));
+    let (conflict_status, _) = req_cbor(
+        public,
+        "POST",
+        &path,
+        conflicting.to_canonical_cbor().unwrap_or_else(|_| panic!("conflicting cbor")),
+        &organizer,
+    )
+    .await;
+    assert_eq!(conflict_status, axum::http::StatusCode::CONFLICT);
 }
 
 #[tokio::test]

@@ -51,6 +51,18 @@ pub struct FinalizedTransportBindingRecord {
     pub binding_cbor: Vec<u8>,
 }
 
+/// Durable record of a Hosted authority response to one Desktop-generated
+/// descriptor request. Both canonical artifacts are retained so a retry can
+/// return the original response while conflicting reuse of a request ID is
+/// rejected without relying on signer determinism.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescriptorIssuanceRecord {
+    pub election_id: String,
+    pub request_id: [u8; 32],
+    pub request_cbor: Vec<u8>,
+    pub response_cbor: Vec<u8>,
+}
+
 // ── Enrollment draft records ─────────────────────────────────────────────────
 
 /// Draft election configuration stored before the registry is frozen.
@@ -142,6 +154,7 @@ pub enum StorageError {
     SlotNotFound,
     InvitationNotFound,
     AlreadyFrozen,
+    DescriptorRequestConflict,
     Db,
 }
 
@@ -159,6 +172,7 @@ impl StorageError {
             Self::SlotNotFound => "STORAGE_SLOT_NOT_FOUND",
             Self::InvitationNotFound => "STORAGE_INVITATION_NOT_FOUND",
             Self::AlreadyFrozen => "STORAGE_ALREADY_FROZEN",
+            Self::DescriptorRequestConflict => "STORAGE_DESCRIPTOR_REQUEST_CONFLICT",
             Self::Db => "STORAGE_DB_ERROR",
         }
     }
@@ -192,6 +206,13 @@ pub trait HostedStorage: Send + Sync {
         &self,
         election_id: &str,
     ) -> Result<Option<FinalizedTransportBindingRecord>, StorageError>;
+    /// Atomically records a new signed response or returns the earlier one
+    /// for an identical canonical request. Reusing an ID with any different
+    /// request bytes is a conflict, even across a process restart.
+    fn record_descriptor_issuance(
+        &self,
+        record: DescriptorIssuanceRecord,
+    ) -> Result<DescriptorIssuanceRecord, StorageError>;
 
     // Ballot records
     fn get_ballot_by_receipt(
@@ -323,6 +344,7 @@ pub(crate) enum EnrollmentFailpoint {
 pub struct InMemoryStorage {
     elections: Mutex<HashMap<String, ElectionRecord>>,
     finalized_transport_bindings: Mutex<HashMap<String, FinalizedTransportBindingRecord>>,
+    descriptor_issuances: Mutex<HashMap<(String, [u8; 32]), DescriptorIssuanceRecord>>,
     ballots: Mutex<HashMap<String, Vec<BallotRecord>>>,
     legacy: Mutex<HashMap<String, Vec<Vec<u8>>>>,
     drafts: Mutex<HashMap<String, ElectionDraftRecord>>,
@@ -413,6 +435,25 @@ impl HostedStorage for InMemoryStorage {
             .unwrap_or_else(|e| e.into_inner())
             .get(election_id)
             .cloned())
+    }
+
+    fn record_descriptor_issuance(
+        &self,
+        record: DescriptorIssuanceRecord,
+    ) -> Result<DescriptorIssuanceRecord, StorageError> {
+        let mut issuances = self
+            .descriptor_issuances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (record.election_id.clone(), record.request_id);
+        match issuances.get(&key) {
+            Some(existing) if existing.request_cbor == record.request_cbor => Ok(existing.clone()),
+            Some(_) => Err(StorageError::DescriptorRequestConflict),
+            None => {
+                issuances.insert(key, record.clone());
+                Ok(record)
+            }
+        }
     }
 
     fn get_ballot_by_receipt(
@@ -870,6 +911,21 @@ impl SqliteStorage {
         )
         .map_err(|_| StorageError::Db)?;
 
+        // Server-side replay boundary for authority issuance. The request
+        // bytes are canonical and exact; the stored response remains stable
+        // even if a future external signer is non-deterministic.
+        g.execute_batch(
+            "CREATE TABLE IF NOT EXISTS descriptor_issuances (
+                election_id TEXT NOT NULL,
+                request_id BLOB NOT NULL,
+                request_cbor BLOB NOT NULL,
+                response_cbor BLOB NOT NULL,
+                PRIMARY KEY (election_id, request_id),
+                FOREIGN KEY (election_id) REFERENCES elections(id)
+             );",
+        )
+        .map_err(|_| StorageError::Db)?;
+
         // Enrollment tables (schema v3, idempotent).
         g.execute_batch(
             "CREATE TABLE IF NOT EXISTS election_drafts (
@@ -945,7 +1001,7 @@ impl SqliteStorage {
         match existing.as_deref() {
             None => {
                 g.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', '6')",
+                    "INSERT INTO meta (key, value) VALUES ('schema_version', '7')",
                     [],
                 )
                 .map_err(|_| StorageError::Db)?;
@@ -959,7 +1015,14 @@ impl SqliteStorage {
                 )
                 .map_err(|_| StorageError::Db)?;
             }
-            Some("6") => {}
+            Some("6") => {
+                g.execute(
+                    "UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+                    [],
+                )
+                .map_err(|_| StorageError::Db)?;
+            }
+            Some("7") => {}
             Some(_) => return Err(StorageError::Db),
         }
         Ok(())
@@ -1091,6 +1154,41 @@ impl HostedStorage for SqliteStorage {
         )
         .optional()
         .map_err(|_| StorageError::Db)
+    }
+
+    fn record_descriptor_issuance(
+        &self,
+        record: DescriptorIssuanceRecord,
+    ) -> Result<DescriptorIssuanceRecord, StorageError> {
+        let mut g = self.lock();
+        let tx = g.transaction().map_err(|_| StorageError::Db)?;
+        let existing = tx
+            .query_row(
+                "SELECT request_cbor, response_cbor FROM descriptor_issuances WHERE election_id = ?1 AND request_id = ?2",
+                params![&record.election_id, record.request_id.as_slice()],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()
+            .map_err(|_| StorageError::Db)?;
+        let output = match existing {
+            Some((request_cbor, response_cbor)) if request_cbor == record.request_cbor => DescriptorIssuanceRecord {
+                election_id: record.election_id,
+                request_id: record.request_id,
+                request_cbor,
+                response_cbor,
+            },
+            Some(_) => return Err(StorageError::DescriptorRequestConflict),
+            None => {
+                tx.execute(
+                    "INSERT INTO descriptor_issuances (election_id, request_id, request_cbor, response_cbor) VALUES (?1, ?2, ?3, ?4)",
+                    params![&record.election_id, record.request_id.as_slice(), &record.request_cbor, &record.response_cbor],
+                )
+                .map_err(|_| StorageError::Db)?;
+                record
+            }
+        };
+        tx.commit().map_err(|_| StorageError::Db)?;
+        Ok(output)
     }
 
     fn get_ballot_by_receipt(

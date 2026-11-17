@@ -70,7 +70,8 @@ use tari_cc_private_ballot_ballot::{
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
     DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GuiElectionArtifactsV1,
-    HostedBindingRequestV1, HostedOrganizerBootstrapV1, TransportAuthorityRootV1,
+    HostedBindingRequestV1, HostedDescriptorRequestV1, HostedDescriptorResponseV1,
+    HostedOrganizerBootstrapV1, TransportAuthorityRootV1,
     TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
@@ -140,6 +141,9 @@ pub struct HostedConfig {
     pub organizer_max_slots: i64,
     /// Release-pinned public root used to authenticate transport descriptors.
     pub transport_authority_root: TransportAuthorityRootV1,
+    /// Exact public transport environment accepted for descriptor issuance.
+    /// This is not inferred from a browser-supplied artifact.
+    pub transport_environment: String,
     /// Server-only Ed25519 seed supplied by deployment configuration. This is
     /// never serialized or returned through any API.
     authority_signing_key: Option<[u8; 32]>,
@@ -200,6 +204,12 @@ impl HostedConfig {
             Err(std::env::VarError::NotPresent) => None,
             Err(_) => return Err(ConfigError::AuthoritySignerInvalid),
         };
+        let transport_environment = std::env::var("PRIVATE_BALLOT_HOSTED_TRANSPORT_ENVIRONMENT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        if authority_signing_key.is_some() && transport_environment.is_none() {
+            return Err(ConfigError::AuthorityEnvironmentMissing);
+        }
         Self {
             bind,
             admin_bind,
@@ -212,6 +222,7 @@ impl HostedConfig {
             rate_limit_per_minute,
             organizer_max_slots,
             transport_authority_root,
+            transport_environment: transport_environment.unwrap_or_else(|| "local".to_owned()),
             authority_signing_key,
         }
         .validate()
@@ -237,6 +248,9 @@ impl HostedConfig {
             return Err(ConfigError::InvalidBind);
         }
         if self.organizer_max_slots < 1 || self.organizer_max_slots > MAX_ORGANIZER_SLOTS_LIMIT {
+            return Err(ConfigError::InvalidBind);
+        }
+        if self.transport_environment.trim().is_empty() || self.transport_environment.len() > 128 {
             return Err(ConfigError::InvalidBind);
         }
         if let Some(seed) = self.authority_signing_key {
@@ -274,6 +288,7 @@ pub enum ConfigError {
     AuthoritySignerInvalid,
     AuthoritySignerMissing,
     AuthoritySignerMismatch,
+    AuthorityEnvironmentMissing,
 }
 impl ConfigError {
     #[must_use]
@@ -285,6 +300,7 @@ impl ConfigError {
             Self::AuthoritySignerInvalid => "HOSTED_CONFIG_AUTHORITY_SIGNER_INVALID",
             Self::AuthoritySignerMissing => "HOSTED_CONFIG_AUTHORITY_SIGNER_MISSING",
             Self::AuthoritySignerMismatch => "HOSTED_CONFIG_AUTHORITY_SIGNER_MISMATCH",
+            Self::AuthorityEnvironmentMissing => "HOSTED_CONFIG_AUTHORITY_ENVIRONMENT_MISSING",
         }
     }
 }
@@ -3956,6 +3972,128 @@ async fn organizer_download_desktop_bootstrap(
         .into_response()
 }
 
+/// Authenticated browser-mediated descriptor issuance. The uploaded artifact
+/// is public Desktop-generated data, not an organizer credential; authorization
+/// always comes from the existing election-scoped Hosted capability header.
+async fn organizer_issue_transport_descriptor(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(response) = check_organizer(&state, &headers, &id) {
+        return response;
+    }
+    if let Err(response) = organizer_rate(&state, &id) {
+        return response;
+    }
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(';').next().is_some_and(|value| value.trim() == "application/cbor"))
+        != Some(true)
+    {
+        return error_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "invalid_descriptor_request",
+            "descriptor request must be canonical CBOR",
+        );
+    }
+    let request = match HostedDescriptorRequestV1::from_canonical_cbor(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_descriptor_request",
+                "descriptor request is invalid",
+            );
+        }
+    };
+    let canonical_request = match request.to_canonical_cbor() {
+        Ok(bytes) => bytes,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_descriptor_request", "descriptor request is invalid"),
+    };
+    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+        Ok(loaded) => loaded,
+        Err(response) => return response,
+    };
+    if !matches!(loaded.manifest, ElectionManifest::V2(_)) || loaded.record.state != "open" {
+        return error_response(
+            StatusCode::CONFLICT,
+            "descriptor_not_available",
+            "descriptor issuance is available only for an open persisted V2 election",
+        );
+    }
+    let manifest_hash = match loaded.manifest.canonical_hash(&Blake3HashProviderV1) {
+        Ok(hash) => hash,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "stored election is invalid"),
+    };
+    if request.election_id() != loaded.manifest.election_id().as_bytes()
+        || request.manifest_hash() != manifest_hash
+        || request.network() != state.config.transport_environment
+    {
+        return error_response(
+            StatusCode::CONFLICT,
+            "descriptor_request_mismatch",
+            "descriptor request does not match the authoritative election",
+        );
+    }
+    let signer = match state.config.authority_signer() {
+        Ok(signer) => signer,
+        Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "authority_unavailable", "release authority is unavailable"),
+    };
+    if request.descriptor_draft().root_key_id() != signer.key_id() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "descriptor_request_mismatch",
+            "descriptor request names an unexpected authority key",
+        );
+    }
+    let signature = match request
+        .descriptor_draft()
+        .authority_signing_payload()
+        .and_then(|payload| signer.sign_canonical(&payload).map_err(|_| tari_cc_private_ballot_gui_core::TransportError::InvalidDescriptor))
+    {
+        Ok(signature) => signature,
+        Err(_) => return error_response(StatusCode::SERVICE_UNAVAILABLE, "authority_unavailable", "release authority is unavailable"),
+    };
+    let descriptor = match request.descriptor_draft().with_authority_signature(signature) {
+        Ok(descriptor) => descriptor,
+        Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid_descriptor_request", "descriptor request is invalid"),
+    };
+    let response = match HostedDescriptorResponseV1::new(&request, descriptor)
+        .and_then(|response| response.to_canonical_cbor().map(|bytes| (response, bytes)))
+    {
+        Ok(response) => response,
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "descriptor response is unavailable"),
+    };
+    let recorded = match state.storage.record_descriptor_issuance(storage::DescriptorIssuanceRecord {
+        election_id: id,
+        request_id: request.request_id(),
+        request_cbor: canonical_request,
+        response_cbor: response.1,
+    }) {
+        Ok(record) => record,
+        Err(StorageError::DescriptorRequestConflict) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "descriptor_request_conflict",
+                "descriptor request ID was previously used with different content",
+            );
+        }
+        Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "service_unavailable", "descriptor issuance persistence is unavailable"),
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/cbor"),
+            (header::CONTENT_DISPOSITION, "attachment; filename=\"private-ballot-descriptor-response-v1.cbor\""),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        recorded.response_cbor,
+    )
+        .into_response()
+}
+
 async fn organizer_finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4085,6 +4223,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/open-voting", post(organizer_open_voting))
         .route("/api/v1/organizer/elections/{id}/close", post(organizer_close))
         .route("/api/v1/organizer/elections/{id}/desktop-bootstrap", get(organizer_download_desktop_bootstrap))
+        .route("/api/v1/organizer/elections/{id}/descriptor-issuance", post(organizer_issue_transport_descriptor))
         .route("/api/v1/organizer/elections/{id}/binding-handoff", get(organizer_get_binding_handoff_request))
         .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
@@ -4141,6 +4280,7 @@ pub fn test_config() -> HostedConfig {
         rate_limit_per_minute: 10_000,
         organizer_max_slots: DEFAULT_ORGANIZER_MAX_SLOTS,
         transport_authority_root: production_transport_authority_root_v1(),
+        transport_environment: "test".to_owned(),
         authority_signing_key: None,
     }
 }

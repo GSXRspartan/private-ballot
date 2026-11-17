@@ -30,7 +30,11 @@ impl HostedDescriptorRequestV1 {
         network: String,
         descriptor_draft: TransportDescriptorV1,
     ) -> Result<Self, TransportError> {
-        if network.is_empty() || network.len() > MAX_NETWORK_BYTES || !descriptor_draft.is_unsigned_authority_draft() {
+        if request_id == [0; 32]
+            || network.is_empty()
+            || network.len() > MAX_NETWORK_BYTES
+            || !descriptor_draft.is_unsigned_authority_draft()
+        {
             return Err(TransportError::InvalidDescriptor);
         }
         Ok(Self {
@@ -113,6 +117,10 @@ impl HostedDescriptorResponseV1 {
     #[must_use]
     pub fn network(&self) -> &str { &self.network }
     #[must_use]
+    pub fn election_id(&self) -> &[u8] { &self.election_id }
+    #[must_use]
+    pub const fn manifest_hash(&self) -> ManifestHash { self.manifest_hash }
+    #[must_use]
     pub fn descriptor(&self) -> &TransportDescriptorV1 { &self.descriptor }
 
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, TransportError> {
@@ -142,7 +150,10 @@ impl HostedDescriptorResponseV1 {
         let manifest_hash = ManifestHash::new(fixed_32(&mut r)?);
         let descriptor = TransportDescriptorV1::from_canonical_cbor(r.read_byte_string().map_err(|_| TransportError::InvalidDescriptor)?)?;
         r.finish().map_err(|_| TransportError::InvalidDescriptor)?;
-        if network.is_empty() || network.len() > MAX_NETWORK_BYTES || descriptor.is_unsigned_authority_draft()
+        if request_id == [0; 32]
+            || network.is_empty()
+            || network.len() > MAX_NETWORK_BYTES
+            || descriptor.is_unsigned_authority_draft()
             || descriptor.election_id() != election_id || descriptor.manifest_hash() != manifest_hash {
             return Err(TransportError::InvalidDescriptor);
         }
