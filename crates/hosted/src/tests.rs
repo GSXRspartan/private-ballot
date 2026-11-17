@@ -26,7 +26,8 @@ use tari_cc_private_ballot_crypto::{
 };
 use tari_cc_private_ballot_gui_core::{
     BatchPolicyV1, GuiLiveAnchorV2RequestV1, GuiV2AnchorPublishPreparationRequestV1,
-    PaddingPolicyV1, TransportDescriptorV1, TransportRoutePolicyV1,
+    HostedOrganizerBootstrapV1, PaddingPolicyV1, TransportAuthorityRootSetV1,
+    TransportDescriptorV1, TransportRoutePolicyV1,
     build_v2_public_payload_from_verified_archive_v1,
     prepare_v2_anchor_publish_from_verified_evidence_v1,
 };
@@ -410,6 +411,7 @@ fn test_routers() -> (TestRouters, Arc<InMemoryStorage>) {
     let storage = Arc::new(InMemoryStorage::new());
     let mut config = test_config();
     config.transport_authority_root = test_transport_root();
+    config.authority_signing_key = Some([42; 32]);
     let state = Arc::new(AppState::new(config, storage.clone()));
     let routers = TestRouters {
         public: router_with_state(state.clone()),
@@ -452,6 +454,27 @@ async fn req(
         Err(_) => panic!("body"),
     };
     (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+async fn req_bytes(
+    router: axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (axum::http::StatusCode, Vec<u8>) {
+    let mut builder = axum::http::Request::builder().method(method).uri(uri);
+    for (key, value) in headers {
+        builder = builder.header(*key, *value);
+    }
+    let response = router
+        .oneshot(builder.body(Body::empty()).unwrap_or_else(|_| panic!("request")))
+        .await
+        .unwrap_or_else(|_| panic!("oneshot"));
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_else(|_| panic!("body"));
+    (status, bytes.to_vec())
 }
 
 async fn import(admin: axum::Router, f: &Fixture) -> axum::http::StatusCode {
@@ -1276,6 +1299,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        authority_signing_key: None,
     };
     assert!(cfg.validate().is_err());
     let cfg = HostedConfig {
@@ -1290,6 +1314,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        authority_signing_key: None,
     };
     assert!(
         cfg.validate().is_err(),
@@ -1307,6 +1332,7 @@ fn storage_and_config_boundaries() {
         rate_limit_per_minute: 10,
         organizer_max_slots: 10,
         transport_authority_root: test_transport_root(),
+        authority_signing_key: None,
     };
     assert!(
         cfg.validate().is_err(),
@@ -3338,6 +3364,90 @@ async fn organizer_freeze_rejects_post_freeze_mutations() {
     )
     .await;
     assert_eq!(s4, axum::http::StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn organizer_bootstrap_is_v2_bound_signed_and_capability_protected() {
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let election_id = "org-bootstrap-001";
+    let organizer = organizer_secret(0x66);
+    organizer_create_ok(&public, election_id, &organizer, 1).await;
+    assert_eq!(
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+            None,
+            Some(&organizer),
+        )
+        .await
+        .0,
+        axum::http::StatusCode::OK
+    );
+    let (_, invitation) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let invitation_secret = invitation["invitation_secret_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("invitation secret"));
+    assert_eq!(
+        enroll(&public, election_id, invitation_secret, &enroll_key(1))
+            .await
+            .0,
+        axum::http::StatusCode::CREATED
+    );
+    for (action, expected) in [
+        ("freeze", axum::http::StatusCode::OK),
+        ("open-voting", axum::http::StatusCode::CREATED),
+    ] {
+        assert_eq!(
+            organizer_call(
+                &public,
+                "POST",
+                &format!("/api/v1/organizer/elections/{election_id}/{action}"),
+                None,
+                Some(&organizer),
+            )
+            .await
+            .0,
+            expected
+        );
+    }
+
+    let path = format!("/api/v1/organizer/elections/{election_id}/desktop-bootstrap");
+    let foreign_organizer = organizer_secret(0x67);
+    assert_eq!(
+        req_bytes(
+            public.clone(),
+            "GET",
+            &path,
+            &[("x-private-ballot-organizer", &foreign_organizer)],
+        )
+        .await
+        .0,
+        axum::http::StatusCode::UNAUTHORIZED
+    );
+    let (status, bytes) = req_bytes(
+        public,
+        "GET",
+        &path,
+        &[("x-private-ballot-organizer", &organizer)],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let bootstrap = HostedOrganizerBootstrapV1::from_canonical_cbor(&bytes)
+        .unwrap_or_else(|error| panic!("canonical bootstrap: {error}"));
+    let artifacts = bootstrap
+        .verify(&TransportAuthorityRootSetV1::new(test_transport_root()))
+        .unwrap_or_else(|error| panic!("signed bootstrap: {error}"));
+    assert_eq!(artifacts.manifest().proposal_question(), Some("Should the self-service test proposal pass?"));
+    assert_eq!(artifacts.manifest().election_id().as_bytes(), election_id.as_bytes());
 }
 
 #[tokio::test]
