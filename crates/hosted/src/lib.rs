@@ -72,6 +72,7 @@ use tari_cc_private_ballot_gui_core::{
     TransportAuthorityRootV1, TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
+use crate::authority_signer::{AuthoritySigner, LocalEd25519AuthoritySigner};
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, HashProvider, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
     PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode, hash_domain_separated,
@@ -138,6 +139,9 @@ pub struct HostedConfig {
     pub organizer_max_slots: i64,
     /// Release-pinned public root used to authenticate transport descriptors.
     pub transport_authority_root: TransportAuthorityRootV1,
+    /// Server-only Ed25519 seed supplied by deployment configuration. This is
+    /// never serialized or returned through any API.
+    authority_signing_key: Option<[u8; 32]>,
 }
 
 fn is_loopback_bind(bind: &str) -> Option<bool> {
@@ -189,6 +193,12 @@ impl HostedConfig {
             (None, None) => production_transport_authority_root_v1(),
             _ => return Err(ConfigError::InvalidBind),
         };
+        let authority_signing_key = match std::env::var("PRIVATE_BALLOT_HOSTED_AUTHORITY_SIGNING_KEY_HEX") {
+            Ok(value) => Some(hex_decode(&value).map_err(|_| ConfigError::AuthoritySignerInvalid)?
+                .try_into().map_err(|_| ConfigError::AuthoritySignerInvalid)?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(_) => return Err(ConfigError::AuthoritySignerInvalid),
+        };
         Self {
             bind,
             admin_bind,
@@ -201,6 +211,7 @@ impl HostedConfig {
             rate_limit_per_minute,
             organizer_max_slots,
             transport_authority_root,
+            authority_signing_key,
         }
         .validate()
     }
@@ -227,7 +238,30 @@ impl HostedConfig {
         if self.organizer_max_slots < 1 || self.organizer_max_slots > MAX_ORGANIZER_SLOTS_LIMIT {
             return Err(ConfigError::InvalidBind);
         }
+        if let Some(seed) = self.authority_signing_key {
+            let TransportAuthorityRootV1::Pinned { key_id, public_key } = &self.transport_authority_root else {
+                return Err(ConfigError::AuthoritySignerMismatch);
+            };
+            LocalEd25519AuthoritySigner::new(key_id.clone(), seed, *public_key)
+                .map_err(|_| ConfigError::AuthoritySignerMismatch)?;
+        } else if matches!(self.transport_authority_root, TransportAuthorityRootV1::Pinned { .. }) {
+            // A configured release root without its server-side signer must
+            // never silently run as an issuing authority.
+            return Err(ConfigError::AuthoritySignerMissing);
+        }
         Ok(self)
+    }
+
+    /// Returns the authority signer only when explicit server-side key material
+    /// is configured and matches the pinned public root. Issuance callers must
+    /// treat `None` as an unavailable production authority, never as test-root.
+    pub fn authority_signer(&self) -> Result<Box<dyn AuthoritySigner>, ConfigError> {
+        let seed = self.authority_signing_key.ok_or(ConfigError::AuthoritySignerMissing)?;
+        let TransportAuthorityRootV1::Pinned { key_id, public_key } = &self.transport_authority_root else {
+            return Err(ConfigError::AuthoritySignerMissing);
+        };
+        Ok(Box::new(LocalEd25519AuthoritySigner::new(key_id.clone(), seed, *public_key)
+            .map_err(|_| ConfigError::AuthoritySignerMismatch)?))
     }
 }
 
@@ -236,6 +270,9 @@ pub enum ConfigError {
     InvalidBind,
     NonLoopbackBind,
     AdminBindNotLoopback,
+    AuthoritySignerInvalid,
+    AuthoritySignerMissing,
+    AuthoritySignerMismatch,
 }
 impl ConfigError {
     #[must_use]
@@ -244,6 +281,9 @@ impl ConfigError {
             Self::InvalidBind => "HOSTED_CONFIG_INVALID_BIND",
             Self::NonLoopbackBind => "HOSTED_CONFIG_NON_LOOPBACK_BIND",
             Self::AdminBindNotLoopback => "HOSTED_CONFIG_ADMIN_BIND_NOT_LOOPBACK",
+            Self::AuthoritySignerInvalid => "HOSTED_CONFIG_AUTHORITY_SIGNER_INVALID",
+            Self::AuthoritySignerMissing => "HOSTED_CONFIG_AUTHORITY_SIGNER_MISSING",
+            Self::AuthoritySignerMismatch => "HOSTED_CONFIG_AUTHORITY_SIGNER_MISMATCH",
         }
     }
 }
@@ -3995,6 +4035,7 @@ pub fn test_config() -> HostedConfig {
         rate_limit_per_minute: 10_000,
         organizer_max_slots: DEFAULT_ORGANIZER_MAX_SLOTS,
         transport_authority_root: production_transport_authority_root_v1(),
+        authority_signing_key: None,
     }
 }
 
