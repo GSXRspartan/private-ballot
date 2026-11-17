@@ -285,6 +285,13 @@ impl OrganizerIntakeState {
         self.service_loop.accepted_unique_count()
     }
 
+    /// Returns the public, signed descriptor for pre-finalization provenance
+    /// checks. The descriptor contains no organizer or voter secret material.
+    #[must_use]
+    pub(crate) fn descriptor(&self) -> &TransportDescriptorV1 {
+        &self.descriptor
+    }
+
     pub(crate) fn finalize_transport_archive_binding(
         &self,
     ) -> Result<Option<TransportArchiveBindingV1>, CommandError> {

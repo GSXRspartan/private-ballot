@@ -90,7 +90,7 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
-use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
+use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, ManifestHash};
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
     WalletdEndpoint,
@@ -2274,6 +2274,11 @@ async fn write_hosted_binding_handoff(
             })?;
         request.validate()?;
         let state = app.state::<AppState>();
+        let app_data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| CommandError::app_data_unavailable())?;
+        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
         let (live_handoff, election_id, manifest_hash_hex, accepted_count) =
             state.with_organizer_session(|session| {
                 let manifest = session.artifacts().manifest();
@@ -2296,12 +2301,27 @@ async fn write_hosted_binding_handoff(
                         "the Hosted request does not match this finalized Desktop election",
                     ));
                 }
+                let manifest_hash = session
+                    .artifacts()
+                    .manifest()
+                    .canonical_hash(&Blake3HashProviderV1)
+                    .map_err(|_| {
+                        CommandError::new(
+                            "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                            "ARCHIVE_INTEGRITY",
+                            "the active Desktop manifest could not be hashed for the Hosted handoff",
+                        )
+                    })?;
                 // This is the first operation allowed to seal a live batch. It
                 // runs only after the schema, organizer role, exact identity,
                 // and finalized lifecycle checks above, while this session lock
                 // still prevents an election/role swap.
-                let live_handoff =
-                    finalized_transport_handoff_for_active_intake(state.inner(), session)?;
+                let live_handoff = finalized_transport_handoff_for_active_intake(
+                    state.inner(),
+                    session,
+                    &roots,
+                    manifest_hash,
+                )?;
                 Ok((live_handoff, election_id, manifest_hash_hex, session.accepted_count() as u64))
             })?;
         let material = match live_handoff {
@@ -2319,11 +2339,6 @@ async fn write_hosted_binding_handoff(
                 "the verified Desktop transport history has no finalized binding for this election",
             )
         })?;
-        let app_data_root = app
-            .path()
-            .app_data_dir()
-            .map_err(|_| CommandError::app_data_unavailable())?;
-        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
         let manifest_hash = state.with_organizer_session(|session| {
             if session.summary().manifest_hash_hex != manifest_hash_hex {
                 return Err(CommandError::new(
@@ -2483,6 +2498,8 @@ fn durable_recovered_transport_binding_handoff(
 fn finalized_transport_handoff_for_active_intake(
     state: &AppState,
     session: &GuiElectionSessionV1,
+    roots: &TransportAuthorityRootSetV1,
+    manifest_hash: ManifestHash,
 ) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
     #[cfg(feature = "managed-tor")]
     {
@@ -2497,6 +2514,13 @@ fn finalized_transport_handoff_for_active_intake(
         if !intake.is_bound_to_manifest(&manifest_hash_hex) {
             return Ok(None);
         }
+        roots
+            .verify_descriptor(intake.descriptor(), manifest_hash)
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_UNTRUSTED_DESCRIPTOR",
+                "ARCHIVE_INTEGRITY",
+                "the active Desktop transport descriptor is not signed by the configured production authority",
+            ))?;
         let handoff = intake.finalized_transport_binding_handoff()?;
         if handoff.is_none() && intake.accepted_unique_count() > 0 {
             return Err(CommandError::new(
@@ -2509,7 +2533,7 @@ fn finalized_transport_handoff_for_active_intake(
     }
     #[cfg(not(feature = "managed-tor"))]
     {
-        let _ = (state, session);
+        let _ = (state, session, roots, manifest_hash);
         Ok(None)
     }
 }
