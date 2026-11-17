@@ -26,8 +26,9 @@ use hpke::{Kem as KemTrait, Serializable};
 use tari_cc_private_ballot_protocol::{CanonicalCborReader, CanonicalCborWriter};
 
 use tari_cc_private_ballot_gui_core::{
-    BatchPolicyV1, HostedDescriptorPendingStateV1, PaddingPolicyV1, TransportAuthorityRootV1,
-    TransportDescriptorV1, TransportRoutePolicyV1,
+    BatchPolicyV1, HostedDescriptorPendingStateV1, HostedDescriptorPendingStatusV1,
+    HostedDescriptorResponseV1, PaddingPolicyV1, TransportAuthorityRootSetV1,
+    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
 };
 
 use crate::GatewayReceiverKeyV1;
@@ -47,6 +48,7 @@ const BUNDLE_MANIFEST_FILENAME: &str = "bundle-manifest.cbor";
 const HOSTED_PENDING_DIRECTORY: &str = "hosted-descriptor-pending-v1";
 const HOSTED_PENDING_MANIFEST_FILENAME: &str = "pending-manifest.cbor";
 const HOSTED_PENDING_STATE_FILENAME: &str = "pending-state.cbor";
+const HOSTED_ISSUED_DESCRIPTOR_FILENAME: &str = "issued-descriptor.cbor";
 const HOSTED_GATEWAY_RECEIVER_SECRET_FILENAME: &str = "gateway-receiver-secret.bin";
 const HOSTED_RECEIPT_SIGNING_SECRET_FILENAME: &str = "receipt-signing-secret.bin";
 const HOSTED_PENDING_MANIFEST_TYPE_ID: &str =
@@ -94,6 +96,14 @@ pub struct LoadedHostedPendingTransportV1 {
     pub binding: TransportElectionBindingV1,
     pub tor_data_directory: std::path::PathBuf,
     pub hidden_service_dir: std::path::PathBuf,
+}
+
+/// Result of importing a Hosted response into the durable Desktop store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedDescriptorResponseImportV1 {
+    ProvisioningRecovered,
+    Completed,
+    AlreadyCompleted,
 }
 
 /// Non-secret metadata binding the test material to a specific election.
@@ -331,6 +341,74 @@ pub fn load_hosted_pending_transport_v1(
         tor_data_directory,
         hidden_service_dir,
     })
+}
+
+/// Performs the durable request `pending -> provisioning -> completed`
+/// transition for an exact authority-issued response. The descriptor is written
+/// before the completed marker, so a restart can never mistake a marker for a
+/// provisioned descriptor that was not persisted.
+pub fn import_hosted_descriptor_response_v1(
+    organizer_private_dir: &Path,
+    response: &HostedDescriptorResponseV1,
+    roots: &TransportAuthorityRootSetV1,
+    current_workspace_election_id: &[u8],
+    current_workspace_manifest_hash: tari_cc_private_ballot_protocol::ManifestHash,
+) -> Result<(HostedDescriptorResponseImportV1, TransportDescriptorV1), ProvisioningErrorV1> {
+    let loaded = load_hosted_pending_transport_v1(organizer_private_dir)?;
+    let descriptor = loaded
+        .pending
+        .verify_response(
+            response,
+            roots,
+            current_workspace_election_id,
+            current_workspace_manifest_hash,
+        )
+        .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    let dir = organizer_private_dir.join(HOSTED_PENDING_DIRECTORY);
+    match loaded.pending.status() {
+        HostedDescriptorPendingStatusV1::Completed => {
+            let issued = TransportDescriptorV1::from_canonical_cbor(&read_bounded(
+                &dir.join(HOSTED_ISSUED_DESCRIPTOR_FILENAME),
+            )?)
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+            if issued != descriptor {
+                return Err(ProvisioningErrorV1::MalformedBundle);
+            }
+            Ok((HostedDescriptorResponseImportV1::AlreadyCompleted, descriptor))
+        }
+        HostedDescriptorPendingStatusV1::Pending | HostedDescriptorPendingStatusV1::Provisioning => {
+            let provisioning = match loaded.pending.status() {
+                HostedDescriptorPendingStatusV1::Pending => loaded
+                    .pending
+                    .begin_provisioning()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+                HostedDescriptorPendingStatusV1::Provisioning => loaded.pending.clone(),
+                HostedDescriptorPendingStatusV1::Completed => unreachable!(),
+            };
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_PENDING_STATE_FILENAME),
+                &provisioning
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_ISSUED_DESCRIPTOR_FILENAME),
+                &descriptor
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            let completed = provisioning
+                .complete(response.clone())
+                .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_PENDING_STATE_FILENAME),
+                &completed
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            Ok((HostedDescriptorResponseImportV1::Completed, descriptor))
+        }
+    }
 }
 
 /// Builds and signs a [`TransportDescriptorV1`] bound to the discovered onion
@@ -917,6 +995,32 @@ fn write_atomic_bounded(path: &Path, bytes: &[u8]) -> Result<(), ProvisioningErr
     Ok(())
 }
 
+fn write_replace_atomic_bounded(path: &Path, bytes: &[u8]) -> Result<(), ProvisioningErrorV1> {
+    if bytes.len() as u64 > MAX_BUNDLE_FILE_BYTES {
+        return Err(ProvisioningErrorV1::Io);
+    }
+    let temporary = path.with_extension("new");
+    // A process that stopped before rename leaves only a non-authoritative
+    // scratch file. It is safe to discard before retrying the durable
+    // transition because `path` remains the sole committed state.
+    if temporary.exists() {
+        let metadata = fs::symlink_metadata(&temporary).map_err(|_| ProvisioningErrorV1::Io)?;
+        if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(ProvisioningErrorV1::Io);
+        }
+        fs::remove_file(&temporary).map_err(|_| ProvisioningErrorV1::Io)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| ProvisioningErrorV1::Io)?;
+    file.write_all(bytes).map_err(|_| ProvisioningErrorV1::Io)?;
+    file.sync_all().map_err(|_| ProvisioningErrorV1::Io)?;
+    drop(file);
+    fs::rename(&temporary, path).map_err(|_| ProvisioningErrorV1::Io)
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, ProvisioningErrorV1> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ProvisioningErrorV1::Io)?;
     if metadata.file_type().is_symlink()
@@ -978,10 +1082,12 @@ fn is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use ed25519_dalek::{Signer, SigningKey};
     use super::*;
     use std::path::PathBuf;
     use tari_cc_private_ballot_gui_core::{
-        HostedDescriptorRequestV1, HostedDescriptorPendingStateV1, TransportAuthorityRootSetV1,
+        HostedDescriptorRequestV1, HostedDescriptorPendingStateV1, HostedDescriptorResponseV1,
+        TransportAuthorityRootSetV1, TransportAuthorityRootV1,
     };
     use tari_cc_private_ballot_protocol::ManifestHash;
 
@@ -1091,6 +1197,51 @@ mod tests {
         assert_eq!(
             restored.material.gateway_receiver_public_key,
             material.gateway_receiver_public_key
+        );
+        let authority = SigningKey::from_bytes(&[42; 32]);
+        let signature = authority
+            .sign(
+                &request
+                    .descriptor_draft()
+                    .authority_signing_payload()
+                    .expect("payload"),
+            )
+            .to_bytes();
+        let response = HostedDescriptorResponseV1::new(
+            &request,
+            request
+                .descriptor_draft()
+                .with_authority_signature(signature)
+                .expect("issued"),
+        )
+        .expect("response");
+        let roots = TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
+            key_id: "hosted-test-root".to_owned(),
+            public_key: authority.verifying_key().to_bytes(),
+        });
+        assert_eq!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .expect("response import")
+            .0,
+            HostedDescriptorResponseImportV1::Completed
+        );
+        assert_eq!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .expect("idempotent response import")
+            .0,
+            HostedDescriptorResponseImportV1::AlreadyCompleted
         );
         assert!(
             persist_hosted_pending_transport_v1(
