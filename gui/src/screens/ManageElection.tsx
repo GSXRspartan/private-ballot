@@ -9,6 +9,8 @@ import {
   pickGovernanceDocument,
   pickHostedBindingHandoffPath,
   pickHostedBindingRequest,
+  pickHostedDescriptorRequestPath,
+  pickHostedDescriptorResponse,
   pickTorExecutable,
 } from "../api/dialog";
 import {
@@ -173,6 +175,8 @@ export function ManageElection() {
   );
   const [remoteTestStatus, setRemoteTestStatus] = useState<OrganizerIntakeStatusV1 | null>(null);
   const [bundleExportPath, setBundleExportPath] = useState<string | null>(null);
+  const [hostedDescriptorRequestPath, setHostedDescriptorRequestPath] = useState<string | null>(null);
+  const [hostedDescriptorResponseImported, setHostedDescriptorResponseImported] = useState(false);
   const [hostedBindingHandoffPath, setHostedBindingHandoffPath] = useState<string | null>(null);
   // Bounded automatic inbox sync: a single in-flight guard and the last observed
   // intake-worker accepted count. Auto-sync calls the SAME authoritative
@@ -1046,6 +1050,50 @@ export function ManageElection() {
       setOrganizerStatus(status);
       persistOrganizerRemoteTorConfig();
       recordAction("Started private ballot intake");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
+  const onExportHostedDescriptorRequest = async () => {
+    clearLocalError();
+    const path = await pickHostedDescriptorRequestPath();
+    if (path === null) return;
+    setOrganizerBusy(true);
+    try {
+      const result = await api.exportHostedDescriptorRequest(
+        path,
+        intakeTorExepathOrUndefined(),
+        remoteIntakeArg(),
+      );
+      setHostedDescriptorRequestPath(result.written_path);
+      setHostedDescriptorResponseImported(false);
+      persistOrganizerRemoteTorConfig();
+      recordAction("Exported Hosted descriptor request");
+      setOrganizerStatus(await api.organizerTorStatus(intakeTorExepathOrUndefined()));
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
+  const onImportHostedDescriptorResponse = async () => {
+    clearLocalError();
+    const path = await pickHostedDescriptorResponse();
+    if (path === null) return;
+    setOrganizerBusy(true);
+    try {
+      const result = await api.importHostedDescriptorResponse(path);
+      setHostedDescriptorResponseImported(true);
+      recordAction(
+        result.already_completed
+          ? "Confirmed the existing Hosted descriptor response"
+          : "Imported and verified the Hosted descriptor response",
+      );
+      setOrganizerStatus(await api.organizerTorStatus(intakeTorExepathOrUndefined()));
     } catch (error) {
       showError(error);
     } finally {
@@ -2403,6 +2451,51 @@ export function ManageElection() {
                 for this election.
               </Notice>
             )}
+
+          <h3 className="card-section-heading">Hosted authority descriptor</h3>
+          <p className="form-hint">
+            Before starting intake, export this election&apos;s public descriptor request and upload
+            it in authenticated Hosted Manage. Download the signed response there, then import it
+            here. The request carries no Hosted organizer credential or Desktop private key.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={
+                !canAct ||
+                organizerBusy ||
+                organizerStatus?.intake_running === true ||
+                (organizerTorMode === "managed-local"
+                  ? organizerStatus !== null && !organizerStatus.tor_found
+                  : !remoteSocksHost.trim() || !remoteOnionHostname.trim())
+              }
+              onClick={() => void onExportHostedDescriptorRequest()}
+            >
+              {organizerBusy ? "Working…" : "Export Hosted descriptor request"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || organizerStatus?.intake_running === true}
+              onClick={() => void onImportHostedDescriptorResponse()}
+            >
+              {organizerBusy ? "Working…" : "Import signed Hosted response"}
+            </button>
+          </div>
+          {hostedDescriptorRequestPath && (
+            <Notice tone="ok">
+              Hosted descriptor request exported
+              <br />
+              <span className="hash">{hostedDescriptorRequestPath}</span>
+            </Notice>
+          )}
+          {hostedDescriptorResponseImported && (
+            <Notice tone="ok">
+              Hosted descriptor response verified for this exact Desktop request. Intake can now
+              be started.
+            </Notice>
+          )}
 
           <div className="btn-row">
             {organizerStatus?.failed ? (

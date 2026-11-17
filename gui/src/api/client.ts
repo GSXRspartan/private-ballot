@@ -68,6 +68,8 @@ import type {
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
   ManagedTorStatusV1,
+  HostedDescriptorRequestExportResultV1,
+  HostedDescriptorResponseImportResultV1,
   OrganizerIntakeStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
@@ -562,6 +564,33 @@ export const api = {
   exportVoterTransportBundle: (destinationDir: string) =>
     call<VoterBundleExportResultV1>("export_voter_transport_bundle", {
       destinationDir,
+    }),
+  exportHostedDescriptorRequest: (
+    targetPath: string,
+    torExePath?: string,
+    remote?: {
+      socksHost: string;
+      socksPort: number;
+      onionHostname: string;
+      collectorPort: number;
+    },
+  ) =>
+    call<HostedDescriptorRequestExportResultV1>("export_hosted_descriptor_request", {
+      targetPath,
+      torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+      remote: remote
+        ? {
+            tor_mode: "external-remote",
+            socks_host: remote.socksHost,
+            socks_port: remote.socksPort,
+            onion_hostname: remote.onionHostname,
+            collector_port: remote.collectorPort,
+          }
+        : null,
+    }),
+  importHostedDescriptorResponse: (responsePath: string) =>
+    call<HostedDescriptorResponseImportResultV1>("import_hosted_descriptor_response", {
+      responsePath,
     }),
   exportElectionStatusArtifact: (destinationPath: string) =>
     call<GuiElectionStatusExportResultV1>("export_election_status_artifact", {

@@ -33,6 +33,7 @@ export const DIRECTORY_CATEGORIES = [
   "archive",
   "governance",
   "anchorEvidence",
+  "descriptorExchange",
 ] as const;
 
 export type DirectoryCategory = (typeof DIRECTORY_CATEGORIES)[number];

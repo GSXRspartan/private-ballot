@@ -252,6 +252,33 @@ export async function pickHostedBindingHandoffPath(): Promise<string | null> {
   return picked;
 }
 
+/** Chooses where Desktop writes its public Hosted descriptor request. */
+export async function pickHostedDescriptorRequestPath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const rememberedDir = recallDirectory("descriptorExchange");
+  const picked = await save({
+    title: "Export Hosted descriptor request",
+    defaultPath: rememberedDir
+      ? joinDefaultPath(rememberedDir, "hosted-descriptor-request.cbor")
+      : "hosted-descriptor-request.cbor",
+    filters: [{ name: "Hosted descriptor request", extensions: ["cbor"] }],
+  });
+  if (picked !== null) rememberDirectoryFromFile("descriptorExchange", picked);
+  return picked;
+}
+
+/** Chooses the authority-issued descriptor response downloaded from Hosted Manage. */
+export async function pickHostedDescriptorResponse(): Promise<string | null> {
+  return openFile(
+    "Import signed Hosted descriptor response",
+    [
+      { name: "Hosted descriptor response", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "descriptorExchange",
+  );
+}
+
 /**
  * Opens a native single-file picker for a governance document (Slice 5A8). The
  * document is treated as immutable raw bytes; no semantic parsing happens in

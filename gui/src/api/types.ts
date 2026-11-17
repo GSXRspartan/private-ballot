@@ -1257,6 +1257,16 @@ export interface VoterBundleExportResultV1 {
   written_path: string;
 }
 
+/** Public-only Desktop request exported for authenticated Hosted issuance. */
+export interface HostedDescriptorRequestExportResultV1 {
+  written_path: string;
+}
+
+/** Result of importing a Hosted authority-issued descriptor response. */
+export interface HostedDescriptorResponseImportResultV1 {
+  already_completed: boolean;
+}
+
 /** Result of exporting one authenticated election-status artifact. */
 export interface GuiElectionStatusExportResultV1 {
   written_path: string;
