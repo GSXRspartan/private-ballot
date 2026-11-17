@@ -320,6 +320,90 @@ pub struct TransportDescriptorV1 {
 }
 
 impl TransportDescriptorV1 {
+    /// Constructs the exact public descriptor draft that an external release
+    /// authority must sign. The all-zero signature is an explicit unsigned
+    /// sentinel and is never accepted for transport use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn unsigned_for_authority(
+        election_id: Vec<u8>,
+        manifest_hash: ManifestHash,
+        generation: u64,
+        route: TransportRoutePolicyV1,
+        onion_endpoints: Vec<String>,
+        relay_endpoints: Vec<String>,
+        gateway_public_key: [u8; 32],
+        gateway_key_id: String,
+        receipt_verification_keys: Vec<[u8; 32]>,
+        padding: PaddingPolicyV1,
+        batch: BatchPolicyV1,
+        validity_end_epoch: Option<u64>,
+        root_key_id: String,
+    ) -> Result<Self, TransportError> {
+        let descriptor = Self {
+            election_id,
+            manifest_hash,
+            generation,
+            route,
+            onion_endpoints,
+            relay_endpoints,
+            gateway_public_key,
+            gateway_key_id,
+            receipt_verification_keys,
+            padding,
+            batch,
+            validity_end_epoch,
+            root_key_id,
+            signature: [0; 64],
+        };
+        descriptor.validate_fields()?;
+        Ok(descriptor)
+    }
+
+    /// Returns the dedicated descriptor-signing payload for this exact public
+    /// draft. It is deliberately distinct from Hosted bootstrap artifacts.
+    pub fn authority_signing_payload(&self) -> Result<Vec<u8>, TransportError> {
+        self.signing_message()
+    }
+
+    /// Attaches an external authority signature to an unsigned descriptor
+    /// draft. A nonzero pre-existing signature is refused so Desktop cannot
+    /// replace or re-sign an already-issued production descriptor.
+    pub fn with_authority_signature(&self, signature: [u8; 64]) -> Result<Self, TransportError> {
+        if self.signature != [0; 64] {
+            return Err(TransportError::DescriptorConflict);
+        }
+        let mut issued = self.clone();
+        issued.signature = signature;
+        issued.validate_fields()?;
+        Ok(issued)
+    }
+
+    /// True only for the explicit unsigned draft form used inside a Hosted
+    /// descriptor-issuance request; never sufficient for intake provisioning.
+    #[must_use]
+    pub fn is_unsigned_authority_draft(&self) -> bool {
+        self.signature == [0; 64]
+    }
+
+    /// Checks all public descriptor fields, including root identity, while
+    /// deliberately excluding only the authority signature bytes.
+    #[must_use]
+    pub fn same_public_parameters_as(&self, other: &Self) -> bool {
+        self.election_id == other.election_id
+            && self.manifest_hash == other.manifest_hash
+            && self.generation == other.generation
+            && self.route == other.route
+            && self.onion_endpoints == other.onion_endpoints
+            && self.relay_endpoints == other.relay_endpoints
+            && self.gateway_public_key == other.gateway_public_key
+            && self.gateway_key_id == other.gateway_key_id
+            && self.receipt_verification_keys == other.receipt_verification_keys
+            && self.padding == other.padding
+            && self.batch == other.batch
+            && self.validity_end_epoch == other.validity_end_epoch
+            && self.root_key_id == other.root_key_id
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn sign_for_test_or_ceremony(
         election_id: Vec<u8>,
