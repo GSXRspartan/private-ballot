@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { JSDOM } from "jsdom";
@@ -837,5 +838,63 @@ test("mounted recovery rejects invalid cross-field phase/ID combinations as corr
     } finally {
       harness.cleanup();
     }
+  }
+});
+
+test("Rust fixture feeds buildBundleFromDesktop correctly: cross-language contract and pipeline to Connect", async () => {
+  // This fixture is written by the Rust test
+  // `v2_anchor_preparation_json_contract_and_cross_language_fixture` in
+  // crates/gui-core/src/live_anchor_v2.rs. Run:
+  //   cargo test -p tari-cc-private-ballot-gui-core
+  // to regenerate it whenever the Rust struct changes.
+  const fixtureJson = readFileSync(
+    new URL("fixtures/rust_v2_anchor_preparation.json", import.meta.url),
+    "utf8",
+  );
+  const r = JSON.parse(fixtureJson);
+
+  // Tauri IPC delivers the Rust struct as snake_case JSON. The GUI maps each
+  // field to camelCase before passing it to buildBundleFromDesktop. We simulate
+  // that mapping here to prove the full Rust → IPC → TypeScript pipeline.
+  const publicSummaryParsed = JSON.parse(r.public_summary_json);
+  const source = {
+    network: r.arguments[1],
+    templateAddress: r.template_address,
+    // template_artifact_digest lives inside the public summary, not in the
+    // top-level Rust struct; the GUI extracts it from the deployment context.
+    templateArtifactDigestHex: publicSummaryParsed.template_artifact_digest,
+    templateModule: r.template_module,
+    templateFunction: r.template_function,
+    preparation: {
+      templateEventTopic: r.template_event_topic,
+      anchorDigestHex: r.anchor_digest_hex,
+      arguments: r.arguments,
+      publicSummaryJson: r.public_summary_json,
+    },
+  };
+
+  // The Rust fixture must parse without throwing.
+  const bundle = buildBundleFromDesktop(source);
+
+  // Key cross-language assertions: the fixture's values match the TypeScript
+  // constants used by the rest of the hosted-web test suite.
+  assert.equal(bundle.anchorArgs.electionId, ELECTION_A, "election_id round-trips");
+  assert.equal(bundle.anchorArgs.anchorDigestHex, DIGEST, "anchor_digest_hex round-trips");
+  assert.equal(bundle.anchorArgs.network, "mainnet", "network round-trips");
+  assert.equal(JSON.parse(bundle.anchorArgs.publicSummary).archive_hash, ARCHIVE, "archive_hash round-trips");
+  assert.equal(bundle.template.address, TEMPLATE, "template_address round-trips");
+  assert.equal(bundle.template.artifactDigestHex, ARTIFACT, "template_artifact_digest round-trips");
+
+  // The bundle must reach the Hosted Manage wallet-connect gate.
+  const harness = installBrowser({ bundle });
+  try {
+    await importBundle(harness.root, harness.dom, bundle);
+    assert.equal(
+      button(harness.root, "Connect Sapient").disabled,
+      false,
+      "Connect must be enabled when bundle originates from Rust fixture",
+    );
+  } finally {
+    harness.cleanup();
   }
 });
