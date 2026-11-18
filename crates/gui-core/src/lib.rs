@@ -45,6 +45,7 @@ pub mod historical_replay;
 pub mod hosted_descriptor_exchange;
 pub mod hosted_descriptor_pending;
 pub mod hosted_binding_handoff;
+pub mod hosted_voter_bundle;
 pub mod inspect;
 pub mod instrumentation;
 pub mod intake;
@@ -123,6 +124,10 @@ pub use hosted_descriptor_pending::{
 pub use hosted_binding_handoff::{
     DESKTOP_BINDING_HANDOFF_SCHEMA_V1, DesktopBindingHandoffV1, HOSTED_BINDING_REQUEST_SCHEMA_V1,
     HostedBindingRequestV1,
+};
+pub use hosted_voter_bundle::{
+    HOSTED_VOTER_BUNDLE_V2_TYPE_ID, HOSTED_VOTER_BUNDLE_V2_VERSION, HostedVoterPublicBundleV2,
+    VerifiedHostedVoterBundleV2,
 };
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,

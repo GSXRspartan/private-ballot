@@ -213,6 +213,15 @@ pub trait HostedStorage: Send + Sync {
         &self,
         record: DescriptorIssuanceRecord,
     ) -> Result<DescriptorIssuanceRecord, StorageError>;
+    /// Returns any single descriptor issuance record for the given election, or
+    /// `None` if none exists. The election may have more than one record (from
+    /// separate request IDs), but the voter bundle endpoint only needs the most
+    /// recent one; this returns the first row found, which is sufficient when
+    /// there is exactly one (the common case).
+    fn get_any_descriptor_issuance(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<DescriptorIssuanceRecord>, StorageError>;
 
     // Ballot records
     fn get_ballot_by_receipt(
@@ -454,6 +463,19 @@ impl HostedStorage for InMemoryStorage {
                 Ok(record)
             }
         }
+    }
+
+    fn get_any_descriptor_issuance(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<DescriptorIssuanceRecord>, StorageError> {
+        Ok(self
+            .descriptor_issuances
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|((eid, _), _)| eid == election_id)
+            .map(|(_, record)| record.clone()))
     }
 
     fn get_ballot_by_receipt(
@@ -1189,6 +1211,31 @@ impl HostedStorage for SqliteStorage {
         };
         tx.commit().map_err(|_| StorageError::Db)?;
         Ok(output)
+    }
+
+    fn get_any_descriptor_issuance(
+        &self,
+        election_id: &str,
+    ) -> Result<Option<DescriptorIssuanceRecord>, StorageError> {
+        let g = self.lock();
+        g.query_row(
+            "SELECT election_id, request_id, request_cbor, response_cbor FROM descriptor_issuances WHERE election_id = ?1 LIMIT 1",
+            params![election_id],
+            |row| {
+                let request_id_bytes: Vec<u8> = row.get(1)?;
+                let request_id: [u8; 32] = request_id_bytes
+                    .try_into()
+                    .map_err(|_| rusqlite::Error::InvalidColumnType(1, "request_id".to_owned(), rusqlite::types::Type::Blob))?;
+                Ok(DescriptorIssuanceRecord {
+                    election_id: row.get(0)?,
+                    request_id,
+                    request_cbor: row.get(2)?,
+                    response_cbor: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|_| StorageError::Db)
     }
 
     fn get_ballot_by_receipt(

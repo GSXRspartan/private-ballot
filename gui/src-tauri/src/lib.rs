@@ -6217,6 +6217,10 @@ pub fn run() {
             #[cfg(feature = "managed-tor")]
             managed_tor::configure_managed_tor,
             #[cfg(feature = "managed-tor")]
+            managed_tor::import_v2_voter_bundle,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::restore_v2_voter_transport,
+            #[cfg(feature = "managed-tor")]
             managed_tor::start_managed_tor,
             #[cfg(feature = "managed-tor")]
             managed_tor::stop_managed_tor,

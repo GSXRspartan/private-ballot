@@ -27,8 +27,8 @@ use tari_cc_private_ballot_crypto::{
 use tari_cc_private_ballot_gui_core::{
     BatchPolicyV1, GuiLiveAnchorV2RequestV1, GuiV2AnchorPublishPreparationRequestV1,
     HostedDescriptorRequestV1, HostedDescriptorResponseV1, HostedOrganizerBootstrapV1,
-    PaddingPolicyV1, TransportAuthorityRootSetV1,
-    TransportDescriptorV1, TransportRoutePolicyV1,
+    HostedVoterPublicBundleV2, PaddingPolicyV1, TransportAuthorityRootSetV1,
+    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
     build_v2_public_payload_from_verified_archive_v1,
     prepare_v2_anchor_publish_from_verified_evidence_v1,
 };
@@ -4636,4 +4636,387 @@ fn in_memory_organizer_credential_operations() {
     ));
     assert!(storage.get_invitation_by_id("missing").unwrap().is_none());
     assert_eq!(storage.list_invitations("e").unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Section 9: Organizer-to-voter V2 bundle integration test (17 steps, no
+// fixtures). Exercises the complete pipeline:
+//   organizer creates V2 election → opens enrollment → freezes → opens voting
+//   → issues descriptor → voter fetches bundle → bundle verifies end-to-end.
+// ---------------------------------------------------------------------------
+
+/// Builds an unsigned descriptor draft for the given election under the test
+/// authority key (key_id = "hosted-test-root").
+fn make_descriptor_draft_for(
+    election_id_bytes: &[u8],
+    manifest_hash: tari_cc_private_ballot_protocol::ManifestHash,
+) -> TransportDescriptorV1 {
+    TransportDescriptorV1::unsigned_for_authority(
+        election_id_bytes.to_vec(),
+        manifest_hash,
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion".to_owned()],
+        Vec::new(),
+        [0x07_u8; 32],
+        "integration-test-gateway".to_owned(),
+        vec![[0x08_u8; 32]],
+        PaddingPolicyV1 {
+            id: "integration-padding".to_owned(),
+            padded_bytes: 2048,
+        },
+        BatchPolicyV1 {
+            id: "integration-batch".to_owned(),
+            accepted_unique_floor: 1,
+        },
+        None,
+        "hosted-test-root".to_owned(),
+    )
+    .unwrap_or_else(|_| panic!("descriptor draft"))
+}
+
+#[tokio::test]
+async fn organizer_to_voter_v2_bundle_pipeline_end_to_end() {
+    // Step 1: Set up test state with a Pinned authority root and signing key.
+    let (routers, storage) = test_routers();
+    let public = routers.public;
+    let election_id = "v2-bundle-e2e-001";
+    let organizer = organizer_secret(0x91);
+
+    // Step 2: Organizer creates a V2 election (proposal_question is non-empty →
+    // the manifest will be ElectionManifestV2 with a proposal_question).
+    organizer_create_ok(&public, election_id, &organizer, 3).await;
+
+    // Step 3: Open enrollment.
+    assert_eq!(
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+            None,
+            Some(&organizer),
+        )
+        .await
+        .0,
+        axum::http::StatusCode::OK
+    );
+
+    // Step 4: Issue an invitation.
+    let (_, invitation) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let inv_secret = invitation["invitation_secret_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("invitation secret"));
+
+    // Step 5: Enroll a voter.
+    assert_eq!(
+        enroll(&public, election_id, inv_secret, &enroll_key(1))
+            .await
+            .0,
+        axum::http::StatusCode::CREATED
+    );
+
+    // Step 6: Freeze the registry.
+    assert_eq!(
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/freeze"),
+            None,
+            Some(&organizer),
+        )
+        .await
+        .0,
+        axum::http::StatusCode::OK
+    );
+
+    // Step 7: Open voting (election state → "open"). Returns 201 CREATED.
+    assert_eq!(
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/open-voting"),
+            None,
+            Some(&organizer),
+        )
+        .await
+        .0,
+        axum::http::StatusCode::CREATED
+    );
+
+    // Step 8: Confirm voter-bundle is not yet available (no issuance recorded).
+    let (pre_status, _) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        pre_status,
+        axum::http::StatusCode::CONFLICT,
+        "voter-bundle without prior descriptor issuance must return 409"
+    );
+
+    // Step 9: Load election record to derive manifest hash and election_id.
+    let record = storage
+        .get_election(election_id)
+        .unwrap_or_else(|_| panic!("storage"))
+        .unwrap_or_else(|| panic!("election record"));
+    let manifest = ElectionManifest::from_canonical_cbor(&record.manifest_cbor)
+        .unwrap_or_else(|_| panic!("manifest parse"));
+    let manifest_hash = manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("manifest hash"));
+
+    // Step 10: Confirm this is a V2 manifest (proposal_question must be Some).
+    assert!(
+        manifest.proposal_question().is_some(),
+        "organizer_create_ok must produce a V2 election"
+    );
+    assert_eq!(
+        manifest.proposal_question(),
+        Some("Should the self-service test proposal pass?")
+    );
+
+    // Step 11: Build and submit a descriptor issuance request.
+    let election_id_bytes = manifest.election_id().as_bytes().to_vec();
+    let draft = make_descriptor_draft_for(&election_id_bytes, manifest_hash);
+    let request = HostedDescriptorRequestV1::new([0x91_u8; 32], "test".to_owned(), draft)
+        .unwrap_or_else(|_| panic!("descriptor request"));
+    let request_cbor = request.to_canonical_cbor().unwrap_or_else(|_| panic!("request cbor"));
+    let (issuance_status, issued_cbor) = req_cbor(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance"),
+        request_cbor,
+        &organizer,
+    )
+    .await;
+    assert_eq!(
+        issuance_status,
+        axum::http::StatusCode::OK,
+        "descriptor issuance must succeed"
+    );
+
+    // Step 12: Decode and verify the issued descriptor response.
+    let response = HostedDescriptorResponseV1::from_canonical_cbor(&issued_cbor)
+        .unwrap_or_else(|_| panic!("descriptor response decode"));
+    assert_eq!(response.request_id(), request.request_id());
+    response
+        .descriptor()
+        .verify(&test_transport_root(), manifest_hash)
+        .unwrap_or_else(|_| panic!("descriptor verify under test root"));
+
+    // Step 13: GET /api/v1/elections/{id}/voter-bundle — now must succeed.
+    let (bundle_status, bundle_cbor) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        bundle_status,
+        axum::http::StatusCode::OK,
+        "voter-bundle must be available after descriptor issuance"
+    );
+    assert!(
+        !bundle_cbor.is_empty(),
+        "voter-bundle body must not be empty"
+    );
+
+    // Step 14: Decode the bundle.
+    let bundle = HostedVoterPublicBundleV2::from_canonical_cbor(&bundle_cbor)
+        .unwrap_or_else(|_| panic!("voter bundle decode"));
+
+    // Step 15: Fully verify the bundle — all 10 security checks.
+    let verified = bundle.verify().unwrap_or_else(|_| panic!("voter bundle verify"));
+
+    // Step 16: Assert the verified bundle's election artifacts match the
+    // authoritative election record.
+    assert_eq!(
+        verified.descriptor.election_id(),
+        election_id_bytes.as_slice(),
+        "verified descriptor election_id must match the election"
+    );
+    assert_eq!(
+        verified.descriptor.manifest_hash(),
+        manifest_hash,
+        "verified descriptor manifest_hash must match the election"
+    );
+    assert_eq!(
+        verified.artifacts.manifest().election_id().as_bytes(),
+        election_id_bytes.as_slice(),
+        "verified artifacts election_id must match"
+    );
+    assert_eq!(
+        verified.artifacts.manifest_hash().as_bytes(),
+        manifest_hash.as_bytes(),
+        "verified artifacts manifest_hash must match"
+    );
+
+    // Step 17: Assert the authority root is Pinned (never ProductionNotProvisioned).
+    assert!(
+        matches!(verified.root, TransportAuthorityRootV1::Pinned { .. }),
+        "authority root must be Pinned"
+    );
+
+    // Idempotency: a second GET must return the identical canonical CBOR bytes.
+    let (bundle_status2, bundle_cbor2) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(bundle_status2, axum::http::StatusCode::OK);
+    assert_eq!(bundle_cbor, bundle_cbor2, "voter-bundle must be idempotent");
+
+    // --- Negative gate: closed election must reject the voter-bundle request ---
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let (closed_status, _) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        closed_status,
+        axum::http::StatusCode::CONFLICT,
+        "voter-bundle must be unavailable for a closed election"
+    );
+}
+
+#[tokio::test]
+async fn voter_bundle_requires_descriptor_issuance_before_serving() {
+    // Separate from the main e2e test to verify the specific 409 path.
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let election_id = "v2-bundle-no-issuance-001";
+    let organizer = organizer_secret(0x92);
+
+    organizer_create_ok(&public, election_id, &organizer, 1).await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let (_, invitation) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let inv_secret = invitation["invitation_secret_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("inv secret"));
+    enroll(&public, election_id, inv_secret, &enroll_key(2)).await;
+    for action in ["freeze", "open-voting"] {
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/{action}"),
+            None,
+            Some(&organizer),
+        )
+        .await;
+    }
+    // Open, V2, but NO descriptor issuance → must 409.
+    let (status, _) = req_bytes(
+        public,
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "open election with no descriptor issuance must 409"
+    );
+}
+
+#[tokio::test]
+async fn voter_bundle_unavailable_for_non_open_elections() {
+    // A closed election (state="closed" in elections table) must reject voter-bundle with 409.
+    // Draft elections are not in the elections table at all and return 404 from LoadedElection::load,
+    // so we must advance to "open" and then close to get the state-gate 409.
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let election_id = "v2-bundle-state-gate-001";
+    let organizer = organizer_secret(0x93);
+
+    organizer_create_ok(&public, election_id, &organizer, 1).await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let (_, invitation) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    let inv_secret = invitation["invitation_secret_hex"]
+        .as_str()
+        .unwrap_or_else(|| panic!("inv secret"));
+    enroll(&public, election_id, inv_secret, &enroll_key(3)).await;
+    for action in ["freeze", "open-voting"] {
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/{action}"),
+            None,
+            Some(&organizer),
+        )
+        .await;
+    }
+    // Now close the election so state="closed" in the elections table.
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None,
+        Some(&organizer),
+    )
+    .await;
+    // Closed election must 409 (state gate fires before descriptor check).
+    let (closed_status, _) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    )
+    .await;
+    assert_eq!(
+        closed_status,
+        axum::http::StatusCode::CONFLICT,
+        "closed election must not serve voter-bundle"
+    );
 }

@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
-    DescriptorConsistencyStoreV1, GuiPrivateReleaseResultV1, TransportAuthorityRootSetV1,
-    TransportAuthorityRootV1, TransportDescriptorV1, ensure_voter_cast_locks_directory_v1,
+    DescriptorConsistencyStoreV1, GuiPrivateReleaseResultV1, HostedVoterPublicBundleV2,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    ensure_voter_cast_locks_directory_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, voter_cast_locks_directory_v1,
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
@@ -711,6 +712,445 @@ pub fn configure_managed_tor(
         tor_mode: mode.as_token(),
         message,
     })
+}
+
+/// Subdirectory under app-data where V2 voter transport bundles are persisted.
+const VOTER_TRANSPORT_V2_DIR: &str = "voter-transport-v2";
+/// Maximum V2 bundle file size accepted from disk (matches bundle construction
+/// upper bound: 3 × MAX_CANONICAL_OBJECT_BYTES + generous headroom).
+const MAX_V2_BUNDLE_FILE_BYTES: u64 = 3 * 1_048_576 + 32_768;
+
+/// Returns the app-owned election-scoped directory for V2 voter transport state:
+/// `<app-data>/voter-transport-v2/<manifest-hash-hex>/`.
+fn voter_transport_v2_dir(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+) -> Result<PathBuf, CommandError> {
+    if manifest_hash_hex.len() != MANIFEST_HASH_HEX_LEN
+        || !manifest_hash_hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(CommandError::new(
+            "GUI_VOTER_TOR_INVALID_ELECTION",
+            "INVALID_INPUT",
+            "the election manifest hash is not a canonical lowercase hex digest",
+        ));
+    }
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    Ok(root
+        .join(VOTER_TRANSPORT_V2_DIR)
+        .join(manifest_hash_hex))
+}
+
+/// Persists the V2 voter bundle CBOR to the election-scoped transport directory.
+fn persist_v2_voter_bundle(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    bundle_cbor: &[u8],
+) -> Result<(), CommandError> {
+    let dir = voter_transport_v2_dir(app, manifest_hash_hex)?;
+    std::fs::create_dir_all(&dir).map_err(|_| CommandError::app_data_unavailable())?;
+    let path = dir.join("voter-bundle.cbor");
+    std::fs::write(&path, bundle_cbor).map_err(|_| CommandError::app_data_unavailable())
+}
+
+/// Input for the production V2 voter-bundle import command.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ImportV2VoterBundleInputV1 {
+    /// Absolute path to the voter-bundle-v2.cbor file downloaded from the
+    /// Hosted election server.
+    pub bundle_path: String,
+    /// Transport mode token: `"managed-local"` (default) or `"remote-socks"`.
+    #[serde(default)]
+    pub tor_mode: Option<String>,
+    /// Remote-SOCKS mode: externally-managed proxy host. Ignored in managed-local.
+    #[serde(default)]
+    pub remote_socks_host: Option<String>,
+    /// Remote-SOCKS mode: SOCKS proxy port. Ignored in managed-local.
+    #[serde(default)]
+    pub remote_socks_port: Option<u16>,
+    /// Managed-local only: absolute path to the voter Tor data directory.
+    /// Absent means auto (app-owned, election-scoped directory).
+    #[serde(default)]
+    pub voter_tor_data_dir: Option<String>,
+    /// Managed-local only: absolute path to `tor.exe`. Absent means auto-detect.
+    #[serde(default)]
+    pub tor_exe_path: Option<String>,
+}
+
+/// Imports a production V2 voter-public bundle downloaded from a Hosted election
+/// server. This is the separate production path; it must not be confused with the
+/// test-only `configure_managed_tor` command (V1 test bundle) or the organizer
+/// bootstrap import.
+///
+/// On success the bundle is persisted to app-data for automatic restoration after
+/// restart, and the managed-Tor state is configured identically to V1 — ready for
+/// `start_managed_tor` to bring the transport up.
+#[tauri::command]
+pub fn import_v2_voter_bundle(
+    input: ImportV2VoterBundleInputV1,
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<ManagedTorStatusV1, CommandError> {
+    let bundle_path = PathBuf::from(input.bundle_path.trim());
+    if !bundle_path.is_absolute() {
+        return Err(CommandError::new(
+            "GUI_V2_BUNDLE_PATH_NOT_ABSOLUTE",
+            "INVALID_INPUT",
+            "the V2 voter bundle path must be absolute",
+        ));
+    }
+
+    // Bounded read: reject files exceeding the maximum bundle size.
+    let meta = std::fs::metadata(&bundle_path).map_err(|_| {
+        CommandError::new(
+            "GUI_V2_BUNDLE_NOT_FOUND",
+            "INVALID_INPUT",
+            "the V2 voter bundle file could not be read",
+        )
+    })?;
+    if meta.len() > MAX_V2_BUNDLE_FILE_BYTES {
+        return Err(CommandError::new(
+            "GUI_V2_BUNDLE_TOO_LARGE",
+            "INVALID_INPUT",
+            "the V2 voter bundle file exceeds the maximum allowed size",
+        ));
+    }
+    let bundle_cbor = std::fs::read(&bundle_path).map_err(|_| {
+        CommandError::new(
+            "GUI_V2_BUNDLE_NOT_FOUND",
+            "INVALID_INPUT",
+            "the V2 voter bundle file could not be read",
+        )
+    })?;
+
+    // Decode and verify the production V2 bundle. `verify()` performs the full
+    // 10-step check: artifact cross-validation, V2-only gate, election_id /
+    // manifest_hash binding, descriptor authority signature, and consistency.
+    let bundle = HostedVoterPublicBundleV2::from_canonical_cbor(&bundle_cbor).map_err(|_| {
+        CommandError::new(
+            "GUI_V2_BUNDLE_MALFORMED",
+            "INVALID_INPUT",
+            "the V2 voter bundle is not a valid production bundle",
+        )
+    })?;
+    let verified = bundle.verify().map_err(|_| {
+        CommandError::new(
+            "GUI_V2_BUNDLE_UNTRUSTED",
+            "BINDING_MISMATCH",
+            "the V2 voter bundle did not pass verification",
+        )
+    })?;
+
+    // The root embedded in the bundle must be Pinned — ProductionNotProvisioned
+    // is the unprovisioned sentinel and must never configure transport.
+    let root_anchor = match &verified.root {
+        TransportAuthorityRootV1::Pinned { key_id, public_key } => {
+            (key_id.clone(), *public_key)
+        }
+        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
+            return Err(CommandError::new(
+                "GUI_V2_BUNDLE_UNTRUSTED",
+                "BINDING_MISMATCH",
+                "the V2 voter bundle carries no pinned authority root",
+            ));
+        }
+    };
+
+    // Build a root set from the bundle's pinned root and re-verify the descriptor
+    // under it (defense-in-depth: `verify()` already did this, but the root set
+    // provides the `DescriptorConsistencyStoreV1` required for `ManagedTorState`).
+    let roots = TransportAuthorityRootSetV1::new(verified.root.clone());
+    let mut consistency = DescriptorConsistencyStoreV1::default();
+    let manifest_hash = verified.artifacts.manifest_hash();
+    roots
+        .verify_and_accept_descriptor(&verified.descriptor, manifest_hash, &mut consistency)
+        .map_err(|_| {
+            CommandError::new(
+                "GUI_V2_BUNDLE_UNTRUSTED",
+                "BINDING_MISMATCH",
+                "the V2 voter bundle descriptor does not verify under its authority root",
+            )
+        })?;
+
+    // Confirm the bundle matches the currently loaded election session.
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
+        return Err(CommandError::no_session());
+    };
+    let session_manifest_hash = session.artifacts().manifest_hash();
+    let session_election_id = session.artifacts().manifest().election_id().as_bytes();
+    if verified.descriptor.election_id() != session_election_id
+        || verified.descriptor.manifest_hash() != session_manifest_hash
+    {
+        return Err(CommandError::new(
+            "GUI_V2_BUNDLE_WRONG_ELECTION",
+            "BINDING_MISMATCH",
+            "the V2 voter bundle is bound to a different election",
+        ));
+    }
+    let manifest_hash_hex = session.summary().manifest_hash_hex.clone();
+    drop(session_guard);
+
+    // Resolve the tor mode and optional remote endpoint.
+    let mode = TorTransportModeV1::from_token_or_default(
+        input.tor_mode.as_deref().unwrap_or("").trim(),
+    );
+    let remote_endpoint = match mode {
+        TorTransportModeV1::ManagedLocal => None,
+        TorTransportModeV1::RemoteSocks => {
+            let host = input.remote_socks_host.as_deref().unwrap_or("").trim();
+            let port = input.remote_socks_port.unwrap_or(0);
+            if host.is_empty() {
+                return Err(CommandError::new(
+                    "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                    "INVALID_INPUT",
+                    "enter the remote SOCKS proxy host for the advanced remote Tor mode",
+                ));
+            }
+            Some(
+                RemoteSocksEndpointV1::from_parts(host, port).map_err(|error| {
+                    CommandError::new(
+                        "GUI_REMOTE_TOR_ENDPOINT_INVALID",
+                        "INVALID_INPUT",
+                        match error {
+                            tari_cc_private_ballot_transport_network::RemoteSocksEndpointErrorV1::InvalidPort => {
+                                "the remote SOCKS port must be a number between 1 and 65535"
+                            }
+                            _ => "the remote SOCKS endpoint must be a bare host:port",
+                        },
+                    )
+                })?,
+            )
+        }
+    };
+
+    let tor_exe = match mode {
+        TorTransportModeV1::ManagedLocal => resolve_tor_executable(
+            input
+                .tor_exe_path
+                .as_deref()
+                .filter(|s| !s.trim().is_empty()),
+        )?,
+        TorTransportModeV1::RemoteSocks => PathBuf::new(),
+    };
+
+    let tor_data_dir = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            if input
+                .voter_tor_data_dir
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                voter_tor_data_dir(&app, &manifest_hash_hex)?
+            } else {
+                let dir = PathBuf::from(input.voter_tor_data_dir.as_deref().unwrap_or(""));
+                if !dir.is_absolute() {
+                    return Err(CommandError::new(
+                        "GUI_TOR_DATA_DIR_NOT_ABSOLUTE",
+                        "INVALID_INPUT",
+                        "the voter Tor data directory must be an absolute path",
+                    ));
+                }
+                dir
+            }
+        }
+        TorTransportModeV1::RemoteSocks => PathBuf::new(),
+    };
+
+    let (socks_addr, socks_port, socks_display) = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            std::fs::create_dir_all(&tor_data_dir)
+                .map_err(|_| CommandError::app_data_unavailable())?;
+            let socks_port = reserve_loopback_socks_port()?;
+            let socks_addr = SocketAddr::from(([127, 0, 0, 1], socks_port));
+            (socks_addr, socks_port, socks_addr.to_string())
+        }
+        TorTransportModeV1::RemoteSocks => {
+            let endpoint = remote_endpoint.as_ref().expect("remote endpoint present");
+            (SocketAddr::from(([127, 0, 0, 1], 0)), 0, endpoint.display())
+        }
+    };
+
+    let onion_hostname = verified.descriptor.onion_endpoints().first().cloned();
+    let descriptor_fingerprint = verified.descriptor.fingerprint().ok().map(|fp| hex_lower(&fp));
+
+    // Persist the bundle to app-data before mutating state so that a crash
+    // after configure but before persist doesn't leave stale state.
+    persist_v2_voter_bundle(&app, &manifest_hash_hex, &bundle_cbor)?;
+
+    let managed_state = ManagedTorState {
+        mode,
+        controller: None,
+        descriptor: verified.descriptor,
+        roots,
+        root_anchor,
+        consistency,
+        socks_addr,
+        tor_exe_path: tor_exe,
+        tor_data_dir,
+        socks_port,
+        remote_endpoint,
+        remote_last_ready: false,
+    };
+    let mut managed = state
+        .managed_tor
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *managed = Some(managed_state);
+
+    let message = match mode {
+        TorTransportModeV1::ManagedLocal => {
+            "V2 Hosted voter bundle configured. Start Tor to submit privately."
+        }
+        TorTransportModeV1::RemoteSocks => {
+            "V2 Hosted voter bundle configured (remote SOCKS). Test the connection, then submit privately."
+        }
+    };
+    Ok(ManagedTorStatusV1 {
+        configured: true,
+        tor_running: false,
+        socks_ready: false,
+        socks_addr: Some(socks_display),
+        onion_hostname,
+        descriptor_fingerprint,
+        tor_mode: mode.as_token(),
+        message,
+    })
+}
+
+/// Restores a previously-imported V2 voter transport configuration from
+/// app-data, if one exists for the currently active election. Called by the
+/// frontend after loading a session so that voters do not have to re-import
+/// the bundle after restarting the app.
+///
+/// Returns `Ok(Some(status))` if a bundle was found and restored, or
+/// `Ok(None)` if no persisted bundle exists for the current election.
+#[tauri::command]
+pub fn restore_v2_voter_transport(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<ManagedTorStatusV1>, CommandError> {
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
+        return Err(CommandError::no_session());
+    };
+    let manifest_hash_hex = session.summary().manifest_hash_hex.clone();
+    drop(session_guard);
+
+    let dir = match voter_transport_v2_dir(&app, &manifest_hash_hex) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let bundle_path = dir.join("voter-bundle.cbor");
+    if !bundle_path.exists() {
+        return Ok(None);
+    }
+
+    let meta = std::fs::metadata(&bundle_path).map_err(|_| CommandError::app_data_unavailable())?;
+    if meta.len() > MAX_V2_BUNDLE_FILE_BYTES {
+        return Ok(None);
+    }
+    let bundle_cbor =
+        std::fs::read(&bundle_path).map_err(|_| CommandError::app_data_unavailable())?;
+
+    let bundle = match HostedVoterPublicBundleV2::from_canonical_cbor(&bundle_cbor) {
+        Ok(b) => b,
+        Err(_) => return Ok(None),
+    };
+    let verified = match bundle.verify() {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+
+    let root_anchor = match &verified.root {
+        TransportAuthorityRootV1::Pinned { key_id, public_key } => {
+            (key_id.clone(), *public_key)
+        }
+        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => return Ok(None),
+    };
+
+    let roots = TransportAuthorityRootSetV1::new(verified.root.clone());
+    let mut consistency = DescriptorConsistencyStoreV1::default();
+    let manifest_hash = verified.artifacts.manifest_hash();
+    if roots
+        .verify_and_accept_descriptor(&verified.descriptor, manifest_hash, &mut consistency)
+        .is_err()
+    {
+        return Ok(None);
+    }
+
+    // Re-confirm the bundle matches the current session.
+    let session_guard = state
+        .session
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    let Some(session) = session_guard.as_ref().map(|active| &active.session) else {
+        return Ok(None);
+    };
+    let session_manifest_hash = session.artifacts().manifest_hash();
+    let session_election_id = session.artifacts().manifest().election_id().as_bytes();
+    if verified.descriptor.election_id() != session_election_id
+        || verified.descriptor.manifest_hash() != session_manifest_hash
+    {
+        return Ok(None);
+    }
+    let manifest_hash_hex_check = session.summary().manifest_hash_hex.clone();
+    drop(session_guard);
+
+    // Guard: the dir we loaded from must match the current session.
+    if manifest_hash_hex_check != manifest_hash_hex {
+        return Ok(None);
+    }
+
+    let onion_hostname = verified.descriptor.onion_endpoints().first().cloned();
+    let descriptor_fingerprint = verified.descriptor.fingerprint().ok().map(|fp| hex_lower(&fp));
+
+    // Restore with managed-local defaults; no SOCKS port reserved until the
+    // user explicitly calls `start_managed_tor`.
+    let managed_state = ManagedTorState {
+        mode: TorTransportModeV1::ManagedLocal,
+        controller: None,
+        descriptor: verified.descriptor,
+        roots,
+        root_anchor,
+        consistency,
+        socks_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        tor_exe_path: PathBuf::new(),
+        tor_data_dir: voter_tor_data_dir(&app, &manifest_hash_hex)
+            .unwrap_or_default(),
+        socks_port: 0,
+        remote_endpoint: None,
+        remote_last_ready: false,
+    };
+    let mut managed = state
+        .managed_tor
+        .lock()
+        .map_err(|_| CommandError::state_poisoned())?;
+    *managed = Some(managed_state);
+
+    Ok(Some(ManagedTorStatusV1 {
+        configured: true,
+        tor_running: false,
+        socks_ready: false,
+        socks_addr: None,
+        onion_hostname,
+        descriptor_fingerprint,
+        tor_mode: TorTransportModeV1::ManagedLocal.as_token(),
+        message: "V2 voter transport restored from saved bundle. Start Tor to submit privately.",
+    }))
 }
 
 /// Read-only voter Tor availability probe. Reports whether a Tor executable can

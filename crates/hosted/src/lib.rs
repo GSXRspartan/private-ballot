@@ -71,7 +71,7 @@ use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
     DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GuiElectionArtifactsV1,
     HostedBindingRequestV1, HostedDescriptorRequestV1, HostedDescriptorResponseV1,
-    HostedOrganizerBootstrapV1, TransportAuthorityRootV1,
+    HostedOrganizerBootstrapV1, HostedVoterPublicBundleV2, TransportAuthorityRootV1,
     TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
 };
@@ -4094,6 +4094,141 @@ async fn organizer_issue_transport_descriptor(
         .into_response()
 }
 
+async fn public_voter_bundle(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+        Ok(loaded) => loaded,
+        Err(response) => return response,
+    };
+    if loaded.record.state != "open" {
+        return error_response(
+            StatusCode::CONFLICT,
+            "voter_bundle_not_available",
+            "voter bundle is available only for an open election",
+        );
+    }
+    if !matches!(loaded.manifest, ElectionManifest::V2(_)) {
+        return error_response(
+            StatusCode::CONFLICT,
+            "voter_bundle_not_available",
+            "voter bundle is available only for a V2 election",
+        );
+    }
+    let manifest_hash = match loaded.manifest.canonical_hash(&Blake3HashProviderV1) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "stored election is invalid",
+            )
+        }
+    };
+    let issuance = match state.storage.get_any_descriptor_issuance(&id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "voter_bundle_not_available",
+                "no transport descriptor has been issued for this election",
+            )
+        }
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "storage unavailable",
+            )
+        }
+    };
+    let (authority_key_id, authority_public_key) =
+        match &state.config.transport_authority_root {
+            TransportAuthorityRootV1::Pinned { key_id, public_key } => {
+                (key_id.clone(), *public_key)
+            }
+            TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
+                return error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "authority_unavailable",
+                    "transport authority is not provisioned",
+                )
+            }
+        };
+    // Decode the persisted descriptor response to extract the authority-signed
+    // TransportDescriptorV1 and re-serialize it as the bundle's descriptor_cbor.
+    let descriptor_response = match HostedDescriptorResponseV1::from_canonical_cbor(&issuance.response_cbor) {
+        Ok(response) => response,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "persisted descriptor response is invalid",
+            )
+        }
+    };
+    let descriptor_cbor = match descriptor_response.descriptor().to_canonical_cbor() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "descriptor serialization failed",
+            )
+        }
+    };
+    let election_id = loaded.manifest.election_id().as_bytes().to_vec();
+    let bundle = match HostedVoterPublicBundleV2::new(
+        authority_key_id,
+        authority_public_key,
+        election_id,
+        *manifest_hash.as_bytes(),
+        loaded.record.manifest_cbor.clone(),
+        loaded.record.registry_cbor.clone(),
+        loaded.record.candidate_cbor.clone(),
+        descriptor_cbor,
+    ) {
+        Ok(bundle) => bundle,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "voter bundle construction failed",
+            )
+        }
+    };
+    if bundle.verify().is_err() {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "service_unavailable",
+            "voter bundle self-verification failed",
+        );
+    }
+    let cbor = match bundle.to_canonical_cbor() {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "voter bundle serialization failed",
+            )
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "application/cbor"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"voter-bundle-v2.cbor\"",
+            ),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        cbor,
+    )
+        .into_response()
+}
+
 async fn organizer_finalize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -4207,6 +4342,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/results", get(get_results))
         .route("/api/v1/elections/{id}/archive", get(get_archive))
         .route("/api/v1/elections/{id}/enrollment-info", get(public_enrollment_info))
+        .route("/api/v1/elections/{id}/voter-bundle", get(public_voter_bundle))
         .route("/api/v1/elections/{id}/enroll", post(enroll_voter))
         .route("/api/v1/ootle/status", get(ootle_status))
         // Self-service organizer plane: election-scoped capability
