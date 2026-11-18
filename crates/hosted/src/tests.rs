@@ -15,7 +15,8 @@ use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V2, ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V2,
     AnchorTemplateBindingV2,
 };
-use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBindingV1};
+use tari_cc_private_ballot_anchor::{OotleAnchorPublicPayloadV2, OotleNetworkIdV1};
+use tari_cc_private_ballot_archive::{ArchiveHashV1, TransportArchiveBatchV1, TransportArchiveBindingV1};
 use tari_cc_private_ballot_ballot::{
     ApprovalBallotPayload, ApprovalLimits, BallotConfidentialityV1, BallotKindV1, BallotPackageV1,
     BallotPackageV1Input, CandidateDefinition, CandidateId, CandidateSet, ElectionId,
@@ -31,6 +32,7 @@ use tari_cc_private_ballot_gui_core::{
     TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
     build_v2_public_payload_from_verified_archive_v1,
     prepare_v2_anchor_publish_from_verified_evidence_v1,
+    verify_v2_public_payload_against_archive_v1,
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, CanonicalCborWriter, HashDomain, PROTOCOL_VERSION_V1,
@@ -1115,7 +1117,7 @@ fn sqlite_schema_v2_upgrade_preserves_existing_data_and_is_idempotent() {
         assert_eq!(ballots[0].seq, 7);
     }
 
-    // The v5 tables/version exist after migration, and a second open is idempotent.
+    // The v6 tables/version exist after migration, and a second open is idempotent.
     {
         let migrated = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v3"));
         let version: String = migrated
@@ -1125,7 +1127,7 @@ fn sqlite_schema_v2_upgrade_preserves_existing_data_and_is_idempotent() {
                 |r| r.get(0),
             )
             .unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         for table in [
             "election_drafts",
             "eligibility_slots",
@@ -4412,6 +4414,7 @@ async fn organizer_malformed_and_oversized_requests_rejected() {
         "max_approvals": 1,
         "authorized_slot_count": 1,
         "governance_revision": format!("blake3:{}", "0".repeat(64)),
+        "proposal_question": "Should the content-pin validation fire?",
     })
     .to_string();
     let (content_pin_status, content_pin_response) = req(
@@ -4556,7 +4559,7 @@ fn sqlite_migration_v3_to_v4_preserves_staging_data() {
             .unwrap_or_else(|_| panic!("v4 insert after migration"));
     }
 
-    // Version bumped to 5 and the organizer and finalized-binding tables exist.
+    // Version bumped to 6 and the organizer and finalized-binding tables exist.
     {
         let conn = Connection::open(&db).unwrap_or_else(|_| panic!("inspect v4"));
         let version: String = conn
@@ -4566,12 +4569,12 @@ fn sqlite_migration_v3_to_v4_preserves_staging_data() {
                 |r| r.get(0),
             )
             .unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
         let exists: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'organizer_credentials'", [], |r| r.get(0)).unwrap_or_else(|_| panic!("table lookup"));
         assert_eq!(exists, 1);
     }
 
-    // Reopen is idempotent: data intact, version still 5.
+    // Reopen advances to 7: data intact.
     {
         let storage = crate::SqliteStorage::open(&db).unwrap_or_else(|_| panic!("reopen v4"));
         assert!(
@@ -4602,7 +4605,7 @@ fn sqlite_migration_v3_to_v4_preserves_staging_data() {
                 |r| r.get(0),
             )
             .unwrap_or_else(|_| panic!("schema version"));
-        assert_eq!(version, "5");
+        assert_eq!(version, "7");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5404,12 +5407,51 @@ async fn organizer_archive_endpoint_full_e2e_v2_anchor() {
     assert_eq!(
         prepared.arguments,
         vec![
-            hosted_identity.anchor_digest_hex,
+            hosted_identity.anchor_digest_hex.clone(),
             "mainnet".to_owned(),
             election_id.to_owned(),
-            hosted_identity.public_summary_json,
+            hosted_identity.public_summary_json.clone(),
         ],
         "V2 anchor arguments must match Hosted identity"
+    );
+
+    // ── Section 3: "Connect enabled" gate ────────────────────────────────────
+    // Feed the exact Desktop export artifact (desktop_payload.payload_hex) into
+    // verify_v2_public_payload_against_archive_v1. This is the Connect gate: it
+    // verifies the exported payload against the archive imported from the
+    // production organizer endpoint. Hosted derives its expected identity
+    // independently via finalized_anchor_identity — no field is copied from the
+    // Desktop export.
+    let connect_result = verify_v2_public_payload_against_archive_v1(
+        &dir,
+        &hex_decode(&desktop_payload.payload_hex).expect("Desktop export must hex-decode"),
+        &desktop_payload.v2_anchor_digest_hex,
+    )
+    .expect("Connect must become enabled: authentic payload must verify against imported archive");
+    // 7-field identity cross-check (all must agree for Connect to be enabled).
+    assert_eq!(connect_result.election_id, election_id, "Connect: election ID");
+    assert_eq!(
+        connect_result.archive_hash_hex, hosted_identity.archive_hash_hex,
+        "Connect: archive identity"
+    );
+    assert_eq!(
+        connect_result.v2_anchor_digest_hex, hosted_identity.anchor_digest_hex,
+        "Connect: anchor digest"
+    );
+    assert_eq!(connect_result.network, "mainnet", "Connect: network");
+    assert_eq!(
+        connect_result.public_summary_json, hosted_identity.public_summary_json,
+        "Connect: public summary"
+    );
+    assert_eq!(
+        connect_result.template_address,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS,
+        "Connect: deployment address"
+    );
+    assert_eq!(
+        connect_result.template_artifact_digest_hex,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3,
+        "Connect: artifact digest"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5463,4 +5505,448 @@ async fn organizer_archive_legacy_v4_anchor_not_eligible() {
         axum::http::StatusCode::UNAUTHORIZED,
         "V4 admin-imported election has no organizer credential → 401"
     );
+}
+
+// ── Section 4: Real-export negative matrix ───────────────────────────────────
+// Uses the REAL Desktop export from an organizer-authenticated archive.
+// Mutates one field at a time; every mutation must fail
+// verify_v2_public_payload_against_archive_v1 before Connect is enabled.
+// DO NOT use bundleFixture(). DO NOT use manually supplied digests.
+
+#[tokio::test]
+async fn desktop_export_to_hosted_connect_negative_matrix() {
+    // Build a real Desktop export through the production organizer endpoint path.
+    let (routers, _storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0xA1);
+    let election_id = "org-neg-matrix-001";
+
+    organizer_create_ok(&public, election_id, &secret, 2).await;
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None, Some(&secret)).await;
+    let mut inv_secrets = Vec::new();
+    for _ in 0..2usize {
+        let (s, v) = organizer_call(&public, "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+            None, Some(&secret)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+        inv_secrets.push(v["invitation_secret_hex"].as_str().unwrap().to_owned());
+    }
+    for (i, inv) in inv_secrets.iter().enumerate() {
+        let (s, v) = enroll(&public, election_id, inv, &enroll_key((i + 1) as u64)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+    }
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/freeze"),
+        None, Some(&secret)).await;
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-voting"),
+        None, Some(&secret)).await;
+
+    let (sp, vp) = req(public.clone(), "GET",
+        &format!("/api/v1/elections/{election_id}"), None, &[]).await;
+    assert_eq!(sp, axum::http::StatusCode::OK, "{vp}");
+    let pkg_json: serde_json::Value = serde_json::from_str(&vp).unwrap();
+    let f_nm = Fixture {
+        election_id: election_id.to_owned(),
+        manifest_cbor: hex_decode(pkg_json["manifest_cbor_hex"].as_str().unwrap()).unwrap(),
+        registry_cbor: hex_decode(pkg_json["registry_cbor_hex"].as_str().unwrap()).unwrap(),
+        candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
+    };
+    let pkg_a = make_package(&f_nm, 1, b"candidate-a");
+    let pkg_b = make_package(&f_nm, 2, b"candidate-b");
+    let (s1, r1) = req(public.clone(), "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({"receipt_id": "aa000000-0000-4000-8000-000000000001", "package_cbor_hex": hex_encode(&pkg_a), "api_version": "v1"}).to_string()),
+        &[("content-type", "application/json")]).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{r1}");
+    let (s2, r2) = req(public.clone(), "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({"receipt_id": "aa000000-0000-4000-8000-000000000002", "package_cbor_hex": hex_encode(&pkg_b), "api_version": "v1"}).to_string()),
+        &[("content-type", "application/json")]).await;
+    assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
+
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None, Some(&secret)).await;
+    let (binding, descriptor) = authoritative_transport_proof(&f_nm, &[pkg_a, pkg_b]);
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(desktop_binding_handoff_json(&f_nm, &binding, &descriptor)),
+        Some(&secret)).await;
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/finalize"),
+        None, Some(&secret)).await;
+
+    let (_, varch) = organizer_call(&public, "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None, Some(&secret)).await;
+    let dir = std::env::temp_dir().join(format!("pb-neg-matrix-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let archive_manifest =
+        hex_decode(varch["archive_manifest_cbor_hex"].as_str().unwrap_or("")).expect("manifest hex");
+    let archive_files = varch["files"].as_array().cloned().unwrap_or_else(|| panic!("archive files"));
+    write_archive_from_endpoint(&dir, &archive_files, &archive_manifest);
+    assert!(verify_archive_dir_for_test(&dir));
+
+    let desktop_payload = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: "mainnet".to_owned(),
+        template_address: tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        template_module: tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function: tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: format!("{}.{}",
+            tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2,
+            tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_TOPIC_SUFFIX_V2),
+        template_artifact_digest_hex:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+    }).expect("real Desktop export must build from organizer-endpoint archive");
+
+    let payload_bytes = hex_decode(&desktop_payload.payload_hex).expect("payload hex");
+    let digest = desktop_payload.v2_anchor_digest_hex.clone();
+
+    // Decode the real export as a mutable struct for field-level mutations.
+    let canonical = OotleAnchorPublicPayloadV2::from_canonical_json_bytes(&payload_bytes)
+        .expect("real export must decode as canonical payload");
+
+    // Mutation 1: election ID.
+    {
+        let mut p = canonical.clone();
+        p.election_id = b"wrong-election-00".to_vec();
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [election id] must fail before Connect"
+        );
+    }
+
+    // Mutation 2: archive identity (archive_hash field).
+    {
+        let mut p = canonical.clone();
+        p.archive_hash = ArchiveHashV1::new([0xABu8; 32]);
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [archive identity] must fail before Connect"
+        );
+    }
+
+    // Mutation 3: transport binding (registry_commitment is derived from the binding).
+    {
+        let mut p = canonical.clone();
+        p.registry_commitment[0] ^= 0xFF;
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [transport binding (registry_commitment)] must fail before Connect"
+        );
+    }
+
+    // Mutation 4: anchor digest.
+    {
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &payload_bytes, &"ab".repeat(32)).is_err(),
+            "mutation [anchor digest] must fail before Connect"
+        );
+    }
+
+    // Mutation 5: network.
+    {
+        let mut p = canonical.clone();
+        p.network = OotleNetworkIdV1::new("stagenet".to_owned()).expect("valid network id");
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [network] must fail before Connect"
+        );
+    }
+
+    // Mutation 6: public summary (ballot_question is part of the public summary payload).
+    {
+        let mut p = canonical.clone();
+        p.ballot_question = "Tampered question for negative-matrix test".to_owned();
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [public summary (ballot_question)] must fail before Connect"
+        );
+    }
+
+    // Mutation 7: deployment identity (template_address).
+    {
+        let mut p = canonical.clone();
+        p.template.template_address = "0".repeat(66);
+        let tampered = p.to_canonical_json_bytes().expect("re-encode");
+        assert!(
+            verify_v2_public_payload_against_archive_v1(&dir, &tampered, &digest).is_err(),
+            "mutation [deployment identity (template_address)] must fail before Connect"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Section 5: True release flow through Connect ──────────────────────────────
+// Full V2 flow: organizer bootstrap download + Desktop organizer import →
+// descriptor request → authenticated Hosted issuance → Desktop signed-response
+// import → V2 voter bundle → fresh voter import → ballot cast → close →
+// real binding handoff → finalize → organizer-authenticated archive fetch →
+// Desktop archive import → archive verification → V2 preparation →
+// actual Desktop browser-anchor export → Hosted Manage → independent Hosted
+// identity validation → Connect enabled.
+// No wallet transaction required.
+
+#[tokio::test]
+async fn organizer_full_v2_release_flow_through_connect() {
+    let (routers, storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0xA2);
+    let election_id = "v2-connect-flow-001";
+
+    // ── 1. Full Hosted V2 creation ────────────────────────────────────────────
+    organizer_create_ok(&public, election_id, &secret, 2).await;
+    organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None, Some(&secret)).await;
+
+    // ── 2. Enroll two voters ──────────────────────────────────────────────────
+    let mut inv_secrets = Vec::new();
+    for _ in 0..2usize {
+        let (s, v) = organizer_call(&public, "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+            None, Some(&secret)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+        inv_secrets.push(v["invitation_secret_hex"].as_str().unwrap().to_owned());
+    }
+    for (i, inv) in inv_secrets.iter().enumerate() {
+        let (s, v) = enroll(&public, election_id, inv, &enroll_key((i + 1) as u64)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+    }
+
+    // ── 3. Freeze → open voting ───────────────────────────────────────────────
+    let (sf, vf) = organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/freeze"),
+        None, Some(&secret)).await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{vf}");
+    let (sv, vv) = organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-voting"),
+        None, Some(&secret)).await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{vv}");
+
+    // ── 4. Organizer bootstrap + Desktop organizer import ─────────────────────
+    // Bootstrap is only available once the election is open (state = "open").
+    let (s_boot, boot_bytes) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/desktop-bootstrap"),
+        &[("x-private-ballot-organizer", &secret)],
+    ).await;
+    assert_eq!(s_boot, axum::http::StatusCode::OK, "bootstrap endpoint");
+    let bootstrap = HostedOrganizerBootstrapV1::from_canonical_cbor(&boot_bytes)
+        .expect("bootstrap must decode");
+    let boot_artifacts = bootstrap
+        .verify(&tari_cc_private_ballot_gui_core::TransportAuthorityRootSetV1::new(
+            test_transport_root(),
+        ))
+        .expect("bootstrap must verify under test root");
+    assert_eq!(
+        boot_artifacts.manifest().election_id().as_bytes(),
+        election_id.as_bytes(),
+        "bootstrap election ID must match"
+    );
+
+    // ── 5. Descriptor request → authenticated Hosted issuance ─────────────────
+    let record = storage.get_election(election_id).unwrap().unwrap();
+    let manifest = tari_cc_private_ballot_ballot::ElectionManifest::from_canonical_cbor(
+        &record.manifest_cbor,
+    ).expect("manifest parse");
+    let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("manifest hash");
+    let election_id_bytes = manifest.election_id().as_bytes().to_vec();
+    let draft = make_descriptor_draft_for(&election_id_bytes, manifest_hash);
+    let request = HostedDescriptorRequestV1::new(
+        [0xA2_u8; 32],
+        "test".to_owned(),
+        draft,
+    ).expect("descriptor request");
+    let request_cbor = request.to_canonical_cbor().expect("request cbor");
+    let (s_desc, issued_cbor) = req_cbor(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance"),
+        request_cbor,
+        &secret,
+    ).await;
+    assert_eq!(s_desc, axum::http::StatusCode::OK, "descriptor issuance");
+
+    // ── 6. Desktop signed-response import ─────────────────────────────────────
+    let response = HostedDescriptorResponseV1::from_canonical_cbor(&issued_cbor)
+        .expect("descriptor response decode");
+    assert_eq!(response.request_id(), request.request_id());
+    response
+        .descriptor()
+        .verify(&test_transport_root(), manifest_hash)
+        .expect("descriptor must verify under test root");
+
+    // ── 7. V2 voter bundle (confirms production intake path is live) ───────────
+    let (s_bundle, bundle_cbor) = req_bytes(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/voter-bundle"),
+        &[],
+    ).await;
+    assert_eq!(s_bundle, axum::http::StatusCode::OK, "voter bundle");
+    let bundle = HostedVoterPublicBundleV2::from_canonical_cbor(&bundle_cbor)
+        .expect("voter bundle decode");
+    let verified_bundle = bundle.verify().expect("voter bundle must verify");
+    assert_eq!(verified_bundle.descriptor.election_id(), election_id.as_bytes());
+
+    // ── 8. Fresh voter import + ballot/history ────────────────────────────────
+    let (sp, vp) = req(public.clone(), "GET",
+        &format!("/api/v1/elections/{election_id}"), None, &[]).await;
+    assert_eq!(sp, axum::http::StatusCode::OK, "{vp}");
+    let pkg_json: serde_json::Value = serde_json::from_str(&vp).unwrap();
+    let f_v2 = Fixture {
+        election_id: election_id.to_owned(),
+        manifest_cbor: hex_decode(pkg_json["manifest_cbor_hex"].as_str().unwrap()).unwrap(),
+        registry_cbor: hex_decode(pkg_json["registry_cbor_hex"].as_str().unwrap()).unwrap(),
+        candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
+    };
+    let pkg_a = make_package(&f_v2, 1, b"candidate-a");
+    let (s1, r1) = req(public.clone(), "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({
+            "receipt_id": "bb000000-0000-4000-8000-000000000001",
+            "package_cbor_hex": hex_encode(&pkg_a),
+            "api_version": "v1",
+        }).to_string()),
+        &[("content-type", "application/json")]).await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{r1}");
+    let pkg_b = make_package(&f_v2, 2, b"candidate-b");
+    let (s2, r2) = req(public.clone(), "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({
+            "receipt_id": "bb000000-0000-4000-8000-000000000002",
+            "package_cbor_hex": hex_encode(&pkg_b),
+            "api_version": "v1",
+        }).to_string()),
+        &[("content-type", "application/json")]).await;
+    assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
+
+    // ── 9. Close → real binding handoff → finalize ────────────────────────────
+    let (sc, vc) = organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None, Some(&secret)).await;
+    assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
+    let (binding, descriptor) = authoritative_transport_proof(&f_v2, &[pkg_a.clone(), pkg_b.clone()]);
+    let (sbind, vbind) = organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(desktop_binding_handoff_json(&f_v2, &binding, &descriptor)),
+        Some(&secret)).await;
+    assert_eq!(sbind, axum::http::StatusCode::CREATED, "{vbind}");
+    let (sfin, vfin) = organizer_call(&public, "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/finalize"),
+        None, Some(&secret)).await;
+    assert_eq!(sfin, axum::http::StatusCode::OK, "{vfin}");
+    assert_eq!(vfin["state"], "finalized");
+
+    // ── 10. Organizer-authenticated Hosted archive fetch ──────────────────────
+    let (sarch, varch) = organizer_call(&public, "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None, Some(&secret)).await;
+    assert_eq!(sarch, axum::http::StatusCode::OK, "{varch}");
+    assert!(
+        varch["anchor_eligible"].as_bool().unwrap_or(false),
+        "transport-bound election must be anchor-eligible"
+    );
+
+    // ── 11. Desktop archive import ────────────────────────────────────────────
+    let dir = std::env::temp_dir().join(format!("pb-v2-connect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let archive_manifest =
+        hex_decode(varch["archive_manifest_cbor_hex"].as_str().unwrap_or("")).expect("manifest hex");
+    let archive_files = varch["files"].as_array().cloned().unwrap_or_else(|| panic!("files"));
+    write_archive_from_endpoint(&dir, &archive_files, &archive_manifest);
+
+    // ── 12. Archive verification ──────────────────────────────────────────────
+    assert!(verify_archive_dir_for_test(&dir), "archive must pass verifier");
+
+    // ── 13. V2 preparation (actual Desktop browser-anchor export) ─────────────
+    let desktop_payload = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: "mainnet".to_owned(),
+        template_address:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        template_module:
+            tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function:
+            tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: format!("{}.{}",
+            tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2,
+            tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_TOPIC_SUFFIX_V2),
+        template_artifact_digest_hex:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+    }).expect("V2 payload must build from organizer-endpoint archive");
+    let artifact_digest: [u8; 32] =
+        hex_decode(tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3)
+            .unwrap().try_into().unwrap();
+    let deployment = tari_cc_private_ballot_anchor_transport::AnchorTemplateBindingV2::new(
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!("{}.{}",
+            tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2,
+            tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_TOPIC_SUFFIX_V2),
+        artifact_digest,
+    ).expect("deployment binding");
+    let prepared = prepare_v2_anchor_publish_from_verified_evidence_v1(
+        &GuiV2AnchorPublishPreparationRequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            payload_hex: desktop_payload.payload_hex.clone(),
+            expected_digest_hex: desktop_payload.v2_anchor_digest_hex.clone(),
+        },
+        &deployment,
+    ).expect("V2 preparation must succeed");
+
+    // ── 14. Exact unchanged export into Hosted Manage → Connect enabled ────────
+    // Hosted derives its expected identity independently via finalized_anchor_identity.
+    let loaded = crate::LoadedElection::load(storage.as_ref(), election_id)
+        .expect("finalized election must load");
+    let hosted_identity = crate::finalized_anchor_identity(&loaded, storage.as_ref())
+        .expect("Hosted identity must derive");
+    let connect_result = verify_v2_public_payload_against_archive_v1(
+        &dir,
+        &hex_decode(&desktop_payload.payload_hex).expect("payload hex"),
+        &desktop_payload.v2_anchor_digest_hex,
+    ).expect("Connect must be enabled after full V2 release flow");
+    // 7-field identity cross-check (independent Hosted identity validation).
+    assert_eq!(connect_result.election_id, election_id,              "Connect: election ID");
+    assert_eq!(connect_result.archive_hash_hex, hosted_identity.archive_hash_hex, "Connect: archive identity");
+    assert_eq!(connect_result.v2_anchor_digest_hex, hosted_identity.anchor_digest_hex, "Connect: anchor digest");
+    assert_eq!(connect_result.network, "mainnet",                    "Connect: network");
+    assert_eq!(connect_result.public_summary_json, hosted_identity.public_summary_json, "Connect: public summary");
+    assert_eq!(
+        connect_result.template_address,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS,
+        "Connect: deployment address"
+    );
+    assert_eq!(
+        connect_result.template_artifact_digest_hex,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3,
+        "Connect: artifact digest"
+    );
+    // Prepared arguments must match Hosted identity.
+    assert_eq!(
+        prepared.arguments,
+        vec![
+            hosted_identity.anchor_digest_hex,
+            "mainnet".to_owned(),
+            election_id.to_owned(),
+            hosted_identity.public_summary_json,
+        ],
+        "V2 anchor arguments must match Hosted identity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

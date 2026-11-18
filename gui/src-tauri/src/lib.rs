@@ -2486,6 +2486,19 @@ async fn verify_archive(
     .await
 }
 
+/// Returns true only when `path` matches the canonical submission-file pattern:
+/// `submissions/NNNNNNNN.cbor` where the filename is exactly eight lowercase
+/// hex digits. Called from `import_hosted_archive` whitelist validation.
+fn is_canonical_submission_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("submissions/") else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".cbor") else {
+        return false;
+    };
+    stem.len() == 8 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Input for downloading and importing a canonical finalized archive from
 /// a Hosted instance. The organizer credential authenticates the download;
 /// the archive is independently verified before being written to disk.
@@ -2627,6 +2640,82 @@ async fn import_hosted_archive(
         )
     })?;
 
+    // 5a. Path-safety and canonical-member whitelist validation.
+    //     Every server-provided path is validated through ArchivePathV1 (rejects
+    //     absolute paths, traversal segments, backslash, Windows drive prefixes,
+    //     reserved device names, and non-printable ASCII) before any file is
+    //     written to disk. Only the documented canonical archive member paths are
+    //     accepted; any unexpected path aborts the entire import.
+    {
+        use tari_cc_private_ballot_archive::{
+            ArchivePathV1, CANDIDATE_SET_ARCHIVE_PATH, ELECTION_MANIFEST_ARCHIVE_PATH,
+            GOVERNANCE_DOCUMENT_ARCHIVE_PATH, MAX_GOVERNANCE_DOCUMENT_BYTES,
+            TRANSPORT_ARCHIVE_BINDING_PATH_V1, VOTER_REGISTRY_ARCHIVE_PATH,
+        };
+        // Per-member decoded size: governance/source.bin is the largest legal
+        // member; all other protocol objects are well below this limit.
+        const MAX_MEMBER_BYTES: usize = MAX_GOVERNANCE_DOCUMENT_BYTES;
+        // Conservative member-count cap (matches protocol MAX_ARCHIVE_FILES).
+        const MAX_IMPORT_FILES: usize = 65_536;
+
+        if body.files.len() > MAX_IMPORT_FILES {
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_TOO_MANY_MEMBERS",
+                "INVALID_INPUT",
+                "the hosted archive contains too many members",
+            ));
+        }
+
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(body.files.len());
+
+        for entry in &body.files {
+            // Reject any path that fails the portable archive-path validator.
+            ArchivePathV1::new(entry.path.clone()).map_err(|_| {
+                CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_UNSAFE_PATH",
+                    "INVALID_INPUT",
+                    "a hosted archive member path failed the portable path safety check",
+                )
+            })?;
+
+            // Reject any path not in the documented canonical member set.
+            let is_canonical = entry.path == ELECTION_MANIFEST_ARCHIVE_PATH
+                || entry.path == CANDIDATE_SET_ARCHIVE_PATH
+                || entry.path == VOTER_REGISTRY_ARCHIVE_PATH
+                || entry.path == TRANSPORT_ARCHIVE_BINDING_PATH_V1
+                || entry.path == GOVERNANCE_DOCUMENT_ARCHIVE_PATH
+                || is_canonical_submission_path(&entry.path);
+            if !is_canonical {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_UNEXPECTED_MEMBER",
+                    "INVALID_INPUT",
+                    "a hosted archive member path is not in the canonical member set",
+                ));
+            }
+
+            // Reject duplicate member paths (case-insensitive, matching the
+            // portable archive-path collision rules).
+            if !seen.insert(entry.path.to_ascii_lowercase()) {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_DUPLICATE_MEMBER",
+                    "INVALID_INPUT",
+                    "the hosted archive contains duplicate member paths",
+                ));
+            }
+
+            // Per-member decoded size bound.
+            let decoded_len = entry.cbor_hex.len() / 2;
+            if decoded_len > MAX_MEMBER_BYTES {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_MEMBER_TOO_LARGE",
+                    "INVALID_INPUT",
+                    "a hosted archive member exceeds the per-member size limit",
+                ));
+            }
+        }
+    }
+
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     for entry in &body.files {
         let bytes = hex_decode(&entry.cbor_hex).ok_or_else(|| {
@@ -2672,6 +2761,17 @@ async fn import_hosted_archive(
     //    verbatim from Hosted to preserve byte-exact archive identity).
     for (rel_path, bytes) in &files {
         let dest = staging_path.join(rel_path);
+        // Confinement check: destination must remain under the staging directory.
+        // ArchivePathV1 already rejects dangerous paths; this is a belt-and-
+        // suspenders guard against any OS-specific join edge cases.
+        if !dest.starts_with(&staging_path) {
+            let _ = std::fs::remove_dir_all(&staging_path);
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_PATH_ESCAPE",
+                "INTEGRITY",
+                "an archive member path resolved outside the staging directory",
+            ));
+        }
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|_| {
                 CommandError::new(

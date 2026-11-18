@@ -1029,11 +1029,26 @@ impl SqliteStorage {
                 .map_err(|_| StorageError::Db)?;
             }
             Some("2") | Some("3") | Some("4") | Some("5") => {
-                // V6 adds only the V2 question field; existing V1 drafts keep
-                // their empty marker and therefore retain their V1 identity.
-                g.execute_batch(
-                    "ALTER TABLE election_drafts ADD COLUMN proposal_question TEXT NOT NULL DEFAULT '';
-                     UPDATE meta SET value = '6' WHERE key = 'schema_version';",
+                // V6 adds the V2 question field. For v2 DBs the election_drafts
+                // table was just created by CREATE TABLE IF NOT EXISTS (above)
+                // and already includes the column; skip the ALTER in that case.
+                let has_pq: bool = g
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_info('election_drafts') WHERE name='proposal_question'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0) > 0;
+                if !has_pq {
+                    g.execute(
+                        "ALTER TABLE election_drafts ADD COLUMN proposal_question TEXT NOT NULL DEFAULT ''",
+                        [],
+                    )
+                    .map_err(|_| StorageError::Db)?;
+                }
+                g.execute(
+                    "UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+                    [],
                 )
                 .map_err(|_| StorageError::Db)?;
             }
