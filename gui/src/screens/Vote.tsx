@@ -1173,8 +1173,10 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     setError(null);
     setPrivateError(null);
     try {
-      await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
-      persistManagedTorConfig();
+      if (voterBundlePath) {
+        await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
+        persistManagedTorConfig();
+      }
       const status = await api.testRemoteTorConnection();
       setManagedTorStatus(status);
       setReconfiguring(false);
@@ -1204,9 +1206,14 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     setError(null);
     setPrivateError(null);
     try {
-      // "" data dir → backend auto-derives the app-owned election-scoped dir.
-      await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
-      persistManagedTorConfig();
+      // For V1 bundles (voterBundlePath set), configure first so Rust re-validates.
+      // For V2 (Hosted) bundles, importV2VoterBundle already set up Rust state;
+      // skip configure to avoid overwriting it with an empty path.
+      if (voterBundlePath) {
+        // "" data dir → backend auto-derives the app-owned election-scoped dir.
+        await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
+        persistManagedTorConfig();
+      }
       // In managed-local mode `startManagedTor` spawns Tor; in remote-SOCKS mode
       // it runs the explicit readiness check against the external proxy (no
       // spawn). Either way a successful return means the transport is ready.
@@ -1761,9 +1768,9 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 </>
               )}
 
-              {(!voterBundlePath || reconfiguring) && (
+              {((!voterBundlePath && !managedTorStatus?.configured) || reconfiguring) && (
                 <>
-                  {!voterBundlePath && (
+                  {!voterBundlePath && !managedTorStatus?.configured && (
                     <Notice tone="info">
                       Ballot-office connection file required. If your ballot office uses
                       Hosted, download the voter bundle from the enrollment page and import it
@@ -1779,16 +1786,18 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                     >
                       Import V2 bundle from Hosted
                     </button>
-                    <button
-                      type="button"
-                      className="btn btn-secondary"
-                      disabled={busy || !shellAvailable}
-                      onClick={() => void onBrowseVoterBundle()}
-                    >
-                      {reconfiguring && voterBundlePath
-                        ? "Choose a different ballot-office connection file"
-                        : "Select ballot-office connection file (V1)"}
-                    </button>
+                    {(!managedTorStatus?.configured || !!voterBundlePath) && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={busy || !shellAvailable}
+                        onClick={() => void onBrowseVoterBundle()}
+                      >
+                        {reconfiguring && voterBundlePath
+                          ? "Choose a different ballot-office connection file"
+                          : "Select ballot-office connection file (V1)"}
+                      </button>
+                    )}
                   </div>
                 </>
               )}
@@ -1799,7 +1808,8 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                   className="btn btn-primary"
                   disabled={
                     busy ||
-                    !voterBundlePath ||
+                    // No bundle at all — neither V2 (Hosted) nor V1 (file path).
+                    (!voterBundlePath && !managedTorStatus?.configured) ||
                     (torMode === "managed-local"
                       ? !(voterTorStatus?.tor_found ?? false)
                       : !remoteSocksHost.trim())

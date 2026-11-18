@@ -1192,6 +1192,20 @@ export function ManageElection() {
       );
       setHostedArchiveImportResult(result);
       recordAction("Imported Hosted finalized archive");
+      // Wire the verified archive into the anchor preparation flow so the
+      // imported Hosted archive can serve as the basis for a V2 anchor publish.
+      if (result.anchor_eligible) {
+        try {
+          const verification = await api.verifyArchive(targetDirectory);
+          updateArchiveView({
+            directory: targetDirectory,
+            verification: { result: verification, verifiedDirectory: targetDirectory },
+            transportAnchor: null,
+          });
+        } catch {
+          // Verification is non-fatal: the import result UI still shows.
+        }
+      }
     } catch (error) {
       showError(error);
     }

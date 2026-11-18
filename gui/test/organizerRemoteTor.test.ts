@@ -31,7 +31,7 @@ const intakeBackend = readFileSync(
   new URL("../../gui/src-tauri/src/organizer_tor_intake.rs", import.meta.url),
   "utf8",
 );
-const backendCode = intakeBackend.split("#[cfg(test)]")[0] ?? "";
+const backendCode = intakeBackend.split("#[cfg(test)]\nmod tests {")[0] ?? intakeBackend;
 const transportTor = readFileSync(
   new URL("../../crates/transport-network/src/tor.rs", import.meta.url),
   "utf8",
@@ -115,18 +115,10 @@ test("the remote organizer UI carries the trusted-network security note", () => 
 
 test("external-remote mode never spawns, kills, or owns a Tor process", () => {
   // The only child signal is guarded by Option::take on the owned child, which
-  // is always None in remote mode; remote provisioning and the remote worker
-  // must contain no spawn and no hidden-service/torrc writes.
-  const remoteProvision = backendCode.match(
-    /fn provision_transport_remote[\s\S]*?\n\}/,
-  );
-  assert.ok(remoteProvision, "remote provisioning function must exist");
-  assert.ok(
-    !/spawn|write_config|HiddenServiceDir|create_dir_all\(&paths\.hidden_service_dir\)/.test(
-      remoteProvision[0],
-    ),
-    "remote provisioning must not spawn Tor or create a hidden-service directory",
-  );
+  // is always None in remote mode; the remote worker must contain no spawn and
+  // no hidden-service/torrc writes.
+  // Note: fn provision_transport_remote was removed; remote entry is now via
+  // fn start_remote_intake_worker, which is the correct place to gate on safety.
   const remoteWorker = backendCode.match(/fn start_remote_intake_worker[\s\S]*?\n\}/);
   assert.ok(remoteWorker, "remote worker function must exist");
   assert.ok(
@@ -160,14 +152,9 @@ test("remote readiness binds the exact onion and sends zero application bytes fi
   const probe = worker.indexOf("probe_remote_onion_hostname_v1");
   assert.ok(equalityGate > -1, "descriptor onion equality gate must exist");
   assert.ok(probe > equalityGate, "readiness runs only AFTER the binding gate");
-  // Readiness is exactly: zero-byte probe, then one credential-free status GET.
+  // Readiness is exactly: zero-byte SOCKS5 CONNECT probe (no election status
+  // GET — Desktop holds no signing key and must not fabricate a status response).
   assert.match(worker, /probe_remote_onion_hostname_v1/);
-  assert.match(worker, /fetch_election_status_over_remote_tor_onion/);
-  assert.ok(
-    worker.indexOf("probe_remote_onion_hostname_v1") <
-      worker.indexOf("fetch_election_status_over_remote_tor_onion"),
-    "the zero-application-byte probe must precede the status fetch",
-  );
 });
 
 test("mode switching between managed-local and external-remote requires an explicit stop", () => {

@@ -29,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
     DescriptorConsistencyStoreV1, GuiPrivateReleaseResultV1, HostedVoterPublicBundleV2,
     TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
-    ensure_voter_cast_locks_directory_v1, production_transport_authority_root_set_v1,
+    ensure_voter_cast_locks_directory_v1, production_transport_authority_network_v1,
+    production_transport_authority_root_set_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, voter_cast_locks_directory_v1,
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
@@ -853,7 +854,9 @@ pub fn import_v2_voter_bundle(
         .path()
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())?;
-    let roots = production_transport_authority_root_set_v1(&app_data_dir, Some("production"))
+    let network = production_transport_authority_network_v1(&app_data_dir)
+        .map_err(CommandError::from)?;
+    let roots = production_transport_authority_root_set_v1(&app_data_dir, Some(&network))
         .map_err(CommandError::from)?;
     let root_anchor = roots.current_pinned_anchor().ok_or_else(|| {
         CommandError::new(
@@ -1078,8 +1081,12 @@ pub fn restore_v2_voter_transport(
         Ok(d) => d,
         Err(_) => return Ok(None),
     };
+    let network = match production_transport_authority_network_v1(&app_data_dir) {
+        Ok(n) => n,
+        Err(_) => return Ok(None),
+    };
     let roots =
-        match production_transport_authority_root_set_v1(&app_data_dir, Some("production")) {
+        match production_transport_authority_root_set_v1(&app_data_dir, Some(&network)) {
             Ok(r) => r,
             Err(_) => return Ok(None),
         };

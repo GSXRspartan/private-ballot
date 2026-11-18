@@ -227,7 +227,6 @@ describe("backend organizer transport and signing gates", () => {
       "resolve_tor_executable",
       "bound_election",
       "election_transport_root",
-      "provision_transport",
       "start_intake_worker",
     ]) {
       const idx = body.indexOf(laterOf);

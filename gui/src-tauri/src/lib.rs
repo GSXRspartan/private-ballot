@@ -2815,14 +2815,22 @@ async fn import_hosted_archive(
 
     // 10. Atomic rename: staging → target.
     if target_path.exists() {
-        std::fs::remove_dir_all(target_path).map_err(|_| {
+        // Reject non-empty targets — the user may have important data there.
+        // An empty directory is harmless to remove before the rename.
+        let is_non_empty = std::fs::read_dir(target_path)
+            .ok()
+            .and_then(|mut d| d.next())
+            .is_some();
+        if is_non_empty {
             let _ = std::fs::remove_dir_all(&staging_path);
-            CommandError::new(
-                "GUI_ARCHIVE_IMPORT_TARGET_CLEANUP_FAILED",
-                "IO",
-                "could not remove an existing target directory before import",
-            )
-        })?;
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_TARGET_NOT_EMPTY",
+                "INVALID_INPUT",
+                "the target directory already exists and is not empty; choose an empty or new folder",
+            ));
+        }
+        // Empty directory: remove it so the rename succeeds on Windows.
+        let _ = std::fs::remove_dir(target_path);
     }
     std::fs::rename(&staging_path, target_path).map_err(|_| {
         let _ = std::fs::remove_dir_all(&staging_path);

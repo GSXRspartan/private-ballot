@@ -353,7 +353,9 @@ pub(crate) enum EnrollmentFailpoint {
 pub struct InMemoryStorage {
     elections: Mutex<HashMap<String, ElectionRecord>>,
     finalized_transport_bindings: Mutex<HashMap<String, FinalizedTransportBindingRecord>>,
-    descriptor_issuances: Mutex<HashMap<(String, [u8; 32]), DescriptorIssuanceRecord>>,
+    // Keyed by election_id only: one descriptor per election, enforced here and
+    // in the SQLite implementation by checking election_id alone before inserting.
+    descriptor_issuances: Mutex<HashMap<String, DescriptorIssuanceRecord>>,
     ballots: Mutex<HashMap<String, Vec<BallotRecord>>>,
     legacy: Mutex<HashMap<String, Vec<Vec<u8>>>>,
     drafts: Mutex<HashMap<String, ElectionDraftRecord>>,
@@ -454,12 +456,18 @@ impl HostedStorage for InMemoryStorage {
             .descriptor_issuances
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let key = (record.election_id.clone(), record.request_id);
-        match issuances.get(&key) {
-            Some(existing) if existing.request_cbor == record.request_cbor => Ok(existing.clone()),
+        // Check by election_id only: one descriptor per election, regardless of
+        // request_id. The Mutex makes this check-then-insert atomic.
+        match issuances.get(&record.election_id) {
+            Some(existing)
+                if existing.request_id == record.request_id
+                    && existing.request_cbor == record.request_cbor =>
+            {
+                Ok(existing.clone())
+            }
             Some(_) => Err(StorageError::DescriptorRequestConflict),
             None => {
-                issuances.insert(key, record.clone());
+                issuances.insert(record.election_id.clone(), record.clone());
                 Ok(record)
             }
         }
@@ -473,9 +481,8 @@ impl HostedStorage for InMemoryStorage {
             .descriptor_issuances
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .find(|((eid, _), _)| eid == election_id)
-            .map(|(_, record)| record.clone()))
+            .get(election_id)
+            .cloned())
     }
 
     fn get_ballot_by_receipt(
@@ -1199,21 +1206,37 @@ impl HostedStorage for SqliteStorage {
     ) -> Result<DescriptorIssuanceRecord, StorageError> {
         let mut g = self.lock();
         let tx = g.transaction().map_err(|_| StorageError::Db)?;
+        // Check for ANY existing descriptor for this election (not just this request_id).
+        // The connection Mutex serializes all calls, so this check-then-insert is atomic
+        // and closes the TOCTOU race that could issue two descriptors for the same election.
         let existing = tx
             .query_row(
-                "SELECT request_cbor, response_cbor FROM descriptor_issuances WHERE election_id = ?1 AND request_id = ?2",
-                params![&record.election_id, record.request_id.as_slice()],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                "SELECT request_id, request_cbor, response_cbor FROM descriptor_issuances WHERE election_id = ?1 LIMIT 1",
+                params![&record.election_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|_| StorageError::Db)?;
         let output = match existing {
-            Some((request_cbor, response_cbor)) if request_cbor == record.request_cbor => DescriptorIssuanceRecord {
-                election_id: record.election_id,
-                request_id: record.request_id,
-                request_cbor,
-                response_cbor,
-            },
+            // Identical request (same ID and same bytes): idempotent — return the stored response.
+            Some((existing_request_id, existing_request_cbor, response_cbor))
+                if existing_request_id == record.request_id.as_slice()
+                    && existing_request_cbor == record.request_cbor =>
+            {
+                DescriptorIssuanceRecord {
+                    election_id: record.election_id,
+                    request_id: record.request_id,
+                    request_cbor: existing_request_cbor,
+                    response_cbor,
+                }
+            }
+            // Any existing row (different request_id or different bytes): conflict.
             Some(_) => return Err(StorageError::DescriptorRequestConflict),
             None => {
                 tx.execute(
