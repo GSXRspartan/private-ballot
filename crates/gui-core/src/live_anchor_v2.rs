@@ -624,7 +624,8 @@ mod tests {
         if let Some(dir) = fixture.parent() {
             std::fs::create_dir_all(dir).ok();
         }
-        std::fs::write(&fixture, serde_json::to_string_pretty(&prep).unwrap())
+        let json = serde_json::to_string_pretty(&prep).unwrap() + "\n";
+        std::fs::write(&fixture, json)
             .unwrap_or_else(|e| eprintln!("fixture write skipped (CI may be read-only): {e}"));
     }
 }
