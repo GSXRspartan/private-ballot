@@ -2486,6 +2486,281 @@ async fn verify_archive(
     .await
 }
 
+/// Input for downloading and importing a canonical finalized archive from
+/// a Hosted instance. The organizer credential authenticates the download;
+/// the archive is independently verified before being written to disk.
+#[derive(Debug, serde::Deserialize)]
+struct GuiImportHostedArchiveInputV1 {
+    hosted_base_url: String,
+    election_id: String,
+    organizer_secret_hex: String,
+    target_directory: String,
+}
+
+/// Public result of a successful hosted archive import.
+#[derive(Debug, serde::Serialize)]
+struct GuiArchiveImportResultV1 {
+    verified: bool,
+    finalized: bool,
+    anchor_eligible: bool,
+    archive_hash_hex: String,
+    election_id: String,
+    file_count: usize,
+}
+
+/// Downloads the canonical finalized archive from a Hosted instance and writes
+/// it to `target_directory`, after independently verifying the archive and
+/// cross-checking the hosted archive_hash_hex against the local verifier.
+///
+/// Security policy:
+/// 1. Write to a staging directory (a temp sibling of target_directory).
+/// 2. Verify via `verify_archive_directory_v1` on the staging directory.
+/// 3. Cross-check: hosted `archive_hash_hex` must equal the verifier result.
+/// 4. Only on match: atomically rename staging → target.
+///
+/// Does NOT require an active organizer session; the credential is supplied
+/// explicitly and used only for this one download.
+#[tauri::command]
+async fn import_hosted_archive(
+    input: GuiImportHostedArchiveInputV1,
+) -> Result<GuiArchiveImportResultV1, CommandError> {
+    use std::collections::BTreeMap;
+    use tari_cc_private_ballot_archive::ARCHIVE_MANIFEST_CANONICAL_PATH;
+
+    // 1. Build the archive URL and send the authenticated GET request.
+    let url = format!(
+        "{}/api/v1/organizer/elections/{}/archive",
+        input.hosted_base_url.trim_end_matches('/'),
+        input.election_id,
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("x-private-ballot-organizer", &input.organizer_secret_hex)
+        .send()
+        .await
+        .map_err(|e| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_NETWORK_ERROR",
+                "NETWORK",
+                "could not reach the Hosted archive endpoint",
+            )
+            .with_context(format!("{e}"))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_ENDPOINT_ERROR",
+            "ENDPOINT",
+            "the Hosted archive endpoint returned an error",
+        )
+        .with_context(format!("HTTP {status}")));
+    }
+
+    // 2. Bound and parse the response body. The JSON body is bounded by the
+    //    hosted server's own MAX_BODY_BYTES limit, but we apply a client-side
+    //    guard of 512 MiB to prevent a rogue server from allocating unbounded
+    //    memory on this machine.
+    const MAX_IMPORT_BYTES: usize = 512 * 1024 * 1024;
+    let body_bytes = response
+        .bytes()
+        .await
+        .map_err(|_| CommandError::new(
+            "GUI_ARCHIVE_IMPORT_BODY_ERROR",
+            "NETWORK",
+            "could not read the Hosted archive response body",
+        ))?;
+    if body_bytes.len() > MAX_IMPORT_BYTES {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_BODY_TOO_LARGE",
+            "INVALID_INPUT",
+            "the Hosted archive response body exceeds the import size limit",
+        ));
+    }
+
+    // 3. Parse the ArchiveBody JSON.
+    #[derive(serde::Deserialize)]
+    struct ArchiveFileJson { path: String, cbor_hex: String }
+    #[derive(serde::Deserialize)]
+    struct ArchiveBodyJson {
+        election_id: String,
+        archive_hash_hex: String,
+        archive_manifest_cbor_hex: String,
+        anchor_eligible: bool,
+        files: Vec<ArchiveFileJson>,
+    }
+    let body: ArchiveBodyJson = serde_json::from_slice(&body_bytes).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PARSE_ERROR",
+            "INVALID_INPUT",
+            "could not parse the Hosted archive response as a canonical archive body",
+        )
+    })?;
+
+    // 4. Cross-check election_id.
+    if body.election_id != input.election_id {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_ELECTION_ID_MISMATCH",
+            "INVALID_INPUT",
+            "the Hosted archive election_id does not match the requested election",
+        ));
+    }
+
+    // 5. Hex-decode each file and assemble the write map.
+    let hex_decode = |hex: &str| -> Option<Vec<u8>> {
+        if hex.len() % 2 != 0 { return None; }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            let hi = (pair[0] as char).to_digit(16)? as u8;
+            let lo = (pair[1] as char).to_digit(16)? as u8;
+            out.push((hi << 4) | lo);
+        }
+        Some(out)
+    };
+
+    let manifest_cbor = hex_decode(&body.archive_manifest_cbor_hex).ok_or_else(|| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_MANIFEST_HEX_INVALID",
+            "INVALID_INPUT",
+            "the hosted archive manifest is not valid hex",
+        )
+    })?;
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for entry in &body.files {
+        let bytes = hex_decode(&entry.cbor_hex).ok_or_else(|| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_FILE_HEX_INVALID",
+                "INVALID_INPUT",
+                "a hosted archive file is not valid hex",
+            )
+        })?;
+        files.insert(entry.path.clone(), bytes);
+    }
+    let file_count = files.len();
+
+    // 6. Create a staging directory (temp sibling of target_directory).
+    let target_path = std::path::Path::new(&input.target_directory);
+    let staging_path = {
+        let name = target_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("archive");
+        let parent = target_path.parent().unwrap_or(target_path);
+        parent.join(format!("{name}.staging"))
+    };
+    if staging_path.exists() {
+        std::fs::remove_dir_all(&staging_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_STAGING_CLEANUP_FAILED",
+                "IO",
+                "could not remove an existing staging directory",
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&staging_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_STAGING_CREATE_FAILED",
+            "IO",
+            "could not create the staging directory",
+        )
+    })?;
+
+    // 7. Write all archive files to the staging directory. Write the
+    //    archive manifest last (it is NOT hash-covered and must be written
+    //    verbatim from Hosted to preserve byte-exact archive identity).
+    for (rel_path, bytes) in &files {
+        let dest = staging_path.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| {
+                CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_WRITE_FAILED",
+                    "IO",
+                    "could not create a staging subdirectory",
+                )
+            })?;
+        }
+        std::fs::write(&dest, bytes).map_err(|_| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_WRITE_FAILED",
+                "IO",
+                "could not write an archive file to the staging directory",
+            )
+        })?;
+    }
+    std::fs::write(
+        staging_path.join(ARCHIVE_MANIFEST_CANONICAL_PATH),
+        &manifest_cbor,
+    )
+    .map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_MANIFEST_WRITE_FAILED",
+            "IO",
+            "could not write the archive manifest to the staging directory",
+        )
+    })?;
+
+    // 8. Independently verify the staging archive.
+    let verification = run_blocking_command({
+        let staging = staging_path.clone();
+        move || Ok(tari_cc_private_ballot_gui_core::archive_verify::verify_archive_directory_v1(&staging)?)
+    })
+    .await
+    .map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        e
+    })?;
+
+    // 9. Cross-check: hosted archive_hash_hex must equal the verifier result.
+    let verified_hash = verification.archive_hash_hex.as_deref().unwrap_or("");
+    if verified_hash != body.archive_hash_hex {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_HASH_MISMATCH",
+            "INTEGRITY",
+            "the imported archive hash does not match the hash reported by Hosted",
+        ));
+    }
+    if !verification.verified {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_VERIFICATION_FAILED",
+            "INTEGRITY",
+            "the imported archive did not pass independent verification",
+        ));
+    }
+
+    // 10. Atomic rename: staging → target.
+    if target_path.exists() {
+        std::fs::remove_dir_all(target_path).map_err(|_| {
+            let _ = std::fs::remove_dir_all(&staging_path);
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_TARGET_CLEANUP_FAILED",
+                "IO",
+                "could not remove an existing target directory before import",
+            )
+        })?;
+    }
+    std::fs::rename(&staging_path, target_path).map_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_RENAME_FAILED",
+            "IO",
+            "could not move the staged archive to the target directory",
+        )
+    })?;
+
+    Ok(GuiArchiveImportResultV1 {
+        verified: verification.verified,
+        finalized: verification.finalized,
+        anchor_eligible: body.anchor_eligible,
+        archive_hash_hex: body.archive_hash_hex,
+        election_id: body.election_id,
+        file_count,
+    })
+}
+
 /// Verifies the public transport-binding → completed archive → existing Phase
 /// 4 evidence chain. This is inspection only: no walletd/indexer access,
 /// signing, fee payment, ballot package, or transport secret crosses Tauri.
@@ -6141,6 +6416,7 @@ pub fn run() {
             write_hosted_binding_handoff,
             anchor_deployment_capabilities,
             verify_archive,
+            import_hosted_archive,
             verify_transport_archive_anchor,
             trusted_ootle_deployment_status,
             inspect_template_wasm,

@@ -5349,6 +5349,7 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "keyring",
+ "reqwest",
  "serde",
  "serde_json",
  "tari-cc-private-ballot-anchor",

@@ -5020,3 +5020,447 @@ async fn voter_bundle_unavailable_for_non_open_elections() {
         "closed election must not serve voter-bundle"
     );
 }
+
+// ── Section 10: Organizer archive endpoint – negative security matrix ─────────
+
+#[tokio::test]
+async fn organizer_archive_requires_credential() {
+    // GET /api/v1/organizer/elections/{id}/archive must reject with 401 when no
+    // organizer credential header is present.
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let election_id = "org-archive-auth-001";
+    let secret = organizer_secret(0x41);
+    organizer_create_ok(&public, election_id, &secret, 1).await;
+
+    // No credential header → 401.
+    let (s_no_cred, _) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(
+        s_no_cred,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "missing credential must be 401"
+    );
+
+    // Wrong credential header → 401.
+    let wrong_secret = organizer_secret(0x99);
+    let (s_wrong, _) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None,
+        &[("x-private-ballot-organizer", wrong_secret.as_str())],
+    )
+    .await;
+    assert_eq!(
+        s_wrong,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "wrong credential must be 401"
+    );
+}
+
+#[tokio::test]
+async fn organizer_archive_requires_finalized_election() {
+    // GET /api/v1/organizer/elections/{id}/archive must return 409 when the
+    // election is in the elections table but has not been finalized.
+    // We advance to "open" state (which writes the election into the elections
+    // table) so that check_organizer passes and LoadedElection::load succeeds,
+    // then verify that the state gate returns 409.
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let election_id = "org-archive-state-001";
+    let secret = organizer_secret(0x42);
+    organizer_create_ok(&public, election_id, &secret, 1).await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    // Issue one invitation and enroll one voter so freeze/open can proceed.
+    let (_, inv) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    let inv_secret = inv["invitation_secret_hex"].as_str().unwrap_or("").to_owned();
+    enroll(&public, election_id, &inv_secret, &enroll_key(7)).await;
+    for action in ["freeze", "open-voting"] {
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/{action}"),
+            None,
+            Some(&secret),
+        )
+        .await;
+    }
+
+    // Election is now "open" (in the elections table) but not yet finalized → 409.
+    let (s_open, v_open) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(
+        s_open,
+        axum::http::StatusCode::CONFLICT,
+        "non-finalized election must be 409: {v_open}"
+    );
+    assert_eq!(v_open["code"], "election_not_finalized");
+}
+
+#[tokio::test]
+async fn organizer_archive_nonexistent_election_is_401() {
+    // For a nonexistent election, check_organizer fires first and returns 401
+    // (no stored credential → fail-closed, same response as wrong credential).
+    // The endpoint never reveals whether the election exists via the organizer plane.
+    let (routers, _storage) = test_routers();
+    let public = routers.public;
+    let secret = organizer_secret(0x43);
+
+    let (s, _) = organizer_call(
+        &public,
+        "GET",
+        "/api/v1/organizer/elections/does-not-exist-000/archive",
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(s, axum::http::StatusCode::UNAUTHORIZED, "nonexistent election has no stored credential → 401 (fail-closed)");
+}
+
+// ── Section 12: Full e2e – organizer archive endpoint → verify → V2 anchor ───
+
+#[tokio::test]
+async fn organizer_archive_endpoint_full_e2e_v2_anchor() {
+    // Verifies the new organizer-authenticated archive endpoint through the
+    // complete release boundary:
+    //   organizer create → enroll → freeze → open-voting → vote × 2 → close
+    //   → transport-binding → finalize
+    //   → GET /api/v1/organizer/elections/{id}/archive (organizer-authenticated)
+    //   → write_archive_from_endpoint → verify_archive_dir_for_test
+    //   → build_v2_public_payload_from_verified_archive_v1
+    //   → prepare_v2_anchor_publish_from_verified_evidence_v1
+    //   → cross-check: archive_hash and anchor_digest match Hosted identity
+    let (routers, storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0x51);
+    let election_id = "org-archive-e2e-001";
+
+    organizer_create_ok(&public, election_id, &secret, 3).await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None,
+        Some(&secret),
+    )
+    .await;
+
+    // Enroll two voters.
+    let mut invitation_secrets = Vec::new();
+    for _ in 0..2 {
+        let (s, v) = organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+            None,
+            Some(&secret),
+        )
+        .await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+        invitation_secrets.push(v["invitation_secret_hex"].as_str().unwrap().to_owned());
+    }
+    for (i, invitation) in invitation_secrets.iter().enumerate() {
+        let (s, v) = enroll(&public, election_id, invitation, &enroll_key((i + 1) as u64)).await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+    }
+
+    // Freeze → open-voting.
+    let (sf, vf) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/freeze"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{vf}");
+    let (sv, vv) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-voting"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sv, axum::http::StatusCode::CREATED, "{vv}");
+
+    // Fetch frozen manifest so ballot packages use the correct registry hash.
+    let (sp, vp) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(sp, axum::http::StatusCode::OK, "{vp}");
+    let pkg_json: serde_json::Value =
+        serde_json::from_str(&vp).unwrap_or_else(|_| panic!("package json"));
+    let f2 = Fixture {
+        election_id: election_id.to_owned(),
+        manifest_cbor: hex_decode(pkg_json["manifest_cbor_hex"].as_str().unwrap()).unwrap(),
+        registry_cbor: hex_decode(pkg_json["registry_cbor_hex"].as_str().unwrap()).unwrap(),
+        candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
+    };
+
+    // Two voters cast ballots.
+    let pkg_a = make_package(&f2, 1, b"candidate-a");
+    let (s1, r1) = req(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({"receipt_id": "22222222-2222-4222-8222-222222222221", "package_cbor_hex": hex_encode(&pkg_a), "api_version": "v1"}).to_string()),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{r1}");
+    let pkg_b = make_package(&f2, 2, b"candidate-b");
+    let (s2, r2) = req(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/elections/{election_id}/ballots"),
+        Some(serde_json::json!({"receipt_id": "22222222-2222-4222-8222-222222222222", "package_cbor_hex": hex_encode(&pkg_b), "api_version": "v1"}).to_string()),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
+
+    // Close → submit transport binding → finalize.
+    let (sc, vc) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
+    let (binding, descriptor) = authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_b.clone()]);
+    let (sbind, vbind) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
+        Some(desktop_binding_handoff_json(&f2, &binding, &descriptor)),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sbind, axum::http::StatusCode::CREATED, "{vbind}");
+    let (sfin, vfin) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/finalize"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sfin, axum::http::StatusCode::OK, "{vfin}");
+    assert_eq!(vfin["state"], "finalized");
+
+    // ── Organizer-authenticated archive endpoint ──────────────────────────────
+    // This is the new endpoint under test. Same body shape as the public one,
+    // but gated on the election-scoped organizer credential.
+    let (sarch, varch) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sarch, axum::http::StatusCode::OK, "{varch}");
+    assert_eq!(varch["election_id"].as_str(), Some(election_id));
+    assert_eq!(varch["archive_hash_hex"].as_str().unwrap_or("").len(), 64);
+    assert!(varch["anchor_eligible"].as_bool().unwrap_or(false), "transport-bound election must be anchor-eligible");
+    assert!(
+        varch["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"].as_str().unwrap_or("").contains("manifest")),
+        "archive body must include the archive-manifest file"
+    );
+
+    // Cross-check: organizer endpoint body matches public endpoint body.
+    let (spub, vpub) = organizer_call(
+        &public,
+        "GET",
+        &format!("/api/v1/elections/{election_id}/archive"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(spub, axum::http::StatusCode::OK, "{vpub}");
+    assert_eq!(
+        varch["archive_hash_hex"],
+        vpub["archive_hash_hex"],
+        "organizer and public endpoints must return identical archive hash"
+    );
+
+    // ── Write to staging directory → verify → V2 anchor preparation ──────────
+    let dir = std::env::temp_dir().join(format!("pb-org-archive-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    let archive_manifest =
+        hex_decode(varch["archive_manifest_cbor_hex"].as_str().unwrap_or(""))
+            .unwrap_or_else(|_| panic!("archive manifest hex"));
+    let archive_files = varch["files"]
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| panic!("archive files"));
+    write_archive_from_endpoint(&dir, &archive_files, &archive_manifest);
+    assert!(
+        verify_archive_dir_for_test(&dir),
+        "archive written from organizer endpoint must pass verify_archive_dir_for_test"
+    );
+
+    let desktop_payload =
+        build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            network: "mainnet".to_owned(),
+            template_address:
+                tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+            template_module: tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+            template_function: tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+            template_event_topic: format!(
+                "{}.{}",
+                tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2,
+                tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_TOPIC_SUFFIX_V2
+            ),
+            template_artifact_digest_hex:
+                tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+        })
+        .expect("V2 payload must build from organizer-endpoint archive");
+
+    let artifact_digest: [u8; 32] =
+        hex_decode(tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3)
+            .unwrap_or_else(|_| panic!("release digest"))
+            .try_into()
+            .unwrap_or_else(|_| panic!("release digest length"));
+    let deployment = tari_cc_private_ballot_anchor_transport::AnchorTemplateBindingV2::new(
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        format!(
+            "{}.{}",
+            tari_cc_private_ballot_anchor_transport::ANCHOR_TEMPLATE_MODULE_V2,
+            tari_cc_private_ballot_anchor_transport::ANCHOR_EVENT_TOPIC_SUFFIX_V2
+        ),
+        artifact_digest,
+    )
+    .expect("release deployment binding");
+    let prepared = prepare_v2_anchor_publish_from_verified_evidence_v1(
+        &GuiV2AnchorPublishPreparationRequestV1 {
+            archive_directory: dir.to_string_lossy().into_owned(),
+            payload_hex: desktop_payload.payload_hex.clone(),
+            expected_digest_hex: desktop_payload.v2_anchor_digest_hex.clone(),
+        },
+        &deployment,
+    )
+    .expect("V2 anchor preparation must succeed from organizer-endpoint archive");
+
+    // Final cross-check: Desktop-derived archive hash matches Hosted identity.
+    let loaded = crate::LoadedElection::load(storage.as_ref(), election_id)
+        .unwrap_or_else(|_| panic!("finalized election loads"));
+    let hosted_identity = crate::finalized_anchor_identity(&loaded, storage.as_ref())
+        .unwrap_or_else(|_| panic!("Hosted identity derives"));
+    assert_eq!(desktop_payload.election_id, election_id);
+    assert_eq!(
+        desktop_payload.archive_hash_hex,
+        hosted_identity.archive_hash_hex,
+        "Desktop archive hash must match Hosted identity"
+    );
+    assert_eq!(
+        desktop_payload.v2_anchor_digest_hex,
+        hosted_identity.anchor_digest_hex,
+        "Desktop anchor digest must match Hosted identity"
+    );
+    assert_eq!(
+        prepared.arguments,
+        vec![
+            hosted_identity.anchor_digest_hex,
+            "mainnet".to_owned(),
+            election_id.to_owned(),
+            hosted_identity.public_summary_json,
+        ],
+        "V2 anchor arguments must match Hosted identity"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Section 13: Legacy V4 regression – no transport binding → anchor_eligible=false ──
+
+#[tokio::test]
+async fn organizer_archive_legacy_v4_anchor_not_eligible() {
+    // A finalized V4 election (no transport binding) must still be served by
+    // the public archive endpoint with anchor_eligible=false, and the
+    // organizer-authenticated archive endpoint must return 401 (admin-imported
+    // elections have no organizer credential).
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    assert_eq!(
+        import(routers.admin.clone(), &f).await,
+        axum::http::StatusCode::CREATED
+    );
+    let election_id = &f.election_id;
+
+    // Advance to finalized state via storage (V4 path: no transport binding).
+    assert!(storage.set_election_state(election_id, "open", "closed").unwrap());
+    assert!(storage.set_election_state(election_id, "closed", "finalized").unwrap());
+
+    // Public archive endpoint must report anchor_eligible=false.
+    let (spub, vpub) = req(
+        routers.public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/archive"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(spub, axum::http::StatusCode::OK, "{vpub}");
+    let vpub_json: serde_json::Value = serde_json::from_str(&vpub).unwrap();
+    assert_eq!(vpub_json["anchor_eligible"], false, "V4 public archive must not be anchor-eligible");
+
+    // Organizer-authenticated endpoint returns 401 (no organizer credential
+    // was registered for an admin-imported V4 election).
+    let organizer = organizer_secret(0x61);
+    let (sorg, _) = req(
+        routers.public.clone(),
+        "GET",
+        &format!("/api/v1/organizer/elections/{election_id}/archive"),
+        None,
+        &[("x-private-ballot-organizer", organizer.as_str())],
+    )
+    .await;
+    assert_eq!(
+        sorg,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "V4 admin-imported election has no organizer credential → 401"
+    );
+}

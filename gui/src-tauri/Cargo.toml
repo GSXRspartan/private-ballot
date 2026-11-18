@@ -41,6 +41,9 @@ tari-cc-private-ballot-ootle-anchor-app = { path = "../../crates/ootle-anchor-ap
 tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../../crates/ootle-anchor-network-adapters" }
 tari-cc-private-ballot-transport-gateway = { path = "../../crates/transport-gateway" }
 tari-cc-private-ballot-transport-network = { path = "../../crates/transport-network" }
+# HTTP client for the hosted archive import command. Pinned to the version
+# already in the lockfile via the ootle-anchor-network-adapters transitive dep.
+reqwest = { version = "=0.13.4", default-features = false, features = ["json"] }
 
 [features]
 # The normal public release enables the managed-Tor production transport. The

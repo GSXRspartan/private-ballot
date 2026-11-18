@@ -1296,11 +1296,8 @@ struct ArchiveFileJson {
     cbor_hex: String,
 }
 
-async fn get_archive(
-    State(state): State<Arc<AppState>>,
-    AxumPath(id): AxumPath<String>,
-) -> Response {
-    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+fn get_archive_response(state: &AppState, id: &str) -> Response {
+    let loaded = match LoadedElection::load(state.storage.as_ref(), id) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1344,7 +1341,7 @@ async fn get_archive(
         Err(r) => return r,
     };
     Json(ArchiveBody {
-        election_id: id,
+        election_id: id.to_owned(),
         archive_hash_hex: archive.archive_hash_hex,
         archive_manifest_cbor_hex: hex_encode(&archive.archive_manifest_cbor),
         anchor_eligible: archive.anchor_eligible,
@@ -1358,6 +1355,31 @@ async fn get_archive(
             .collect(),
     })
     .into_response()
+}
+
+async fn get_archive(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    get_archive_response(state.as_ref(), &id)
+}
+
+/// Organizer-authenticated archive download. Identical content to the public
+/// `get_archive` endpoint but gated on the election-scoped organizer credential,
+/// so the Desktop can retrieve the canonical finalized archive without exposing
+/// it to unauthenticated callers on a public route.
+async fn organizer_get_archive(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) {
+        return r;
+    }
+    if let Err(r) = organizer_rate(&state, &id) {
+        return r;
+    }
+    get_archive_response(state.as_ref(), &id)
 }
 
 async fn ootle_status(State(state): State<Arc<AppState>>) -> Response {
@@ -4363,6 +4385,10 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/binding-handoff", get(organizer_get_binding_handoff_request))
         .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
+        .route(
+            "/api/v1/organizer/elections/{id}/archive",
+            get(organizer_get_archive),
+        )
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state, origin_token_middleware))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
