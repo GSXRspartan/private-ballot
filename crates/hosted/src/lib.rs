@@ -3738,6 +3738,27 @@ fn do_store_finalized_transport_binding(
             "the supplied transport descriptor belongs to another election",
         ));
     }
+    // The supplied descriptor must be byte-for-byte identical to the one issued
+    // by the authoritative descriptor endpoint — not merely signed by the same key.
+    let issued = state
+        .storage
+        .get_any_descriptor_issuance(id)
+        .map_err(|_| {
+            binding_error("authoritative descriptor lookup failed")
+        })?
+        .ok_or_else(|| {
+            binding_error("no authoritative descriptor has been issued for this election")
+        })?;
+    let issued_descriptor_cbor = HostedDescriptorResponseV1::from_canonical_cbor(&issued.response_cbor)
+        .map_err(|_| binding_error("the authoritative descriptor record is invalid"))?
+        .descriptor()
+        .to_canonical_cbor()
+        .map_err(|_| binding_error("the authoritative descriptor cannot be serialized"))?;
+    if issued_descriptor_cbor != descriptor_cbor {
+        return Err(binding_error(
+            "the supplied transport descriptor does not match the authoritative issued descriptor",
+        ));
+    }
     let (ledger, ballots) = loaded.replay_ledger(state.storage.as_ref())?;
     validate_transport_binding_bytes(
         &loaded,
@@ -4059,6 +4080,44 @@ async fn organizer_issue_transport_descriptor(
             "descriptor_request_mismatch",
             "descriptor request does not match the authoritative election",
         );
+    }
+    // One authoritative descriptor per election: idempotent replay on the same
+    // request_id, hard reject on a different request_id.
+    match state.storage.get_any_descriptor_issuance(&loaded.record.id) {
+        Ok(Some(existing)) if existing.request_id == request.request_id() => {
+            if existing.request_cbor == canonical_request {
+                return (
+                    [
+                        (header::CONTENT_TYPE, "application/cbor"),
+                        (header::CONTENT_DISPOSITION, "attachment; filename=\"private-ballot-descriptor-response-v1.cbor\""),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    existing.response_cbor,
+                )
+                    .into_response();
+            } else {
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "descriptor_request_conflict",
+                    "descriptor request ID was previously used with different content",
+                );
+            }
+        }
+        Ok(Some(_)) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "descriptor_already_issued",
+                "an authoritative descriptor has already been issued for this election",
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "descriptor issuance lookup failed",
+            );
+        }
     }
     let signer = match state.config.authority_signer() {
         Ok(signer) => signer,

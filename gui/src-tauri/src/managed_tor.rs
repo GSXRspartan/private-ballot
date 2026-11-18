@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_gui_core::{
     DescriptorConsistencyStoreV1, GuiPrivateReleaseResultV1, HostedVoterPublicBundleV2,
     TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
-    ensure_voter_cast_locks_directory_v1,
+    ensure_voter_cast_locks_directory_v1, production_transport_authority_root_set_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, voter_cast_locks_directory_v1,
 };
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
@@ -846,25 +846,22 @@ pub fn import_v2_voter_bundle(
         )
     })?;
 
-    // The root embedded in the bundle must be Pinned — ProductionNotProvisioned
-    // is the unprovisioned sentinel and must never configure transport.
-    let root_anchor = match &verified.root {
-        TransportAuthorityRootV1::Pinned { key_id, public_key } => {
-            (key_id.clone(), *public_key)
-        }
-        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
-            return Err(CommandError::new(
-                "GUI_V2_BUNDLE_UNTRUSTED",
-                "BINDING_MISMATCH",
-                "the V2 voter bundle carries no pinned authority root",
-            ));
-        }
-    };
-
-    // Build a root set from the bundle's pinned root and re-verify the descriptor
-    // under it (defense-in-depth: `verify()` already did this, but the root set
-    // provides the `DescriptorConsistencyStoreV1` required for `ManagedTorState`).
-    let roots = TransportAuthorityRootSetV1::new(verified.root.clone());
+    // Load the pinned production authority root from disk and verify the bundle's
+    // descriptor against it — not against the bundle's own embedded key, which
+    // would let a malicious bundle self-certify.
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let roots = production_transport_authority_root_set_v1(&app_data_dir, Some("production"))
+        .map_err(CommandError::from)?;
+    let root_anchor = roots.current_pinned_anchor().ok_or_else(|| {
+        CommandError::new(
+            "GUI_V2_BUNDLE_UNTRUSTED",
+            "BINDING_MISMATCH",
+            "the production transport authority is not provisioned",
+        )
+    })?;
     let mut consistency = DescriptorConsistencyStoreV1::default();
     let manifest_hash = verified.artifacts.manifest_hash();
     roots
@@ -873,7 +870,7 @@ pub fn import_v2_voter_bundle(
             CommandError::new(
                 "GUI_V2_BUNDLE_UNTRUSTED",
                 "BINDING_MISMATCH",
-                "the V2 voter bundle descriptor does not verify under its authority root",
+                "the V2 voter bundle descriptor does not verify under the production authority root",
             )
         })?;
 
@@ -1075,14 +1072,21 @@ pub fn restore_v2_voter_transport(
         Err(_) => return Ok(None),
     };
 
-    let root_anchor = match &verified.root {
-        TransportAuthorityRootV1::Pinned { key_id, public_key } => {
-            (key_id.clone(), *public_key)
-        }
-        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => return Ok(None),
+    // Load the pinned production authority root from disk — the bundle's own
+    // embedded key must not be used to verify itself (self-certifying).
+    let app_data_dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
     };
-
-    let roots = TransportAuthorityRootSetV1::new(verified.root.clone());
+    let roots =
+        match production_transport_authority_root_set_v1(&app_data_dir, Some("production")) {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+    let root_anchor = match roots.current_pinned_anchor() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
     let mut consistency = DescriptorConsistencyStoreV1::default();
     let manifest_hash = verified.artifacts.manifest_hash();
     if roots

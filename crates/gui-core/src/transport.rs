@@ -150,6 +150,18 @@ impl TransportAuthorityRootSetV1 {
         self.current.key_id()
     }
 
+    /// Returns `(key_id, public_key)` for the current root when it is `Pinned`.
+    /// Returns `None` when the root is `ProductionNotProvisioned`.
+    #[must_use]
+    pub fn current_pinned_anchor(&self) -> Option<(String, [u8; 32])> {
+        match &self.current {
+            TransportAuthorityRootV1::Pinned { key_id, public_key } => {
+                Some((key_id.clone(), *public_key))
+            }
+            TransportAuthorityRootV1::ProductionNotProvisioned { .. } => None,
+        }
+    }
+
     /// Looks up a non-revoked root by id. Descriptors can never install a new
     /// root; they only select an already-pinned one.
     fn lookup_root(&self, root_key_id: &str) -> Result<&TransportAuthorityRootV1, TransportError> {

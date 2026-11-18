@@ -2499,14 +2499,16 @@ fn is_canonical_submission_path(path: &str) -> bool {
     stem.len() == 8 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Input for downloading and importing a canonical finalized archive from
-/// a Hosted instance. The organizer credential authenticates the download;
-/// the archive is independently verified before being written to disk.
+/// Input for importing a canonical finalized archive from a Hosted instance.
+/// The browser downloads and authenticates the archive using its in-memory
+/// credential; Rust only verifies and writes. No credential reaches Rust.
 #[derive(Debug, serde::Deserialize)]
 struct GuiImportHostedArchiveInputV1 {
-    hosted_base_url: String,
     election_id: String,
-    organizer_secret_hex: String,
+    /// Pre-downloaded archive JSON body from the Hosted instance. The browser
+    /// fetched this using its own in-memory credential; Rust never sees or
+    /// sends the organizer secret.
+    archive_body_json: String,
     target_directory: String,
 }
 
@@ -2521,18 +2523,18 @@ struct GuiArchiveImportResultV1 {
     file_count: usize,
 }
 
-/// Downloads the canonical finalized archive from a Hosted instance and writes
-/// it to `target_directory`, after independently verifying the archive and
-/// cross-checking the hosted archive_hash_hex against the local verifier.
+/// Imports a canonical finalized archive from a pre-downloaded Hosted JSON
+/// body and writes it to `target_directory`, after independently verifying
+/// the archive and cross-checking the archive_hash_hex against the local
+/// verifier. The browser fetches the archive using its own in-memory
+/// credential; no organizer secret is passed to or handled by Rust.
 ///
 /// Security policy:
-/// 1. Write to a staging directory (a temp sibling of target_directory).
-/// 2. Verify via `verify_archive_directory_v1` on the staging directory.
-/// 3. Cross-check: hosted `archive_hash_hex` must equal the verifier result.
-/// 4. Only on match: atomically rename staging → target.
-///
-/// Does NOT require an active organizer session; the credential is supplied
-/// explicitly and used only for this one download.
+/// 1. Parse and validate the pre-downloaded archive_body_json.
+/// 2. Write to a staging directory (a temp sibling of target_directory).
+/// 3. Verify via `verify_archive_directory_v1` on the staging directory.
+/// 4. Cross-check: hosted `archive_hash_hex` must equal the verifier result.
+/// 5. Only on match: atomically rename staging → target.
 #[tauri::command]
 async fn import_hosted_archive(
     input: GuiImportHostedArchiveInputV1,
@@ -2540,59 +2542,16 @@ async fn import_hosted_archive(
     use std::collections::BTreeMap;
     use tari_cc_private_ballot_archive::ARCHIVE_MANIFEST_CANONICAL_PATH;
 
-    // 1. Build the archive URL and send the authenticated GET request.
-    let url = format!(
-        "{}/api/v1/organizer/elections/{}/archive",
-        input.hosted_base_url.trim_end_matches('/'),
-        input.election_id,
-    );
-    let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("x-private-ballot-organizer", &input.organizer_secret_hex)
-        .send()
-        .await
-        .map_err(|e| {
-            CommandError::new(
-                "GUI_ARCHIVE_IMPORT_NETWORK_ERROR",
-                "NETWORK",
-                "could not reach the Hosted archive endpoint",
-            )
-            .with_context(format!("{e}"))
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
-        return Err(CommandError::new(
-            "GUI_ARCHIVE_IMPORT_ENDPOINT_ERROR",
-            "ENDPOINT",
-            "the Hosted archive endpoint returned an error",
-        )
-        .with_context(format!("HTTP {status}")));
-    }
-
-    // 2. Bound and parse the response body. The JSON body is bounded by the
-    //    hosted server's own MAX_BODY_BYTES limit, but we apply a client-side
-    //    guard of 512 MiB to prevent a rogue server from allocating unbounded
-    //    memory on this machine.
+    // 1. Parse the pre-downloaded archive body JSON. Apply a size guard before
+    //    parsing to prevent OOM from a malicious/oversized string.
     const MAX_IMPORT_BYTES: usize = 512 * 1024 * 1024;
-    let body_bytes = response
-        .bytes()
-        .await
-        .map_err(|_| CommandError::new(
-            "GUI_ARCHIVE_IMPORT_BODY_ERROR",
-            "NETWORK",
-            "could not read the Hosted archive response body",
-        ))?;
-    if body_bytes.len() > MAX_IMPORT_BYTES {
+    if input.archive_body_json.len() > MAX_IMPORT_BYTES {
         return Err(CommandError::new(
             "GUI_ARCHIVE_IMPORT_BODY_TOO_LARGE",
             "INVALID_INPUT",
-            "the Hosted archive response body exceeds the import size limit",
+            "the archive body exceeds the import size limit",
         ));
     }
-
-    // 3. Parse the ArchiveBody JSON.
     #[derive(serde::Deserialize)]
     struct ArchiveFileJson { path: String, cbor_hex: String }
     #[derive(serde::Deserialize)]
@@ -2603,20 +2562,20 @@ async fn import_hosted_archive(
         anchor_eligible: bool,
         files: Vec<ArchiveFileJson>,
     }
-    let body: ArchiveBodyJson = serde_json::from_slice(&body_bytes).map_err(|_| {
+    let body: ArchiveBodyJson = serde_json::from_str(&input.archive_body_json).map_err(|_| {
         CommandError::new(
             "GUI_ARCHIVE_IMPORT_PARSE_ERROR",
             "INVALID_INPUT",
-            "could not parse the Hosted archive response as a canonical archive body",
+            "could not parse the archive body as a canonical archive body",
         )
     })?;
 
-    // 4. Cross-check election_id.
+    // Cross-check election_id against the caller's declared election.
     if body.election_id != input.election_id {
         return Err(CommandError::new(
             "GUI_ARCHIVE_IMPORT_ELECTION_ID_MISMATCH",
             "INVALID_INPUT",
-            "the Hosted archive election_id does not match the requested election",
+            "the archive election_id does not match the requested election",
         ));
     }
 

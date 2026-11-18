@@ -185,7 +185,8 @@ pub use production_transport_authority_config::{
     ProductionTransportAuthorityReadinessV1, ProductionTransportAuthorityRootConfigV1,
     configure_production_transport_authority_root_v1, ensure_configured_root_matches_v1,
     forget_production_transport_authority_root_v1, production_transport_authority_path_v1,
-    production_transport_authority_readiness_v1, production_transport_authority_root_set_v1,
+    production_transport_authority_network_v1, production_transport_authority_readiness_v1,
+    production_transport_authority_root_set_v1,
 };
 pub use session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};

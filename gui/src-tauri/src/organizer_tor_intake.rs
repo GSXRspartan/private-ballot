@@ -41,7 +41,7 @@ use tari_cc_private_ballot_gui_core::{
     GuiElectionSessionV1, HostedDescriptorPendingStateV1, HostedDescriptorResponseV1,
     HostedDescriptorPendingStatusV1, HostedDescriptorRequestV1, PaddingPolicyV1, BatchPolicyV1,
     TransportAuthorityRootSetV1, TransportDescriptorV1, TransportRoutePolicyV1,
-    production_transport_authority_root_set_v1,
+    production_transport_authority_network_v1, production_transport_authority_root_set_v1,
     ensure_private_intake_inbox_directory_v1,
     ensure_voter_election_status_directory_v1, private_intake_inbox_directory_v1,
     read_accepted_package_digests_v1, reserve_next_status_generation_v1,
@@ -1488,9 +1488,11 @@ pub async fn export_hosted_descriptor_request(
                     "Desktop could not construct the Hosted descriptor request",
                 )
             })?;
+            let transport_network =
+                production_transport_authority_network_v1(&app_data_dir).map_err(CommandError::from)?;
             let request = HostedDescriptorRequestV1::new(
                 new_retry_capability_v1(),
-                HOSTED_DESCRIPTOR_NETWORK_V1.to_owned(),
+                transport_network,
                 descriptor,
             )
             .map_err(|_| CommandError::new(

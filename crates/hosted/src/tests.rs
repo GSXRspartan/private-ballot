@@ -28,11 +28,15 @@ use tari_cc_private_ballot_crypto::{
 use tari_cc_private_ballot_gui_core::{
     BatchPolicyV1, GuiLiveAnchorV2RequestV1, GuiV2AnchorPublishPreparationRequestV1,
     HostedDescriptorRequestV1, HostedDescriptorResponseV1, HostedOrganizerBootstrapV1,
-    HostedVoterPublicBundleV2, PaddingPolicyV1, TransportAuthorityRootSetV1,
-    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
-    build_v2_public_payload_from_verified_archive_v1,
+    HostedVoterPublicBundleV2, PaddingPolicyV1, PrivateBallotEnvelopeV1,
+    TransportAuthorityRootSetV1, TransportAuthorityRootV1, TransportDescriptorV1,
+    TransportRoutePolicyV1, build_v2_public_payload_from_verified_archive_v1,
     prepare_v2_anchor_publish_from_verified_evidence_v1,
     verify_v2_public_payload_against_archive_v1,
+};
+use tari_cc_private_ballot_transport_gateway::{
+    GatewayReceiverKeyV1, finalized_transport_archive_binding_from_accepted_digests_v1,
+    open_envelope_bytes_v1,
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, CanonicalCborWriter, HashDomain, PROTOCOL_VERSION_V1,
@@ -257,55 +261,6 @@ fn test_transport_root() -> tari_cc_private_ballot_gui_core::TransportAuthorityR
         signing.verifying_key().to_bytes(),
     )
     .unwrap_or_else(|_| panic!("test transport root"))
-}
-
-/// Uses the same durable-digest reconstruction as the production Desktop
-/// intake recovery, rather than a hand-built binding fixture.
-fn authoritative_transport_proof(f: &Fixture, packages: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
-    let (manifest, _, _) = load_fixture(f);
-    let signing = SigningKey::from_bytes(&[42; 32]);
-    let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
-        f.election_id.as_bytes().to_vec(),
-        manifest
-            .canonical_hash(&Blake3HashProviderV1)
-            .unwrap_or_else(|_| panic!("manifest hash")),
-        7,
-        TransportRoutePolicyV1::ManagedTorOrOffline,
-        vec!["http://test.invalid".to_owned()],
-        Vec::new(),
-        [7; 32],
-        "hosted-test-gateway".to_owned(),
-        vec![[8; 32]],
-        PaddingPolicyV1 {
-            id: "test-padding".to_owned(),
-            padded_bytes: 2048,
-        },
-        BatchPolicyV1 {
-            id: "test-batch".to_owned(),
-            accepted_unique_floor: 1,
-        },
-        None,
-        "hosted-test-root".to_owned(),
-        &signing,
-    )
-    .unwrap_or_else(|_| panic!("signed descriptor"));
-    let digests: Vec<[u8; 32]> = packages
-        .iter()
-        .map(|package| {
-            hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, package)
-        })
-        .collect();
-    let binding = tari_cc_private_ballot_transport_gateway::finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor, &digests)
-        .unwrap_or_else(|_| panic!("transport binding"))
-        .unwrap_or_else(|| panic!("nonempty accepted packages"));
-    (
-        binding
-            .to_canonical_cbor()
-            .unwrap_or_else(|_| panic!("binding cbor")),
-        descriptor
-            .to_canonical_cbor()
-            .unwrap_or_else(|_| panic!("descriptor cbor")),
-    )
 }
 
 fn desktop_binding_handoff_json(f: &Fixture, binding: &[u8], descriptor: &[u8]) -> String {
@@ -3700,6 +3655,47 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
         candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
     };
 
+    // Issue the authoritative Hosted descriptor while the election is open.
+    // All subsequent binding computations must use this exact descriptor.
+    let issued_descriptor_lifecycle = {
+        let manifest = ElectionManifest::from_canonical_cbor(&f2.manifest_cbor)
+            .expect("lifecycle manifest");
+        let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("lifecycle hash");
+        let draft = TransportDescriptorV1::unsigned_for_authority(
+            election_id.as_bytes().to_vec(),
+            manifest_hash,
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec!["http://test.invalid".to_owned()],
+            Vec::new(),
+            [7; 32],
+            "hosted-test-gateway".to_owned(),
+            vec![[8; 32]],
+            PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+            BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: 1 },
+            None,
+            "hosted-test-root".to_owned(),
+        ).expect("lifecycle descriptor draft");
+        let request = HostedDescriptorRequestV1::new(
+            [0x31; 32],
+            "test".to_owned(),
+            draft,
+        ).expect("lifecycle descriptor request");
+        let path = format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance");
+        let (s_desc, issued_cbor) = req_cbor(
+            public.clone(),
+            "POST",
+            &path,
+            request.to_canonical_cbor().expect("lifecycle request cbor"),
+            &secret,
+        ).await;
+        assert_eq!(s_desc, axum::http::StatusCode::OK, "lifecycle descriptor issuance");
+        HostedDescriptorResponseV1::from_canonical_cbor(&issued_cbor)
+            .expect("lifecycle descriptor response")
+            .descriptor()
+            .clone()
+    };
+
     // Voter 1 votes; a second ballot from the same credential (same
     // nullifier) is rejected exactly as before.
     let pkg_a = make_package(&f2, 1, b"candidate-a");
@@ -3803,7 +3799,19 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     .await;
     assert_eq!(smissing, axum::http::StatusCode::CONFLICT, "{vmissing}");
     assert_eq!(vmissing["code"], "transport_binding_required");
-    let (binding, descriptor) = authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_b.clone()]);
+    let lifecycle_binding_digests: Vec<[u8; 32]> = [&pkg_a, &pkg_b]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let lifecycle_transport_binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(
+            &issued_descriptor_lifecycle,
+            &lifecycle_binding_digests,
+        )
+        .expect("lifecycle transport binding")
+        .expect("non-empty lifecycle binding");
+    let binding = lifecycle_transport_binding.to_canonical_cbor().expect("lifecycle binding cbor");
+    let descriptor = issued_descriptor_lifecycle.to_canonical_cbor().expect("lifecycle descriptor cbor");
     let mut wrong_election_handoff: serde_json::Value =
         serde_json::from_str(&desktop_binding_handoff_json(&f2, &binding, &descriptor))
             .unwrap_or_else(|_| panic!("desktop binding handoff json"));
@@ -3856,8 +3864,19 @@ async fn organizer_full_lifecycle_vote_close_finalize_results_archive() {
     // A different *canonical* binding with the same election and accepted
     // count cannot win a first-write race: its accepted digest set is not the
     // authenticated history held by Hosted.
-    let (same_count_different_binding, _) =
-        authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_c.clone()]);
+    let wrong_lifecycle_digests: Vec<[u8; 32]> = [&pkg_a, &pkg_c]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let same_count_different_binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(
+            &issued_descriptor_lifecycle,
+            &wrong_lifecycle_digests,
+        )
+        .expect("wrong-content binding")
+        .expect("non-empty wrong-content binding")
+        .to_canonical_cbor()
+        .expect("wrong-content binding cbor");
     let (sdifferent, vdifferent) = organizer_call(
         &public,
         "POST",
@@ -5255,6 +5274,46 @@ async fn organizer_archive_endpoint_full_e2e_v2_anchor() {
     .await;
     assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
 
+    // Issue the authoritative Hosted descriptor while the election is still open.
+    let issued_descriptor_archive = {
+        let manifest = ElectionManifest::from_canonical_cbor(&f2.manifest_cbor)
+            .expect("archive manifest");
+        let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("archive hash");
+        let draft = TransportDescriptorV1::unsigned_for_authority(
+            election_id.as_bytes().to_vec(),
+            manifest_hash,
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec!["http://test.invalid".to_owned()],
+            Vec::new(),
+            [7; 32],
+            "hosted-test-gateway".to_owned(),
+            vec![[8; 32]],
+            PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+            BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: 1 },
+            None,
+            "hosted-test-root".to_owned(),
+        ).expect("archive descriptor draft");
+        let request = HostedDescriptorRequestV1::new(
+            [0x51; 32],
+            "test".to_owned(),
+            draft,
+        ).expect("archive descriptor request");
+        let path = format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance");
+        let (s_desc, issued_cbor) = req_cbor(
+            public.clone(),
+            "POST",
+            &path,
+            request.to_canonical_cbor().expect("archive request cbor"),
+            &secret,
+        ).await;
+        assert_eq!(s_desc, axum::http::StatusCode::OK, "archive descriptor issuance");
+        HostedDescriptorResponseV1::from_canonical_cbor(&issued_cbor)
+            .expect("archive descriptor response")
+            .descriptor()
+            .clone()
+    };
+
     // Close → submit transport binding → finalize.
     let (sc, vc) = organizer_call(
         &public,
@@ -5265,7 +5324,19 @@ async fn organizer_archive_endpoint_full_e2e_v2_anchor() {
     )
     .await;
     assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
-    let (binding, descriptor) = authoritative_transport_proof(&f2, &[pkg_a.clone(), pkg_b.clone()]);
+    let archive_binding_digests: Vec<[u8; 32]> = [&pkg_a, &pkg_b]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let archive_transport_binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(
+            &issued_descriptor_archive,
+            &archive_binding_digests,
+        )
+        .expect("archive transport binding")
+        .expect("non-empty archive binding");
+    let binding = archive_transport_binding.to_canonical_cbor().expect("archive binding cbor");
+    let descriptor = issued_descriptor_archive.to_canonical_cbor().expect("archive descriptor cbor");
     let (sbind, vbind) = organizer_call(
         &public,
         "POST",
@@ -5567,10 +5638,62 @@ async fn desktop_export_to_hosted_connect_negative_matrix() {
         &[("content-type", "application/json")]).await;
     assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
 
+    // Issue the authoritative Hosted descriptor while the election is still open.
+    let issued_descriptor_neg = {
+        let manifest = ElectionManifest::from_canonical_cbor(&f_nm.manifest_cbor)
+            .expect("neg-matrix manifest");
+        let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("neg-matrix hash");
+        let draft = TransportDescriptorV1::unsigned_for_authority(
+            election_id.as_bytes().to_vec(),
+            manifest_hash,
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec!["http://test.invalid".to_owned()],
+            Vec::new(),
+            [7; 32],
+            "hosted-test-gateway".to_owned(),
+            vec![[8; 32]],
+            PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+            BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: 1 },
+            None,
+            "hosted-test-root".to_owned(),
+        ).expect("neg-matrix descriptor draft");
+        let request = HostedDescriptorRequestV1::new(
+            [0xA1; 32],
+            "test".to_owned(),
+            draft,
+        ).expect("neg-matrix descriptor request");
+        let path = format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance");
+        let (s_desc, issued_cbor) = req_cbor(
+            public.clone(),
+            "POST",
+            &path,
+            request.to_canonical_cbor().expect("neg-matrix request cbor"),
+            &secret,
+        ).await;
+        assert_eq!(s_desc, axum::http::StatusCode::OK, "neg-matrix descriptor issuance");
+        HostedDescriptorResponseV1::from_canonical_cbor(&issued_cbor)
+            .expect("neg-matrix descriptor response")
+            .descriptor()
+            .clone()
+    };
+
     organizer_call(&public, "POST",
         &format!("/api/v1/organizer/elections/{election_id}/close"),
         None, Some(&secret)).await;
-    let (binding, descriptor) = authoritative_transport_proof(&f_nm, &[pkg_a, pkg_b]);
+    let neg_binding_digests: Vec<[u8; 32]> = [&pkg_a, &pkg_b]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let neg_transport_binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(
+            &issued_descriptor_neg,
+            &neg_binding_digests,
+        )
+        .expect("neg-matrix transport binding")
+        .expect("non-empty neg-matrix binding");
+    let binding = neg_transport_binding.to_canonical_cbor().expect("neg-matrix binding cbor");
+    let descriptor = issued_descriptor_neg.to_canonical_cbor().expect("neg-matrix descriptor cbor");
     organizer_call(&public, "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
         Some(desktop_binding_handoff_json(&f_nm, &binding, &descriptor)),
@@ -5758,13 +5881,39 @@ async fn organizer_full_v2_release_flow_through_connect() {
     );
 
     // ── 5. Descriptor request → authenticated Hosted issuance ─────────────────
+    // Build a gateway receiver key from a known test secret so the descriptor's
+    // public key is HPKE-derivable, enabling the full V2 transport path in step 8.
+    let gateway_receiver = GatewayReceiverKeyV1::from_secret_bytes([0x07_u8; 32])
+        .expect("test gateway receiver key must be valid");
+    let gateway_pk = gateway_receiver.receiver_public_key();
     let record = storage.get_election(election_id).unwrap().unwrap();
     let manifest = tari_cc_private_ballot_ballot::ElectionManifest::from_canonical_cbor(
         &record.manifest_cbor,
     ).expect("manifest parse");
     let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).expect("manifest hash");
     let election_id_bytes = manifest.election_id().as_bytes().to_vec();
-    let draft = make_descriptor_draft_for(&election_id_bytes, manifest_hash);
+    // Use the DERIVED public key so the descriptor can be used for sealing envelopes.
+    let draft = TransportDescriptorV1::unsigned_for_authority(
+        election_id_bytes.clone(),
+        manifest_hash,
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion".to_owned()],
+        Vec::new(),
+        gateway_pk,
+        "integration-test-gateway".to_owned(),
+        vec![[0x08_u8; 32]],
+        PaddingPolicyV1 {
+            id: "integration-padding".to_owned(),
+            padded_bytes: 2048,
+        },
+        BatchPolicyV1 {
+            id: "integration-batch".to_owned(),
+            accepted_unique_floor: 1,
+        },
+        None,
+        "hosted-test-root".to_owned(),
+    ).expect("descriptor draft");
     let request = HostedDescriptorRequestV1::new(
         [0xA2_u8; 32],
         "test".to_owned(),
@@ -5788,6 +5937,8 @@ async fn organizer_full_v2_release_flow_through_connect() {
         .descriptor()
         .verify(&test_transport_root(), manifest_hash)
         .expect("descriptor must verify under test root");
+    // Keep the issued descriptor: steps 8 and 9 must use it, not a fresh one.
+    let issued_descriptor = response.descriptor().clone();
 
     // ── 7. V2 voter bundle (confirms production intake path is live) ───────────
     let (s_bundle, bundle_cbor) = req_bytes(
@@ -5802,7 +5953,10 @@ async fn organizer_full_v2_release_flow_through_connect() {
     let verified_bundle = bundle.verify().expect("voter bundle must verify");
     assert_eq!(verified_bundle.descriptor.election_id(), election_id.as_bytes());
 
-    // ── 8. Fresh voter import + ballot/history ────────────────────────────────
+    // ── 8. V2 transport path: seal → transport intake simulation → ballot relay ──
+    // Voters seal ballot packages using the issued descriptor's gateway public key.
+    // The Desktop organizer opens the envelopes via its Tor gateway (simulated here
+    // with open_envelope_bytes_v1) and relays the decrypted packages to Hosted.
     let (sp, vp) = req(public.clone(), "GET",
         &format!("/api/v1/elections/{election_id}"), None, &[]).await;
     assert_eq!(sp, axum::http::StatusCode::OK, "{vp}");
@@ -5814,32 +5968,68 @@ async fn organizer_full_v2_release_flow_through_connect() {
         candidate_cbor: hex_decode(pkg_json["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
     };
     let pkg_a = make_package(&f_v2, 1, b"candidate-a");
+    // 8a. Voter seals ballot package for Tor transport.
+    let envelope_a = PrivateBallotEnvelopeV1::seal(&issued_descriptor, &pkg_a)
+        .expect("envelope seal for voter A");
+    let envelope_a_cbor = envelope_a.to_canonical_cbor().expect("envelope A encode");
+    // 8b. Desktop Tor gateway opens the envelope (simulates organizer intake).
+    let relay_a = open_envelope_bytes_v1(
+        &PrivateBallotEnvelopeV1::from_canonical_cbor(&envelope_a_cbor)
+            .expect("envelope A decode"),
+        &issued_descriptor,
+        &gateway_receiver,
+    ).expect("envelope A open");
+    assert_eq!(relay_a, pkg_a, "transport round-trip must preserve ballot package");
+    // 8c. Desktop relays the ballot to Hosted's ledger.
     let (s1, r1) = req(public.clone(), "POST",
         &format!("/api/v1/elections/{election_id}/ballots"),
         Some(serde_json::json!({
             "receipt_id": "bb000000-0000-4000-8000-000000000001",
-            "package_cbor_hex": hex_encode(&pkg_a),
+            "package_cbor_hex": hex_encode(&relay_a),
             "api_version": "v1",
         }).to_string()),
         &[("content-type", "application/json")]).await;
     assert_eq!(s1, axum::http::StatusCode::CREATED, "{r1}");
     let pkg_b = make_package(&f_v2, 2, b"candidate-b");
+    // Voter B: same seal → open → relay path.
+    let envelope_b = PrivateBallotEnvelopeV1::seal(&issued_descriptor, &pkg_b)
+        .expect("envelope seal for voter B");
+    let envelope_b_cbor = envelope_b.to_canonical_cbor().expect("envelope B encode");
+    let relay_b = open_envelope_bytes_v1(
+        &PrivateBallotEnvelopeV1::from_canonical_cbor(&envelope_b_cbor)
+            .expect("envelope B decode"),
+        &issued_descriptor,
+        &gateway_receiver,
+    ).expect("envelope B open");
+    assert_eq!(relay_b, pkg_b, "transport round-trip must preserve ballot package");
     let (s2, r2) = req(public.clone(), "POST",
         &format!("/api/v1/elections/{election_id}/ballots"),
         Some(serde_json::json!({
             "receipt_id": "bb000000-0000-4000-8000-000000000002",
-            "package_cbor_hex": hex_encode(&pkg_b),
+            "package_cbor_hex": hex_encode(&relay_b),
             "api_version": "v1",
         }).to_string()),
         &[("content-type", "application/json")]).await;
     assert_eq!(s2, axum::http::StatusCode::CREATED, "{r2}");
 
-    // ── 9. Close → real binding handoff → finalize ────────────────────────────
+    // ── 9. Close → real binding handoff (using ISSUED descriptor) → finalize ────
+    // After Fix #3 the binding must use the EXACT descriptor issued in step 5-6.
+    // Build the transport binding from the issued descriptor and the actual relayed
+    // ballot packages; do NOT create a fresh independent descriptor here.
     let (sc, vc) = organizer_call(&public, "POST",
         &format!("/api/v1/organizer/elections/{election_id}/close"),
         None, Some(&secret)).await;
     assert_eq!(sc, axum::http::StatusCode::OK, "{vc}");
-    let (binding, descriptor) = authoritative_transport_proof(&f_v2, &[pkg_a.clone(), pkg_b.clone()]);
+    let binding_digests: Vec<[u8; 32]> = [&pkg_a, &pkg_b]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let transport_binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(&issued_descriptor, &binding_digests)
+            .expect("transport binding computation")
+            .expect("non-empty accepted packages");
+    let binding = transport_binding.to_canonical_cbor().expect("binding cbor");
+    let descriptor = issued_descriptor.to_canonical_cbor().expect("issued descriptor cbor");
     let (sbind, vbind) = organizer_call(&public, "POST",
         &format!("/api/v1/organizer/elections/{election_id}/transport-binding"),
         Some(desktop_binding_handoff_json(&f_v2, &binding, &descriptor)),
