@@ -800,6 +800,16 @@ export interface GuiTrustedOotleTemplateWasmInspectionV1 {
   digest_hex: string;
 }
 
+/** Public result of a successful hosted archive import and verification. */
+export interface GuiArchiveImportResultV1 {
+  verified: boolean;
+  finalized: boolean;
+  anchor_eligible: boolean;
+  archive_hash_hex: string;
+  election_id: string;
+  file_count: number;
+}
+
 /** Bounded command error payload (mirror of the shell's CommandError). */
 export interface GuiCommandError {
   code: string;

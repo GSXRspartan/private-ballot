@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Hosted enrollment UI.
  *
  * Security invariants maintained throughout:
@@ -20,7 +20,7 @@ import init, {
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
 import { hostedShell } from "./shell";
 
-// â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Types â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 type Step =
   | "invitation_entry"
@@ -51,7 +51,7 @@ type EnrollResult = {
 
 type WasmResult = { ok: boolean; error?: string } & Record<string, unknown>;
 
-// â”€â”€ State (memory only â€” nothing persisted) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ State (memory only â€" nothing persisted) â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 let step: Step = "invitation_entry";
 // invitation secret stays in memory; cleared after successful enrollment
@@ -66,7 +66,7 @@ let errorMsg = "";
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let registryVerificationError = "";
 
-// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Helpers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 const app = document.getElementById("app") as HTMLElement;
 
@@ -93,7 +93,7 @@ function stopPoll() {
   if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
 }
 
-// â”€â”€ Render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Render â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 function render() {
   app.innerHTML = hostedShell(buildHtml(), "enroll");
@@ -107,7 +107,7 @@ function buildHtml(): string {
 
   const notice = `
     <div class="notice" role="note">
-      <strong>Hosted / Web Mode â€” reduced network-metadata privacy.</strong><br/>
+      <strong>Hosted / Web Mode â€" reduced network-metadata privacy.</strong><br/>
       Cloudflare/VPS infrastructure may observe connection metadata (timing, IP).
       Cryptographic ballot privacy (Triptych ring signatures) is preserved separately:
       your voter credential is generated <strong>in this browser</strong> and never sent to the server.
@@ -198,7 +198,7 @@ function buildHtml(): string {
         : "";
       return `${notice}
         <div class="card ok">
-          <h2>Enrollment accepted âœ“</h2>
+          <h2>Enrollment accepted âœ"</h2>
           ${idempotentNote}
           <p><strong>Election:</strong> <span class="mono">${esc(ei.election_id)}</span></p>
           <p><strong>Enrolled public credential:</strong>
@@ -228,7 +228,7 @@ function buildHtml(): string {
       const commitShort = ei.registry_commitment_hex ? shortHex(ei.registry_commitment_hex) : "(unavailable)";
       return `${notice}
         <div class="card ok">
-          <h2>Registry frozen âœ“</h2>
+          <h2>Registry frozen âœ"</h2>
           <p><strong>Election:</strong> <span class="mono">${esc(ei.election_id)}</span></p>
           <p><strong>Enrolled credentials:</strong> ${esc(String(ei.enrolled_count ?? "?"))}</p>
           <p><strong>Authorized seats:</strong> ${esc(String(ei.authorized_slot_count))}</p>
@@ -241,7 +241,12 @@ function buildHtml(): string {
           </details>
           <p class="ok"><strong>Registry verified locally with canonical Rust/WASM code.</strong></p>
           <p>Voting will open shortly. Keep your private credential safe.</p>
-          <a href="/">Go to voting page â†’</a>
+          <div class="action-row">
+            <a href="/">Go to voting page â†’</a>
+            <button id="btn-download-voter-bundle">Download Desktop voter bundle</button>
+          </div>
+          <p><small>The Desktop voter bundle is available once the organizer opens voting.
+          It identifies the ballot office and lets Private Ballot Desktop connect privately.</small></p>
         </div>`;
     }
 
@@ -256,7 +261,7 @@ function buildHtml(): string {
   }
 }
 
-// â”€â”€ Event binding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Event binding â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 function bind() {
   switch (step) {
@@ -284,6 +289,10 @@ function bind() {
       (document.getElementById("btn-check-freeze") as HTMLButtonElement)
         ?.addEventListener("click", () => pollFreezeStatus());
       break;
+    case "frozen":
+      (document.getElementById("btn-download-voter-bundle") as HTMLButtonElement)
+        ?.addEventListener("click", () => { void downloadV2VoterBundle(); });
+      break;
     case "wait_freeze":
     case "integrity_failure":
       (document.getElementById("btn-refresh") as HTMLButtonElement)
@@ -293,7 +302,7 @@ function bind() {
   }
 }
 
-// â”€â”€ Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â"€â"€ Handlers â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 async function handleLoadElection() {
   const secretInput = document.getElementById("inv-secret") as HTMLInputElement;
@@ -304,7 +313,7 @@ async function handleLoadElection() {
   if (!rawSecret) { setError("Please enter your invitation code."); render(); return; }
   if (!rawEid) { setError("Please enter the election ID."); render(); return; }
 
-  // Keep invitation in memory â€” not in URL, localStorage, or any persistent store
+  // Keep invitation in memory â€" not in URL, localStorage, or any persistent store
   invitationSecret = rawSecret;
   electionId = rawEid;
   clearError();
@@ -408,7 +417,7 @@ async function handleEnroll() {
       } else {
         setError(`Enrollment conflict (${code}): ${parsed.message ?? text.slice(0, 200)}`);
       }
-      // Don't clear invitation â€” allow user to retry
+      // Don't clear invitation â€" allow user to retry
       step = "confirm_credential";
       render();
     } else if (res.status === 401) {
@@ -461,7 +470,37 @@ function startAutoPoll() {
   pollTimer = setTimeout(() => { void pollFreezeStatus(); }, 10_000);
 }
 
-// â”€â”€ Bootstrap â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+async function downloadV2VoterBundle() {
+  if (!electionId) return;
+  clearError();
+  render();
+  let response: Response;
+  try {
+    response = await fetch(`/api/v1/elections/${encodeURIComponent(electionId)}/voter-bundle`);
+  } catch (e) {
+    setError(`Network error: ${e instanceof Error ? e.message : String(e)}`);
+    render();
+    return;
+  }
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 409) {
+      setError("The voter bundle is not available yet. The organizer must open voting first.");
+    } else {
+      setError(`Could not download the voter bundle (${response.status}).`);
+    }
+    render();
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `voter-bundle-v2.cbor`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// â"€â"€ Bootstrap â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 
 await init();
 render();

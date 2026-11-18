@@ -7,6 +7,7 @@ import {
   pickElectionArtifact,
   pickElectionStatusExportPath,
   pickGovernanceDocument,
+  pickHostedArchiveJson,
   pickHostedBindingHandoffPath,
   pickHostedBindingRequest,
   pickHostedDescriptorRequestPath,
@@ -22,6 +23,7 @@ import {
   rememberOrganizerRemoteTorConfig,
 } from "../api/organizerRemoteTorMemory";
 import type {
+  GuiArchiveImportResultV1,
   GuiArchiveWriteResultV1,
   GuiCommandError,
   GuiTallySummaryV1,
@@ -185,6 +187,7 @@ export function ManageElection() {
   const autoSyncBusyRef = useRef(false);
   const prevAcceptedRef = useRef<number | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
+  const [hostedArchiveImportResult, setHostedArchiveImportResult] = useState<GuiArchiveImportResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
@@ -1168,6 +1171,27 @@ export function ManageElection() {
       const result = await api.writeHostedBindingHandoff(requestPath, targetPath);
       setHostedBindingHandoffPath(result.written_path);
       recordAction("Exported verified Desktop binding handoff for Hosted");
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onImportHostedArchive = async () => {
+    clearLocalError();
+    setHostedArchiveImportResult(null);
+    if (!election) return;
+    const archiveJsonPath = await pickHostedArchiveJson();
+    if (archiveJsonPath === null) return;
+    const targetDirectory = await pickDirectory("Choose folder for the imported archive", "archive");
+    if (targetDirectory === null) return;
+    try {
+      const result = await api.importHostedArchive(
+        election.election_id_text ?? election.election_id_hex,
+        archiveJsonPath,
+        targetDirectory,
+      );
+      setHostedArchiveImportResult(result);
+      recordAction("Imported Hosted finalized archive");
     } catch (error) {
       showError(error);
     }
@@ -2730,6 +2754,33 @@ export function ManageElection() {
               Verified Desktop binding handoff exported
               <br />
               <span className="hash">{hostedBindingHandoffPath}</span>
+            </Notice>
+          )}
+
+          <h3 className="card-section-heading">Import Hosted archive</h3>
+          <p className="card-body">
+            Once Hosted Manage finalizes and publishes the archive, download it there and import
+            it here to verify and extract the canonical archive files. Desktop checks the election
+            ID and independently verifies the archive against the transport history. No organizer
+            credential is passed to Desktop in this step.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || !election}
+              onClick={() => void onImportHostedArchive()}
+            >
+              {organizerBusy ? "Working…" : "Import Hosted archive"}
+            </button>
+          </div>
+          {hostedArchiveImportResult && (
+            <Notice tone="ok">
+              Hosted archive imported and verified
+              <br />
+              <span className="hash">{hostedArchiveImportResult.archive_hash_hex}</span>
+              <br />
+              <span>{hostedArchiveImportResult.file_count} file(s) written</span>
             </Notice>
           )}
 

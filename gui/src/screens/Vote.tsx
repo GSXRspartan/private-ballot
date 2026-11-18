@@ -8,6 +8,7 @@ import {
   pickElectionStatusFile,
   pickGovernanceDocument,
   pickTorExecutable,
+  pickV2VoterBundle,
   pickVoterTransportBundle,
 } from "../api/dialog";
 import {
@@ -1241,6 +1242,32 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     if (picked !== null) setVoterBundlePath(picked);
   }
 
+  async function onImportV2Bundle() {
+    setBusy(true);
+    setError(null);
+    setPrivateError(null);
+    try {
+      const picked = await pickV2VoterBundle();
+      if (picked === null) return;
+      const status = await api.importV2VoterBundle(
+        picked,
+        torMode === "remote-socks" ? "remote-socks" : "managed-local",
+        torExePath,
+        torDataDir,
+        torMode === "remote-socks" && remoteSocksHost.trim()
+          ? { host: remoteSocksHost.trim(), port: parseInt(remoteSocksPort, 10) || 9050 }
+          : undefined,
+      );
+      setManagedTorStatus(status);
+      // V2 bundle is persisted in Rust app-data; no persistManagedTorConfig() call.
+      setReconfiguring(false);
+    } catch (err) {
+      setPrivateError(commandErrorFromUnknown(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onBrowseTorDataDir() {
     const picked = await pickDirectory("Choose voter Tor data directory");
     if (picked !== null) setTorDataDir(picked);
@@ -1738,11 +1765,20 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 <>
                   {!voterBundlePath && (
                     <Notice tone="info">
-                      Ballot-office connection file required. Ask the ballot office for
-                      the voter transport bundle file, then select it here.
+                      Ballot-office connection file required. If your ballot office uses
+                      Hosted, download the voter bundle from the enrollment page and import it
+                      below. Otherwise, ask the ballot office for the voter transport bundle file.
                     </Notice>
                   )}
                   <div className="action-row">
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      disabled={busy || !shellAvailable}
+                      onClick={() => void onImportV2Bundle()}
+                    >
+                      Import V2 bundle from Hosted
+                    </button>
                     <button
                       type="button"
                       className="btn btn-secondary"
@@ -1751,7 +1787,7 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                     >
                       {reconfiguring && voterBundlePath
                         ? "Choose a different ballot-office connection file"
-                        : "Select ballot-office connection file"}
+                        : "Select ballot-office connection file (V1)"}
                     </button>
                   </div>
                 </>

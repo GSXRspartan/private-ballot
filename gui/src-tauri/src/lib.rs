@@ -2505,10 +2505,10 @@ fn is_canonical_submission_path(path: &str) -> bool {
 #[derive(Debug, serde::Deserialize)]
 struct GuiImportHostedArchiveInputV1 {
     election_id: String,
-    /// Pre-downloaded archive JSON body from the Hosted instance. The browser
-    /// fetched this using its own in-memory credential; Rust never sees or
-    /// sends the organizer secret.
-    archive_body_json: String,
+    /// Absolute path to the pre-downloaded archive JSON file. The browser
+    /// fetched this using its own in-memory credential and saved it to disk;
+    /// Rust reads and verifies the file. No organizer secret reaches Rust.
+    archive_json_path: String,
     target_directory: String,
 }
 
@@ -2542,16 +2542,39 @@ async fn import_hosted_archive(
     use std::collections::BTreeMap;
     use tari_cc_private_ballot_archive::ARCHIVE_MANIFEST_CANONICAL_PATH;
 
-    // 1. Parse the pre-downloaded archive body JSON. Apply a size guard before
-    //    parsing to prevent OOM from a malicious/oversized string.
+    // 1. Read the pre-downloaded archive JSON file. The browser fetched and
+    //    saved it to disk using its own in-memory credential; Rust reads from
+    //    an absolute path only and applies a size guard before parsing.
     const MAX_IMPORT_BYTES: usize = 512 * 1024 * 1024;
-    if input.archive_body_json.len() > MAX_IMPORT_BYTES {
+    let archive_json_path = std::path::Path::new(input.archive_json_path.trim());
+    if !archive_json_path.is_absolute() {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_ABSOLUTE",
+            "INVALID_INPUT",
+            "the archive JSON path must be absolute",
+        ));
+    }
+    let archive_json_meta = std::fs::metadata(archive_json_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_FOUND",
+            "INVALID_INPUT",
+            "the archive JSON file could not be read",
+        )
+    })?;
+    if archive_json_meta.len() > MAX_IMPORT_BYTES as u64 {
         return Err(CommandError::new(
             "GUI_ARCHIVE_IMPORT_BODY_TOO_LARGE",
             "INVALID_INPUT",
             "the archive body exceeds the import size limit",
         ));
     }
+    let archive_body_json = std::fs::read_to_string(archive_json_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_FOUND",
+            "INVALID_INPUT",
+            "the archive JSON file could not be read",
+        )
+    })?;
     #[derive(serde::Deserialize)]
     struct ArchiveFileJson { path: String, cbor_hex: String }
     #[derive(serde::Deserialize)]
@@ -2562,7 +2585,7 @@ async fn import_hosted_archive(
         anchor_eligible: bool,
         files: Vec<ArchiveFileJson>,
     }
-    let body: ArchiveBodyJson = serde_json::from_str(&input.archive_body_json).map_err(|_| {
+    let body: ArchiveBodyJson = serde_json::from_str(&archive_body_json).map_err(|_| {
         CommandError::new(
             "GUI_ARCHIVE_IMPORT_PARSE_ERROR",
             "INVALID_INPUT",

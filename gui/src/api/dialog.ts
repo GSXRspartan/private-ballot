@@ -385,6 +385,37 @@ export async function pickElectionStatusExportPath(): Promise<string | null> {
 }
 
 /**
+ * Opens a native single-file picker for a pre-downloaded Hosted finalized
+ * archive JSON file. The frontend receives only the path; Rust reads,
+ * validates, and writes the archive files to the target directory.
+ */
+export async function pickHostedArchiveJson(): Promise<string | null> {
+  return openFile(
+    "Import Hosted finalized archive",
+    [
+      { name: "Hosted archive", extensions: ["json"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "electionExport",
+  );
+}
+
+/**
+ * Opens a native single-file picker for a V2 voter-public bundle downloaded
+ * from a Hosted election server. The frontend receives only the path; Rust
+ * verifies the bundle and configures the managed-Tor transport.
+ */
+export async function pickV2VoterBundle(): Promise<string | null> {
+  return openFile(
+    "Import V2 voter bundle from Hosted",
+    [
+      { name: "V2 voter bundle", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  );
+}
+
+/**
  * Opens a native single-file picker for a plain-text public-key list (the
  * non-canonical organizer convenience import format). Reading and validation
  * happen in the frontend/Rust; this only returns a path.

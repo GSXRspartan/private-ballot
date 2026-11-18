@@ -280,6 +280,7 @@ function renderConsole() {
   }
   if (election.election_state === "finalized") {
     actions.push(`<a class="btn-link btn-primary-link" href="/archive.html">View archive</a>`);
+    actions.push(`<button id="btn-download-archive">Download finalized archive</button>`);
   }
 
   app.innerHTML = hostedShell(`
@@ -432,6 +433,9 @@ function bindConsole() {
     if (file) void importDesktopBindingHandoff(file);
   });
 
+  const archiveDownloadBtn = document.getElementById("btn-download-archive") as HTMLButtonElement | null;
+  archiveDownloadBtn?.addEventListener("click", () => { void downloadFinalizedArchive(); });
+
   const autoBtn = document.getElementById("btn-issue-auto") as HTMLButtonElement | null;
   autoBtn?.addEventListener("click", () => issueInvitation(null));
   for (const el of Array.from(document.querySelectorAll("button[data-issue]"))) {
@@ -555,6 +559,45 @@ async function downloadBindingRequest() {
   a.click();
   URL.revokeObjectURL(url);
   cs.infoMsg = "Desktop binding request downloaded. In Desktop, select it after the transport history is finalized and verified.";
+  renderConsole();
+}
+
+async function downloadFinalizedArchive() {
+  if (!cs || cs.busy) return;
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const access = cs.access;
+  const base = access.service_url === "" ? "" : access.service_url;
+  let response: Response;
+  try {
+    response = await fetch(`${base}${apiPath(access, "/archive")}`, {
+      method: "GET",
+      headers: { "x-private-ballot-organizer": access.organizer_secret_hex },
+    });
+  } catch {
+    cs.busy = false;
+    setError("Could not reach Hosted to download the finalized archive.");
+    renderConsole();
+    return;
+  }
+  cs.busy = false;
+  if (!response.ok) {
+    if (response.status === 401) setError("Organizer credential rejected (401).");
+    else if (response.status === 404) setError("Finalized archive not found. The election may not be finalized yet.");
+    else setError(`Could not download the finalized archive (${response.status}).`);
+    renderConsole();
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `private-ballot-${access.election_id}.archive.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  cs.infoMsg = "Finalized archive downloaded. Import it in Desktop to verify and extract.";
   renderConsole();
 }
 
