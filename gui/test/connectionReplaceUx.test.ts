@@ -103,7 +103,11 @@ describe("replace ballot-office connection (backend invariants)", () => {
   it("re-verifies the bundle against the loaded election and fails closed on mismatch", () => {
     const body = configureBody();
     assert.match(body, /GUI_VOTER_BUNDLE_WRONG_ELECTION/);
-    assert.match(body, /verify_and_accept_descriptor/);
+    // The externally rooted trust decision (evaluate_v1_voter_bundle_trust)
+    // performs the descriptor verification under the operator-pinned
+    // production authority; the configure body must invoke it.
+    assert.match(body, /evaluate_v1_voter_bundle_trust/);
+    assert.match(managedTor, /verify_and_accept_descriptor/);
   });
 
   it("never touches the voter session (prepared ballot / selection / proof preserved)", () => {

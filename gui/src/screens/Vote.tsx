@@ -342,6 +342,9 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
   // like an election switch (the periodic Vote-page reset). A real switch —
   // different manifest hash, or unloaded -> loaded — still trips every effect.
   const electionManifestHashHex = election?.manifest_hash_hex ?? "";
+  // Canonical V2 elections must use the V2 voter-bundle path from Hosted. The
+  // legacy V1 connection-file UI is only for historical V1-schema elections.
+  const isV2Election = (election?.manifest_schema_version ?? 1) >= 2;
 
   useEffect(() => {
     setConfirmation(null);
@@ -1173,7 +1176,7 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     setError(null);
     setPrivateError(null);
     try {
-      if (voterBundlePath) {
+      if (voterBundlePath && !isV2Election) {
         await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
         persistManagedTorConfig();
       }
@@ -1208,8 +1211,10 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
     try {
       // For V1 bundles (voterBundlePath set), configure first so Rust re-validates.
       // For V2 (Hosted) bundles, importV2VoterBundle already set up Rust state;
-      // skip configure to avoid overwriting it with an empty path.
-      if (voterBundlePath) {
+      // skip configure to avoid overwriting it with an empty path. A canonical
+      // V2 election never invokes the legacy configure path (a stale remembered
+      // V1 path must not be sent at all — the Rust boundary rejects it).
+      if (voterBundlePath && !isV2Election) {
         // "" data dir → backend auto-derives the app-owned election-scoped dir.
         await api.configureManagedTor(torExePath, "", voterBundlePath, remoteConfigureArg());
         persistManagedTorConfig();
@@ -1632,10 +1637,9 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
             <div className="config-stack">
               {reconfiguring && managedTorStatus?.configured && (
                 <Notice tone="warn">
-                  Choose the correct ballot-office connection file for this election.
-                  Replacing it does not change your prepared ballot, your response, or
-                  your anonymous proof — it only updates which ballot office you connect
-                  to. A file from another election is still rejected.
+                  {isV2Election
+                    ? "Import the correct V2 voter bundle from Hosted for this election. Replacing it does not change your prepared ballot, your response, or your anonymous proof — it only updates which ballot office you connect to. A bundle from another election is still rejected."
+                    : "Choose the correct ballot-office connection file for this election. Replacing it does not change your prepared ballot, your response, or your anonymous proof — it only updates which ballot office you connect to. A file from another election is still rejected."}
                 </Notice>
               )}
               {/* Tor connection mode: managed local (default/recommended) vs the
@@ -1772,9 +1776,9 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                 <>
                   {!voterBundlePath && !managedTorStatus?.configured && (
                     <Notice tone="info">
-                      Ballot-office connection file required. If your ballot office uses
-                      Hosted, download the voter bundle from the enrollment page and import it
-                      below. Otherwise, ask the ballot office for the voter transport bundle file.
+                      {isV2Election
+                        ? "This election uses the canonical V2 format. Download the voter bundle from the Hosted enrollment page and import it below."
+                        : "Ballot-office connection file required. If your ballot office uses Hosted, download the voter bundle from the enrollment page and import it below. Otherwise, ask the ballot office for the voter transport bundle file."}
                     </Notice>
                   )}
                   <div className="action-row">
@@ -1786,7 +1790,10 @@ export function Vote({ onNavigate }: { onNavigate?: (section: NavSection) => voi
                     >
                       Import V2 bundle from Hosted
                     </button>
-                    {(!managedTorStatus?.configured || !!voterBundlePath) && (
+                    {/* Legacy V1 connection files are only for historical V1-schema
+                        elections. Canonical V2 elections must use the V2 voter bundle
+                        from Hosted; the Rust boundary refuses legacy files for them. */}
+                    {!isV2Election && (!managedTorStatus?.configured || !!voterBundlePath) && (
                       <button
                         type="button"
                         className="btn btn-secondary"

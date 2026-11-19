@@ -3,8 +3,10 @@
 //! Compiled only under the `managed-tor` feature. It adds the minimum
 //! backend state needed to:
 //!
-//!   * configure the voter test transport (absolute tor.exe path, voter Tor
-//!     data directory, voter-public transport bundle);
+//!   * configure the LEGACY voter transport (absolute tor.exe path, voter Tor
+//!     data directory, voter-public transport bundle) — externally rooted: the
+//!     bundle is verified under the operator-pinned production authority and a
+//!     canonical V2 election refuses legacy files entirely;
 //!   * start/stop a managed `tor.exe` directly (no shell) with a loopback
 //!     SOCKS5 listener;
 //!   * poll the REAL reviewed SOCKS readiness probe before transitioning to
@@ -33,6 +35,7 @@ use tari_cc_private_ballot_gui_core::{
     production_transport_authority_root_set_v1,
     resolve_and_recover_private_transport_cast_lock_state_v1, voter_cast_locks_directory_v1,
 };
+use tari_cc_private_ballot_protocol::ManifestHash;
 use tari_cc_private_ballot_transport_gateway::load_voter_public_bundle_v1;
 use tari_cc_private_ballot_transport_network::{
     ManagedTorConfigV1, ManagedTorControllerV1, ManagedTorReadinessProbeV1, ManagedTorSpawnerV1,
@@ -527,12 +530,117 @@ fn resolve_requested_tor_mode(
     }
 }
 
-/// Configures the voter test transport. In BOTH modes it loads and verifies the
-/// voter-public transport bundle and confirms the descriptor matches the loaded
-/// election. Managed-local additionally validates a `tor.exe` and prepares an
-/// app-owned Tor data directory; remote-SOCKS instead validates the operator's
-/// externally-managed SOCKS endpoint and never touches a Tor process. No Tor
-/// process is started here in either mode.
+/// Rejection reasons for the externally rooted legacy (V1) voter-bundle trust
+/// decision. Mapped 1:1 onto bounded `CommandError`s at the command boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum V1BundleTrustRejectionV1 {
+    /// The loaded election is a canonical V2 election: it must be configured
+    /// with the V2 voter bundle from Hosted, never a legacy connection file.
+    V2ElectionRequiresV2Bundle,
+    /// No production transport authority root is configured. Fails closed:
+    /// without an operator-pinned root NO legacy bundle can be verified.
+    AuthorityNotProvisioned,
+    /// The bundle's embedded authority root is not the externally pinned one
+    /// (self-signed, malformed, wrong key id, or wrong public key). A legacy
+    /// bundle can never install or select its own trust anchor.
+    UntrustedRoot,
+    /// The descriptor does not verify under the externally pinned authority
+    /// (wrong signature, wrong election, or wrong manifest binding).
+    DescriptorRejected,
+}
+
+/// THE externally rooted trust decision for a legacy (V1) voter connection
+/// file. Pure and unit-testable so the security matrix is behavioral.
+///
+/// The V1 bundle is CANDIDATE EVIDENCE ONLY. The trust anchor is the
+/// operator-pinned production transport authority root, the same external
+/// policy the V2 voter-bundle path uses:
+///   1. a canonical V2 election (manifest schema version 2) never accepts a
+///      legacy connection file — it requires the V2 voter bundle from Hosted;
+///   2. an unprovisioned pinned root fails closed (never a bundle-root
+///      fallback);
+///   3. the bundle's embedded root must EXACTLY match the pinned root (key id
+///      AND public key) — a bundle can never nominate its own root;
+///   4. the descriptor must verify under the pinned root set (revocation-aware
+///      lookup, strict signature, manifest binding).
+///
+/// On success returns the pinned root anchor `(key_id, public_key)` for
+/// authenticated election-status verification. The caller's consistency store
+/// records the accepted descriptor generation/fingerprint.
+pub(crate) fn evaluate_v1_voter_bundle_trust(
+    bundle_root: &TransportAuthorityRootV1,
+    descriptor: &TransportDescriptorV1,
+    pinned_roots: &TransportAuthorityRootSetV1,
+    expected_manifest: ManifestHash,
+    manifest_schema_version: u16,
+    consistency: &mut DescriptorConsistencyStoreV1,
+) -> Result<(String, [u8; 32]), V1BundleTrustRejectionV1> {
+    // 1. Canonical V2 elections must use the V2 voter-bundle path. The legacy
+    //    file format carries no V2 voter-bundle semantics and can never be a
+    //    fallback for one — not even when its root happens to be authentic.
+    if manifest_schema_version >= 2 {
+        return Err(V1BundleTrustRejectionV1::V2ElectionRequiresV2Bundle);
+    }
+    // 2. The externally pinned root is the ONLY trust anchor.
+    let Some(root_anchor) = pinned_roots.current_pinned_anchor() else {
+        return Err(V1BundleTrustRejectionV1::AuthorityNotProvisioned);
+    };
+    // 3. The bundle's embedded root is candidate evidence: it must EXACTLY
+    //    match the pinned root. A self-signed or otherwise divergent bundle is
+    //    rejected before any signature processing.
+    match bundle_root {
+        TransportAuthorityRootV1::Pinned { key_id, public_key } => {
+            if key_id != &root_anchor.0 || public_key != &root_anchor.1 {
+                return Err(V1BundleTrustRejectionV1::UntrustedRoot);
+            }
+        }
+        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
+            return Err(V1BundleTrustRejectionV1::UntrustedRoot);
+        }
+    }
+    // 4. The descriptor verifies under the pinned root set, never under the
+    //    bundle's own embedded key.
+    pinned_roots
+        .verify_and_accept_descriptor(descriptor, expected_manifest, consistency)
+        .map_err(|_| V1BundleTrustRejectionV1::DescriptorRejected)?;
+    Ok(root_anchor)
+}
+
+/// Maps one legacy-bundle trust rejection onto its bounded command error.
+fn v1_bundle_trust_error(rejection: V1BundleTrustRejectionV1) -> CommandError {
+    match rejection {
+        V1BundleTrustRejectionV1::V2ElectionRequiresV2Bundle => CommandError::new(
+            "GUI_VOTER_BUNDLE_V2_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "this election uses the canonical V2 election format; import the V2 voter bundle from Hosted instead of a legacy connection file",
+        ),
+        V1BundleTrustRejectionV1::AuthorityNotProvisioned => CommandError::new(
+            "GUI_VOTER_BUNDLE_AUTHORITY_NOT_PROVISIONED",
+            "BINDING_MISMATCH",
+            "no production transport authority root is configured; load the operator-supplied public root before a legacy connection file can be verified",
+        ),
+        V1BundleTrustRejectionV1::UntrustedRoot => CommandError::new(
+            "GUI_VOTER_BUNDLE_UNTRUSTED",
+            "BINDING_MISMATCH",
+            "the legacy connection file's embedded authority does not match the configured production transport authority; a connection file can never nominate its own trust root",
+        ),
+        V1BundleTrustRejectionV1::DescriptorRejected => CommandError::new(
+            "GUI_VOTER_BUNDLE_DESCRIPTOR_REJECTED",
+            "BINDING_MISMATCH",
+            "the legacy connection file descriptor does not verify under the configured production transport authority",
+        ),
+    }
+}
+
+/// Configures the LEGACY (V1) voter transport. In BOTH modes it loads the
+/// voter-public transport bundle, confirms the descriptor matches the loaded
+/// election, and verifies it under the EXTERNALLY PINNED production transport
+/// authority (the bundle itself can never nominate its own trust root, and a
+/// canonical V2 election refuses legacy files entirely — it requires the V2
+/// voter bundle from Hosted). Managed-local additionally validates a `tor.exe`
+/// and prepares an app-owned Tor data directory; remote-SOCKS instead validates
+/// the operator's externally-managed SOCKS endpoint and never touches a Tor
+/// process. No Tor process is started here in either mode.
 #[tauri::command]
 pub fn configure_managed_tor(
     input: ManagedTorConfigInputV1,
@@ -618,18 +726,29 @@ pub fn configure_managed_tor(
         TorTransportModeV1::RemoteSocks => PathBuf::new(),
     };
 
-    // Verify the descriptor under the test root before accepting it.
-    let roots = TransportAuthorityRootSetV1::new(bundle.root.clone());
+    // F1: EXTERNAL ROOT POLICY. The legacy connection file is candidate
+    // evidence only; the trust anchor is the operator-pinned production
+    // transport authority — the SAME external policy the V2 voter-bundle path
+    // uses. The bundle can never nominate its own root, and a canonical V2
+    // election never accepts a legacy file at all.
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| CommandError::app_data_unavailable())?;
+    let network = production_transport_authority_network_v1(&app_data_dir)
+        .map_err(CommandError::from)?;
+    let roots = production_transport_authority_root_set_v1(&app_data_dir, Some(&network))
+        .map_err(CommandError::from)?;
     let mut consistency = DescriptorConsistencyStoreV1::default();
-    roots
-        .verify_and_accept_descriptor(&bundle.descriptor, manifest_hash, &mut consistency)
-        .map_err(|_| {
-            CommandError::new(
-                "GUI_VOTER_BUNDLE_UNTRUSTED",
-                "BINDING_MISMATCH",
-                "the voter-public transport bundle descriptor does not verify under its test root",
-            )
-        })?;
+    let root_anchor = evaluate_v1_voter_bundle_trust(
+        &bundle.root,
+        &bundle.descriptor,
+        &roots,
+        manifest_hash,
+        session.artifacts().manifest().manifest_schema_version(),
+        &mut consistency,
+    )
+    .map_err(v1_bundle_trust_error)?;
 
     let onion_hostname = bundle.descriptor.onion_endpoints().first().cloned();
     let descriptor_fingerprint = bundle
@@ -637,19 +756,6 @@ pub fn configure_managed_tor(
         .fingerprint()
         .ok()
         .map(|fp| hex_lower(&fp));
-
-    // Capture the pinned root anchor (key id + public key) for authenticated
-    // election-status verification. The bundle loader guarantees a Pinned root.
-    let root_anchor = match &bundle.root {
-        TransportAuthorityRootV1::Pinned { key_id, public_key } => (key_id.clone(), *public_key),
-        TransportAuthorityRootV1::ProductionNotProvisioned { .. } => {
-            return Err(CommandError::new(
-                "GUI_VOTER_BUNDLE_UNTRUSTED",
-                "BINDING_MISMATCH",
-                "the voter-public transport bundle carries no pinned authority root",
-            ));
-        }
-    };
 
     // Managed-local: create the app-owned data directory and reserve a fresh
     // loopback SOCKS port. Remote-SOCKS: neither — the proxy is external.
@@ -785,8 +891,9 @@ pub struct ImportV2VoterBundleInputV1 {
 
 /// Imports a production V2 voter-public bundle downloaded from a Hosted election
 /// server. This is the separate production path; it must not be confused with the
-/// test-only `configure_managed_tor` command (V1 test bundle) or the organizer
-/// bootstrap import.
+/// legacy `configure_managed_tor` command (an externally rooted V1 connection
+/// file, refused outright for canonical V2 elections) or the organizer bootstrap
+/// import.
 ///
 /// On success the bundle is persisted to app-data for automatic restoration after
 /// restart, and the managed-Tor state is configured identically to V1 — ready for
@@ -2258,5 +2365,339 @@ mod tests {
             ManagedTorStartFailureKind::ReadinessTimeout,
         );
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ---------------------------------------------------------------------
+    // F1: the legacy (V1) voter-bundle trust decision is EXTERNALLY ROOTED.
+    // The bundle is candidate evidence only; the trust anchor is the
+    // operator-pinned production transport authority. Behavioral matrix:
+    //   A/G. correct, externally rooted bundle on a V1-schema election → OK
+    //   B/C. canonical V2 election + any V1 bundle (authentic or self-signed)
+    //        → V2ElectionRequiresV2Bundle (V2 import is the only path)
+    //   D.   descriptor signed by a wrong authority → DescriptorRejected
+    //   E.   correct descriptor but a wrong embedded root → UntrustedRoot
+    //   F.   production authority root not provisioned → AuthorityNotProvisioned
+    //   (self-signed V1 bundle on a V1-schema election → UntrustedRoot)
+    // ---------------------------------------------------------------------
+
+    mod f1_matrix {
+        use super::super::*;
+        use ed25519_dalek::SigningKey;
+        use tari_cc_private_ballot_gui_core::{
+            BatchPolicyV1, PaddingPolicyV1, TransportRoutePolicyV1,
+            provision_production_transport_authority_root_v1,
+        };
+        use tari_cc_private_ballot_protocol::{
+            Blake3HashProviderV1, HashProvider, ManifestHash,
+        };
+
+        const ELECTION_A: &[u8] = b"legacy-election-01";
+
+        fn manifest_hash() -> ManifestHash {
+            ManifestHash::new(Blake3HashProviderV1.hash(b"legacy-election-01-manifest"))
+        }
+
+        fn padded() -> PaddingPolicyV1 {
+            PaddingPolicyV1 {
+                id: "matrix-padding".to_owned(),
+                padded_bytes: 2048,
+            }
+        }
+
+        fn batch() -> BatchPolicyV1 {
+            BatchPolicyV1 {
+                id: "matrix-batch".to_owned(),
+                accepted_unique_floor: 1,
+            }
+        }
+
+        fn pinned_roots(operator: &SigningKey) -> TransportAuthorityRootSetV1 {
+            let root = provision_production_transport_authority_root_v1(
+                "op-root-2026",
+                operator.verifying_key().to_bytes(),
+            )
+            .expect("operator pin");
+            TransportAuthorityRootSetV1::new(root)
+        }
+
+        fn descriptor_signed_by(
+            signing: &SigningKey,
+            root_key_id: &str,
+        ) -> TransportDescriptorV1 {
+            TransportDescriptorV1::sign_for_test_or_ceremony(
+                ELECTION_A.to_vec(),
+                manifest_hash(),
+                1,
+                TransportRoutePolicyV1::ManagedTorOrOffline,
+                vec!["2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion".to_owned()],
+                Vec::new(),
+                [7; 32],
+                "matrix-gateway".to_owned(),
+                vec![[8; 32]],
+                padded(),
+                batch(),
+                None,
+                root_key_id.to_owned(),
+                signing,
+            )
+            .expect("descriptor")
+        }
+
+        fn embedded_root(signing: &SigningKey, key_id: &str) -> TransportAuthorityRootV1 {
+            TransportAuthorityRootV1::Pinned {
+                key_id: key_id.to_owned(),
+                public_key: signing.verifying_key().to_bytes(),
+            }
+        }
+
+        fn decide(
+            roots: &TransportAuthorityRootSetV1,
+            bundle_root: &TransportAuthorityRootV1,
+            descriptor: &TransportDescriptorV1,
+            schema_version: u16,
+        ) -> Result<(String, [u8; 32]), V1BundleTrustRejectionV1> {
+            let mut consistency = DescriptorConsistencyStoreV1::default();
+            evaluate_v1_voter_bundle_trust(
+                bundle_root,
+                descriptor,
+                roots,
+                manifest_hash(),
+                schema_version,
+                &mut consistency,
+            )
+        }
+
+        /// A + G: a legacy V1-schema election with a bundle whose embedded root
+        /// exactly matches the externally pinned authority is accepted, and the
+        /// pinned anchor — never the bundle's key — is returned.
+        #[test]
+        fn externally_rooted_legacy_bundle_is_accepted_and_returns_pinned_anchor() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let roots = pinned_roots(&operator);
+            let descriptor = descriptor_signed_by(&operator, "op-root-2026");
+            let outcome = decide(
+                &roots,
+                &embedded_root(&operator, "op-root-2026"),
+                &descriptor,
+                1,
+            )
+            .expect("externally rooted bundle must be accepted");
+            assert_eq!(outcome.0, "op-root-2026");
+            assert_eq!(
+                outcome.1,
+                operator.verifying_key().to_bytes(),
+                "the pinned operator key, never a bundle-supplied key"
+            );
+        }
+
+        /// B + C: a canonical V2 election refuses a legacy connection file
+        /// outright — even a perfectly authentic, externally rooted one — and
+        /// therefore also a malicious self-signed one. The V2 voter bundle is
+        /// the only path.
+        #[test]
+        fn canonical_v2_election_rejects_any_v1_bundle() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let attacker = SigningKey::from_bytes(&[0x99; 32]);
+            let roots = pinned_roots(&operator);
+            let authentic = descriptor_signed_by(&operator, "op-root-2026");
+            let self_signed = descriptor_signed_by(&attacker, "attacker-root");
+            for (name, root, descriptor) in [
+                ("authentic", embedded_root(&operator, "op-root-2026"), &authentic),
+                ("self-signed", embedded_root(&attacker, "attacker-root"), &self_signed),
+            ] {
+                let outcome = decide(&roots, &root, descriptor, 2);
+                assert_eq!(
+                    outcome,
+                    Err(V1BundleTrustRejectionV1::V2ElectionRequiresV2Bundle),
+                    "{name} legacy bundle must be refused for a canonical V2 election"
+                );
+            }
+            // Also refused when the pinned root is not provisioned at all.
+            let unprovisioned = TransportAuthorityRootSetV1::new(
+                tari_cc_private_ballot_gui_core::production_transport_authority_root_v1(),
+            );
+            let outcome = decide(
+                &unprovisioned,
+                &embedded_root(&attacker, "attacker-root"),
+                &self_signed,
+                2,
+            );
+            assert_eq!(
+                outcome,
+                Err(V1BundleTrustRejectionV1::V2ElectionRequiresV2Bundle),
+                "the V2 gate fires before any authority lookup"
+            );
+        }
+
+        /// D: a descriptor signed by the WRONG authority (but naming the pinned
+        /// root id) is rejected at signature verification.
+        #[test]
+        fn wrong_authority_signature_is_rejected() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let attacker = SigningKey::from_bytes(&[0x99; 32]);
+            let roots = pinned_roots(&operator);
+            // Correct root id, attacker signature.
+            let forged = descriptor_signed_by(&attacker, "op-root-2026");
+            let outcome = decide(&roots, &embedded_root(&operator, "op-root-2026"), &forged, 1);
+            assert_eq!(
+                outcome,
+                Err(V1BundleTrustRejectionV1::DescriptorRejected),
+                "a signature by a non-pinned authority must be rejected"
+            );
+            // Wrong root id entirely: lookup fails before signature processing.
+            let misbound = descriptor_signed_by(&operator, "some-other-root");
+            let outcome = decide(&roots, &embedded_root(&operator, "op-root-2026"), &misbound, 1);
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::DescriptorRejected));
+        }
+
+        /// E: a correct descriptor paired with a WRONG embedded root (the
+        /// self-certification attempt) is rejected on the exact root match.
+        #[test]
+        fn wrong_embedded_root_cannot_self_certify() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let attacker = SigningKey::from_bytes(&[0x99; 32]);
+            let roots = pinned_roots(&operator);
+            let descriptor = descriptor_signed_by(&operator, "op-root-2026");
+            // Same key id, attacker public key: the classic self-certifying
+            // bundle. The exact-match gate rejects it before any signature use.
+            let outcome = decide(&roots, &embedded_root(&attacker, "op-root-2026"), &descriptor, 1);
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::UntrustedRoot));
+            // A correct key under a different id is equally refused.
+            let outcome = decide(
+                &roots,
+                &embedded_root(&operator, "op-root-2027"),
+                &descriptor,
+                1,
+            );
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::UntrustedRoot));
+            // A bundle that carries the unprovisioned sentinel root is refused.
+            let outcome = decide(
+                &roots,
+                &TransportAuthorityRootV1::ProductionNotProvisioned {
+                    key_id:
+                        tari_cc_private_ballot_gui_core::PRODUCTION_TRANSPORT_ROOT_UNPROVISIONED_KEY_ID
+                            .to_owned(),
+                },
+                &descriptor,
+                1,
+            );
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::UntrustedRoot));
+        }
+
+        /// F: with NO production authority root configured, the decision fails
+        /// closed — a legacy bundle can never fall back to its own root.
+        #[test]
+        fn unprovisioned_authority_fails_closed() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let unprovisioned = TransportAuthorityRootSetV1::new(
+                tari_cc_private_ballot_gui_core::production_transport_authority_root_v1(),
+            );
+            let descriptor = descriptor_signed_by(&operator, "op-root-2026");
+            let outcome = decide(
+                &unprovisioned,
+                &embedded_root(&operator, "op-root-2026"),
+                &descriptor,
+                1,
+            );
+            assert_eq!(
+                outcome,
+                Err(V1BundleTrustRejectionV1::AuthorityNotProvisioned),
+                "no pinned root → fail closed, never a bundle-root fallback"
+            );
+        }
+
+        /// A fully self-signed legacy bundle (attacker root + attacker
+        /// descriptor) on a legacy V1-schema election is rejected twice over:
+        /// the embedded root does not match the pin, and the signature does not
+        /// verify under the pinned authority.
+        #[test]
+        fn fully_self_signed_bundle_is_rejected() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let attacker = SigningKey::from_bytes(&[0x99; 32]);
+            let roots = pinned_roots(&operator);
+            let descriptor = descriptor_signed_by(&attacker, "attacker-root");
+            let outcome = decide(&roots, &embedded_root(&attacker, "attacker-root"), &descriptor, 1);
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::UntrustedRoot));
+        }
+
+        /// The bounded error mapping names every rejection distinctly.
+        #[test]
+        fn every_rejection_maps_to_a_distinct_bounded_error() {
+            let codes = [
+                v1_bundle_trust_error(V1BundleTrustRejectionV1::V2ElectionRequiresV2Bundle).code,
+                v1_bundle_trust_error(V1BundleTrustRejectionV1::AuthorityNotProvisioned).code,
+                v1_bundle_trust_error(V1BundleTrustRejectionV1::UntrustedRoot).code,
+                v1_bundle_trust_error(V1BundleTrustRejectionV1::DescriptorRejected).code,
+            ];
+            let unique: std::collections::BTreeSet<_> = codes.iter().collect();
+            assert_eq!(unique.len(), codes.len(), "each rejection has a distinct code");
+            assert_eq!(codes[0], "GUI_VOTER_BUNDLE_V2_REQUIRED");
+            assert_eq!(codes[1], "GUI_VOTER_BUNDLE_AUTHORITY_NOT_PROVISIONED");
+            assert_eq!(codes[2], "GUI_VOTER_BUNDLE_UNTRUSTED");
+            assert_eq!(codes[3], "GUI_VOTER_BUNDLE_DESCRIPTOR_REJECTED");
+        }
+
+        /// The election binding still applies: an externally rooted bundle for
+        /// a DIFFERENT manifest hash is rejected at descriptor verification.
+        #[test]
+        fn wrong_election_binding_is_rejected() {
+            let operator = SigningKey::from_bytes(&[0x11; 32]);
+            let roots = pinned_roots(&operator);
+            let other_manifest =
+                ManifestHash::new(Blake3HashProviderV1.hash(b"a-completely-other-manifest"));
+            let mut consistency = DescriptorConsistencyStoreV1::default();
+            let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
+                ELECTION_A.to_vec(),
+                other_manifest,
+                1,
+                TransportRoutePolicyV1::ManagedTorOrOffline,
+                vec!["2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion".to_owned()],
+                Vec::new(),
+                [7; 32],
+                "matrix-gateway".to_owned(),
+                vec![[8; 32]],
+                padded(),
+                batch(),
+                None,
+                "op-root-2026".to_owned(),
+                &operator,
+            )
+            .expect("descriptor");
+            let outcome = evaluate_v1_voter_bundle_trust(
+                &embedded_root(&operator, "op-root-2026"),
+                &descriptor,
+                &roots,
+                manifest_hash(),
+                1,
+                &mut consistency,
+            );
+            assert_eq!(outcome, Err(V1BundleTrustRejectionV1::DescriptorRejected));
+        }
+    }
+
+    /// Source gate: the shipped `configure_managed_tor` command must run the
+    /// externally rooted trust decision (never the bundle-root set), must
+    /// derive the network from the trusted configuration, and must refuse
+    /// canonical V2 elections. Test-only source scan (the behavioral matrix
+    /// above proves the decision itself).
+    #[test]
+    fn configure_managed_tor_uses_the_externally_rooted_decision() {
+        let source = include_str!("managed_tor.rs");
+        let (body, _tests) = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("managed_tor.rs test module marker");
+        assert!(
+            body.contains("evaluate_v1_voter_bundle_trust("),
+            "configure_managed_tor must invoke the externally rooted V1 decision"
+        );
+        assert!(
+            body.contains("production_transport_authority_root_set_v1(")
+                && body.contains("production_transport_authority_network_v1("),
+            "the legacy path must derive its trust anchor from the trusted configuration"
+        );
+        assert!(
+            !body.contains("TransportAuthorityRootSetV1::new(bundle.root"),
+            "the self-certifying bundle-root trust anchor must be gone"
+        );
     }
 }
