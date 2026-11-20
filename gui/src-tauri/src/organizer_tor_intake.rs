@@ -91,7 +91,6 @@ const TOR_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
 const COLLECTOR_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Bounded collector shutdown join budget.
 const COLLECTOR_STOP_TIMEOUT: Duration = Duration::from_secs(3);
-const HOSTED_DESCRIPTOR_NETWORK_V1: &str = "production";
 
 /// Which Tor hosting mode the ORGANIZER intake uses. `ManagedLocal` is the
 /// default and recommended mode (this application starts, owns, and stops the
@@ -1091,9 +1090,10 @@ fn start_private_intake_blocking(
     ensure_app_owned_directory(&root)?;
     let paths = TransportPaths::under(&root);
     ensure_app_owned_directory(&paths.organizer_private_dir)?;
+    let expected_network = expected_transport_network_v1(&app_data_root(app)?)?;
     let roots = production_transport_authority_root_set_v1(
         &app_data_root(app)?,
-        Some(HOSTED_DESCRIPTOR_NETWORK_V1),
+        Some(expected_network.as_str()),
     )
     .map_err(CommandError::from)?;
 
@@ -1389,9 +1389,10 @@ pub async fn export_hosted_descriptor_request(
         let state = app.state::<AppState>();
         state.ensure_organizer_authority()?;
         let app_data_dir = app_data_root(&app)?;
+        let expected_network = expected_transport_network_v1(&app_data_dir)?;
         let roots = production_transport_authority_root_set_v1(
             &app_data_dir,
-            Some(HOSTED_DESCRIPTOR_NETWORK_V1),
+            Some(expected_network.as_str()),
         )
         .map_err(CommandError::from)?;
         let target = checked_new_artifact_target(&target_path)?;
@@ -1431,7 +1432,7 @@ pub async fn export_hosted_descriptor_request(
             })?;
             if loaded.binding.election_id != bound.election_id
                 || loaded.binding.manifest_hash != bound.manifest_hash
-                || loaded.pending.request().network() != HOSTED_DESCRIPTOR_NETWORK_V1
+                || loaded.pending.request().network() != expected_network
                 || loaded.pending.completed_descriptor().is_some()
             {
                 return Err(CommandError::new(
@@ -1488,8 +1489,7 @@ pub async fn export_hosted_descriptor_request(
                     "Desktop could not construct the Hosted descriptor request",
                 )
             })?;
-            let transport_network =
-                production_transport_authority_network_v1(&app_data_dir).map_err(CommandError::from)?;
+            let transport_network = expected_transport_network_v1(&app_data_dir)?;
             let request = HostedDescriptorRequestV1::new(
                 new_retry_capability_v1(),
                 transport_network,
@@ -1571,9 +1571,10 @@ pub async fn import_hosted_descriptor_response(
             )
         })?;
         let app_data_dir = app_data_root(&app)?;
+        let expected_network = expected_transport_network_v1(&app_data_dir)?;
         let roots = production_transport_authority_root_set_v1(
             &app_data_dir,
-            Some(HOSTED_DESCRIPTOR_NETWORK_V1),
+            Some(expected_network.as_str()),
         )
         .map_err(CommandError::from)?;
         let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
@@ -2224,6 +2225,15 @@ fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
     app.path()
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())
+}
+
+/// The expected transport environment for every Hosted descriptor decision is
+/// the externally provisioned authority network read from the operator's
+/// public pin. It is never hard-coded: a staging pin expects staging, a
+/// production pin expects production, and a missing or malformed authority
+/// config fails closed before any network decision is made.
+fn expected_transport_network_v1(app_data_root: &Path) -> Result<String, CommandError> {
+    production_transport_authority_network_v1(app_data_root).map_err(CommandError::from)
 }
 
 // -------------------------------------------------------------------------

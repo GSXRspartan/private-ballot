@@ -1,4 +1,4 @@
-//! Controlled-test provisioning material and public/private bundle separation.
+﻿//! Controlled-test provisioning material and public/private bundle separation.
 //!
 //! This module is compiled only under the `managed-tor` feature. It
 //! creates the organizer-side secret material and the voter-side public bundle
@@ -1477,5 +1477,295 @@ mod tests {
         );
         // The onion hostname IS safe to print (public).
         assert!(safe_output.contains(loaded.descriptor.onion_endpoints()[0].as_str()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Descriptor network decisions are derived from the provisioned authority
+    // config â€” never a hard-coded value. Behavioral matrix for the exact
+    // request-export / response-import boundary the Desktop commands call.
+    // -----------------------------------------------------------------------
+
+    const STAGING_NETWORK: &str = "staging";
+    const PRODUCTION_NETWORK: &str = "production";
+
+    fn configure_pinned_authority(label_tag: &str, network: &str, signing_seed: u8) -> PathBuf {
+        let signing = SigningKey::from_bytes(&[signing_seed; 32]);
+        let dir = unique_dir(&format!("authority-{label_tag}-{network}-{signing_seed}"));
+        // Write the operator's public pin in the exact shipped on-disk format.
+        // The atomic-write ceremony is gui-core's own concern; this matrix
+        // exercises the read/derive/verify boundary the Desktop calls.
+        let pin = format!(
+            r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_PRODUCTION_TRANSPORT_AUTHORITY_ROOT_V1","network":"{network}","root_key_id":"hosted-test-root","root_public_key_hex":"{key}","label":null,"configured_at_unix_ms":0}}"#,
+            key = hex_lower(&signing.verifying_key().to_bytes()),
+        );
+        std::fs::write(
+            dir.join(tari_cc_private_ballot_gui_core::production_transport_authority_path_v1(&dir)
+                .file_name()
+                .expect("file name")),
+            pin,
+        )
+        .expect("write pin");
+        dir
+    }
+
+    fn pinned_roots(dir: &Path, network: &str) -> TransportAuthorityRootSetV1 {
+        tari_cc_private_ballot_gui_core::production_transport_authority_root_set_v1(dir, Some(network))
+            .expect("root set for configured network")
+    }
+
+    fn hosted_draft(
+        material: &HostedPendingTransportMaterialV1,
+        binding: &TransportElectionBindingV1,
+    ) -> TransportDescriptorV1 {
+        TransportDescriptorV1::unsigned_for_authority(
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec![GOOD_ONION.to_owned()],
+            Vec::new(),
+            material.gateway_receiver_public_key,
+            "desktop-pending-gateway".to_owned(),
+            vec![material.receipt_signing_key.verifying_key().to_bytes()],
+            PaddingPolicyV1 {
+                id: "test-padding".to_owned(),
+                padded_bytes: 2048,
+            },
+            BatchPolicyV1 {
+                id: "test-batch".to_owned(),
+                accepted_unique_floor: 1,
+            },
+            None,
+            "hosted-test-root".to_owned(),
+        )
+        .expect("draft")
+    }
+
+    fn signed_response(
+        request: &HostedDescriptorRequestV1,
+        signing: &SigningKey,
+    ) -> HostedDescriptorResponseV1 {
+        let signature = signing
+            .sign(
+                &request
+                    .descriptor_draft()
+                    .authority_signing_payload()
+                    .expect("payload"),
+            )
+            .to_bytes();
+        HostedDescriptorResponseV1::new(
+            request,
+            request
+                .descriptor_draft()
+                .with_authority_signature(signature)
+                .expect("issued"),
+        )
+        .expect("response")
+    }
+
+    fn persisted_pending(
+        organizer_private_dir: &Path,
+        base_dir: &Path,
+        binding: &TransportElectionBindingV1,
+        material: &HostedPendingTransportMaterialV1,
+        request: HostedDescriptorRequestV1,
+    ) {
+        let pending = HostedDescriptorPendingStateV1::new(
+            request,
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            [4; 32],
+        )
+        .expect("pending");
+        persist_hosted_pending_transport_v1(
+            organizer_private_dir,
+            material,
+            &pending,
+            binding,
+            &base_dir.join("tor-data"),
+            &base_dir.join("hs-dir"),
+        )
+        .expect("persist pending");
+    }
+
+    /// Matrix 1 + 7 + 8: a staging pin derives the expected staging network,
+    /// the exported request carries `network = staging`, and an authority
+    /// response signed by the pinned staging key imports successfully.
+    #[test]
+    fn staging_pin_expects_staging_request_and_imports_its_response() {
+        let dir = configure_pinned_authority("accepts-staging", STAGING_NETWORK, 42);
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        assert_eq!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            STAGING_NETWORK
+        );
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new(
+            [5; 32],
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            draft,
+        )
+        .expect("request");
+        assert_eq!(request.network(), STAGING_NETWORK);
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &signing);
+        let (outcome, descriptor) = import_hosted_descriptor_response_v1(
+            &organizer_private_dir,
+            &response,
+            &roots,
+            &binding.election_id,
+            ManifestHash::new(binding.manifest_hash),
+        )
+        .expect("staging response imports");
+        assert_eq!(outcome, HostedDescriptorResponseImportV1::Completed);
+        assert_eq!(descriptor.root_key_id(), "hosted-test-root".to_owned());
+    }
+
+    /// Matrix 2: a production pin expects production and the same boundary
+    /// accepts a production request/response pair.
+    #[test]
+    fn production_pin_expects_production_request_and_imports_its_response() {
+        let dir = configure_pinned_authority("accepts-production", PRODUCTION_NETWORK, 43);
+        let signing = SigningKey::from_bytes(&[43; 32]);
+        assert_eq!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            PRODUCTION_NETWORK
+        );
+        let roots = pinned_roots(&dir, PRODUCTION_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new(
+            [6; 32],
+            PRODUCTION_NETWORK.to_owned(),
+            draft,
+        )
+        .expect("request");
+        assert_eq!(request.network(), PRODUCTION_NETWORK);
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &signing);
+        let (outcome, _descriptor) = import_hosted_descriptor_response_v1(
+            &organizer_private_dir,
+            &response,
+            &roots,
+            &binding.election_id,
+            ManifestHash::new(binding.manifest_hash),
+        )
+        .expect("production response imports");
+        assert_eq!(outcome, HostedDescriptorResponseImportV1::Completed);
+    }
+
+    /// Matrix 3: a staging Desktop rejects a response that carries a
+    /// production network â€” even when it is signed by the pinned key.
+    #[test]
+    fn staging_pin_rejects_production_network_response() {
+        let dir = configure_pinned_authority("rejects-production", STAGING_NETWORK, 42);
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new([5; 32], STAGING_NETWORK.to_owned(), draft)
+            .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        // A forged/foreign response whose network field says "production".
+        let production_request =
+            HostedDescriptorRequestV1::new([5; 32], PRODUCTION_NETWORK.to_owned(), request.descriptor_draft().clone())
+                .expect("request");
+        let response = signed_response(&production_request, &signing);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a production-network response must never satisfy a staging request"
+        );
+    }
+
+    /// Matrix 4: a production Desktop rejects a staging-network response.
+    #[test]
+    fn production_pin_rejects_staging_network_response() {
+        let dir = configure_pinned_authority("rejects-staging", PRODUCTION_NETWORK, 43);
+        let signing = SigningKey::from_bytes(&[43; 32]);
+        let roots = pinned_roots(&dir, PRODUCTION_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request =
+            HostedDescriptorRequestV1::new([6; 32], PRODUCTION_NETWORK.to_owned(), draft)
+                .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let staging_request =
+            HostedDescriptorRequestV1::new([6; 32], STAGING_NETWORK.to_owned(), request.descriptor_draft().clone())
+                .expect("request");
+        let response = signed_response(&staging_request, &signing);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a staging-network response must never satisfy a production request"
+        );
+    }
+
+    /// Matrix 5: a missing authority config fails closed before any network
+    /// decision is made.
+    #[test]
+    fn missing_authority_config_fails_closed() {
+        let dir = unique_dir("authority-missing");
+        assert!(tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir).is_err());
+        assert!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_root_set_v1(
+                &dir,
+                Some(STAGING_NETWORK)
+            )
+            .is_err(),
+            "an unprovisioned authority must fail closed"
+        );
+    }
+
+    /// Matrix 6: a wrong authority key with the correct network is rejected.
+    #[test]
+    fn wrong_authority_key_rejected_with_correct_network() {
+        let dir = configure_pinned_authority("rejects-wrong-key", STAGING_NETWORK, 42);
+        let attacker = SigningKey::from_bytes(&[99; 32]);
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new([5; 32], STAGING_NETWORK.to_owned(), draft)
+            .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &attacker);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a signature that is not from the pinned authority must be rejected"
+        );
     }
 }
