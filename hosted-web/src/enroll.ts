@@ -18,6 +18,10 @@ import init, {
   generate_secret_key,
   public_key_for_secret,
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
+import {
+  artifactFileName,
+  buildVoterCredentialArtifact,
+} from "./voterCredentialArtifact";
 import { hostedShell } from "./shell";
 
 // â"€â"€ Types â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -91,6 +95,30 @@ function clearError() { errorMsg = ""; }
 
 function stopPoll() {
   if (pollTimer !== null) { clearTimeout(pollTimer); pollTimer = null; }
+}
+
+/**
+ * Explicit, user-initiated export of the enrolled private credential. This is
+ * the ONLY shipped way a web voter can carry the enrollment credential to the
+ * vote page (or another session). The secret never leaves this page except as
+ * the downloaded file the voter chooses to save; it is not logged, stored, or
+ * placed in any URL. Producing the artifact is always an explicit user action.
+ */
+function downloadVoterCredentialArtifact() {
+  if (!electionId || !secretKeyHex || !enrollResult) return;
+  const artifact = buildVoterCredentialArtifact(
+    electionId,
+    enrollResult.public_key_hex,
+    secretKeyHex,
+    new Date().toISOString()
+  );
+  const blob = new Blob([JSON.stringify(artifact, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = artifactFileName(electionId);
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // â"€â"€ Render â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
@@ -198,12 +226,19 @@ function buildHtml(): string {
         : "";
       return `${notice}
         <div class="card ok">
-          <h2>Enrollment accepted âœ"</h2>
+          <h2>Enrollment accepted ðŸŽ‰</h2>
           ${idempotentNote}
           <p><strong>Election:</strong> <span class="mono">${esc(ei.election_id)}</span></p>
           <p><strong>Enrolled public credential:</strong>
             <span class="mono">${esc(pubShort)}</span></p>
           <p>The invitation code has been cleared from browser memory.</p>
+          <div class="card error">
+            <strong>Save your voting credential now.</strong> Your private credential
+            stays in this browser tab's memory only. Download the credential file and
+            keep it safe &mdash; without it you cannot cast your ballot, and closing
+            this page cannot be undone.
+          </div>
+          <button id="btn-download-voter-credential">Download voter credential</button>
           <p><strong>Registry status:</strong> ${esc(ei.eligibility_state)}</p>
           <p>The organizer must freeze the voter registry before voting opens.</p>
           <button id="btn-check-freeze">Check registry status</button>
@@ -243,6 +278,7 @@ function buildHtml(): string {
           <p>Voting will open shortly. Keep your private credential safe.</p>
           <div class="action-row">
             <a href="/">Go to voting page â†’</a>
+            <button id="btn-download-voter-credential">Download voter credential</button>
             <button id="btn-download-voter-bundle">Download Desktop voter bundle</button>
           </div>
           <p><small>The Desktop voter bundle is available once the organizer opens voting.
@@ -288,10 +324,14 @@ function bind() {
     case "receipt":
       (document.getElementById("btn-check-freeze") as HTMLButtonElement)
         ?.addEventListener("click", () => pollFreezeStatus());
+      (document.getElementById("btn-download-voter-credential") as HTMLButtonElement)
+        ?.addEventListener("click", downloadVoterCredentialArtifact);
       break;
     case "frozen":
       (document.getElementById("btn-download-voter-bundle") as HTMLButtonElement)
         ?.addEventListener("click", () => { void downloadV2VoterBundle(); });
+      (document.getElementById("btn-download-voter-credential") as HTMLButtonElement)
+        ?.addEventListener("click", downloadVoterCredentialArtifact);
       break;
     case "wait_freeze":
     case "integrity_failure":

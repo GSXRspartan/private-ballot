@@ -6,6 +6,9 @@ import init, {
   package_hash_hex,
   public_key_for_secret,
 } from "./wasm/tari_cc_private_ballot_hosted_wasm.js";
+import {
+  parseVoterCredentialArtifact,
+} from "./voterCredentialArtifact";
 import { hostedShell } from "./shell";
 
 type Pkg = {
@@ -61,6 +64,15 @@ function render() {
     <input type="password" id="secret" placeholder="voter secret hex (memory only)" autocomplete="off" />
     <button id="show-pubkey">Show public key</button>
     <div id="pubkey" class="mono"></div>
+    <details id="import-credential-section">
+      <summary>Import saved credential file</summary>
+      <p>Open the credential file you saved after enrolling
+      (<span class="mono">private-ballot-voter-&lt;election&gt;-credential-v1.json</span>).
+      The file is verified against this election before use.</p>
+      <input type="file" id="credential-file" accept="application/json,.json" />
+      <button id="import-credential">Import credential</button>
+      <div id="import-status" class="mono"></div>
+    </details>
   </div>
   <div class="card">
     <h2>3. Ballot choice</h2>
@@ -118,6 +130,27 @@ function bind() {
     if (!secretHex) { output("no secret in memory"); return; }
     const r = parseWasm(public_key_for_secret(secretHex));
     (document.getElementById("pubkey") as HTMLElement).textContent = r.ok ? `pubkey: ${r.public_key_hex}` : `error: ${r.error}`;
+  });
+  document.getElementById("import-credential")?.addEventListener("click", () => {
+    const input = document.getElementById("credential-file") as HTMLInputElement;
+    const status = document.getElementById("import-status") as HTMLElement;
+    const file = input.files?.[0];
+    if (!file) { status.textContent = "choose a credential file first"; return; }
+    if (!pkg) { status.textContent = "load the election first, then import your credential"; return; }
+    file.text().then((text) => {
+      const parsed = parseVoterCredentialArtifact(text, pkg!.election_id, (secret) => {
+        const r = parseWasm(public_key_for_secret(secret));
+        if (!r.ok) return null;
+        const derived = String(r.public_key_hex ?? "");
+        return /^[0-9a-f]{64}$/.test(derived) ? derived : null;
+      });
+      if (!parsed.ok) { status.textContent = parsed.error; return; }
+      secretHex = parsed.secret_key_hex;
+      const secretInput = document.getElementById("secret") as HTMLInputElement;
+      secretInput.value = secretHex;
+      status.textContent = "credential verified for this election";
+      output("imported credential loaded (memory only)");
+    });
   });
   document.getElementById("create")?.addEventListener("click", () => {
     if (!pkg) { output(packageIntegrityError || "load a locally verified election first"); return; }
