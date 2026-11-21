@@ -37,7 +37,19 @@ export function providerErrorMessage(error: unknown): string {
 
 export interface PublishDriver {
   connect(adapter: WindowTariProvider): Promise<string[]>;
-  createRequest(adapter: WindowTariProvider, bundle: AnchorBundleV1): Promise<string>;
+  /**
+   * Creates the wallet transaction request.
+   *
+   * `maxFee` is the hard fee ceiling, in fee units, that the page authorizes.
+   * It is forwarded to the wallet as the `maxFee` request parameter so the
+   * wallet — not the page — enforces the cap. Callers that omit it inherit the
+   * wallet default, which this project never does for Mainnet anchors.
+   */
+  createRequest(
+    adapter: WindowTariProvider,
+    bundle: AnchorBundleV1,
+    maxFee?: number,
+  ): Promise<string>;
   waitForApproval(
     adapter: WindowTariProvider,
     requestId: string,
@@ -62,8 +74,10 @@ export function defaultPublishDriver(options: {
 }): PublishDriver {
   return {
     connect: (adapter) => adapter.connect(),
-    createRequest: (adapter, bundle) =>
-      adapter.createTransactionRequest(buildAnchorInstructions(bundle)).then((created) => created.requestId),
+    createRequest: (adapter, bundle, maxFee) =>
+      adapter
+        .createTransactionRequest(buildAnchorInstructions(bundle), maxFee)
+        .then((created) => created.requestId),
     waitForApproval: (adapter, requestId, timeoutMs) =>
       adapter.pollTransactionRequest(requestId, { timeoutMs }),
     submit: async (adapter, requestId) => {
