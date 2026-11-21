@@ -40,6 +40,8 @@ const DAPP_DOCUMENT_PATHS = new Set([
   "/evidence.html",
   "/guide",
   "/guide.html",
+  "/anchor",
+  "/anchor.html",
   "/about",
   "/about.html",
   "/settings",
