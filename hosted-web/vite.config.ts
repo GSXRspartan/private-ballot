@@ -23,6 +23,7 @@ export default defineConfig({
         settings: "settings.html",
         archive: "archive.html",
         evidence: "evidence.html",
+        anchor: "anchor.html",
       },
     },
   },

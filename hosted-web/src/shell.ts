@@ -1,4 +1,4 @@
-export type HostedSection = "home" | "guide" | "create" | "manage" | "vote" | "enroll" | "archive" | "evidence" | "settings" | "about";
+export type HostedSection = "home" | "guide" | "create" | "manage" | "vote" | "enroll" | "archive" | "evidence" | "anchor" | "settings" | "about";
 
 function navItem(
   href: string,
@@ -15,21 +15,6 @@ function navItem(
       >
         ${label}
       </a>
-    </li>
-  `;
-}
-
-function disabledNavItem(label: string): string {
-  return `
-    <li>
-      <span
-        class="nav-item nav-item-disabled"
-        aria-disabled="true"
-        title="Available in Organizer/Desktop Mode"
-      >
-        <span>${label}</span>
-        <span class="nav-item-badge">Desktop</span>
-      </span>
     </li>
   `;
 }
@@ -81,7 +66,7 @@ export function hostedShell(content: string, section: HostedSection): string {
           <ul>
             ${navItem("/create.html", "Create Election", "create", section)}
             ${navItem("/manage.html", "Manage Election", "manage", section)}
-            ${disabledNavItem("Anchor")}
+            ${navItem("/anchor.html", "Anchor", "anchor", section)}
           </ul>
         </div>
 
