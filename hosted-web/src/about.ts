@@ -1,8 +1,9 @@
 ﻿import { hostedShell } from "./shell";
 import {
+  APP_ANCHOR_NETWORK,
+  APP_DEPLOYMENT_ENVIRONMENT,
   APP_IDENTITY_TAG,
   APP_NAME,
-  APP_NETWORK_LABEL,
   APP_RELEASE_STATUS,
   APP_STATUS_LABEL,
   APP_VERSION,
@@ -60,8 +61,13 @@ app.innerHTML = hostedShell(`
       </div>
 
       <div class="field-row">
-        <span class="field-label">Network</span>
-        <span class="field-value">${APP_NETWORK_LABEL}</span>
+        <span class="field-label">Deployment environment</span>
+        <span class="field-value">${APP_DEPLOYMENT_ENVIRONMENT}</span>
+      </div>
+
+      <div class="field-row">
+        <span class="field-label">Anchor network</span>
+        <span class="field-value">${APP_ANCHOR_NETWORK}</span>
       </div>
 
       <div class="field-row">

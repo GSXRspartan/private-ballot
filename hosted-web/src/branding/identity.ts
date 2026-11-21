@@ -21,15 +21,16 @@ export const APP_IDENTITY_TAG = "Independent Open-Source Project";
 export const APP_STATUS_LABEL = "Governance Pilot";
 
 /** Release-maturity label. This describes the SOFTWARE stage independently
- *  from the release's intended purpose (governance pilot) or network
- *  (Esmeralda testnet). "Alpha" is the pre-release maturity level: the
+ *  from the release's intended purpose (governance pilot) or network.
+ *  "Alpha" is the pre-release maturity level: the
  *  software is functional but not audited for production governance use. */
 export const APP_RELEASE_STATUS = "Alpha";
 
-/** Human-readable network the release targets. Kept as a plain, non-secret
- *  string; the actual network id used by the anchor backend is
- *  `esmeralda` (see `src/anchor/anchorForm.ts`). */
-export const APP_NETWORK_LABEL = "Esmeralda Testnet";
+/** Human-readable deployment environment for the hosted web service. */
+export const APP_DEPLOYMENT_ENVIRONMENT = "Hosted Staging";
+
+/** Human-readable anchor blockchain network targeted for public anchoring. */
+export const APP_ANCHOR_NETWORK = "Tari Ootle Mainnet";
 
 /** Current application version. Kept in step with package.json; the
  *  branding tests assert the two never drift apart. */

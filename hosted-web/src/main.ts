@@ -56,12 +56,13 @@ function render() {
     <button id="load">Load public package</button>
     <div id="election-info">${pkg ? "Registry verified locally" : esc(packageIntegrityError || "Not loaded")}</div>
   </div>
-  <div class="card">
-    <h2>2. Voter credential (memory only)</h2>
-    <p>Secret stays in memory for this session only. It is never put in a URL, never stored in localStorage,
-    never sent to the backend, and never logged. Close the tab to discard it.</p>
+<div class="card">
+    <h2>2. Voter credential</h2>
+    <p>Your credential is loaded into browser memory for voting. It is never put in a URL, never stored in localStorage,
+    never sent to the backend, and never logged. You can import a saved credential file (downloaded after enrollment)
+    or generate a new one here. Close the tab to discard the in-memory secret.</p>
     <button id="gen-secret">Generate new credential</button>
-    <input type="password" id="secret" placeholder="voter secret hex (memory only)" autocomplete="off" />
+    <input type="password" id="secret" placeholder="voter secret hex" autocomplete="off" />
     <button id="show-pubkey">Show public key</button>
     <div id="pubkey" class="mono"></div>
     <details id="import-credential-section">

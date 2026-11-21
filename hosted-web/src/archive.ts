@@ -14,6 +14,14 @@ app.innerHTML = hostedShell(`
     This page retrieves the ballot office's public result and archive data.
     Full offline archive replay verification remains available in the
     Private Ballot desktop application.
+    <br/><br/>
+    <strong>Anchoring.</strong> A finalized election can be anchored to Tari Ootle Mainnet
+    directly from the browser using the <a href="/anchor.html">Anchor</a> page; the desktop
+    application is not required. The Anchor page independently verifies the canonical
+    payload encoding, the released Mainnet deployment identity, the wallet network, and the
+    on-chain anchor event. It does not re-replay the archive itself: the archive-to-tally
+    provenance is proven by the ballot office's canonical archive replay, which the desktop
+    application can also verify offline.
   </div>
 
   <section class="card">

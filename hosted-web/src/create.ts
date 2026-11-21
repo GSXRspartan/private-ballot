@@ -64,34 +64,52 @@ function render() {
     ${err}
     <div class="card">
       <h2>Create a new election</h2>
-      <label for="eid-input">Election ID</label>
-      <input type="text" id="eid-input" placeholder="e.g. club-vote-2026-11" autocomplete="off" />
-      <small>1..128 characters of A-Z a-z 0-9 . _ -</small>
+      <div class="form-grid">
+        <div class="form-field form-field--full">
+          <label for="eid-input">Election ID</label>
+          <input type="text" id="eid-input" placeholder="e.g. club-vote-2026-11" autocomplete="off" />
+          <small>1..128 characters of A-Z a-z 0-9 . _ -</small>
+        </div>
 
-      <label for="proposal-question-input">Proposal question</label>
-      <textarea id="proposal-question-input" rows="2" placeholder="What decision should voters make?"></textarea>
-      <small>This exact question is bound into the V2 election manifest.</small>
+        <div class="form-field form-field--full">
+          <label for="proposal-question-input">Proposal question</label>
+          <textarea id="proposal-question-input" rows="2" placeholder="What decision should voters make?"></textarea>
+          <small>This exact question is bound into the V2 election manifest.</small>
+        </div>
 
-      <label for="options-input">Ballot options (one per line)</label>
-      <textarea id="options-input" rows="4" placeholder="Yes&#10;No&#10;Abstain"></textarea>
-      <small>Up to 256 options; duplicates are rejected.</small>
+        <div class="form-field form-field--full">
+          <label for="options-input">Ballot options (one per line)</label>
+          <textarea id="options-input" rows="4" placeholder="Yes&#10;No&#10;Abstain"></textarea>
+          <small>Up to 256 options; duplicates are rejected.</small>
+        </div>
 
-      <label for="slots-input">Authorized voter seats</label>
-      <input type="number" id="slots-input" min="1" value="10" autocomplete="off" />
+        <div class="form-field">
+          <label for="slots-input">Authorized voter seats</label>
+          <input type="number" id="slots-input" min="1" value="10" autocomplete="off" />
+        </div>
 
-      <label for="min-approvals">Minimum approvals per ballot</label>
-      <input type="number" id="min-approvals" min="1" value="1" autocomplete="off" />
+        <div class="form-field">
+          <label for="min-approvals">Minimum approvals per ballot</label>
+          <input type="number" id="min-approvals" min="1" value="1" autocomplete="off" />
+        </div>
 
-      <label for="max-approvals">Maximum approvals per ballot</label>
-      <input type="number" id="max-approvals" min="1" value="1" autocomplete="off" />
+        <div class="form-field">
+          <label for="max-approvals">Maximum approvals per ballot</label>
+          <input type="number" id="max-approvals" min="1" value="1" autocomplete="off" />
+        </div>
 
-      <label>
-        <input type="checkbox" id="allow-abstention" checked />
-        Allow explicit abstention
-      </label>
+        <div class="form-field form-field--checkbox">
+          <label>
+            <input type="checkbox" id="allow-abstention" checked />
+            Allow explicit abstention
+          </label>
+        </div>
 
-      <label for="revision-input">Governance source revision (optional)</label>
-      <input type="text" id="revision-input" placeholder="e.g. club-charter §3.1" autocomplete="off" />
+        <div class="form-field form-field--full">
+          <label for="revision-input">Governance source revision (optional)</label>
+          <input type="text" id="revision-input" placeholder="e.g. club-charter §3.1" autocomplete="off" />
+        </div>
+      </div>
 
       <button id="btn-create">Create election</button>
       <p><small>By creating an election you agree to act as its organizer: you issue
