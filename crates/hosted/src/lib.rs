@@ -44,7 +44,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::DefaultBodyLimit,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderName, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -69,11 +69,18 @@ use tari_cc_private_ballot_ballot::{
 };
 use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
 use tari_cc_private_ballot_gui_core::{
-    DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GuiElectionArtifactsV1,
+    DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1,
+    GuiCoreError, GuiElectionArtifactsV1, GuiLiveAnchorV2RequestV1,
+    GuiTrustedOotleDeploymentV2, GuiV2AnchorPublishPreparationRequestV1,
     HostedBindingRequestV1, HostedDescriptorRequestV1, HostedDescriptorResponseV1,
-    HostedOrganizerBootstrapV1, HostedVoterPublicBundleV2, TransportAuthorityRootV1,
-    TransportDescriptorV1, production_transport_authority_root_v1,
+    HostedOrganizerBootstrapV1, HostedVoterPublicBundleV2, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX, TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK,
+    TransportAuthorityRootV1, TransportDescriptorV1, production_transport_authority_root_v1,
     provision_production_transport_authority_root_v1,
+    build_v2_public_payload_from_verified_archive_v1,
+    prepare_v2_anchor_publish_from_verified_evidence_v1,
+    trusted_ootle_deployment_fixed_v2, trusted_ootle_deployment_to_live_anchor_v2_request_v1,
+    trusted_ootle_deployment_v2_binding,
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, HashProvider, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
@@ -1364,6 +1371,411 @@ async fn get_archive(
     get_archive_response(state.as_ref(), &id)
 }
 
+/// Minimum accepted-ballot cohort for which a public anchor payload may be
+/// issued. This mirrors the Desktop publisher's privacy floor so the browser
+/// path can never silently anchor a cohort the desktop publisher refuses.
+const ANCHOR_MIN_ACCEPTED_BALLOT_FLOOR_V1: u64 = GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1;
+
+/// Upper bound for the canonical public summary rendered in one response.
+const ANCHOR_MAX_PUBLIC_SUMMARY_BYTES: usize = 256 * 1024;
+
+/// Upper bound for the hex-encoded canonical payload in one response.
+const ANCHOR_MAX_PAYLOAD_HEX_BYTES: usize = 2 * 256 * 1024 + 64;
+
+/// Query parameters accepted by the anchor-payload endpoint.
+#[derive(Debug, Deserialize)]
+struct AnchorPayloadQuery {
+    /// Explicit operator acknowledgement that the finalized transport binding
+    /// covers a cohort below the descriptor's accepted-unique floor
+    /// (`reduced_anonymity`). Required before a publishable payload is issued.
+    #[serde(default)]
+    acknowledge_reduced_anonymity: Option<bool>,
+}
+
+/// Builds a response that carries only a stable public code and a fixed
+/// human-readable message. No internal error text is ever returned.
+fn anchor_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+    error_response(status, code, message)
+}
+
+/// Maps a bounded gui-core failure to a stable public error code.
+fn anchor_gui_error(error: &GuiCoreError) -> Response {
+    anchor_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        error.code(),
+        "the canonical anchor payload could not be produced",
+    )
+}
+
+/// Resolves the released Mainnet V2 deployment from the checked-in release
+/// registry.
+///
+/// This is the same authority the Desktop V2 lock uses: the unique `CURRENT`
+/// registry entry for `mainnet` with the release-pinned artifact digest. The
+/// transport environment (`staging`, `local`, ...) is deliberately NOT used as
+/// the anchor network: the anchor chain and the transport environment are
+/// independent deployment facts.
+fn trusted_mainnet_deployment_v2() -> Result<GuiTrustedOotleDeploymentV2, Response> {
+    let registry = tari_cc_private_ballot_deployment_registry::released_v2_deployment_registry();
+    let entry = registry
+        .resolve_current(
+            TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK,
+            tari_cc_private_ballot_deployment_registry::ABI_NAME_V2,
+            Some(TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX),
+        )
+        .map_err(|_| {
+            anchor_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "anchor_deployment_unavailable",
+                "no current Mainnet V2 anchor deployment is released",
+            )
+        })?;
+    let fixed = trusted_ootle_deployment_fixed_v2();
+    Ok(GuiTrustedOotleDeploymentV2 {
+        schema: TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2.to_owned(),
+        network: TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK.to_owned(),
+        template_address: entry.template_address.clone(),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+        template_module: fixed.template_module.to_owned(),
+        template_function: fixed.template_function.to_owned(),
+        template_event_topic: fixed.template_event_topic.clone(),
+        // The Hosted plane holds no per-installation lock file; the deployment
+        // identity above is the released registry entry, which is the only
+        // authority this endpoint needs.
+        locked_at_unix_ms: 0,
+    })
+}
+
+/// A private, randomly named staging directory for one anchor-payload request.
+///
+/// The name is never derived from client input, the directory is created with
+/// `create_dir` (so a colliding name is skipped rather than reused), and the
+/// tree is removed exactly once when the request ends.
+struct PrivateArchiveDir {
+    path: PathBuf,
+}
+
+impl PrivateArchiveDir {
+    fn create() -> Result<Self, Response> {
+        let base = std::env::temp_dir();
+        for _ in 0..8 {
+            let mut name = [0_u8; 8];
+            rand::thread_rng().fill_bytes(&mut name);
+            let candidate = base.join(format!("pb-anchor-{:016x}", u64::from_le_bytes(name)));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => return Ok(Self { path: candidate }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => {
+                    return Err(anchor_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "anchor_payload_unavailable",
+                        "the anchor payload could not be staged",
+                    ))
+                }
+            }
+        }
+        Err(anchor_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "anchor_payload_unavailable",
+            "the anchor payload could not be staged",
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateArchiveDir {
+    fn drop(&mut self) {
+        // Only ever removes the directory this request created.
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Writes one verified finalized archive into a private directory.
+fn write_finalized_archive(archive: &FinalizedArchiveV1, dir: &Path) -> Result<(), Response> {
+    for (path, bytes) in &archive.files {
+        // Archive paths are server-generated; re-validate before joining so a
+        // future producer can never turn this into an arbitrary file write.
+        ArchivePathV1::new(path.clone()).map_err(|_| {
+            anchor_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "anchor_payload_unavailable",
+                "the finalized archive contains an invalid path",
+            )
+        })?;
+        let file_path = dir.join(path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| {
+                anchor_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "anchor_payload_unavailable",
+                    "the anchor payload could not be staged",
+                )
+            })?;
+        }
+        std::fs::write(&file_path, bytes).map_err(|_| {
+            anchor_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "anchor_payload_unavailable",
+                "the anchor payload could not be staged",
+            )
+        })?;
+    }
+    std::fs::write(
+        dir.join(ARCHIVE_MANIFEST_CANONICAL_PATH),
+        &archive.archive_manifest_cbor,
+    )
+    .map_err(|_| {
+        anchor_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "anchor_payload_unavailable",
+            "the anchor payload could not be staged",
+        )
+    })?;
+    Ok(())
+}
+
+/// Returns the canonical V2 anchor payload for a finalized election.
+///
+/// The payload is derived exclusively from the independently verified finalized
+/// archive plus the authoritative finalized transport binding, and is bound to
+/// the released Mainnet V2 deployment. The response carries only public
+/// election data: no ballot, credential, invitation, organizer secret, or
+/// per-voter material is read or returned.
+async fn get_anchor_payload(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<AnchorPayloadQuery>,
+) -> Response {
+    // Archive verification replays every accepted proof; bound abuse first.
+    if !state.check_rate(&id, "anchor") {
+        return anchor_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "anchor_rate_limited",
+            "too many anchor payload requests",
+        );
+    }
+    let loaded = match LoadedElection::load(state.storage.as_ref(), &id) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if loaded.record.state != "finalized" {
+        return anchor_error(
+            StatusCode::CONFLICT,
+            "election_not_finalized",
+            "anchor payload is available only after finalization",
+        );
+    }
+    // Resolve the deployment before any expensive work so a release
+    // misconfiguration fails closed with a stable public code.
+    let deployment = match trusted_mainnet_deployment_v2() {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let binding = match trusted_ootle_deployment_v2_binding(&deployment) {
+        Ok(v) => v,
+        Err(_) => {
+            return anchor_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "anchor_deployment_invalid",
+                "the released Mainnet anchor deployment is invalid",
+            )
+        }
+    };
+    let (ledger, ballots) = match loaded.replay_ledger(state.storage.as_ref()) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let accepted_ballot_count = ledger.accepted_ballots().len() as u64;
+    let binding_record = match state.storage.get_finalized_transport_binding(&loaded.record.id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return anchor_error(
+                StatusCode::CONFLICT,
+                "anchor_not_eligible",
+                "this election has no finalized transport binding; anchoring is not available",
+            )
+        }
+        Err(_) => {
+            return anchor_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "anchor_binding_unavailable",
+                "the finalized transport binding is unavailable",
+            )
+        }
+    };
+    if let Err(response) = validate_transport_binding_bytes(
+        &loaded,
+        &binding_record.binding_cbor,
+        accepted_ballot_count,
+    ) {
+        return response;
+    }
+    // Privacy policy: never silently publish below the release floor, and
+    // require explicit acknowledgement when the binding reports reduced
+    // anonymity (a cohort below the descriptor's accepted-unique floor).
+    if accepted_ballot_count < ANCHOR_MIN_ACCEPTED_BALLOT_FLOOR_V1 {
+        return anchor_error(
+            StatusCode::CONFLICT,
+            "anchor_privacy_floor_not_met",
+            "this election's accepted cohort is below the anchor privacy floor",
+        );
+    }
+    let final_binding =
+        match TransportArchiveBindingV1::from_canonical_cbor(&binding_record.binding_cbor) {
+            Ok(v) => v,
+            Err(_) => {
+                return anchor_error(
+                    StatusCode::CONFLICT,
+                    "anchor_binding_invalid",
+                    "the finalized transport binding is not canonical",
+                )
+            }
+        };
+    let reduced_anonymity = final_binding
+        .batches()
+        .iter()
+        .any(|batch| batch.reduced_anonymity());
+    if reduced_anonymity && query.acknowledge_reduced_anonymity != Some(true) {
+        return anchor_error(
+            StatusCode::CONFLICT,
+            "anchor_reduced_anonymity_ack_required",
+            "this election's transport binding covers a cohort below the descriptor floor; explicit acknowledgement is required",
+        );
+    }
+
+    let dir = match PrivateArchiveDir::create() {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let archive =
+        match build_finalized_archive(&loaded, &ballots, Some(&binding_record.binding_cbor)) {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    if let Err(r) = write_finalized_archive(&archive, dir.path()) {
+        return r;
+    }
+    let request = GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.path().to_string_lossy().into_owned(),
+        network: String::new(),
+        template_address: String::new(),
+        template_module: String::new(),
+        template_function: String::new(),
+        template_event_topic: String::new(),
+        template_artifact_digest_hex: String::new(),
+    };
+    // The deployment lock is the single authority for network, template
+    // address, module, function, event topic, and artifact digest.
+    let request =
+        match trusted_ootle_deployment_to_live_anchor_v2_request_v1(request, &deployment) {
+            Ok(v) => v,
+            Err(_) => {
+                return anchor_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "anchor_deployment_invalid",
+                    "the released Mainnet anchor deployment is invalid",
+                )
+            }
+        };
+    let payload = match build_v2_public_payload_from_verified_archive_v1(&request) {
+        Ok(v) => v,
+        Err(error) => return anchor_gui_error(&error),
+    };
+    if payload.election_id != loaded.record.id {
+        return anchor_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "anchor_identity_mismatch",
+            "the derived anchor identity does not match this election",
+        );
+    }
+    if payload.network != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK {
+        return anchor_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "anchor_deployment_invalid",
+            "the released Mainnet anchor deployment is invalid",
+        );
+    }
+    let preparation_request = GuiV2AnchorPublishPreparationRequestV1 {
+        archive_directory: dir.path().to_string_lossy().into_owned(),
+        payload_hex: payload.payload_hex.clone(),
+        expected_digest_hex: payload.v2_anchor_digest_hex.clone(),
+    };
+    let preparation =
+        match prepare_v2_anchor_publish_from_verified_evidence_v1(&preparation_request, &binding) {
+            Ok(v) => v,
+            Err(error) => return anchor_gui_error(&error),
+        };
+    if preparation.arguments.len() != 4
+        || preparation.anchor_digest_hex != payload.v2_anchor_digest_hex
+        || preparation.template_address != request.template_address
+        || preparation.template_module != request.template_module
+        || preparation.template_function != request.template_function
+        || preparation.template_event_topic != request.template_event_topic
+    {
+        return anchor_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "anchor_payload_inconsistent",
+            "the derived anchor preparation is inconsistent",
+        );
+    }
+    if payload.public_summary_json.len() > ANCHOR_MAX_PUBLIC_SUMMARY_BYTES
+        || payload.payload_hex.len() > ANCHOR_MAX_PAYLOAD_HEX_BYTES
+    {
+        return anchor_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "anchor_payload_too_large",
+            "the canonical anchor payload exceeds the publishable size",
+        );
+    }
+
+    #[derive(Serialize)]
+    struct AnchorPayloadResponse {
+        election_id: String,
+        archive_hash_hex: String,
+        v2_anchor_digest_hex: String,
+        payload_hex: String,
+        public_summary_json: String,
+        network: String,
+        template_address: String,
+        template_module: String,
+        template_function: String,
+        template_event_topic: String,
+        template_artifact_digest_hex: String,
+        anchor_args: AnchorArgsResponse,
+    }
+    #[derive(Serialize)]
+    struct AnchorArgsResponse {
+        anchor_digest_hex: String,
+        network: String,
+        election_id: String,
+        public_summary: String,
+    }
+
+    let anchor_args = AnchorArgsResponse {
+        anchor_digest_hex: preparation.anchor_digest_hex,
+        network: payload.network.clone(),
+        election_id: payload.election_id.clone(),
+        public_summary: preparation.public_summary_json,
+    };
+    Json(AnchorPayloadResponse {
+        election_id: payload.election_id,
+        archive_hash_hex: payload.archive_hash_hex,
+        v2_anchor_digest_hex: payload.v2_anchor_digest_hex,
+        payload_hex: payload.payload_hex,
+        public_summary_json: payload.public_summary_json,
+        network: payload.network,
+        template_address: preparation.template_address,
+        template_module: preparation.template_module,
+        template_function: preparation.template_function,
+        template_event_topic: preparation.template_event_topic,
+        template_artifact_digest_hex: request.template_artifact_digest_hex,
+        anchor_args,
+    })
+    .into_response()
+}
 /// Organizer-authenticated archive download. Identical content to the public
 /// `get_archive` endpoint but gated on the election-scoped organizer credential,
 /// so the Desktop can retrieve the canonical finalized archive without exposing
@@ -4422,6 +4834,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/elections/{id}/receipt/{receipt_id}", get(get_receipt))
         .route("/api/v1/elections/{id}/results", get(get_results))
         .route("/api/v1/elections/{id}/archive", get(get_archive))
+        .route("/api/v1/elections/{id}/anchor-payload", get(get_anchor_payload))
         .route("/api/v1/elections/{id}/enrollment-info", get(public_enrollment_info))
         .route("/api/v1/elections/{id}/voter-bundle", get(public_voter_bundle))
         .route("/api/v1/elections/{id}/enroll", post(enroll_voter))

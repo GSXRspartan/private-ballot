@@ -6140,3 +6140,518 @@ async fn organizer_full_v2_release_flow_through_connect() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+// ---------------------------------------------------------------------------
+// Anchor-payload endpoint (browser Mainnet anchoring)
+// ---------------------------------------------------------------------------
+
+const ANCHOR_PAYLOAD_PATH: &str = "/anchor-payload";
+
+/// A transport binding whose batch reports reduced anonymity, used to prove the
+/// endpoint requires an explicit acknowledgement before issuing a payload.
+fn reduced_anonymity_binding(f: &Fixture, accepted_ballot_count: u64) -> Vec<u8> {
+    let (manifest, _, _) = load_fixture(f);
+    let manifest_hash = manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("manifest hash"));
+    TransportArchiveBindingV1::new(
+        f.election_id.as_bytes().to_vec(),
+        manifest_hash,
+        [0x44; 32],
+        7,
+        vec![TransportArchiveBatchV1::new(
+            7,
+            [0x55; 32],
+            accepted_ballot_count,
+            true,
+        )],
+    )
+    .and_then(|binding| binding.to_canonical_cbor())
+    .unwrap_or_else(|_| panic!("reduced-anonymity transport binding"))
+}
+
+async fn import_open_election(routers: &TestRouters, f: &Fixture) {
+    assert_eq!(
+        import(routers.admin.clone(), f).await,
+        axum::http::StatusCode::CREATED
+    );
+}
+
+async fn submit_ballot(routers: &TestRouters, f: &Fixture, index: u64, scalar: u64) {
+    let pkg = make_package(f, scalar, b"candidate-a");
+    let body = serde_json::json!({
+        "receipt_id": format!("00000000-0000-4000-8000-{index:012}"),
+        "package_cbor_hex": hex_encode(&pkg),
+        "api_version": "v1",
+    })
+    .to_string();
+    let (status, response) = req(
+        routers.public.clone(),
+        "POST",
+        &format!("/api/v1/elections/{}/ballots", f.election_id),
+        Some(body),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{response}");
+}
+
+async fn close_election(routers: &TestRouters, f: &Fixture) {
+    let (status, response) = req(
+        routers.admin.clone(),
+        "POST",
+        &format!("/api/v1/admin/elections/{}/close", f.election_id),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{response}");
+}
+
+async fn finalize_election(routers: &TestRouters, f: &Fixture) {
+    let (status, response) = req(
+        routers.admin.clone(),
+        "POST",
+        &format!("/api/v1/admin/elections/{}/finalize", f.election_id),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{response}");
+}
+
+/// Imports, votes, closes, records one binding, and finalizes an election.
+async fn finalized_election(
+    routers: &TestRouters,
+    storage: &Arc<InMemoryStorage>,
+    f: &Fixture,
+    scalars: &[u64],
+    binding: Option<Vec<u8>>,
+) {
+    import_open_election(routers, f).await;
+    for (index, scalar) in scalars.iter().enumerate() {
+        submit_ballot(routers, f, index as u64 + 1, *scalar).await;
+    }
+    close_election(routers, f).await;
+    if let Some(binding) = binding {
+        storage
+            .put_finalized_transport_binding(crate::storage::FinalizedTransportBindingRecord {
+                election_id: f.election_id.clone(),
+                binding_cbor: binding,
+            })
+            .unwrap_or_else(|_| panic!("record transport binding"));
+    }
+    finalize_election(routers, f).await;
+}
+
+async fn get_anchor_payload(router: &axum::Router, election_id: &str) -> (axum::http::StatusCode, String) {
+    req(
+        router.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}{ANCHOR_PAYLOAD_PATH}"),
+        None,
+        &[],
+    )
+    .await
+}
+
+#[tokio::test]
+async fn anchor_payload_rejects_a_non_finalized_election() {
+    let f = fixture_with("anchor-open", "anchor-open-rev");
+    let (routers, _storage) = test_routers();
+    import_open_election(&routers, &f).await;
+
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        error_code(&body).as_deref(),
+        Some("election_not_finalized"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn anchor_payload_rejects_an_election_without_a_transport_binding() {
+    let f = fixture_with("anchor-no-binding", "anchor-no-binding-rev");
+    let (routers, storage) = test_routers();
+    import_open_election(&routers, &f).await;
+    submit_ballot(&routers, &f, 1, 1).await;
+    submit_ballot(&routers, &f, 2, 2).await;
+    close_election(&routers, &f).await;
+
+    // Finalization legitimately refuses without a binding, so model the legacy
+    // state directly: a finalized row that predates the binding table.
+    storage
+        .set_election_state(&f.election_id, "closed", "finalized")
+        .unwrap_or_else(|_| panic!("force legacy finalized state"));
+
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(error_code(&body).as_deref(), Some("anchor_not_eligible"), "{body}");
+}
+
+#[tokio::test]
+async fn anchor_payload_rejects_a_malformed_election_id() {
+    let f = fixture_with("anchor-malformed-id", "anchor-malformed-id-rev");
+    let (routers, _storage) = test_routers();
+    import_open_election(&routers, &f).await;
+
+    for candidate in ["..%2F..%2Fetc%2Fpasswd", "nope", "a%20b", "x%2Fy"] {
+        let (status, body) = get_anchor_payload(&routers.public, candidate).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::NOT_FOUND,
+            "candidate {candidate}: {body}"
+        );
+        // Errors expose exactly one stable code and one fixed message.
+        assert_eq!(
+            object_keys(&body),
+            vec!["code".to_owned(), "message".to_owned()],
+            "{body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn anchor_payload_returns_the_canonical_mainnet_v2_payload() {
+    let f = fixture_with("anchor-canonical", "anchor-canonical-rev");
+    let (routers, storage) = test_routers();
+    let accepted = 2_u64;
+    finalized_election(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        Some(desktop_transport_binding(&f, accepted)),
+    )
+    .await;
+
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("json"));
+
+    // Only the documented fields are returned.
+    assert_eq!(
+        object_keys(&body),
+        vec![
+            "anchor_args",
+            "archive_hash_hex",
+            "election_id",
+            "network",
+            "payload_hex",
+            "public_summary_json",
+            "template_address",
+            "template_artifact_digest_hex",
+            "template_event_topic",
+            "template_function",
+            "template_module",
+            "v2_anchor_digest_hex",
+        ]
+    );
+
+    // The anchor network comes from the released deployment, never from the
+    // transport environment (which is "test" in this configuration).
+    assert_eq!(payload["network"], "mainnet");
+    assert_eq!(payload["election_id"], f.election_id);
+    assert_eq!(
+        payload["template_address"],
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS
+    );
+    assert_eq!(
+        payload["template_artifact_digest_hex"],
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3
+    );
+    assert_eq!(payload["template_module"], ANCHOR_TEMPLATE_MODULE_V2);
+    assert_eq!(payload["template_function"], ANCHOR_EVENT_FUNCTION_V2);
+    assert_eq!(
+        payload["template_event_topic"],
+        format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}")
+    );
+
+    // Arguments are exactly [anchorDigest, network, electionId, publicSummary].
+    let args = payload["anchor_args"]
+        .as_object()
+        .unwrap_or_else(|| panic!("anchor_args object"));
+    assert_eq!(args["anchor_digest_hex"], payload["v2_anchor_digest_hex"]);
+    assert_eq!(args["network"], "mainnet");
+    assert_eq!(args["election_id"], f.election_id);
+    assert_eq!(args["public_summary"], payload["public_summary_json"]);
+
+    // No internal path or host detail appears anywhere in the response.
+    for forbidden in ["pb-anchor", "anchor-payload-", "127.0.0.1", "sqlite"] {
+        assert!(
+            !body.contains(forbidden),
+            "response must not contain {forbidden}: {body}"
+        );
+    }
+
+    // Re-derive the canonical payload from the archive exactly as the Desktop
+    // does, and require byte-identical output.
+    let dir = std::env::temp_dir().join(format!("pb-anchor-canonical-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (_archive_status, archive_body) = req(
+        routers.public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/archive", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    let archive: serde_json::Value =
+        serde_json::from_str(&archive_body).unwrap_or_else(|_| panic!("archive json"));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    write_archive_from_endpoint(
+        &dir,
+        archive["files"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &hex_decode(archive["archive_manifest_cbor_hex"].as_str().unwrap_or(""))
+            .unwrap_or_else(|_| panic!("manifest hex")),
+    );
+    assert!(verify_archive_dir_for_test(&dir));
+
+    let desktop = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: "mainnet".to_owned(),
+        template_address: tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS
+            .to_owned(),
+        template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        template_artifact_digest_hex:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+    })
+    .unwrap_or_else(|_| panic!("desktop payload"));
+    assert_eq!(desktop.payload_hex, payload["payload_hex"], "canonical bytes");
+    assert_eq!(
+        desktop.v2_anchor_digest_hex, payload["v2_anchor_digest_hex"],
+        "canonical digest"
+    );
+    assert_eq!(desktop.archive_hash_hex, payload["archive_hash_hex"]);
+    assert_eq!(desktop.public_summary_json, payload["public_summary_json"]);
+    assert_eq!(desktop.election_id, f.election_id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn anchor_payload_enforces_the_privacy_floor_and_reduced_anonymity_acknowledgement() {
+    // A single accepted ballot is below the release floor of 2.
+    let small = fixture_with("anchor-floor", "anchor-floor-rev");
+    let (routers, storage) = test_routers();
+    finalized_election(
+        &routers,
+        &storage,
+        &small,
+        &[1],
+        Some(desktop_transport_binding(&small, 1)),
+    )
+    .await;
+    let (status, body) = get_anchor_payload(&routers.public, &small.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        error_code(&body).as_deref(),
+        Some("anchor_privacy_floor_not_met"),
+        "{body}"
+    );
+
+    // Two accepted ballots with a reduced-anonymity binding require an explicit
+    // acknowledgement; without it the request fails closed.
+    let reduced = fixture_with("anchor-reduced", "anchor-reduced-rev");
+    let (routers, storage) = test_routers();
+    finalized_election(
+        &routers,
+        &storage,
+        &reduced,
+        &[1, 2],
+        Some(reduced_anonymity_binding(&reduced, 2)),
+    )
+    .await;
+    let (status, body) = get_anchor_payload(&routers.public, &reduced.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(
+        error_code(&body).as_deref(),
+        Some("anchor_reduced_anonymity_ack_required"),
+        "{body}"
+    );
+
+    // With the acknowledgement the same election produces a canonical payload.
+    let (status, body) = req(
+        routers.public.clone(),
+        "GET",
+        &format!(
+            "/api/v1/elections/{}{ANCHOR_PAYLOAD_PATH}?acknowledge_reduced_anonymity=true",
+            reduced.election_id
+        ),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("json"));
+    assert_eq!(payload["network"], "mainnet");
+    assert_eq!(payload["election_id"], reduced.election_id);
+}
+
+#[tokio::test]
+async fn anchor_payload_verification_rejects_a_tampered_archive() {
+    let f = fixture_with("anchor-tampered", "anchor-tampered-rev");
+    let (routers, storage) = test_routers();
+    finalized_election(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        Some(desktop_transport_binding(&f, 2)),
+    )
+    .await;
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("json"));
+
+    let dir = std::env::temp_dir().join(format!("pb-anchor-tampered-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (_status, archive_body) = req(
+        routers.public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/archive", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    let archive: serde_json::Value =
+        serde_json::from_str(&archive_body).unwrap_or_else(|_| panic!("archive json"));
+    std::fs::create_dir_all(&dir).unwrap_or_else(|_| panic!("mkdir"));
+    write_archive_from_endpoint(
+        &dir,
+        archive["files"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &hex_decode(archive["archive_manifest_cbor_hex"].as_str().unwrap_or(""))
+            .unwrap_or_else(|_| panic!("manifest hex")),
+    );
+    assert!(verify_archive_dir_for_test(&dir), "untampered archive verifies");
+
+    // Flip one byte of one submission without updating the catalog.
+    let submissions = std::fs::read_dir(dir.join("submissions"))
+        .unwrap_or_else(|_| panic!("submissions dir"))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "cbor"))
+        .unwrap_or_else(|| panic!("a submission file"));
+    let mut bytes = std::fs::read(&submissions).unwrap_or_else(|_| panic!("read submission"));
+    if let Some(byte) = bytes.first_mut() {
+        *byte ^= 0xff;
+    }
+    std::fs::write(&submissions, &bytes).unwrap_or_else(|_| panic!("write submission"));
+
+    let tampered = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: payload["network"].as_str().unwrap_or("").to_owned(),
+        template_address: payload["template_address"].as_str().unwrap_or("").to_owned(),
+        template_module: payload["template_module"].as_str().unwrap_or("").to_owned(),
+        template_function: payload["template_function"].as_str().unwrap_or("").to_owned(),
+        template_event_topic: payload["template_event_topic"].as_str().unwrap_or("").to_owned(),
+        template_artifact_digest_hex: payload["template_artifact_digest_hex"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned(),
+    });
+    assert!(
+        tampered.is_err(),
+        "a tampered archive must never produce a canonical payload"
+    );
+
+    // The detached-payload verifier must reject the same tampered archive.
+    let payload_hex = payload["payload_hex"].as_str().unwrap_or("");
+    let digest_hex = payload["v2_anchor_digest_hex"].as_str().unwrap_or("");
+    assert!(
+        verify_v2_public_payload_against_archive_v1(
+            &dir,
+            &hex_decode(payload_hex).unwrap_or_else(|_| panic!("payload hex")),
+            digest_hex,
+        )
+        .is_err(),
+        "the independent verifier must reject a tampered archive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn anchor_payload_never_deletes_a_directory_derived_from_the_client_election_id() {
+    let f = fixture_with("anchor-decoy", "anchor-decoy-rev");
+    let (routers, storage) = test_routers();
+    finalized_election(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        Some(desktop_transport_binding(&f, 2)),
+    )
+    .await;
+
+    // A directory named after the legacy client-derived pattern must survive.
+    let decoy = std::env::temp_dir().join(format!("pb-anchor-payload-{}", f.election_id));
+    let _ = std::fs::remove_dir_all(&decoy);
+    std::fs::create_dir_all(&decoy).unwrap_or_else(|_| panic!("decoy mkdir"));
+    let sentinel = decoy.join("sentinel.txt");
+    std::fs::write(&sentinel, b"do not delete").unwrap_or_else(|_| panic!("sentinel write"));
+
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(sentinel.exists(), "the client-named decoy must not be deleted");
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap_or_else(|_| panic!("sentinel read")),
+        b"do not delete"
+    );
+    let _ = std::fs::remove_dir_all(&decoy);
+}
+
+#[tokio::test]
+async fn anchor_payload_response_is_bounded_and_carries_only_public_data() {
+    let f = fixture_with("anchor-bounded", "anchor-bounded-rev");
+    let (routers, storage) = test_routers();
+    finalized_election(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        Some(desktop_transport_binding(&f, 2)),
+    )
+    .await;
+    let (status, body) = get_anchor_payload(&routers.public, &f.election_id).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or_else(|_| panic!("json"));
+
+    // Bounded: the public summary and its hex transport form stay inside the
+    // protocol's 256 KiB ceiling.
+    assert!(payload["public_summary_json"].as_str().unwrap_or("").len() <= 256 * 1024);
+    assert!(payload["payload_hex"].as_str().unwrap_or("").len() <= 2 * 256 * 1024 + 64);
+
+    // Public only: no ballot, nullifier, credential, or organizer material.
+    for forbidden in [
+        "package_cbor",
+        "nullifier",
+        "secret",
+        "credential",
+        "organizer_verifier",
+        "authority_signing_key",
+        "invitation",
+    ] {
+        assert!(
+            !body.to_ascii_lowercase().contains(forbidden),
+            "response must not contain {forbidden}"
+        );
+    }
+}
+
+fn object_keys(json: &str) -> Vec<String> {
+    let value: serde_json::Value = serde_json::from_str(json).unwrap_or_else(|_| panic!("json"));
+    let mut keys: Vec<String> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("object"))
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+fn error_code(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value.get("code")?.as_str().map(str::to_owned)
+}
