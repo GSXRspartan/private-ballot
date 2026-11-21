@@ -666,7 +666,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
 
   function esc(s: string): string {
     return s.replace(/[&<>"']/g, (c) =>
-      ({ "&": "&", "<": "<", ">": ">", '"': "\"", "'": "'" }[c] as string)
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string)
     );
   }
 

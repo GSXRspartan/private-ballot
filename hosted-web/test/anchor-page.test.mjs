@@ -539,3 +539,137 @@ test("the worker allowlist covers the anchor document for Universe embedding", (
   assert.match(worker, /"\/anchor"/);
   assert.match(worker, /"\/anchor\.html"/);
 });
+
+// ---------- HTML injection / XSS regression ----------
+
+const XSS_PAYLOADS = [
+  `<script>alert(1)</script>`,
+  `<img src=x onerror=alert(1)>`,
+  `" onfocus="alert(1)`,
+  `&lt;svg onload=alert(1)&gt;`,
+  `&<>"'`,
+];
+
+/** Fails when any active/injected element or event handler made it into the DOM. */
+function assertInert(root, message) {
+  for (const tag of ["script", "img", "svg", "iframe", "object", "embed", "link", "style"]) {
+    assert.equal(root.querySelector(tag), null, `${message}: unexpected <${tag}> element`);
+  }
+  for (const node of root.querySelectorAll("*")) {
+    for (const attr of node.getAttributeNames()) {
+      assert.doesNotMatch(attr, /^on/i, `${message}: unexpected event handler attribute ${attr}`);
+    }
+  }
+  assert.equal(root.querySelectorAll("script").length, 0, message);
+}
+
+function recordingFetch(payload) {
+  const calls = [];
+  const impl = async (input) => {
+    const url = new URL(String(input), "https://hosted.example");
+    calls.push(url);
+    if (url.pathname.endsWith("/anchor-payload")) {
+      return { ok: true, status: 200, json: async () => payload };
+    }
+    if (url.pathname === "/chain/network") {
+      return { ok: true, status: 200, json: async () => ({ network: "mainnet", network_byte: 0 }) };
+    }
+    return { ok: false, status: 404, json: async () => null };
+  };
+  return { calls, impl };
+}
+
+test("a hostile election id typed by the user renders inert", async () => {
+  for (const hostile of XSS_PAYLOADS) {
+    const { impl } = recordingFetch(payloadFixture());
+    const env = installDom({ fetchImpl: impl });
+    try {
+      const root = mountInto(env.dom);
+      byId(root, "election-id-input").value = hostile;
+      await click(byId(root, "load-election-btn"));
+      // The typed value is echoed back through the re-rendered input.
+      assert.equal(byId(root, "election-id-input").value, hostile, "typed value must be preserved verbatim");
+      assertInert(root, `hostile election id ${JSON.stringify(hostile)}`);
+    } finally {
+      env.restore();
+    }
+  }
+});
+
+test("a hostile server-supplied election id renders inert text", async () => {
+  for (const hostile of XSS_PAYLOADS) {
+    const payload = payloadFixture({ electionId: hostile.slice(0, 128) });
+    const { impl } = recordingFetch(payload);
+    const env = installDom({ fetchImpl: impl });
+    try {
+      const root = mountInto(env.dom);
+      byId(root, "election-id-input").value = ELECTION_A;
+      await click(byId(root, "load-election-btn"));
+      assertInert(root, `hostile server election id ${JSON.stringify(hostile)}`);
+      // The hostile string must exist only as inert text content, never as
+      // markup or an element attribute value injected by the server.
+      assert.ok(
+        root.textContent.includes(hostile.slice(0, 128)),
+        "the hostile id must be rendered as readable text",
+      );
+    } finally {
+      env.restore();
+    }
+  }
+});
+
+test("a hostile server error message renders inert text", async () => {
+  const hostileMessage = `<img src=x onerror=window.__xss=1><script>alert(1)</script>`;
+  const env = installDom({
+    fetchImpl: async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({ code: `anchor_rate_limited`, message: hostileMessage }),
+    }),
+  });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    assertInert(root, "hostile server error message");
+    // textContent display keeps the raw string readable but inert.
+    assert.ok(root.textContent.includes(hostileMessage), "the message must be shown as text");
+  } finally {
+    env.restore();
+  }
+});
+
+test("malicious fetch input never reaches a third-party URL", async () => {
+  const hostile = `<script>alert(1)</script>`;
+  const { calls, impl } = recordingFetch(payloadFixture());
+  const env = installDom({ fetchImpl: impl });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = hostile;
+    await click(byId(root, "load-election-btn"));
+    for (const url of calls) {
+      assert.equal(url.origin, "https://hosted.example", "only same-origin requests are allowed");
+      assert.match(url.pathname, /^\/(api\/v1\/elections\/[^/]+\/anchor-payload|chain\/network)$/, "only documented routes are fetched");
+    }
+    assertInert(root, "hostile fetch input");
+  } finally {
+    env.restore();
+  }
+});
+
+test("normal election metadata still renders after the escaping fix", async () => {
+  const payload = payloadFixture();
+  const { impl } = recordingFetch(payload);
+  const env = installDom({ fetchImpl: impl });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    assert.ok(root.textContent.includes(ELECTION_A));
+    assert.ok(root.textContent.includes(ARCHIVE.slice(0, 16)));
+    assert.ok(root.textContent.includes(DIGEST.slice(0, 16)));
+    assertInert(root, "normal payload");
+  } finally {
+    env.restore();
+  }
+});
