@@ -134,25 +134,34 @@ export function sleepWithTimeout(ms: number): Promise<void> {
 }
 
 /**
- * Extracts a fee estimate from a `tari_signAndSubmitTransaction { dryRun: true }`
- * result.
+ * Extracts a fee estimate from a successful `tari_signAndSubmitTransaction {
+ * dryRun: true }` result.
  *
- * The published wallet contract types the response as `unknown` and does NOT
- * specify how a dry-run result represents its fee estimate. The engine-level
- * figure is `FinalizeResult::required_fees()` (µT), but whether a wallet surfaces
- * it — and under which key — is wallet-specific and undocumented.
+ * EVIDENCE-BASED SCHEMA (chironbuilds/tari-wallet, master @ b50199df):
+ * - The provider resolves to `{ transaction_id, result }` on a dry run. There is
+ *   NO `transactionId` (camelCase) on this path and nothing is submitted.
+ * - `result` is an `ExecuteResult` whose `result.finalize` is a `FinalizeResult`.
+ * - The authoritative fee figure is **`result.finalize.total_fees_required`** — a
+ *   decimal STRING in microtari (µT). The provider's `sanitizeForMessage` converts
+ *   every bigint to a decimal string, so all fee fields arrive as strings.
+ * - The engine name `required_fees()` is NOT on the wire; `requiredFees` (camelCase)
+ *   does not exist. Do not look for either.
+ * - The wallet REJECTS the promise on `Reject`/`AcceptFeeRejectRest` outcomes, so a
+ *   resolved value is a successful simulation; `result.finalize.result` carries the
+ *   `Accept` arm.
  *
- * This function therefore recognizes only the shapes a wallet could plausibly
- * return (`result.required_fees`, `requiredFees`, `finalize.required_fees`,
- * `finalize.requiredFees`, or a bare `finalize.required_fees` on the top-level
- * result), all as decimal strings or integers. Anything else resolves to
+ * We read ONLY the fee field (`total_fees_required`), with a conservative fallback to
+ * `fee_receipt.total_fees_paid` for forward-compatibility. We never read wallet
+ * addresses, account ids, instructions, or raw events. Anything unrecognized →
  * `{ kind: "unsupported" }`. It never throws and never invents a figure.
  */
 export function extractDryRunFeeEstimate(result: unknown): DryRunFeeEstimate {
   const isRecord = (v: unknown): v is Record<string, unknown> =>
     typeof v === "object" && v !== null && !Array.isArray(v);
   const asMicrotari = (v: unknown): string | null => {
-    if (typeof v === "string" && /^\d+$/.test(v)) return v;
+    // Exact, bigint-safe, non-negative integer only. Rejects floats, negatives,
+    // scientific notation, hex, and unsafe (>2^53) numbers.
+    if (typeof v === "string" && /^(0|[1-9]\d*)$/.test(v)) return v;
     if (typeof v === "bigint" && v >= 0n) return v.toString();
     if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) return String(v);
     return null;
@@ -161,22 +170,37 @@ export function extractDryRunFeeEstimate(result: unknown): DryRunFeeEstimate {
     return { kind: "unsupported", reason: "the wallet returned no dry-run result object" };
   }
   const finalize = isRecord(result.finalize) ? result.finalize : null;
-  const candidates: unknown[] = [
-    result.required_fees,
-    result.requiredFees,
-    finalize?.required_fees,
-    finalize?.requiredFees,
-  ];
-  for (const candidate of candidates) {
-    const microtari = asMicrotari(candidate);
-    if (microtari !== null) {
-      return { kind: "estimated", requiredFeesMicrotari: microtari };
-    }
+  if (finalize === null) {
+    return {
+      kind: "unsupported",
+      reason: "the dry-run result did not contain a finalize section",
+    };
+  }
+  // A resolved dry run is a successful simulation; the wallet throws on rejection.
+  // If a rejection marker is nonetheless present, refuse to report a fee.
+  const outcome = finalize.result;
+  if (isRecord(outcome) && ("Reject" in outcome || "AcceptFeeRejectRest" in outcome)) {
+    return {
+      kind: "unsupported",
+      reason: "the dry-run simulation was rejected; no fee estimate is available",
+    };
+  }
+  // Primary evidence-backed path: FinalizeResult.total_fees_required (µT string).
+  const totalRequired = asMicrotari(finalize.total_fees_required);
+  if (totalRequired !== null) {
+    return { kind: "estimated", requiredFeesMicrotari: totalRequired };
+  }
+  // Conservative fallback: fee_receipt.total_fees_paid (µT string) — what was
+  // actually paid in the simulation. Only used if the primary field is absent.
+  const feeReceipt = isRecord(finalize.fee_receipt) ? finalize.fee_receipt : null;
+  const feesPaid = feeReceipt ? asMicrotari(feeReceipt.total_fees_paid) : null;
+  if (feesPaid !== null) {
+    return { kind: "estimated", requiredFeesMicrotari: feesPaid };
   }
   return {
     kind: "unsupported",
     reason:
-      "the wallet dry-run result did not expose a documented fee-estimate field (expected FinalizeResult::required_fees)",
+      "the wallet dry-run result did not expose a verifiable fee field (expected result.finalize.total_fees_required)",
   };
 }
 
@@ -422,8 +446,9 @@ export function windowTariProvider(
         // dry runs). Never fall back to a live submission.
         throwProviderError(e, "fee estimate");
       }
-      // The documented response is `{ transactionId, result }`; a dry run must
-      // NOT carry a real transaction id. Extract the fee from `result`.
+      // Real Sapient dry-run schema: the provider resolves to
+      // `{ transaction_id, result }` (snake_case id; nothing is submitted). The
+      // authoritative fee is `result.finalize.total_fees_required` (µT string).
       const record = expectRecord(answer, "dry-run result");
       return extractDryRunFeeEstimate(record.result);
     },

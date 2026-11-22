@@ -53,6 +53,11 @@ import { bundleExpectedPayload, bundleExpectedTemplate } from "../../gui/src/wal
 import { hasCapability, type WindowTariProvider } from "../../gui/src/wallet/provider.ts";
 import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
 import {
+  formatTariFromMicroTari,
+  isMicroTariAbove,
+  MICRO_TARI_PER_TARI,
+} from "../../gui/src/wallet/feeFormat.ts";
+import {
   adapterForKind,
   defaultPublishDriver,
   providerErrorMessage,
@@ -66,22 +71,9 @@ const VERIFY_INTERVAL_MS = 4000;
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const TRANSACTION_ID = /^[0-9a-f]{64}$/;
 
-/** 1 TARI = 1,000,000 microtari (µT). Fees are quoted and capped in µT. */
-const MICRO_TARI_PER_TARI = 1_000_000;
-
-/** Formats a non-negative integer microtari string as a TARI decimal string. */
-function microtariToTari(microtari: string): string {
-  if (!/^\d+$/.test(microtari)) return "—";
-  const value = BigInt(microtari);
-  const whole = value / BigInt(MICRO_TARI_PER_TARI);
-  const frac = (value % BigInt(MICRO_TARI_PER_TARI)).toString().padStart(6, "0").replace(/0+$/, "");
-  return frac.length > 0 ? `${whole}.${frac}` : `${whole}`;
-}
-
-/** Compares two non-negative integer microtari strings. */
-function isMicrotariAbove(a: string, b: string): boolean {
-  if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return false;
-  return BigInt(a) > BigInt(b);
+/** Formats a microTARI amount as a TARI string for display, or "—" if malformed. */
+function displayTari(microtari: unknown): string {
+  return formatTariFromMicroTari(microtari) ?? "—";
 }
 
 /** A pending or resolved fee-estimate view for the current bundle. */
@@ -831,8 +823,12 @@ export function mountAnchorPanel(root: HTMLElement): void {
     }
 
     // Fee and approval policy. The fee is capped client-side and enforced by the
-    // wallet from the maxFee request parameter.
-    card.append(element("p", `Fee cap: ${ANCHOR_MAX_FEE_UNITS} units (release ceiling ${ANCHOR_MAX_FEE_CEILING_UNITS}) · Wallet approval: required · Network: ${APP_ANCHOR_NETWORK}`));
+    // wallet from the maxFee request parameter. Displayed in TARI (protocol µT
+    // shown in parentheses for operators).
+    card.append(element(
+      "p",
+      `Maximum authorized fee: ${displayTari(ANCHOR_MAX_FEE_UNITS)} TARI (${ANCHOR_MAX_FEE_UNITS} µT) · Release fee ceiling: ${displayTari(ANCHOR_MAX_FEE_CEILING_UNITS)} TARI (${ANCHOR_MAX_FEE_CEILING_UNITS} µT) · Wallet approval: required · Network: ${APP_ANCHOR_NETWORK}`,
+    ));
     const disabledReason = submissionDisabledReason();
     if (disabledReason !== null) {
       const notice = element("p", disabledReason);
@@ -854,22 +850,25 @@ export function mountAnchorPanel(root: HTMLElement): void {
 
     // Non-spending fee preflight result. This is an estimate only: it never
     // proves a funded transaction will succeed, and it does not prove the wallet
-    // enforces maxFee — the provider exposes no fee read-back.
+    // enforces maxFee — the provider exposes no fee read-back. All user-facing
+    // amounts are displayed in TARI; protocol accounting stays in integer µT.
+    const maxFeeTari = displayTari(ANCHOR_MAX_FEE_UNITS);
+    const ceilingTari = displayTari(ANCHOR_MAX_FEE_CEILING_UNITS);
     if (feeEstimate.kind === "pending") {
       card.append(element("p", "Estimating the Mainnet fee (non-spending dry run)…"));
     } else if (feeEstimate.kind === "estimated") {
       const microtari = feeEstimate.requiredFeesMicrotari;
-      const tari = microtariToTari(microtari);
-      const overCap = isMicrotariAbove(microtari, String(ANCHOR_MAX_FEE_UNITS));
+      const tari = displayTari(microtari);
+      const overCap = isMicroTariAbove(microtari, String(ANCHOR_MAX_FEE_UNITS));
       const estimateLine = element(
         "p",
-        `Estimated fee: ${microtari} µT (≈ ${tari} TARI) · Configured maximum: ${ANCHOR_MAX_FEE_UNITS} µT (≈ ${microtariToTari(String(ANCHOR_MAX_FEE_UNITS))} TARI)`,
+        `Estimated transaction fee: ${tari} TARI · Maximum authorized fee: ${maxFeeTari} TARI · Release fee ceiling: ${ceilingTari} TARI`,
       );
       card.append(estimateLine);
       if (overCap) {
         const warn = element(
           "p",
-          `Warning: the estimated fee (${microtari} µT) exceeds the configured maximum (${ANCHOR_MAX_FEE_UNITS} µT). Publishing is capped at the maximum; do not proceed without raising the cap deliberately.`,
+          `Warning: the estimated fee (${tari} TARI) exceeds the maximum authorized fee (${maxFeeTari} TARI). Publishing is capped at the maximum; do not proceed without raising the cap deliberately.`,
         );
         warn.className = "error";
         warn.setAttribute("role", "alert");
@@ -884,7 +883,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
     } else if (feeEstimate.kind === "unsupported") {
       const unsupported = element(
         "p",
-        `The wallet did not return a verifiable fee estimate: ${feeEstimate.reason}. No estimate is shown; this is not a zero fee.`,
+        `Fee estimate unavailable: ${feeEstimate.reason}. No estimate is shown; this is not a zero fee.`,
       );
       unsupported.className = "form-hint";
       card.append(unsupported);

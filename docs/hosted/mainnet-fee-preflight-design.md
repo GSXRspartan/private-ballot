@@ -35,16 +35,27 @@ Source: `https://universe.tari.mw/integration/` and
 
 ## 2. Dry-run response format and the required fee field
 
-The fee reference specifies the exact estimation contract:
+The fee reference specifies the engine-level estimation contract:
 
 > Submit a transaction as a **dry run** and the engine meters it exactly as it
 > would for real, but never aborts for insufficient payment. Read
 > `FinalizeResult::required_fees()` from the result and use it as the `max_fee`.
 
-`required_fees() = total_fees_required + FEE_ESTIMATE_ALLOWANCE` (12 µT). The
-wallet's dry-run response carries the finalized result; `required_fees()` is the
-authoritative figure to map onto `maxFee`. The dry-run estimate does **not**
-depend on the exhaust-burn rate, so it is stable across the burn-rate schedule.
+At the **engine** level, `required_fees() = total_fees_required + FEE_ESTIMATE_ALLOWANCE`
+(12 µT). However, the **wallet JSON response does not expose `required_fees()`** — that
+is an engine/TS-binding name on `FeeCostBreakdown`, not on the `ExecuteResult` returned
+to a dApp. Evidence from `chironbuilds/tari-wallet` (master): a dry run resolves to
+`{ transaction_id, result }` where `result.finalize` is a `FinalizeResult` whose fee
+field is **`total_fees_required`** (a decimal STRING in microTARI; all bigints are
+stringified by the wallet's `sanitizeForMessage`). The extractor reads
+`result.finalize.total_fees_required`, with a conservative `fee_receipt.total_fees_paid`
+fallback. A resolved dry run is a successful simulation; the wallet rejects on
+`Reject`/`AcceptFeeRejectRest`, so a rejected simulation never yields a fee estimate.
+
+All user-facing display is in **TARI** (`gui/src/wallet/feeFormat.ts`, exact bigint
+integer formatting); protocol accounting stays in integer µT. 1 TARI = 1,000,000 µT.
+The dry-run estimate does **not** depend on the exhaust-burn rate, so it is stable
+across the burn-rate schedule.
 
 All fees are in microtari (µT); 1 TARI = 1,000,000 µT. The configured anchor
 cap is `ANCHOR_MAX_FEE_UNITS = 1000` µT with a release ceiling of

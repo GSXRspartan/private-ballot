@@ -136,7 +136,7 @@ class ExclusiveLocks {
 }
 
 class FakeWallet {
-  constructor({ network = "mainnet", result = { Rejected: { details: "inert test wallet" } }, dryRunResult = { required_fees: "1000" }, dryRunError = null, dryRunIsLocal = true } = {}) {
+  constructor({ network = "mainnet", result = { Rejected: { details: "inert test wallet" } }, dryRunResult = { finalize: { total_fees_required: "1000", result: { Accept: {} } } }, dryRunError = null, dryRunIsLocal = true } = {}) {
     this.isTariWallet = true;
     this.accounts = ["account-a"];
     this.network = network;
@@ -307,7 +307,8 @@ test("the anchor page renders the required controls", () => {
     assert.ok(byId(root, "load-election-btn"));
     assert.ok(button(root, "Connect Sapient"));
     assert.ok(button(root, "Connect Tari Universe"));
-    assert.ok(root.textContent.includes(`Fee cap: ${ANCHOR_MAX_FEE_UNITS} units`));
+    assert.ok(root.textContent.includes(`Maximum authorized fee: 0.001 TARI (${ANCHOR_MAX_FEE_UNITS} µT)`));
+    assert.ok(root.textContent.includes(`Release fee ceiling: 10 TARI (${ANCHOR_MAX_FEE_CEILING_UNITS} µT)`));
     assert.ok(root.textContent.includes("Mainnet network status: no wallet connected."));
     assert.ok(root.textContent.includes("Wallet approval: required"));
   } finally {
@@ -786,7 +787,8 @@ test("normal election metadata still renders after the escaping fix", async () =
 // -----------------------------------------------------------------------------
 
 test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, and it never submits", async () => {
-  const wallet = new FakeWallet({ dryRunResult: { required_fees: "1500" } });
+  // 1,500,000 µT = 1.5 TARI.
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "1500000", result: { Accept: {} } } } });
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
@@ -810,18 +812,20 @@ test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, an
     assert.equal(wallet.createCalls.length, 0, "estimate must not create a transaction request");
     assert.equal(wallet.submitCalls, 0, "estimate must not submit");
 
-    // The estimate is displayed in µT and TARI, with the maximum.
+    // The estimate is displayed in TARI as the primary denomination.
     const text = root.textContent;
-    assert.ok(text.includes("Estimated fee: 1500 µT"), "microtari estimate shown");
-    assert.ok(text.includes("Configured maximum"), "maximum fee shown");
+    assert.ok(text.includes("Estimated transaction fee: 1.5 TARI"), "TARI estimate shown");
+    assert.ok(text.includes("Maximum authorized fee: 0.001 TARI"), "maximum authorized fee shown");
+    assert.ok(text.includes("Release fee ceiling: 10 TARI"), "release ceiling shown");
     assert.ok(text.includes("does not prove a funded transaction will succeed"), "honest caveat shown");
   } finally {
     env.restore();
   }
 });
 
-test("estimate warns when the estimated fee exceeds the configured maximum", async () => {
-  const wallet = new FakeWallet({ dryRunResult: { required_fees: "999999999" } });
+test("estimate warns when the estimated fee exceeds the maximum authorized fee", async () => {
+  // 999,999,999 µT = 999.999999 TARI, above the 0.001 TARI cap.
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "999999999", result: { Accept: {} } } } });
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
@@ -830,7 +834,7 @@ test("estimate warns when the estimated fee exceeds the configured maximum", asy
     await click(button(root, "Connect Sapient"));
     await click(button(root, "Estimate Mainnet Fee"));
     const text = root.textContent;
-    assert.ok(text.includes("exceeds the configured maximum"), "over-cap warning shown");
+    assert.ok(text.includes("exceeds the maximum authorized fee"), "over-cap warning shown");
     // Publish still disabled.
     assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
   } finally {
@@ -838,8 +842,8 @@ test("estimate warns when the estimated fee exceeds the configured maximum", asy
   }
 });
 
-test("estimate displays unsupported honestly when the wallet exposes no fee field", async () => {
-  const wallet = new FakeWallet({ dryRunResult: { somethingElse: true } });
+test("estimate displays Fee estimate unavailable when the wallet exposes no fee field", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { result: { Accept: {} } } } });
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
@@ -848,7 +852,7 @@ test("estimate displays unsupported honestly when the wallet exposes no fee fiel
     await click(button(root, "Connect Sapient"));
     await click(button(root, "Estimate Mainnet Fee"));
     const text = root.textContent;
-    assert.ok(/did not return a verifiable fee estimate/i.test(text), "unsupported shown honestly");
+    assert.ok(/Fee estimate unavailable/i.test(text), "unsupported shown honestly");
     assert.equal(wallet.createCalls.length, 0);
     assert.equal(wallet.submitCalls, 0);
   } finally {

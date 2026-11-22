@@ -26,23 +26,30 @@ simulated test in this repository constitutes live wallet qualification.
 - `hosted-web/src/anchor.ts`
   - "Estimate Mainnet Fee" action, available whenever a Mainnet wallet is
     connected and the deployment is valid, **even while Mainnet submission is
-    disabled**. It displays the estimate in µT and TARI, the configured maximum,
-    an over-cap warning, and an explicit caveat that the estimate neither proves
-    a funded transaction will succeed nor proves the wallet enforces `maxFee`.
+    disabled**. It displays the estimated transaction fee in **TARI** (primary
+    denomination), the maximum authorized fee in TARI, the release fee ceiling in
+    TARI, an over-cap warning in TARI, and an explicit caveat that the estimate
+    neither proves a funded transaction will succeed nor proves the wallet enforces
+    `maxFee`. Protocol µT values are shown only in parentheses for operators.
+    `gui/src/wallet/feeFormat.ts` does exact bigint integer formatting (no float).
 
 ## Documented contract and its limits
 
 - `tari_signAndSubmitTransaction { instructions, maxFee?, inputs?, dryRun? }`
   — with `dryRun: true` it **never prompts and spends nothing**
-  (https://universe.tari.mw/integration/).
+  (https://universe.tari.com/reference/fees/ and the Universe integration docs).
 - `tari_getCapabilities().dryRunIsLocal: boolean` — the wallet's statement that
-  dry runs never leave the wallet.
-- The **wallet response representation of the fee estimate is not documented**.
-  The engine-level figure is `FinalizeResult::required_fees()` (µT, =
-  `total_fees_required` + 12 µT allowance). Whether a wallet surfaces it, and
-  under which key, is wallet-specific. This is why the page degrades to an honest
-  "unsupported" rather than guessing. **FEE ESTIMATE EXTRACTION is therefore
-  VERIFIED only to the extent a real wallet returns one of the recognized shapes.**
+  dry runs never leave the wallet (Sapient currently reports `false`; dry runs
+  round-trip to the indexer's `/transactions/dry-run`).
+- **Actual Sapient dry-run schema (evidence: chironbuilds/tari-wallet @ master):**
+  the provider resolves to `{ transaction_id, result }` where `result` is an
+  `ExecuteResult`. The authoritative fee is **`result.finalize.total_fees_required`**
+  (a decimal STRING in microTARI). All bigints are stringified by the wallet's
+  `sanitizeForMessage`. The engine name `required_fees()` is NOT on the wire; the
+  page reads `result.finalize.total_fees_required` (with a conservative
+  `fee_receipt.total_fees_paid` fallback). A resolved dry run is a successful
+  simulation; the wallet rejects on `Reject`/`AcceptFeeRejectRest`, so the page
+  refuses to report a fee for a rejected simulation. All display is in TARI.
 
 ## Qualifying a REAL Sapient wallet (operator, manual)
 
@@ -58,10 +65,11 @@ simulated test in this repository constitutes live wallet qualification.
    `tari_signAndSubmitTransaction`. **It must not prompt for approval and must
    not move funds.** Confirm in the wallet's own history that no transaction was
    created.
-6. Record exactly what the page displays: the µT/TARI estimate, the configured
-   maximum, and whether an over-cap warning appears. If the page shows
-   "did not return a verifiable fee estimate", capture the wallet's actual
-   `result` JSON (devtools → network/message) so the extractor can be extended.
+6. Record exactly what the page displays in **TARI**: the estimated transaction
+   fee, the maximum authorized fee, the release fee ceiling, and whether an
+   over-cap warning appears. If the page shows "Fee estimate unavailable", capture
+   the wallet's actual `result` JSON (devtools → the `tari_signAndSubmitTransaction`
+   response) so the extractor can be extended.
 7. Confirm **Ask wallet to publish anchor** is still absent (submission disabled).
 8. **User-rejection path:** with the gate still disabled, there is no publish
    action; to exercise a decline you must enable the gate in a **separate,
