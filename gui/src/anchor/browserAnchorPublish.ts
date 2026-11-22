@@ -76,7 +76,14 @@ export function defaultPublishDriver(options: {
     connect: (adapter) => adapter.connect(),
     createRequest: (adapter, bundle, maxFee) =>
       adapter
-        .createTransactionRequest(buildAnchorInstructions(bundle), maxFee)
+        // The wallet API schema types maxFee as a decimal string (see
+        // docs/tari/wallet-integration.md and the official Tari integration
+        // reference). Callers pass a numeric cap; send the documented string
+        // form so the wallet enforces it as specified.
+        .createTransactionRequest(
+          buildAnchorInstructions(bundle),
+          maxFee === undefined ? undefined : String(maxFee),
+        )
         .then((created) => created.requestId),
     waitForApproval: (adapter, requestId, timeoutMs) =>
       adapter.pollTransactionRequest(requestId, { timeoutMs }),

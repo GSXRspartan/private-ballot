@@ -223,6 +223,44 @@ describe("recovery writer", () => {
 });
 
 // -----------------------------------------------------------------------------
+// Publish driver: maxFee is forwarded in the documented decimal-string schema.
+// -----------------------------------------------------------------------------
+
+describe("publish driver fee forwarding", () => {
+  it("sends the numeric cap to the wallet as a decimal string (documented schema)", async () => {
+    const bundle = buildBundleFromDesktop(desktopSource());
+    let captured: unknown;
+    const adapter = {
+      createTransactionRequest: (instructions: unknown, maxFee?: unknown) => {
+        captured = { instructions, maxFee };
+        return Promise.resolve({ requestId: "req_1" });
+      },
+    } as unknown as Parameters<ReturnType<typeof defaultPublishDriver>["createRequest"]>[0];
+    const driver = defaultPublishDriver({ verifyAttempts: 1, verifyIntervalMs: 0 });
+    const requestId = await driver.createRequest(adapter, bundle, 1000);
+    assert.equal(requestId, "req_1");
+    assert.deepEqual(captured, {
+      instructions: (captured as { instructions: unknown }).instructions,
+      maxFee: "1000",
+    });
+  });
+
+  it("omits maxFee entirely when no cap is supplied", async () => {
+    const bundle = buildBundleFromDesktop(desktopSource());
+    let captured: unknown;
+    const adapter = {
+      createTransactionRequest: (instructions: unknown, maxFee?: unknown) => {
+        captured = { instructions, maxFee };
+        return Promise.resolve({ requestId: "req_1" });
+      },
+    } as unknown as Parameters<ReturnType<typeof defaultPublishDriver>["createRequest"]>[0];
+    const driver = defaultPublishDriver({ verifyAttempts: 1, verifyIntervalMs: 0 });
+    await driver.createRequest(adapter, bundle);
+    assert.equal((captured as { maxFee?: unknown }).maxFee, undefined);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // ManageElection surface assertions (source-level, per repo convention).
 // -----------------------------------------------------------------------------
 
