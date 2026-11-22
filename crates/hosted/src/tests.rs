@@ -7204,3 +7204,240 @@ async fn derive_requires_reduced_anonymity_acknowledgement() {
     .await;
     assert_eq!(s_ack, axum::http::StatusCode::CREATED, "{v_ack}");
 }
+
+// ---------------------------------------------------------------------------
+// Consolidated two-voter browser-only end-to-end lifecycle.
+//
+// Proves the full Hosted-only path a normal organizer follows with two voters,
+// each in its own browser context (distinct enrollment keys), with NO Desktop:
+// create -> enroll A + B -> freeze -> open -> issue descriptor -> vote A + B ->
+// close -> derive binding -> finalize -> archive verifies -> anchor-payload is
+// the canonical Mainnet V2 payload. No funded transaction is ever submitted.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn hosted_two_voter_browser_only_e2e_no_desktop() {
+    let (routers, storage) = test_routers();
+    let public = routers.public.clone();
+    let secret = organizer_secret(0xE1);
+    let election_id = "org-e2e-two-voter";
+
+    // 1. Create + open enrollment.
+    organizer_create_ok(&public, election_id, &secret, 2).await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-enrollment"),
+        None,
+        Some(&secret),
+    )
+    .await;
+
+    // 2-3. Enroll voter A and voter B (two distinct browser contexts).
+    let mut invitations = Vec::new();
+    for _ in 0..2 {
+        let (s, v) = organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}/invitations"),
+            None,
+            Some(&secret),
+        )
+        .await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{v}");
+        invitations.push(v["invitation_secret_hex"].as_str().unwrap().to_owned());
+    }
+    let enroll_key_a = enroll_key(1);
+    let enroll_key_b = enroll_key(2);
+    assert_eq!(
+        enroll(&public, election_id, &invitations[0], &enroll_key_a).await.0,
+        axum::http::StatusCode::CREATED
+    );
+    assert_eq!(
+        enroll(&public, election_id, &invitations[1], &enroll_key_b).await.0,
+        axum::http::StatusCode::CREATED
+    );
+
+    // 4-5. Freeze, then open voting.
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/freeze"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/open-voting"),
+        None,
+        Some(&secret),
+    )
+    .await;
+
+    // Build the Fixture from the server-frozen public package.
+    let (_, package_json) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}"),
+        None,
+        &[],
+    )
+    .await;
+    let pkg: serde_json::Value = serde_json::from_str(&package_json).unwrap();
+    let f = Fixture {
+        election_id: election_id.to_owned(),
+        manifest_cbor: hex_decode(pkg["manifest_cbor_hex"].as_str().unwrap()).unwrap(),
+        registry_cbor: hex_decode(pkg["registry_cbor_hex"].as_str().unwrap()).unwrap(),
+        candidate_cbor: hex_decode(pkg["candidate_cbor_hex"].as_str().unwrap()).unwrap(),
+    };
+
+    // Issue the authoritative descriptor via the real organizer endpoint.
+    let (manifest, _, _) = load_fixture(&f);
+    let manifest_hash = manifest.canonical_hash(&Blake3HashProviderV1).unwrap();
+    let draft = TransportDescriptorV1::unsigned_for_authority(
+        election_id.as_bytes().to_vec(),
+        manifest_hash,
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["http://test.invalid".to_owned()],
+        Vec::new(),
+        [7; 32],
+        "hosted-test-gateway".to_owned(),
+        vec![[8; 32]],
+        PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+        BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: 1 },
+        None,
+        "hosted-test-root".to_owned(),
+    )
+    .unwrap();
+    let descriptor_request =
+        HostedDescriptorRequestV1::new([0xE1; 32], "test".to_owned(), draft).unwrap();
+    let (s_desc, descriptor_cbor) = req_cbor(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/descriptor-issuance"),
+        descriptor_request.to_canonical_cbor().unwrap(),
+        &secret,
+    )
+    .await;
+    assert_eq!(s_desc, axum::http::StatusCode::OK, "descriptor issuance");
+    let descriptor = HostedDescriptorResponseV1::from_canonical_cbor(&descriptor_cbor)
+        .unwrap()
+        .descriptor()
+        .clone();
+    descriptor.verify(&test_transport_root(), manifest_hash).unwrap();
+
+    // 6. Vote independently from two browser contexts.
+    let pkg_a = make_package(&f, 1, b"candidate-a");
+    let pkg_b = make_package(&f, 2, b"candidate-b");
+    for (index, pkg) in [pkg_a.clone(), pkg_b.clone()].iter().enumerate() {
+        let body = serde_json::json!({
+            "receipt_id": format!("00000000-0000-4000-8000-00000000000{}", index + 1),
+            "package_cbor_hex": hex_encode(pkg),
+            "api_version": "v1",
+        })
+        .to_string();
+        let (s, r) = req(
+            public.clone(),
+            "POST",
+            &format!("/api/v1/elections/{election_id}/ballots"),
+            Some(body),
+            &[("content-type", "application/json")],
+        )
+        .await;
+        assert_eq!(s, axum::http::StatusCode::CREATED, "{r}");
+    }
+
+    // 7. Close.
+    let (s_close, v_close) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/close"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(s_close, axum::http::StatusCode::OK, "{v_close}");
+    assert_eq!(v_close["state"], "closed");
+
+    // 8. Derive the Hosted authoritative transport binding with organizer
+    // approval (no client binding bytes).
+    let (s_derive, v_derive) = derive_call(
+        &public,
+        election_id,
+        &secret,
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(s_derive, axum::http::StatusCode::CREATED, "{v_derive}");
+    let derived = storage
+        .get_finalized_transport_binding(election_id)
+        .unwrap()
+        .expect("derived binding")
+        .binding_cbor;
+    let digests: Vec<[u8; 32]> = [pkg_a, pkg_b]
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let expected = finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor, &digests)
+        .unwrap()
+        .expect("non-empty")
+        .to_canonical_cbor()
+        .unwrap();
+    assert_eq!(derived, expected, "derived binding must equal the canonical derivation");
+
+    // 9. Finalize.
+    let (s_fin, v_fin) = organizer_call(
+        &public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{election_id}/finalize"),
+        None,
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(s_fin, axum::http::StatusCode::OK, "{v_fin}");
+    assert_eq!(v_fin["state"], "finalized");
+
+    // 10. Download and verify the archive.
+    let archive = get_archive_json(&public, election_id).await;
+    let dir = std::env::temp_dir().join(format!("pb-e2e-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_archive_from_endpoint(
+        &dir,
+        archive["files"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &hex_decode(archive["archive_manifest_cbor_hex"].as_str().unwrap_or("")).unwrap(),
+    );
+    assert!(verify_archive_dir_for_test(&dir), "two-voter archive must verify");
+
+    // 11. Load the anchor payload.
+    let (s_anchor, anchor_body) = get_anchor_payload(&public, election_id).await;
+    assert_eq!(s_anchor, axum::http::StatusCode::OK, "{anchor_body}");
+    let anchor: serde_json::Value = serde_json::from_str(&anchor_body).unwrap();
+
+    // 12. Verify the canonical V2 payload against the archive.
+    let desktop = build_v2_public_payload_from_verified_archive_v1(&GuiLiveAnchorV2RequestV1 {
+        archive_directory: dir.to_string_lossy().into_owned(),
+        network: "mainnet".to_owned(),
+        template_address: tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS
+            .to_owned(),
+        template_module: ANCHOR_TEMPLATE_MODULE_V2.to_owned(),
+        template_function: ANCHOR_EVENT_FUNCTION_V2.to_owned(),
+        template_event_topic: format!("{ANCHOR_TEMPLATE_MODULE_V2}.{ANCHOR_EVENT_TOPIC_SUFFIX_V2}"),
+        template_artifact_digest_hex:
+            tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3.to_owned(),
+    })
+    .unwrap();
+    assert_eq!(desktop.payload_hex, anchor["payload_hex"], "canonical bytes");
+    assert_eq!(desktop.v2_anchor_digest_hex, anchor["v2_anchor_digest_hex"]);
+    assert_eq!(desktop.archive_hash_hex, anchor["archive_hash_hex"]);
+    assert_eq!(desktop.public_summary_json, anchor["public_summary_json"]);
+    assert_eq!(anchor["network"], "mainnet");
+    assert_eq!(anchor["template_address"], MAINNET_V2_TEMPLATE_ADDRESS_FOR_TEST);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+const MAINNET_V2_TEMPLATE_ADDRESS_FOR_TEST: &str =
+    "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb";
