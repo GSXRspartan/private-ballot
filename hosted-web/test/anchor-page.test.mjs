@@ -7,11 +7,14 @@ import { JSDOM } from "jsdom";
 import {
   ANCHOR_MAX_FEE_CEILING_UNITS,
   ANCHOR_MAX_FEE_UNITS,
+  MAINNET_ANCHOR_SUBMISSION_ENABLED,
   buildAnchorBundleFromPayload,
   mountAnchorPanel,
   parseAnchorPayloadResponse,
+  submissionDisabledReason,
 } from "../src/anchor.ts";
-import { buildBundleFromDesktop } from "../../gui/src/wallet/anchorBundle.ts";
+import { bundleDigestKey, buildBundleFromDesktop } from "../../gui/src/wallet/anchorBundle.ts";
+import { browserRecoveryStore, newRecoveryOwnerToken } from "../../gui/src/wallet/recoveryStore.ts";
 import {
   MAINNET_V2_ARTIFACT_DIGEST_HEX,
   MAINNET_V2_TEMPLATE_ADDRESS,
@@ -451,7 +454,14 @@ test("a non-Mainnet wallet is rejected at connect time", async () => {
   }
 });
 
-test("the Sapient path creates a fee-capped request, submits once, and verifies", async () => {
+test("Mainnet submission is disabled by default with a fail-closed reason", () => {
+  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, false);
+  const reason = submissionDisabledReason();
+  assert.ok(typeof reason === "string" && reason.length > 0);
+  assert.match(reason, /Mainnet publishing not yet enabled/);
+});
+
+test("the Sapient path cannot create or submit a transaction while Mainnet submission is disabled", async () => {
   const wallet = new FakeWallet();
   const env = installDom({ wallet });
   try {
@@ -461,16 +471,99 @@ test("the Sapient path creates a fee-capped request, submits once, and verifies"
     await click(button(root, "Connect Sapient"));
     assert.match(statusText(root), /Sapient connected on mainnet/);
 
-    await click(button(root, "Ask wallet to publish anchor"));
+    // No publish action is offered while the switch is disabled.
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    // The fail-closed notice is displayed clearly.
+    assert.match(root.textContent, /Mainnet publishing not yet enabled/);
 
-    assert.equal(wallet.createCalls.length, 1, "exactly one request must be created");
-    assert.equal(wallet.createCalls[0].maxFee, ANCHOR_MAX_FEE_UNITS, "the fee cap must be sent to the wallet");
-    assert.equal(wallet.submitCalls, 1, "exactly one submission must occur");
-    assert.ok(
-      wallet.createCalls[0].instructions[0].CallFunction.args.length === 4,
-      "the anchor call must carry exactly four arguments",
-    );
-    assert.match(statusText(root), /rejected|failed|blocked/);
+    // Even a direct invocation cannot reach the wallet: no request creation,
+    // no approval wait, no submission.
+    assert.equal(wallet.createCalls.length, 0, "no transaction request may be created");
+    assert.equal(wallet.submitCalls, 0, "no submission may occur");
+  } finally {
+    env.restore();
+  }
+});
+
+test("the Web Tari Universe path cannot create or submit a transaction while Mainnet submission is disabled", async () => {
+  const wallet = new FakeWallet();
+  wallet.isEmbedded = true;
+  wallet.info = { rdns: "mw.tari.universe", name: "Tari Universe" };
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Tari Universe"));
+    assert.match(statusText(root), /Tari Universe connected on mainnet/);
+
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    assert.match(root.textContent, /Mainnet publishing not yet enabled/);
+    assert.equal(wallet.createCalls.length, 0, "no transaction request may be created");
+    assert.equal(wallet.submitCalls, 0, "no submission may occur");
+  } finally {
+    env.restore();
+  }
+});
+
+test("recovery paths never create or submit while Mainnet submission is disabled", async () => {
+  const wallet = new FakeWallet();
+  const env = installDom({ wallet });
+  try {
+    // Seed a saved request exactly as a prior session would have left it.
+    const payload = payloadFixture();
+    const bundle = buildAnchorBundleFromPayload(payload);
+    const key = bundleDigestKey(bundle);
+    const token = newRecoveryOwnerToken();
+    browserRecoveryStore().save(key, {
+      phase: "submitted_awaiting_approval",
+      requestId: "request-saved-1",
+      transactionId: null,
+      ownerToken: token,
+      leaseExpiresAtMs: Date.now() - 1000,
+      updatedAtMs: Date.now() - 60_000,
+    });
+
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Check saved request / transaction"));
+
+    assert.equal(wallet.createCalls.length, 0, "recovery must not create a new request");
+    assert.equal(wallet.submitCalls, 0, "recovery must never submit");
+    assert.match(statusText(root), /approved|not be submitted|pending|remain/i);
+  } finally {
+    env.restore();
+  }
+});
+
+test("a saved transaction is verified but never resubmitted while disabled", async () => {
+  const wallet = new FakeWallet();
+  const env = installDom({ wallet });
+  try {
+    const payload = payloadFixture();
+    const bundle = buildAnchorBundleFromPayload(payload);
+    const key = bundleDigestKey(bundle);
+    const token = newRecoveryOwnerToken();
+    browserRecoveryStore().save(key, {
+      phase: "approved_submitted",
+      requestId: null,
+      transactionId: TRANSACTION_ID,
+      ownerToken: token,
+      leaseExpiresAtMs: Date.now() + 5 * 60 * 1000,
+      updatedAtMs: Date.now(),
+    });
+
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Check saved request / transaction"));
+
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0, "a saved transaction must never be resubmitted");
+    assert.doesNotMatch(statusText(root), /submitted again|retried/i);
   } finally {
     env.restore();
   }
@@ -492,7 +585,7 @@ test("Web Tari Universe embedded provider is accepted", async () => {
   }
 });
 
-test("a rejected receipt is terminal and is never resubmitted", async () => {
+test("the publish action is absent while Mainnet submission is disabled", async () => {
   const wallet = new FakeWallet({ result: { Rejected: { details: "user declined" } } });
   const env = installDom({ wallet });
   try {
@@ -500,14 +593,9 @@ test("a rejected receipt is terminal and is never resubmitted", async () => {
     byId(root, "election-id-input").value = ELECTION_A;
     await click(byId(root, "load-election-btn"));
     await click(button(root, "Connect Sapient"));
-    await click(button(root, "Ask wallet to publish anchor"));
 
-    assert.equal(wallet.submitCalls, 1);
-    assert.match(statusText(root), /rejected|failed|blocked/);
-    // A saved transaction exists, so the publish action must be replaced by the
-    // recovery action rather than offering another publication.
-    assert.ok(button(root, "Check saved request / transaction"));
     assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    assert.equal(wallet.submitCalls, 0, "nothing may be submitted while disabled");
   } finally {
     env.restore();
   }

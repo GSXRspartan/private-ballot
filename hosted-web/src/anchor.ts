@@ -57,6 +57,7 @@ import {
   defaultPublishDriver,
   providerErrorMessage,
   type BrowserWalletKind,
+  type PublishDriver,
 } from "../../gui/src/anchor/browserAnchorPublish.ts";
 
 const REQUIRED_CAPABILITIES = ["transactionRequests", "transactionResultLookup"] as const;
@@ -80,6 +81,40 @@ export const ANCHOR_MAX_FEE_CEILING_UNITS = 10_000_000;
 
 if (ANCHOR_MAX_FEE_UNITS < 1 || ANCHOR_MAX_FEE_UNITS > ANCHOR_MAX_FEE_CEILING_UNITS) {
   throw new Error("the configured anchor fee cap is outside the release ceiling");
+}
+
+/**
+ * Fail-closed Mainnet submission switch for the Hosted Anchor page.
+ *
+ * When false (the default, and the only value approved for the staging
+ * deployment), this page may load finalized-election anchor payloads, display
+ * canonical previews, and connect Sapient or Web Tari Universe for network and
+ * capability checks, but it can never create a transaction request, request
+ * approval, or submit a transaction. The restriction is enforced inside the
+ * transaction code path itself (`driver` wrappers below), so publish,
+ * recovery, and any future UI path all fail closed even without a visible
+ * button. Desktop publishing is unaffected; this switch exists only in the
+ * Hosted web page.
+ */
+export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false;
+
+/**
+ * Live submission policy. Initialized from the fail-closed default above;
+ * tests may flip `mainnetEnabled` to exercise enabled-path behavior, while
+ * the shipped bundle always starts disabled.
+ */
+export const ANCHOR_SUBMISSION_POLICY: { mainnetEnabled: boolean } = {
+  mainnetEnabled: MAINNET_ANCHOR_SUBMISSION_ENABLED,
+};
+
+/**
+ * Returns a human-readable reason while Mainnet submission is disabled, or
+ * `null` once it is enabled. Rendered prominently on the page and thrown by
+ * every guarded wallet operation.
+ */
+export function submissionDisabledReason(): string | null {
+  if (ANCHOR_SUBMISSION_POLICY.mainnetEnabled) return null;
+  return "Mainnet publishing not yet enabled. Payloads, previews, wallet connection, and network/capability checks stay available; no transaction request can be created, approved, or submitted from this page.";
 }
 
 type WalletConnection = {
@@ -275,7 +310,7 @@ export function buildAnchorBundleFromPayload(payload: AnchorPayloadResponse): An
 export function mountAnchorPanel(root: HTMLElement): void {
   const store = browserRecoveryStore();
   const ownerToken = newRecoveryOwnerToken();
-  const driver = defaultPublishDriver({
+  const baseDriver = defaultPublishDriver({
     verifyAttempts: VERIFY_ATTEMPTS,
     verifyIntervalMs: VERIFY_INTERVAL_MS,
     verifyWithEvidence: (adapter, bundle, transactionId) => verifyBrowserAnchorEvidence(
@@ -285,6 +320,29 @@ export function mountAnchorPanel(root: HTMLElement): void {
       bundleExpectedPayload(bundle),
     ),
   });
+  // Fail-closed wrappers: every wallet transaction initiation, approval wait,
+  // and submission goes through these guards. Even if a future UI path forgets
+  // its own check, the disabled switch can never be bypassed into a wallet
+  // request or submission. Verification (read-only) is deliberately not
+  // guarded; checking an existing receipt is always safe.
+  const driver: PublishDriver = {
+    ...baseDriver,
+    createRequest: (adapter, bundle, maxFee) => {
+      const reason = submissionDisabledReason();
+      if (reason !== null) throw new Error(reason);
+      return baseDriver.createRequest(adapter, bundle, maxFee);
+    },
+    waitForApproval: (adapter, requestId, timeoutMs) => {
+      const reason = submissionDisabledReason();
+      if (reason !== null) throw new Error(reason);
+      return baseDriver.waitForApproval(adapter, requestId, timeoutMs);
+    },
+    submit: (adapter, requestId) => {
+      const reason = submissionDisabledReason();
+      if (reason !== null) throw new Error(reason);
+      return baseDriver.submit(adapter, requestId);
+    },
+  };
   let validatedBundle: ValidatedAnchorBundle | null = null;
   let payloadError: string | null = null;
   let wallet: WalletConnection | null = null;
@@ -428,6 +486,8 @@ export function mountAnchorPanel(root: HTMLElement): void {
 
   async function submitApprovedUnlocked(requestId: string): Promise<void> {
     if (!validatedBundle) return;
+    const disabled = submissionDisabledReason();
+    if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
@@ -575,6 +635,8 @@ export function mountAnchorPanel(root: HTMLElement): void {
 
   async function publishUnlocked(): Promise<void> {
     if (!validatedBundle) return;
+    const disabled = submissionDisabledReason();
+    if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
@@ -722,6 +784,13 @@ export function mountAnchorPanel(root: HTMLElement): void {
     // Fee and approval policy. The fee is capped client-side and enforced by the
     // wallet from the maxFee request parameter.
     card.append(element("p", `Fee cap: ${ANCHOR_MAX_FEE_UNITS} units (release ceiling ${ANCHOR_MAX_FEE_CEILING_UNITS}) · Wallet approval: required · Network: ${APP_ANCHOR_NETWORK}`));
+    const disabledReason = submissionDisabledReason();
+    if (disabledReason !== null) {
+      const notice = element("p", disabledReason);
+      notice.className = "notice";
+      notice.setAttribute("role", "note");
+      card.append(notice);
+    }
     if (wallet) {
       const verdict = networkVerdict(validatedBundle?.bundle.network ?? "", wallet.network);
       card.append(element(
@@ -748,7 +817,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
       card.append(error);
     } else if (recovery) {
       actions.append(action("Check saved request / transaction", checkRecovery, busy));
-    } else if (validatedBundle && wallet && deploymentError() === null) {
+    } else if (validatedBundle && wallet && deploymentError() === null && submissionDisabledReason() === null) {
       const phase = assessAnchorWorkflow({ bundle: validatedBundle.bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet.network, recovery: null });
       if (phase.kind === "ready") actions.append(action("Ask wallet to publish anchor", publish, busy));
     }
