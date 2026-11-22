@@ -120,7 +120,10 @@ test("closed elections use the file-based Desktop binding handoff before finaliz
   assert.match(organizer, /btn-download-binding-request/);
   assert.match(organizer, /desktop-binding-handoff-file/);
   assert.match(organizer, /transport_binding_status === "verified"/);
-  assert.match(organizer, /Desktop binding required before finalization/);
+  assert.match(organizer, /Transport binding required before finalization/);
+  assert.match(organizer, /Option A — Derive from the Hosted ledger/);
+  assert.match(organizer, /\/transport-binding\/derive/);
+  assert.match(organizer, /derive-from-hosted-ledger/);
   assert.match(organizer, /no binding bytes need to be copied or pasted/);
   assert.match(organizer, /a\.download = `private-ballot-\$\{access\.election_id\}\.hosted-binding-request\.json`/);
   // The handoff uses the same capability-authenticated fetch helper, whose
@@ -143,6 +146,99 @@ test("no third-party runtime dependencies introduced", async () => {
     const src = await read(p);
     for (const m of src.matchAll(/from "([^"]+)"/g)) {
       assert.match(m[1], /^\.\//, "only local imports are allowed");
+    }
+  }
+});
+
+// ---------- Behavioral: Hosted transport-binding derivation markup ----------
+
+test("derive markup discloses the trust model and gates on explicit confirmation", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
+    url: "https://hosted.example/manage.html",
+  });
+  const previous = new Map();
+  for (const [name, value] of Object.entries({
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    localStorage: dom.window.localStorage,
+    HTMLElement: dom.window.HTMLElement,
+    Event: dom.window.Event,
+  })) {
+    previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  try {
+    const { bindingHandoffMarkup } = await import("../src/organizer.ts?derive-markup");
+    const closed = { election_id: "e1", election_state: "closed", transport_binding_status: "unverified" };
+    const html = bindingHandoffMarkup(closed);
+
+    // Rendered into a real DOM and asserted behaviorally.
+    const root = dom.window.document.createElement("div");
+    root.innerHTML = html;
+
+    // Trust-model disclosure for the HTTPS-only derivation is present.
+    assert.match(root.textContent, /every ballot[\s\S]*Hosted HTTPS/i);
+    assert.match(root.textContent, /Trust model/i);
+    assert.match(root.textContent, /ballot office's accepted-package ledger is treated as authoritative/i);
+
+    // Both options are offered, and the derive action is gated behind an
+    // explicit confirmation checkbox and a reduced-anonymity acknowledgement.
+    const confirm = root.querySelector("#derive-confirm");
+    const ack = root.querySelector("#derive-reduced-ack");
+    const deriveBtn = root.querySelector("#btn-derive-binding");
+    assert.ok(confirm, "confirmation checkbox required");
+    assert.ok(ack, "reduced-anonymity acknowledgement required");
+    assert.ok(deriveBtn, "derive action must be present");
+    assert.equal(confirm.type, "checkbox");
+    assert.equal(ack.type, "checkbox");
+
+    // The Desktop handoff remains available as the alternative path.
+    assert.ok(root.querySelector("#btn-download-binding-request"));
+    assert.ok(root.querySelector("#desktop-binding-handoff-file"));
+
+    // No active markup / event handlers injected by the (server-controlled)
+    // election id.
+    for (const tag of ["script", "img", "svg", "iframe"]) {
+      assert.equal(root.querySelector(tag), null, `no <${tag}> may appear`);
+    }
+  } finally {
+    for (const [name, descriptor] of previous.entries()) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  }
+});
+
+test("a verified binding replaces the derive/handoff chooser with a confirmation", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
+    url: "https://hosted.example/manage.html",
+  });
+  const previous = new Map();
+  for (const [name, value] of Object.entries({
+    window: dom.window,
+    document: dom.window.document,
+    navigator: dom.window.navigator,
+    localStorage: dom.window.localStorage,
+    HTMLElement: dom.window.HTMLElement,
+    Event: dom.window.Event,
+  })) {
+    previous.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
+  try {
+    const { bindingHandoffMarkup } = await import("../src/organizer.ts?derive-markup2");
+    const root = dom.window.document.createElement("div");
+    root.innerHTML = bindingHandoffMarkup({ election_id: "e1", election_state: "closed", transport_binding_status: "verified" });
+    assert.match(root.textContent, /Transport binding verified/i);
+    assert.equal(root.querySelector("#btn-derive-binding"), null, "no derive action once verified");
+    assert.equal(root.querySelector("#desktop-binding-handoff-file"), null, "no handoff import once verified");
+  } finally {
+    for (const [name, descriptor] of previous.entries()) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
     }
   }
 });

@@ -61,6 +61,39 @@ Desktop-generated bundle.
   archive replay; archive staging uses a private randomly-named directory that
   is removed when the request ends and is never derived from the election id.
 
+## Hosted transport-binding derivation (browser-only finalization)
+
+`POST /api/v1/organizer/elections/{id}/transport-binding/derive` lets an organizer
+finalize an **HTTPS-only** election without a Desktop handoff.
+
+- **Auth:** election-scoped organizer capability header
+  (`x-private-ballot-organizer`), constant-time verified.
+- **Body:** `{ "confirm": "derive-from-hosted-ledger", "acknowledge_reduced_anonymity": <bool> }`.
+  No binding bytes are accepted; any client-supplied `transport_binding_cbor_hex`
+  is ignored.
+- **Preconditions:** election state is `closed`; exactly one authoritative
+  descriptor issuance exists, is signature-verified against the configured
+  transport authority root, and matches the election id; the accepted-package
+  ledger replays to a non-empty set.
+- **Derivation:** `finalized_transport_archive_binding_from_accepted_digests_v1`
+  over the stored descriptor and the accepted-package digests — the same
+  deterministic function the Desktop handoff is validated against, so the two
+  paths produce byte-identical bindings, archives, and anchor payloads for
+  equivalent evidence.
+- **Policy:** accepted cohort below
+  `GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1` →
+  `anchor_privacy_floor_not_met`; a derived binding reporting
+  `reduced_anonymity` requires `acknowledge_reduced_anonymity: true`, otherwise
+  `anchor_reduced_anonymity_ack_required`.
+- **Immutability:** first-writer-wins. A second derive (or a Desktop handoff)
+  returns `transport_binding_already_recorded`.
+- **Errors:** `invalid_confirmation`, `invalid_state`, `anchor_privacy_floor_not_met`,
+  `anchor_reduced_anonymity_ack_required`, `transport_binding_required`,
+  `transport_binding_already_recorded`, `election_not_found`.
+- **Trust model:** for HTTPS-only elections the ballot office's accepted-package
+  ledger is authoritative for the accepted set; the Desktop remains authoritative
+  for elections that include Desktop/Tor ballots. `do_finalize` is unchanged.
+
 ## Ballot submission (Stage 2 design)
 
 - **Request:** one canonical ballot envelope: `{ election_id, nullifier_commitment, proof, ciphertext_or_envelope, receipt_id (client-generated UUIDv4), api_version: "v1" }`. No plaintext, no voter secret, no Triptych witness.

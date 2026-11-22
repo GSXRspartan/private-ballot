@@ -16,7 +16,7 @@
  * - Irreversible lifecycle actions require window.confirm().
  */
 
-import { hostedShell } from "./shell";
+import { hostedShell } from "./shell.ts";
 
 export const ACCESS_SCHEMA = "private-ballot-organizer-access-v1";
 
@@ -362,22 +362,44 @@ function renderConsole() {
   }
 }
 
-function bindingHandoffMarkup(election: ElectionView): string {
+export function bindingHandoffMarkup(election: ElectionView): string {
   if (election.transport_binding_status === "verified") {
     return `<div class="card ok">
-      <h3>Desktop binding verified</h3>
-      <p>The Hosted service has authenticated the Desktop-produced transport binding for this exact election. You can now finalize and publish the archive.</p>
+      <h3>Transport binding verified</h3>
+      <p>The Hosted service has authenticated a transport binding for this exact election. You can now finalize and publish the archive.</p>
     </div>`;
   }
   return `<div class="card">
-    <h3>Desktop binding required before finalization</h3>
-    <p>Download the election-bound request, open it in Desktop after Desktop has finalized and verified the transport history, then import the Desktop handoff file here. The organizer secret is never put in either handoff file, and no binding bytes need to be copied or pasted.</p>
-    <div class="action-row">
-      <button id="btn-download-binding-request">1. Download Desktop request</button>
-      <label class="btn-link" for="desktop-binding-handoff-file">2. Import Desktop handoff</label>
-      <input id="desktop-binding-handoff-file" type="file" accept="application/json,.json" hidden />
+    <h3>Transport binding required before finalization</h3>
+    <p>There are two accepted ways to produce the binding. Choose the one that matches how this election's ballots were cast.</p>
+
+    <div class="card">
+      <h4>Option A — Derive from the Hosted ledger (HTTPS-only elections)</h4>
+      <p>Use this when <strong>every ballot was cast over Hosted HTTPS</strong>. The Hosted service derives the binding deterministically from its own authenticated accepted-package ledger and the authoritative descriptor it issued for this election. No Desktop is required.</p>
+      <p class="form-hint"><strong>Trust model:</strong> for an HTTPS-only election, your Hosted capability credential authorizes this derivation. The ballot office's accepted-package ledger is treated as authoritative for the accepted set; the Desktop is no longer a separate witness for this case. Only proceed if all ballots were cast over Hosted HTTPS (not Desktop/Tor).</p>
+      <label class="form-hint" for="derive-confirm">
+        <input type="checkbox" id="derive-confirm" />
+        I confirm every ballot in this election was cast over Hosted HTTPS and I want Hosted to derive the binding from its ledger.
+      </label>
+      <label class="form-hint" for="derive-reduced-ack">
+        <input type="checkbox" id="derive-reduced-ack" />
+        I acknowledge if the derived binding covers a cohort below the descriptor's anonymity floor (reduced anonymity).
+      </label>
+      <div class="action-row">
+        <button id="btn-derive-binding" class="danger">Derive binding from Hosted ledger…</button>
+      </div>
     </div>
-    <p><small>Finalization remains blocked until Hosted independently verifies the imported binding against its closed election.</small></p>
+
+    <div class="card">
+      <h4>Option B — Desktop handoff (Desktop/Tor or mixed elections)</h4>
+      <p>Use this when any ballot was cast through Desktop/Tor. Download the election-bound request, open it in Desktop after Desktop has finalized and verified the transport history, then import the Desktop handoff file here. The organizer secret is never put in either handoff file, and no binding bytes need to be copied or pasted.</p>
+      <div class="action-row">
+        <button id="btn-download-binding-request">1. Download Desktop request</button>
+        <label class="btn-link" for="desktop-binding-handoff-file">2. Import Desktop handoff</label>
+        <input id="desktop-binding-handoff-file" type="file" accept="application/json,.json" hidden />
+      </div>
+    </div>
+    <p><small>Either way, finalization remains blocked until Hosted has a verified binding for this closed election.</small></p>
   </div>`;
 }
 
@@ -432,6 +454,9 @@ function bindConsole() {
     const file = bindingHandoffInput.files?.[0];
     if (file) void importDesktopBindingHandoff(file);
   });
+
+  const deriveBindingBtn = document.getElementById("btn-derive-binding") as HTMLButtonElement | null;
+  deriveBindingBtn?.addEventListener("click", () => { void deriveHostedBinding(); });
 
   const archiveDownloadBtn = document.getElementById("btn-download-archive") as HTMLButtonElement | null;
   archiveDownloadBtn?.addEventListener("click", () => { void downloadFinalizedArchive(); });
@@ -626,6 +651,53 @@ async function importDesktopBindingHandoff(file: File) {
   } else {
     const code = typeof res.json?.["code"] === "string" ? res.json["code"] : "";
     setError(`Desktop binding handoff rejected (${code || res.status}). The election identity, state, and binding provenance must all match.`);
+  }
+  await refreshConsole();
+}
+
+/**
+ * Derives the transport binding from Hosted's own authenticated ledger
+ * (HTTPS-only elections). Requires an explicit confirmation checkbox and,
+ * when the derived binding reports reduced anonymity, an acknowledgement.
+ * No binding bytes are sent; the server derives them.
+ */
+async function deriveHostedBinding() {
+  if (!cs || cs.busy) return;
+  const confirm = (document.getElementById("derive-confirm") as HTMLInputElement | null)?.checked === true;
+  const ack = (document.getElementById("derive-reduced-ack") as HTMLInputElement | null)?.checked === true;
+  if (!confirm) {
+    setError("Confirm that every ballot was cast over Hosted HTTPS before deriving the binding.");
+    renderConsole();
+    return;
+  }
+  clearTransientSecret();
+  cs.busy = true;
+  cs.errorMsg = "";
+  cs.infoMsg = "";
+  renderConsole();
+  const res = await organizerFetch(
+    cs.access,
+    "POST",
+    apiPath(cs.access, "/transport-binding/derive"),
+    { confirm: "derive-from-hosted-ledger", acknowledge_reduced_anonymity: ack }
+  );
+  cs.busy = false;
+  if (res.ok) {
+    cs.infoMsg = "Transport binding derived from the Hosted ledger. You can now finalize the election.";
+  } else if (res.status === 401) {
+    setError("Organizer credential rejected (401).");
+  } else {
+    const code = typeof res.json?.["code"] === "string" ? res.json["code"] : "";
+    const message = typeof res.json?.["message"] === "string" ? res.json["message"] : "";
+    if (code === "anchor_reduced_anonymity_ack_required") {
+      setError("The derived binding covers a cohort below the descriptor's anonymity floor. Tick the reduced-anonymity acknowledgement and try again.");
+    } else if (code === "anchor_privacy_floor_not_met") {
+      setError("This election's accepted cohort is below the anchor privacy floor; a binding cannot be derived.");
+    } else if (code === "transport_binding_already_recorded") {
+      setError("A transport binding is already recorded for this election; it is immutable.");
+    } else {
+      setError(`Binding derivation rejected (${code || res.status}). ${message}`.trim());
+    }
   }
   await refreshConsole();
 }

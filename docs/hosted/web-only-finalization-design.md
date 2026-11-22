@@ -1,9 +1,15 @@
-# Web-only finalization design (NOT implemented)
+# Web-only finalization design (IMPLEMENTED)
 
-Status: **design only**. This document records the smallest secure change that would
-let a Hosted organizer finalize an election that used only Hosted HTTPS voting, without
-a Desktop transport-binding handoff. Nothing in this document is implemented in the
-current change set, and `do_finalize` is unchanged.
+Status: **implemented**. `POST /api/v1/organizer/elections/{id}/transport-binding/derive`
+lets a Hosted organizer finalize an HTTPS-only election without a Desktop
+transport-binding handoff. `do_finalize` is unchanged and still re-validates
+whatever binding row exists. The Desktop handoff (`POST .../transport-binding`)
+remains available as an alternative producer for Desktop/Tor or mixed
+elections. See `HOSTED_API_V1.md` for the request/response schema and
+`crates/hosted/src/tests.rs` (`derive_*` tests) for the byte-identical
+equivalence proof against the Desktop path.
+
+The original design record follows.
 
 ## 1. Why Desktop is currently required
 

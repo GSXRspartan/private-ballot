@@ -6176,8 +6176,21 @@ async fn import_open_election(routers: &TestRouters, f: &Fixture) {
     );
 }
 
-async fn submit_ballot(routers: &TestRouters, f: &Fixture, index: u64, scalar: u64) {
+async fn submit_ballot(routers: &TestRouters, f: &Fixture, index: u64, scalar: u64) -> Vec<u8> {
     let pkg = make_package(f, scalar, b"candidate-a");
+    submit_ballot_with_package(routers, f, index, pkg.clone()).await;
+    pkg
+}
+
+/// Submits a pre-built ballot package byte-for-byte (used when two elections
+/// must carry identical accepted evidence, since proof generation is
+/// randomized and cannot be reproduced by recomputation).
+async fn submit_ballot_with_package(
+    routers: &TestRouters,
+    f: &Fixture,
+    index: u64,
+    pkg: Vec<u8>,
+) {
     let body = serde_json::json!({
         "receipt_id": format!("00000000-0000-4000-8000-{index:012}"),
         "package_cbor_hex": hex_encode(&pkg),
@@ -6654,4 +6667,540 @@ fn object_keys(json: &str) -> Vec<String> {
 fn error_code(json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
     value.get("code")?.as_str().map(str::to_owned)
+}
+
+// ---------------------------------------------------------------------------
+// Hosted HTTPS-only transport-binding derivation (browser-only finalization).
+//
+// The binding is a deterministic function of the stored authoritative
+// descriptor and the accepted-package ledger. These tests prove the derive
+// endpoint stores exactly that function, is organizer-authenticated,
+// closed-only, immutable (first-writer-wins), privacy-floor and
+// reduced-anonymity gated, ignores any client-supplied binding bytes, and
+// produces a byte-identical archive and anchor payload to the Desktop handoff
+// path for equivalent accepted-ballot evidence.
+// ---------------------------------------------------------------------------
+
+const DERIVE_PATH_SUFFIX: &str = "/transport-binding/derive";
+
+/// Injects an organizer credential and an authoritative descriptor issuance
+/// directly into storage so an imported fixture election can exercise the
+/// organizer-authenticated derive/handoff endpoints.
+fn seed_organizer_and_descriptor(
+    storage: &InMemoryStorage,
+    f: &Fixture,
+    secret_hex: &str,
+    request_id: [u8; 32],
+) -> TransportDescriptorV1 {
+    seed_organizer_and_descriptor_with_floor(storage, f, secret_hex, request_id, 1)
+}
+
+fn seed_organizer_and_descriptor_with_floor(
+    storage: &InMemoryStorage,
+    f: &Fixture,
+    secret_hex: &str,
+    request_id: [u8; 32],
+    floor: u64,
+) -> TransportDescriptorV1 {
+    storage
+        .put_organizer_credential(crate::storage::OrganizerCredentialRecord {
+            election_id: f.election_id.clone(),
+            organizer_verifier_hex: crate::organizer_verifier(
+                &f.election_id,
+                &hex_decode(secret_hex).unwrap_or_else(|_| panic!("secret hex")),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap_or_else(|_| panic!("seed organizer credential"));
+    let (manifest, _, _) = load_fixture(f);
+    let manifest_hash = manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .unwrap_or_else(|_| panic!("manifest hash"));
+    let draft = TransportDescriptorV1::unsigned_for_authority(
+        f.election_id.as_bytes().to_vec(),
+        manifest_hash,
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["http://test.invalid".to_owned()],
+        Vec::new(),
+        [7; 32],
+        "hosted-test-gateway".to_owned(),
+        vec![[8; 32]],
+        PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+        BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: floor },
+        None,
+        "hosted-test-root".to_owned(),
+    )
+    .unwrap_or_else(|_| panic!("descriptor draft"));
+    let request = HostedDescriptorRequestV1::new(request_id, "test".to_owned(), draft)
+        .unwrap_or_else(|_| panic!("descriptor request"));
+    let canonical_request = request
+        .to_canonical_cbor()
+        .unwrap_or_else(|_| panic!("request cbor"));
+    // Sign with the test authority key so descriptor.verify() passes.
+    let signing = SigningKey::from_bytes(&[42; 32]);
+    let descriptor = TransportDescriptorV1::sign_for_test_or_ceremony(
+        f.election_id.as_bytes().to_vec(),
+        manifest_hash,
+        1,
+        TransportRoutePolicyV1::ManagedTorOrOffline,
+        vec!["http://test.invalid".to_owned()],
+        Vec::new(),
+        [7; 32],
+        "hosted-test-gateway".to_owned(),
+        vec![[8; 32]],
+        PaddingPolicyV1 { id: "test-padding".to_owned(), padded_bytes: 2048 },
+        BatchPolicyV1 { id: "test-batch".to_owned(), accepted_unique_floor: floor },
+        None,
+        "hosted-test-root".to_owned(),
+        &signing,
+    )
+    .unwrap_or_else(|_| panic!("signed descriptor"));
+    let response = HostedDescriptorResponseV1::new(&request, descriptor)
+        .unwrap_or_else(|_| panic!("descriptor response"));
+    let response_cbor = response
+        .to_canonical_cbor()
+        .unwrap_or_else(|_| panic!("response cbor"));
+    storage
+        .record_descriptor_issuance(crate::storage::DescriptorIssuanceRecord {
+            election_id: f.election_id.clone(),
+            request_id,
+            request_cbor: canonical_request,
+            response_cbor,
+        })
+        .unwrap_or_else(|_| panic!("record descriptor issuance"));
+    response.descriptor().clone()
+}
+
+async fn drive_to_closed_with_ballots(
+    routers: &TestRouters,
+    storage: &Arc<InMemoryStorage>,
+    f: &Fixture,
+    scalars: &[u64],
+    secret_hex: &str,
+    request_id: [u8; 32],
+) -> (TransportDescriptorV1, Vec<Vec<u8>>) {
+    import_open_election(routers, f).await;
+    let descriptor = seed_organizer_and_descriptor(storage, f, secret_hex, request_id);
+    let mut packages = Vec::new();
+    for (index, scalar) in scalars.iter().enumerate() {
+        packages.push(submit_ballot(routers, f, index as u64 + 1, *scalar).await);
+    }
+    close_election(routers, f).await;
+    (descriptor, packages)
+}
+
+fn derive_call(
+    public: &axum::Router,
+    election_id: &str,
+    secret: &str,
+    body: serde_json::Value,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = (axum::http::StatusCode, serde_json::Value)> + Send>,
+> {
+    let public = public.clone();
+    let election_id = election_id.to_owned();
+    let secret = secret.to_owned();
+    Box::pin(async move {
+        organizer_call(
+            &public,
+            "POST",
+            &format!("/api/v1/organizer/elections/{election_id}{DERIVE_PATH_SUFFIX}"),
+            Some(body.to_string()),
+            Some(&secret),
+        )
+        .await
+    })
+}
+
+fn derive_body(confirm: &str, ack: bool) -> serde_json::Value {
+    serde_json::json!({
+        "confirm": confirm,
+        "acknowledge_reduced_anonymity": ack,
+    })
+}
+
+#[tokio::test]
+async fn derive_stores_the_canonical_binding_and_finalizes_to_a_verified_archive() {
+    let f = fixture_with("derive-canonical", "derive-canonical-rev");
+    let (routers, storage) = test_routers();
+    let (descriptor, ballots) = drive_to_closed_with_ballots(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        &organizer_secret(0xD1),
+        [0xD1; 32],
+    )
+    .await;
+
+    let (status, body) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD1),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CREATED, "{body}");
+    assert_eq!(body["state"], "transport_binding_derived");
+    assert_eq!(body["anchor_eligible"], true);
+    assert_eq!(body["accepted_ballot_count"], 2);
+
+    // The stored binding equals the canonical deterministic derivation over
+    // the ACTUAL accepted packages (proofs are randomized, so we must reuse the
+    // exact bytes that were submitted, not recompute them).
+    let stored = storage
+        .get_finalized_transport_binding(&f.election_id)
+        .unwrap()
+        .expect("stored binding")
+        .binding_cbor;
+    let digests: Vec<[u8; 32]> = ballots
+        .iter()
+        .map(|p| hash_domain_separated(&Blake3HashProviderV1, HashDomain::BallotPackageV1, p))
+        .collect();
+    let expected = finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor, &digests)
+        .unwrap()
+        .expect("non-empty")
+        .to_canonical_cbor()
+        .unwrap();
+    assert_eq!(stored, expected, "derive must store the canonical binding bytes");
+
+    // Finalize and verify the archive replays.
+    finalize_election(&routers, &f).await;
+    let (status, archive_body) = req(
+        routers.public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/archive", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{archive_body}");
+    let archive: serde_json::Value = serde_json::from_str(&archive_body).unwrap();
+    let dir = std::env::temp_dir().join(format!("pb-derive-archive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    write_archive_from_endpoint(
+        &dir,
+        archive["files"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        &hex_decode(archive["archive_manifest_cbor_hex"].as_str().unwrap_or("")).unwrap(),
+    );
+    assert!(verify_archive_dir_for_test(&dir), "derived-then-finalized archive must verify");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn derive_equals_desktop_handoff_byte_for_byte_end_to_end() {
+    // Two byte-identical fixture elections across independent storages, each
+    // carrying the SAME accepted package bytes (proof generation is
+    // randomized, so identical evidence must be submitted verbatim). The derive
+    // path and the Desktop handoff path must then produce identical binding
+    // bytes, archive hashes, and anchor payloads.
+    let f = fixture_with("derive-equivalence", "derive-equivalence-rev");
+    let (routers_a, storage_a) = test_routers();
+    let (routers_b, storage_b) = test_routers();
+    let secret = organizer_secret(0xD2);
+
+    // One shared set of accepted packages.
+    let pkg1 = make_package(&f, 1, b"candidate-a");
+    let pkg2 = make_package(&f, 2, b"candidate-a");
+
+    async fn setup(
+        routers: &TestRouters,
+        storage: &Arc<InMemoryStorage>,
+        f: &Fixture,
+        secret: &str,
+        pkg1: &[u8],
+        pkg2: &[u8],
+    ) -> TransportDescriptorV1 {
+        import_open_election(routers, f).await;
+        let descriptor = seed_organizer_and_descriptor(storage, f, secret, [0xD2; 32]);
+        submit_ballot_with_package(routers, f, 1, pkg1.to_vec()).await;
+        submit_ballot_with_package(routers, f, 2, pkg2.to_vec()).await;
+        close_election(routers, f).await;
+        descriptor
+    }
+    let _descriptor_a = setup(&routers_a, &storage_a, &f, &secret, &pkg1, &pkg2).await;
+    let descriptor_b = setup(&routers_b, &storage_b, &f, &secret, &pkg1, &pkg2).await;
+
+    // Path A: derive.
+    let (sa, va) = derive_call(
+        &routers_a.public,
+        &f.election_id,
+        &secret,
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(sa, axum::http::StatusCode::CREATED, "{va}");
+    let binding_a = storage_a
+        .get_finalized_transport_binding(&f.election_id)
+        .unwrap()
+        .expect("binding a")
+        .binding_cbor;
+
+    // Path B: Desktop handoff with the canonically-derived bytes for the same
+    // evidence and descriptor.
+    let handoff = desktop_binding_handoff_json(
+        &f,
+        &binding_a,
+        &descriptor_b.to_canonical_cbor().unwrap(),
+    );
+    let (sb, vb) = organizer_call(
+        &routers_b.public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{}/transport-binding", f.election_id),
+        Some(handoff),
+        Some(&secret),
+    )
+    .await;
+    assert_eq!(sb, axum::http::StatusCode::CREATED, "{vb}");
+    let binding_b = storage_b
+        .get_finalized_transport_binding(&f.election_id)
+        .unwrap()
+        .expect("binding b")
+        .binding_cbor;
+    assert_eq!(binding_a, binding_b, "derive and Desktop handoff bindings must be byte-identical");
+
+    // Finalize both and compare archive + anchor payloads byte-for-byte.
+    finalize_election(&routers_a, &f).await;
+    finalize_election(&routers_b, &f).await;
+    let archive_a = get_archive_json(&routers_a.public, &f.election_id).await;
+    let archive_b = get_archive_json(&routers_b.public, &f.election_id).await;
+    assert_eq!(archive_a["archive_hash_hex"], archive_b["archive_hash_hex"]);
+    let (sa2, anchor_a) = get_anchor_payload(&routers_a.public, &f.election_id).await;
+    let (sb2, anchor_b) = get_anchor_payload(&routers_b.public, &f.election_id).await;
+    assert_eq!(sa2, axum::http::StatusCode::OK, "{anchor_a}");
+    assert_eq!(sb2, axum::http::StatusCode::OK, "{anchor_b}");
+    let ja: serde_json::Value = serde_json::from_str(&anchor_a).unwrap();
+    let jb: serde_json::Value = serde_json::from_str(&anchor_b).unwrap();
+    assert_eq!(ja["v2_anchor_digest_hex"], jb["v2_anchor_digest_hex"]);
+    assert_eq!(ja["payload_hex"], jb["payload_hex"]);
+    assert_eq!(ja["public_summary_json"], jb["public_summary_json"]);
+    assert_eq!(ja["archive_hash_hex"], jb["archive_hash_hex"]);
+}
+
+async fn get_archive_json(router: &axum::Router, election_id: &str) -> serde_json::Value {
+    let (status, body) = req(
+        router.clone(),
+        "GET",
+        &format!("/api/v1/elections/{election_id}/archive"),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    serde_json::from_str(&body).unwrap_or_else(|_| panic!("archive json"))
+}
+
+#[tokio::test]
+async fn derive_requires_closed_state_and_organizer_authentication() {
+    let f = fixture_with("derive-auth", "derive-auth-rev");
+    let (routers, storage) = test_routers();
+    import_open_election(&routers, &f).await;
+    seed_organizer_and_descriptor(&storage, &f, &organizer_secret(0xD3), [0xD3; 32]);
+
+    // Open election: 409 invalid_state.
+    let (s_open, v_open) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD3),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(s_open, axum::http::StatusCode::CONFLICT, "{v_open}");
+    assert_eq!(v_open["code"], "invalid_state");
+
+    // Foreign organizer capability: 401.
+    let (s_foreign, v_foreign) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0x99),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(s_foreign, axum::http::StatusCode::UNAUTHORIZED, "{v_foreign}");
+
+    // Missing confirmation: 400 invalid_confirmation (after auth, closed check).
+    submit_ballot(&routers, &f, 1, 1).await;
+    submit_ballot(&routers, &f, 2, 2).await;
+    close_election(&routers, &f).await;
+    let (s_bad, v_bad) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD3),
+        derive_body("yes-please", false),
+    )
+    .await;
+    assert_eq!(s_bad, axum::http::StatusCode::BAD_REQUEST, "{v_bad}");
+    assert_eq!(v_bad["code"], "invalid_confirmation");
+}
+
+#[tokio::test]
+async fn derive_without_descriptor_issuance_is_rejected() {
+    let f = fixture_with("derive-no-descriptor", "derive-no-descriptor-rev");
+    let (routers, storage) = test_routers();
+    import_open_election(&routers, &f).await;
+    submit_ballot(&routers, &f, 1, 1).await;
+    submit_ballot(&routers, &f, 2, 2).await;
+    close_election(&routers, &f).await;
+    // Organizer credential but no descriptor issuance row.
+    storage
+        .put_organizer_credential(crate::storage::OrganizerCredentialRecord {
+            election_id: f.election_id.clone(),
+            organizer_verifier_hex: crate::organizer_verifier(
+                &f.election_id,
+                &hex_decode(&organizer_secret(0xD4)).unwrap(),
+            ),
+            created_at_ms: 1,
+        })
+        .unwrap();
+
+    let (status, body) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD4),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "transport_binding_required");
+    assert!(body["message"]
+        .as_str()
+        .unwrap_or("")
+        .contains("no authoritative descriptor"));
+}
+
+#[tokio::test]
+async fn derive_is_immutable_and_ignores_client_supplied_binding_bytes() {
+    let f = fixture_with("derive-immutable", "derive-immutable-rev");
+    let (routers, storage) = test_routers();
+    let (descriptor, _packages) = drive_to_closed_with_ballots(
+        &routers,
+        &storage,
+        &f,
+        &[1, 2],
+        &organizer_secret(0xD5),
+        [0xD5; 32],
+    )
+    .await;
+
+    // A client-supplied garbage binding field is ignored; derivation wins.
+    let (s1, v1) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD5),
+        serde_json::json!({
+            "confirm": "derive-from-hosted-ledger",
+            "acknowledge_reduced_anonymity": false,
+            "transport_binding_cbor_hex": "deadbeef",
+        }),
+    )
+    .await;
+    assert_eq!(s1, axum::http::StatusCode::CREATED, "{v1}");
+    let first = storage
+        .get_finalized_transport_binding(&f.election_id)
+        .unwrap()
+        .expect("first binding")
+        .binding_cbor;
+
+    // Second derive: immutable, first-writer-wins.
+    let (s2, v2) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD5),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(s2, axum::http::StatusCode::CONFLICT, "{v2}");
+    assert_eq!(v2["code"], "transport_binding_already_recorded");
+    assert_eq!(
+        storage
+            .get_finalized_transport_binding(&f.election_id)
+            .unwrap()
+            .expect("binding remains")
+            .binding_cbor,
+        first,
+        "the stored binding must never be replaced"
+    );
+
+    // The Desktop handoff can no longer override the derived binding either.
+    let handoff = desktop_binding_handoff_json(
+        &f,
+        &first,
+        &descriptor.to_canonical_cbor().unwrap(),
+    );
+    let (s3, v3) = organizer_call(
+        &routers.public,
+        "POST",
+        &format!("/api/v1/organizer/elections/{}/transport-binding", f.election_id),
+        Some(handoff),
+        Some(&organizer_secret(0xD5)),
+    )
+    .await;
+    assert_eq!(s3, axum::http::StatusCode::CONFLICT, "{v3}");
+    assert_eq!(v3["code"], "transport_binding_already_recorded");
+}
+
+#[tokio::test]
+async fn derive_enforces_the_privacy_floor() {
+    // A single accepted ballot is below the release floor of 2.
+    let f = fixture_with("derive-floor", "derive-floor-rev");
+    let (routers, storage) = test_routers();
+    drive_to_closed_with_ballots(
+        &routers,
+        &storage,
+        &f,
+        &[1],
+        &organizer_secret(0xD6),
+        [0xD6; 32],
+    )
+    .await;
+
+    let (status, body) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD6),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "anchor_privacy_floor_not_met");
+    assert!(storage
+        .get_finalized_transport_binding(&f.election_id)
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn derive_requires_reduced_anonymity_acknowledgement() {
+    // accepted_unique_floor = 3 in the descriptor; two accepted ballots are
+    // below it, so the single sealed batch reports reduced anonymity.
+    let f = fixture_with("derive-reduced", "derive-reduced-rev");
+    let (routers, storage) = test_routers();
+    import_open_election(&routers, &f).await;
+    seed_organizer_and_descriptor_with_floor(&storage, &f, &organizer_secret(0xD7), [0xD7; 32], 3);
+    submit_ballot(&routers, &f, 1, 1).await;
+    submit_ballot(&routers, &f, 2, 2).await;
+    close_election(&routers, &f).await;
+
+    // Without acknowledgement: 409.
+    let (s_no, v_no) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD7),
+        derive_body("derive-from-hosted-ledger", false),
+    )
+    .await;
+    assert_eq!(s_no, axum::http::StatusCode::CONFLICT, "{v_no}");
+    assert_eq!(v_no["code"], "anchor_reduced_anonymity_ack_required");
+
+    // With acknowledgement: 201.
+    let (s_ack, v_ack) = derive_call(
+        &routers.public,
+        &f.election_id,
+        &organizer_secret(0xD7),
+        derive_body("derive-from-hosted-ledger", true),
+    )
+    .await;
+    assert_eq!(s_ack, axum::http::StatusCode::CREATED, "{v_ack}");
 }

@@ -4280,6 +4280,214 @@ async fn organizer_store_transport_binding(
     }
 }
 
+/// Explicit organizer confirmation required before deriving a Hosted binding.
+const HOSTED_BINDING_DERIVE_CONFIRMATION: &str = "derive-from-hosted-ledger";
+
+/// Request body for the Hosted transport-binding derivation endpoint.
+///
+/// Carries no binding bytes: the binding is derived server-side from the
+/// authoritative stored descriptor and the accepted-package ledger.
+#[derive(Debug, Deserialize)]
+struct DeriveTransportBindingRequest {
+    /// Must equal [`HOSTED_BINDING_DERIVE_CONFIRMATION`]; proves deliberate
+    /// organizer action rather than an accidental or replayed request.
+    confirm: String,
+    /// Required when the derived binding reports reduced anonymity.
+    #[serde(default)]
+    acknowledge_reduced_anonymity: bool,
+}
+
+/// Derives the finalized transport binding from Hosted's own authoritative
+/// data for an HTTPS-only election, then stores it immutably.
+///
+/// This is the browser-only alternative to the Desktop handoff. The Desktop is
+/// never a cryptographic necessity here: the binding is a deterministic
+/// function of the stored authoritative descriptor and the accepted-package
+/// ledger, both of which Hosted already holds. `do_finalize` is not modified;
+/// it re-validates whatever binding row exists.
+fn do_derive_finalized_transport_binding(
+    state: &AppState,
+    id: &str,
+    req: &DeriveTransportBindingRequest,
+) -> Result<Response, Response> {
+    if req.confirm != HOSTED_BINDING_DERIVE_CONFIRMATION {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_confirmation",
+            "the derivation request must explicitly confirm deriving from the hosted ledger",
+        ));
+    }
+    let loaded = LoadedElection::load(state.storage.as_ref(), id)?;
+    if loaded.record.state != "closed" {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "invalid_state",
+            "the transport binding can be derived only after voting closes",
+        ));
+    }
+    let manifest_hash = loaded
+        .manifest
+        .canonical_hash(&Blake3HashProviderV1)
+        .map_err(|_| {
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "archive identity unavailable",
+            )
+        })?;
+    // Exactly one stored authoritative descriptor issuance is required; it was
+    // issued while the election was open and signed by the release root.
+    let issued = state
+        .storage
+        .get_any_descriptor_issuance(id)
+        .map_err(|_| binding_error("authoritative descriptor lookup failed"))?
+        .ok_or_else(|| {
+            binding_error("no authoritative descriptor has been issued for this election")
+        })?;
+    let descriptor = HostedDescriptorResponseV1::from_canonical_cbor(&issued.response_cbor)
+        .map_err(|_| binding_error("the authoritative descriptor record is invalid"))?
+        .descriptor()
+        .clone();
+    descriptor.verify(&state.config.transport_authority_root, manifest_hash).map_err(|_| {
+        binding_error(
+            "the authoritative descriptor is not authenticated by the configured transport authority",
+        )
+    })?;
+    if descriptor.election_id() != loaded.manifest.election_id().as_bytes() {
+        return Err(binding_error(
+            "the authoritative descriptor belongs to another election",
+        ));
+    }
+    let (ledger, ballots) = loaded.replay_ledger(state.storage.as_ref())?;
+    let accepted_ballot_count = ledger.accepted_ballots().len() as u64;
+    if accepted_ballot_count == 0 {
+        return Err(binding_error(
+            "the authoritative transport history contains no accepted packages",
+        ));
+    }
+    let accepted_digests: Vec<[u8; 32]> = ballots
+        .iter()
+        .map(|ballot| {
+            hash_domain_separated(
+                &Blake3HashProviderV1,
+                HashDomain::BallotPackageV1,
+                &ballot.package_cbor,
+            )
+        })
+        .collect();
+    let derived = finalized_transport_archive_binding_from_accepted_digests_v1(
+        &descriptor,
+        &accepted_digests,
+    )
+    .map_err(|_| binding_error("the authoritative transport history cannot be reconstructed"))?
+    .ok_or_else(|| {
+        binding_error("the authoritative transport history contains no accepted packages")
+    })?;
+    // Cross-check the derived binding against the accepted-package ledger the
+    // same way the Desktop handoff is validated.
+    let derived_cbor = derived
+        .to_canonical_cbor()
+        .map_err(|_| binding_error("the derived transport binding cannot be serialized"))?;
+    validate_transport_binding_bytes(&loaded, &derived_cbor, accepted_ballot_count)?;
+    // Policy: never publish below the release floor, and require explicit
+    // acknowledgement when the derived binding reports reduced anonymity.
+    if accepted_ballot_count < ANCHOR_MIN_ACCEPTED_BALLOT_FLOOR_V1 {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "anchor_privacy_floor_not_met",
+            "this election's accepted cohort is below the anchor privacy floor",
+        ));
+    }
+    let reduced_anonymity = derived
+        .batches()
+        .iter()
+        .any(|batch| batch.reduced_anonymity());
+    if reduced_anonymity && !req.acknowledge_reduced_anonymity {
+        return Err(error_response(
+            StatusCode::CONFLICT,
+            "anchor_reduced_anonymity_ack_required",
+            "the derived binding covers a cohort below the descriptor floor; explicit acknowledgement is required",
+        ));
+    }
+    // First-writer-wins: a stored binding is immutable. The derived bytes equal
+    // the Desktop handoff bytes for equivalent evidence by construction.
+    match state
+        .storage
+        .put_finalized_transport_binding(storage::FinalizedTransportBindingRecord {
+            election_id: id.to_owned(),
+            binding_cbor: derived_cbor,
+        }) {
+        Ok(()) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "election_id": id,
+                "state": "transport_binding_derived",
+                "anchor_eligible": true,
+                "accepted_ballot_count": accepted_ballot_count,
+            })),
+        )
+            .into_response()),
+        Err(storage::StorageError::ElectionNotFound) => Err(error_response(
+            StatusCode::NOT_FOUND,
+            "election_not_found",
+            "election not found",
+        )),
+        Err(storage::StorageError::InvalidState) => Err(error_response(
+            StatusCode::CONFLICT,
+            "invalid_state",
+            "the transport binding can be derived only while the election is closed",
+        )),
+        Err(storage::StorageError::ElectionExists) => Err(error_response(
+            StatusCode::CONFLICT,
+            "transport_binding_already_recorded",
+            "the finalized transport binding is immutable",
+        )),
+        Err(_) => Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "service_unavailable",
+            "transport binding storage unavailable",
+        )),
+    }
+}
+
+async fn organizer_derive_transport_binding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_organizer(&state, &headers, &id) {
+        return r;
+    }
+    if let Err(r) = organizer_rate(&state, &id) {
+        return r;
+    }
+    if let Err(r) = check_content_type(&headers) {
+        return r;
+    }
+    if body.len() > MAX_BODY_BYTES {
+        return error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "request too large",
+        );
+    }
+    let req: DeriveTransportBindingRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "malformed transport-binding derivation request",
+            );
+        }
+    };
+    match do_derive_finalized_transport_binding(state.as_ref(), &id, &req) {
+        Ok(resp) => resp,
+        Err(r) => r,
+    }
+}
+
 /// Produces the public request file that a Desktop organizer uses to prove it
 /// is deriving a binding for this exact closed Hosted election.  The request
 /// is capability-protected here; the returned response is capability-protected
@@ -4856,6 +5064,7 @@ fn public_router_with_state(state: Arc<AppState>) -> Router {
         .route("/api/v1/organizer/elections/{id}/descriptor-issuance", post(organizer_issue_transport_descriptor))
         .route("/api/v1/organizer/elections/{id}/binding-handoff", get(organizer_get_binding_handoff_request))
         .route("/api/v1/organizer/elections/{id}/transport-binding", post(organizer_store_transport_binding))
+        .route("/api/v1/organizer/elections/{id}/transport-binding/derive", post(organizer_derive_transport_binding))
         .route("/api/v1/organizer/elections/{id}/finalize", post(organizer_finalize))
         .route(
             "/api/v1/organizer/elections/{id}/archive",
