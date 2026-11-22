@@ -1,12 +1,18 @@
-# Mainnet wallet fee preflight design (design only — NOT wired into submission)
+# Mainnet wallet fee preflight (non-spending adapter implemented; submission still disabled)
 
-Status: **design + investigation**. This document records the investigation into
-using the wallets' documented `dryRun` to estimate the fee of the exact anchor
-transaction, and the preflight design that would show an estimate + explicit
-maximum before approval. It does **not** enable Mainnet submission:
-`MAINNET_ANCHOR_SUBMISSION_ENABLED` stays `false`, and the transaction guard
-(`hosted-web/src/anchor.ts`) still blocks `createRequest`/`submit` for both
-Sapient and Web Tari Universe.
+Status: **adapter implemented; live wallet qualification NOT performed.** This
+document records the investigation into using the wallets' documented `dryRun`
+to estimate the fee of the exact anchor transaction, and the preflight that shows
+an estimate + explicit maximum before approval. It does **not** enable Mainnet
+submission: `MAINNET_ANCHOR_SUBMISSION_ENABLED` stays `false`, and the
+transaction guard (`hosted-web/src/anchor.ts`) still blocks
+`createRequest`/`submit` for both Sapient and Web Tari Universe.
+
+The non-spending dry-run adapter (`signAndSubmitTransactionDryRun`) and the
+"Estimate Mainnet Fee" UI are implemented and unit-tested; see
+`mainnet-fee-preflight-operator-qualification.md` for the operator procedure to
+qualify a real wallet. Live Sapient / Tari Universe qualification has NOT been
+performed; do not treat the mocked tests as live qualification.
 
 ## 1. What the official integration documents say
 

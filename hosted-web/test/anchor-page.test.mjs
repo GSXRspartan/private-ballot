@@ -136,7 +136,7 @@ class ExclusiveLocks {
 }
 
 class FakeWallet {
-  constructor({ network = "mainnet", result = { Rejected: { details: "inert test wallet" } } } = {}) {
+  constructor({ network = "mainnet", result = { Rejected: { details: "inert test wallet" } }, dryRunResult = { required_fees: "1000" }, dryRunError = null, dryRunIsLocal = true } = {}) {
     this.isTariWallet = true;
     this.accounts = ["account-a"];
     this.network = network;
@@ -144,6 +144,10 @@ class FakeWallet {
     this.listeners = [];
     this.createCalls = [];
     this.submitCalls = 0;
+    this.signAndSubmitCalls = [];
+    this.dryRunResult = dryRunResult;
+    this.dryRunError = dryRunError;
+    this.dryRunIsLocal = dryRunIsLocal;
     this.status = "approved";
   }
 
@@ -158,7 +162,7 @@ class FakeWallet {
       case "tari_getAccounts":
         return this.accounts;
       case "tari_getCapabilities":
-        return { transactionRequests: true, transactionResultLookup: true };
+        return { transactionRequests: true, transactionResultLookup: true, dryRunIsLocal: this.dryRunIsLocal };
       case "tari_getNetwork":
         return this.network;
       case "tari_createTransactionRequest":
@@ -169,6 +173,10 @@ class FakeWallet {
       case "tari_submitTransactionRequest":
         this.submitCalls += 1;
         return { transactionId: TRANSACTION_ID };
+      case "tari_signAndSubmitTransaction":
+        this.signAndSubmitCalls.push(params);
+        if (this.dryRunError) throw this.dryRunError;
+        return { result: this.dryRunResult };
       case "tari_getTransactionResult":
         return { result: this.result };
       default:
@@ -771,4 +779,135 @@ test("normal election metadata still renders after the escaping fix", async () =
   } finally {
     env.restore();
   }
+});
+
+// -----------------------------------------------------------------------------
+// Non-spending Mainnet fee preflight (Estimate Mainnet Fee).
+// -----------------------------------------------------------------------------
+
+test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, and it never submits", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { required_fees: "1500" } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+
+    // Publish stays disabled (no publish button while the gate is off).
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+
+    // The estimate action is present.
+    const estimateBtn = button(root, "Estimate Mainnet Fee");
+    await click(estimateBtn);
+
+    // A dry-run signAndSubmit was issued with dryRun:true and a decimal-string cap.
+    assert.equal(wallet.signAndSubmitCalls.length, 1);
+    const params = wallet.signAndSubmitCalls[0];
+    assert.equal(params.dryRun, true);
+    assert.equal(params.maxFee, String(ANCHOR_MAX_FEE_UNITS));
+    // No approval or submission path was touched.
+    assert.equal(wallet.createCalls.length, 0, "estimate must not create a transaction request");
+    assert.equal(wallet.submitCalls, 0, "estimate must not submit");
+
+    // The estimate is displayed in µT and TARI, with the maximum.
+    const text = root.textContent;
+    assert.ok(text.includes("Estimated fee: 1500 µT"), "microtari estimate shown");
+    assert.ok(text.includes("Configured maximum"), "maximum fee shown");
+    assert.ok(text.includes("does not prove a funded transaction will succeed"), "honest caveat shown");
+  } finally {
+    env.restore();
+  }
+});
+
+test("estimate warns when the estimated fee exceeds the configured maximum", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { required_fees: "999999999" } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Estimate Mainnet Fee"));
+    const text = root.textContent;
+    assert.ok(text.includes("exceeds the configured maximum"), "over-cap warning shown");
+    // Publish still disabled.
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+  } finally {
+    env.restore();
+  }
+});
+
+test("estimate displays unsupported honestly when the wallet exposes no fee field", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { somethingElse: true } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Estimate Mainnet Fee"));
+    const text = root.textContent;
+    assert.ok(/did not return a verifiable fee estimate/i.test(text), "unsupported shown honestly");
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+  } finally {
+    env.restore();
+  }
+});
+
+test("estimate fails closed on a provider rejection and never submits", async () => {
+  const rejection = new Error("user rejected");
+  rejection.code = 4001;
+  const wallet = new FakeWallet({ dryRunError: rejection });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Estimate Mainnet Fee"));
+    assert.ok(/Fee estimate failed/i.test(root.textContent), "error surfaced");
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+  } finally {
+    env.restore();
+  }
+});
+
+test("estimate is blocked for a non-Mainnet wallet network", async () => {
+  const wallet = new FakeWallet({ network: "esmeralda" });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    // The wallet is not Mainnet; the estimate action must not run a dry run.
+    const estimateBtn = findButton(root, "Estimate Mainnet Fee");
+    if (estimateBtn) {
+      await click(estimateBtn);
+    }
+    assert.equal(wallet.signAndSubmitCalls.length, 0, "no dry run on a non-Mainnet wallet");
+  } finally {
+    env.restore();
+  }
+});
+
+test("Mainnet submission guard remains disabled after adding the fee preflight", () => {
+  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, false);
+  const src = readFileSync(new URL("../src/anchor.ts", import.meta.url), "utf8");
+  // The gate is still a literal build-time constant with no runtime bypass.
+  assert.match(src, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false/);
+  assert.doesNotMatch(src, /ANCHOR_SUBMISSION_POLICY/);
+  assert.doesNotMatch(src, /localStorage|sessionStorage|import\.meta\.env/);
+  // The dry run must never call the transaction-request approval/submission trio.
+  const anchorSrc = readFileSync(new URL("../../gui/src/anchor/browserAnchorPublish.ts", import.meta.url), "utf8");
+  const estimateBody = anchorSrc.slice(
+    anchorSrc.indexOf("estimateFee:"),
+    anchorSrc.indexOf("waitForApproval:"),
+  );
+  assert.match(estimateBody, /signAndSubmitTransactionDryRun/, "estimate uses the dry-run method");
+  assert.doesNotMatch(estimateBody, /createTransactionRequest|submitTransactionRequest/, "estimate never creates or submits");
 });

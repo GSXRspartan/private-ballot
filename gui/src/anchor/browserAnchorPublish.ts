@@ -8,6 +8,7 @@ import {
   type WindowTariProvider,
 } from "../wallet/provider.ts";
 import type { TransactionRequestSummary } from "../wallet/types.ts";
+import type { DryRunFeeEstimate } from "../wallet/types.ts";
 import { pollUntilVerified } from "../wallet/verifyPoll.ts";
 import type { AnchorVerificationOutcome } from "../wallet/verifyReceipt.ts";
 import { newRecoveryOwnerToken, type AnchorRecoveryStore } from "../wallet/recoveryStore.ts";
@@ -50,6 +51,19 @@ export interface PublishDriver {
     bundle: AnchorBundleV1,
     maxFee?: number,
   ): Promise<string>;
+  /**
+   * Non-spending Mainnet fee preflight.
+   *
+   * Builds the exact canonical V2 anchor instructions for `bundle` and asks the
+   * wallet to meter them with `tari_signAndSubmitTransaction { dryRun: true }`.
+   * The wallet never prompts, approves, or submits anything. Returns an honest
+   * estimate or an explicit "unsupported" — never throws a fabricated figure.
+   */
+  estimateFee(
+    adapter: WindowTariProvider,
+    bundle: AnchorBundleV1,
+    maxFee?: number,
+  ): Promise<DryRunFeeEstimate>;
   waitForApproval(
     adapter: WindowTariProvider,
     requestId: string,
@@ -85,6 +99,14 @@ export function defaultPublishDriver(options: {
           maxFee === undefined ? undefined : String(maxFee),
         )
         .then((created) => created.requestId),
+    estimateFee: (adapter, bundle, maxFee) =>
+      // Reuse the exact same canonical anchor instructions as a real publish, so
+      // the quote meters the identical transaction shape. The adapter issues a
+      // dryRun:true signAndSubmit (no approval, no submission).
+      adapter.signAndSubmitTransactionDryRun(
+        buildAnchorInstructions(bundle),
+        maxFee === undefined ? undefined : String(maxFee),
+      ),
     waitForApproval: (adapter, requestId, timeoutMs) =>
       adapter.pollTransactionRequest(requestId, { timeoutMs }),
     submit: async (adapter, requestId) => {

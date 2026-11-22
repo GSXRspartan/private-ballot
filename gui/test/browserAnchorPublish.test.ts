@@ -261,6 +261,49 @@ describe("publish driver fee forwarding", () => {
 });
 
 // -----------------------------------------------------------------------------
+// Publish driver: non-spending fee preflight (estimateFee).
+// -----------------------------------------------------------------------------
+
+describe("publish driver fee preflight", () => {
+  it("calls signAndSubmitTransactionDryRun with a decimal-string maxFee and never createRequest/submit", async () => {
+    const bundle = buildBundleFromDesktop(desktopSource());
+    let dryRunParams: unknown;
+    let createCalls = 0;
+    let submitCalls = 0;
+    const adapter = {
+      signAndSubmitTransactionDryRun: (instructions: unknown, maxFee?: unknown) => {
+        dryRunParams = { instructions, maxFee };
+        return Promise.resolve({ kind: "estimated", requiredFeesMicrotari: "1000" });
+      },
+      createTransactionRequest: () => { createCalls += 1; return Promise.resolve({ requestId: "x" }); },
+      submitTransactionRequest: () => { submitCalls += 1; return Promise.resolve({ transactionId: "t" }); },
+    } as unknown as Parameters<ReturnType<typeof defaultPublishDriver>["estimateFee"]>[0];
+    const driver = defaultPublishDriver({ verifyAttempts: 1, verifyIntervalMs: 0 });
+    const estimate = await driver.estimateFee(adapter, bundle, 1000);
+    assert.deepEqual(estimate, { kind: "estimated", requiredFeesMicrotari: "1000" });
+    // The cap is sent as the documented decimal string.
+    assert.equal((dryRunParams as { maxFee?: unknown }).maxFee, "1000");
+    // No approval or submission method is ever touched.
+    assert.equal(createCalls, 0);
+    assert.equal(submitCalls, 0);
+  });
+
+  it("omits maxFee when no cap is supplied to estimateFee", async () => {
+    const bundle = buildBundleFromDesktop(desktopSource());
+    let dryRunParams: unknown;
+    const adapter = {
+      signAndSubmitTransactionDryRun: (instructions: unknown, maxFee?: unknown) => {
+        dryRunParams = { instructions, maxFee };
+        return Promise.resolve({ kind: "unsupported", reason: "n/a" });
+      },
+    } as unknown as Parameters<ReturnType<typeof defaultPublishDriver>["estimateFee"]>[0];
+    const driver = defaultPublishDriver({ verifyAttempts: 1, verifyIntervalMs: 0 });
+    await driver.estimateFee(adapter, bundle);
+    assert.equal((dryRunParams as { maxFee?: unknown }).maxFee, undefined);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // ManageElection surface assertions (source-level, per repo convention).
 // -----------------------------------------------------------------------------
 

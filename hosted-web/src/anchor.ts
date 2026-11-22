@@ -66,6 +66,32 @@ const VERIFY_INTERVAL_MS = 4000;
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
 const TRANSACTION_ID = /^[0-9a-f]{64}$/;
 
+/** 1 TARI = 1,000,000 microtari (µT). Fees are quoted and capped in µT. */
+const MICRO_TARI_PER_TARI = 1_000_000;
+
+/** Formats a non-negative integer microtari string as a TARI decimal string. */
+function microtariToTari(microtari: string): string {
+  if (!/^\d+$/.test(microtari)) return "—";
+  const value = BigInt(microtari);
+  const whole = value / BigInt(MICRO_TARI_PER_TARI);
+  const frac = (value % BigInt(MICRO_TARI_PER_TARI)).toString().padStart(6, "0").replace(/0+$/, "");
+  return frac.length > 0 ? `${whole}.${frac}` : `${whole}`;
+}
+
+/** Compares two non-negative integer microtari strings. */
+function isMicrotariAbove(a: string, b: string): boolean {
+  if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return false;
+  return BigInt(a) > BigInt(b);
+}
+
+/** A pending or resolved fee-estimate view for the current bundle. */
+type FeeEstimateState =
+  | { kind: "idle" }
+  | { kind: "pending" }
+  | { kind: "estimated"; requiredFeesMicrotari: string }
+  | { kind: "unsupported"; reason: string }
+  | { kind: "error"; message: string };
+
 /**
  * Hard fee ceiling, in fee units, that this page will ever authorize for one
  * anchor transaction. This mirrors the Desktop publisher's default cap so the
@@ -346,6 +372,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
   let acknowledgeReducedAnonymity = false;
   let status = "Enter a finalized election ID to load its canonical anchor payload from the Hosted backend.";
   let busy = false;
+  let feeEstimate: FeeEstimateState = { kind: "idle" };
 
   const bundleKey = () => {
     if (!validatedBundle) throw new Error("Load a finalized election first.");
@@ -627,6 +654,34 @@ export function mountAnchorPanel(root: HTMLElement): void {
     }
   }
 
+  /**
+   * Non-spending Mainnet fee preflight.
+   *
+   * Revalidates the wallet/network, then asks the wallet to meter the exact
+   * anchor instructions with a dryRun signAndSubmit. It never creates a
+   * transaction request, never waits for approval, and never submits. The result
+   * is displayed as an estimate only; it does not prove a funded transaction will
+   * succeed, and it does not prove the wallet enforces `maxFee`.
+   */
+  async function estimateFee(): Promise<void> {
+    if (!validatedBundle) return;
+    feeEstimate = { kind: "pending" };
+    busy = true;
+    render();
+    try {
+      const adapter = await revalidate(true);
+      // The estimate meters the same instructions a real publish would send, at
+      // the same configured fee cap, so the quote matches the eventual shape.
+      const estimate = await driver.estimateFee(adapter, validatedBundle.bundle, ANCHOR_MAX_FEE_UNITS);
+      feeEstimate = estimate;
+    } catch (error) {
+      feeEstimate = { kind: "error", message: providerErrorMessage(error) };
+    } finally {
+      busy = false;
+      render();
+    }
+  }
+
   async function publishUnlocked(): Promise<void> {
     if (!validatedBundle) return;
     const disabled = submissionDisabledReason();
@@ -797,6 +852,48 @@ export function mountAnchorPanel(root: HTMLElement): void {
       card.append(element("p", "Mainnet network status: no wallet connected."));
     }
 
+    // Non-spending fee preflight result. This is an estimate only: it never
+    // proves a funded transaction will succeed, and it does not prove the wallet
+    // enforces maxFee — the provider exposes no fee read-back.
+    if (feeEstimate.kind === "pending") {
+      card.append(element("p", "Estimating the Mainnet fee (non-spending dry run)…"));
+    } else if (feeEstimate.kind === "estimated") {
+      const microtari = feeEstimate.requiredFeesMicrotari;
+      const tari = microtariToTari(microtari);
+      const overCap = isMicrotariAbove(microtari, String(ANCHOR_MAX_FEE_UNITS));
+      const estimateLine = element(
+        "p",
+        `Estimated fee: ${microtari} µT (≈ ${tari} TARI) · Configured maximum: ${ANCHOR_MAX_FEE_UNITS} µT (≈ ${microtariToTari(String(ANCHOR_MAX_FEE_UNITS))} TARI)`,
+      );
+      card.append(estimateLine);
+      if (overCap) {
+        const warn = element(
+          "p",
+          `Warning: the estimated fee (${microtari} µT) exceeds the configured maximum (${ANCHOR_MAX_FEE_UNITS} µT). Publishing is capped at the maximum; do not proceed without raising the cap deliberately.`,
+        );
+        warn.className = "error";
+        warn.setAttribute("role", "alert");
+        card.append(warn);
+      }
+      const caveat = element(
+        "p",
+        "This estimate is a quote only. It does not prove a funded transaction will succeed, and it does not independently prove the wallet enforces the maximum fee — the provider exposes no fee read-back.",
+      );
+      caveat.className = "form-hint";
+      card.append(caveat);
+    } else if (feeEstimate.kind === "unsupported") {
+      const unsupported = element(
+        "p",
+        `The wallet did not return a verifiable fee estimate: ${feeEstimate.reason}. No estimate is shown; this is not a zero fee.`,
+      );
+      unsupported.className = "form-hint";
+      card.append(unsupported);
+    } else if (feeEstimate.kind === "error") {
+      const error = element("p", `Fee estimate failed: ${feeEstimate.message}`);
+      error.className = "error";
+      card.append(error);
+    }
+
     const state = element("p", status);
     state.setAttribute("role", "status");
     card.append(state);
@@ -805,6 +902,12 @@ export function mountAnchorPanel(root: HTMLElement): void {
     const readyToConnect = !!validatedBundle && deploymentError() === null;
     actions.append(action("Connect Sapient", () => connect("sapient"), busy || !readyToConnect));
     actions.append(action("Connect Tari Universe", () => connect("universe"), busy || !readyToConnect));
+    // Fee preflight is available whenever a Mainnet wallet is connected and the
+    // deployment is valid, even while Mainnet submission is disabled. It never
+    // creates a request, waits for approval, or submits.
+    if (validatedBundle && wallet && deploymentError() === null) {
+      actions.append(action("Estimate Mainnet Fee", () => estimateFee(), busy));
+    }
     if (recoveryState.kind === "corrupt") {
       const error = element("p", `${recoveryState.message}. Treat this as ambiguous; browser publishing is blocked.`);
       error.className = "error";

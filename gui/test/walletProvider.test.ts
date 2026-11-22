@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  extractDryRunFeeEstimate,
   hasCapability,
   sapientDiscovery,
   universeDiscovery,
@@ -152,6 +153,7 @@ describe("probe", () => {
     assert.deepEqual(probe.capabilities, {
       transactionRequests: true,
       transactionResultLookup: true,
+      dryRunIsLocal: null,
     });
   });
 
@@ -804,5 +806,211 @@ it("fails closed when provider disappears before create", async () => {
     assert.equal(created.requestId, "req_1");
     const submitted = await adapter.submitTransactionRequest(created.requestId);
     assert.equal(submitted.transactionId, "txn_1");
+  });
+});
+
+describe("non-spending dry-run fee preflight (adapter boundary)", () => {
+  function dryRunAdapter(handlers: Record<string, Handler>) {
+    return windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(fakeProvider({ handlers }))),
+    );
+  }
+
+  it("sends dryRun:true and forwards the maxFee verbatim (decimal-string is the driver's job)", async () => {
+    let capturedParams: unknown = undefined;
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: (params) => {
+        capturedParams = params;
+        return { result: { required_fees: "5000" } };
+      },
+    });
+    const instructions = [{ CallFunction: { address: "template_00", function: "f", args: [] } }];
+    // The driver passes maxFee as a decimal string; the adapter forwards verbatim.
+    await adapter.signAndSubmitTransactionDryRun(instructions, "1000");
+    assert.deepEqual(capturedParams, {
+      instructions,
+      dryRun: true,
+      maxFee: "1000",
+    });
+  });
+
+  it("omits maxFee entirely when no cap is supplied", async () => {
+    let capturedParams: unknown = undefined;
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: (params) => {
+        capturedParams = params;
+        return { result: { required_fees: "5000" } };
+      },
+    });
+    await adapter.signAndSubmitTransactionDryRun([]);
+    assert.deepEqual(capturedParams, { instructions: [], dryRun: true });
+  });
+
+  it("extracts a required_fees estimate from the dry-run result", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => ({ result: { required_fees: "1234" } }),
+    });
+    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+    assert.deepEqual(estimate, { kind: "estimated", requiredFeesMicrotari: "1234" });
+  });
+
+  it("extracts requiredFees (camelCase) and finalize.required_fees variants", async () => {
+    for (const result of [
+      { requiredFees: "10" },
+      { finalize: { required_fees: "20" } },
+      { finalize: { requiredFees: "30" } },
+      { required_fees: 40 },
+    ]) {
+      const adapter = dryRunAdapter({
+        tari_signAndSubmitTransaction: () => ({ result }),
+      });
+      const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+      assert.equal(estimate.kind, "estimated", `result ${JSON.stringify(result)}`);
+    }
+  });
+
+  it("returns unsupported (never invents a figure) when the fee field is absent", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => ({ result: { somethingElse: true } }),
+    });
+    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+    assert.equal(estimate.kind, "unsupported");
+    if (estimate.kind === "unsupported") {
+      assert.match(estimate.reason, /did not expose a documented fee-estimate field/);
+    }
+  });
+
+  it("returns unsupported for a non-object dry-run result", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => ({ result: null }),
+    });
+    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+    assert.equal(estimate.kind, "unsupported");
+  });
+
+  it("fails closed (throws) on a provider rejection — never falls back to submission", async () => {
+    let createCalls = 0;
+    let submitCalls = 0;
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(fakeProvider({
+        handlers: {
+          tari_signAndSubmitTransaction: () => {
+            const error = new Error("user rejected");
+            (error as { code: number }).code = 4001;
+            throw error;
+          },
+          tari_createTransactionRequest: () => { createCalls += 1; return { requestId: "x" }; },
+          tari_submitTransactionRequest: () => { submitCalls += 1; return { transactionId: "t" }; },
+        },
+      }))),
+    );
+    await assert.rejects(() => adapter.signAndSubmitTransactionDryRun([]), /user rejected/);
+    assert.equal(createCalls, 0, "dry run must never call createTransactionRequest");
+    assert.equal(submitCalls, 0, "dry run must never call submitTransactionRequest");
+  });
+
+  it("fails closed on a malformed (non-object) dry-run response", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => "not-an-object" as unknown,
+    });
+    await assert.rejects(() => adapter.signAndSubmitTransactionDryRun([]), /malformed/);
+  });
+
+  it("does not call any approval/submission method on a successful dry run", async () => {
+    let createCalls = 0;
+    let submitCalls = 0;
+    let pollCalls = 0;
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(fakeProvider({
+        handlers: {
+          tari_signAndSubmitTransaction: () => ({ result: { required_fees: "999" } }),
+          tari_createTransactionRequest: () => { createCalls += 1; return { requestId: "x" }; },
+          tari_submitTransactionRequest: () => { submitCalls += 1; return { transactionId: "t" }; },
+          tari_getTransactionRequest: () => { pollCalls += 1; return { status: "approved" }; },
+        },
+      }))),
+    );
+    const estimate = await adapter.signAndSubmitTransactionDryRun([], 1000);
+    assert.equal(estimate.kind, "estimated");
+    assert.equal(createCalls, 0);
+    assert.equal(submitCalls, 0);
+    assert.equal(pollCalls, 0);
+  });
+
+  it("reports dryRunIsLocal capability and hasCapability('dryRunIsLocal')", async () => {
+    const capsProvider = fakeProvider({
+      handlers: {
+        tari_getCapabilities: () => ({
+          transactionRequests: true,
+          transactionResultLookup: true,
+          dryRunIsLocal: true,
+        }),
+      },
+    });
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(capsProvider)),
+    );
+    const caps = await adapter.getCapabilities();
+    assert.equal(caps.dryRunIsLocal, true);
+    assert.equal(hasCapability(caps, "dryRunIsLocal"), true);
+  });
+
+  it("treats an absent dryRunIsLocal capability as not advertised", async () => {
+    const capsProvider = fakeProvider({
+      handlers: {
+        tari_getCapabilities: () => ({ transactionRequests: true, transactionResultLookup: true }),
+      },
+    });
+    const adapter = windowTariProvider("sapient", "Sapient", () =>
+      sapientDiscovery(scopeWith(capsProvider)),
+    );
+    const caps = await adapter.getCapabilities();
+    assert.equal(caps.dryRunIsLocal, null);
+    assert.equal(hasCapability(caps, "dryRunIsLocal"), false);
+  });
+
+  it("refuses a dry run when the pinned provider is swapped mid-operation", async () => {
+    const provider = fakeProvider({
+      handlers: { tari_signAndSubmitTransaction: () => ({ result: { required_fees: "1" } }) },
+    });
+    const holder: { tari?: unknown } = { tari: provider };
+    const adapter = windowTariProvider("sapient", "Sapient", () => sapientDiscovery(holder));
+    adapter.pin();
+    const impostor = fakeProvider({ handlers: {} });
+    holder.tari = impostor;
+    await assert.rejects(
+      () => adapter.signAndSubmitTransactionDryRun([]),
+      /no longer the same provider/,
+    );
+  });
+});
+
+describe("extractDryRunFeeEstimate (pure)", () => {
+  it("reads a decimal-string required_fees", () => {
+    assert.deepEqual(extractDryRunFeeEstimate({ required_fees: "4200" }), {
+      kind: "estimated",
+      requiredFeesMicrotari: "4200",
+    });
+  });
+  it("reads bigint and safe-integer number forms", () => {
+    assert.deepEqual(extractDryRunFeeEstimate({ required_fees: 42n }), {
+      kind: "estimated",
+      requiredFeesMicrotari: "42",
+    });
+    assert.deepEqual(extractDryRunFeeEstimate({ required_fees: 42 }), {
+      kind: "estimated",
+      requiredFeesMicrotari: "42",
+    });
+  });
+  it("rejects negative or non-numeric figures", () => {
+    assert.equal(extractDryRunFeeEstimate({ required_fees: "-1" }).kind, "unsupported");
+    assert.equal(extractDryRunFeeEstimate({ required_fees: "12.5" }).kind, "unsupported");
+    assert.equal(extractDryRunFeeEstimate({ required_fees: "abc" }).kind, "unsupported");
+    assert.equal(extractDryRunFeeEstimate({ required_fees: -5 }).kind, "unsupported");
+  });
+  it("returns unsupported for non-object inputs", () => {
+    assert.equal(extractDryRunFeeEstimate(null).kind, "unsupported");
+    assert.equal(extractDryRunFeeEstimate([]).kind, "unsupported");
+    assert.equal(extractDryRunFeeEstimate("x").kind, "unsupported");
   });
 });

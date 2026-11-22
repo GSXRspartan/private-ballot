@@ -1,5 +1,6 @@
 import type {
   CreateTransactionRequestResult,
+  DryRunFeeEstimate,
   ProviderKind,
   SubmitTransactionRequestResult,
   TariCapabilities,
@@ -48,6 +49,20 @@ export interface WindowTariProvider {
     instructions: unknown,
     maxFee?: unknown,
   ): Promise<CreateTransactionRequestResult>;
+  /**
+   * Non-spending dry-run fee preflight.
+   *
+   * Calls `tari_signAndSubmitTransaction` with `dryRun: true` and the exact
+   * anchor instructions. The wallet meters the transaction locally and never
+   * prompts, approves, or submits anything. Returns an honest estimate only if
+   * the wallet's response carries a recognized fee figure; otherwise it
+   * resolves to `{ kind: "unsupported" }`. It NEVER calls the transaction-request
+   * approval or submission methods and never falls back to a live submission.
+   */
+  signAndSubmitTransactionDryRun(
+    instructions: unknown,
+    maxFee?: unknown,
+  ): Promise<DryRunFeeEstimate>;
   pollTransactionRequest(
     requestId: string,
     options?: PollOptions,
@@ -118,6 +133,53 @@ export function sleepWithTimeout(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Extracts a fee estimate from a `tari_signAndSubmitTransaction { dryRun: true }`
+ * result.
+ *
+ * The published wallet contract types the response as `unknown` and does NOT
+ * specify how a dry-run result represents its fee estimate. The engine-level
+ * figure is `FinalizeResult::required_fees()` (µT), but whether a wallet surfaces
+ * it — and under which key — is wallet-specific and undocumented.
+ *
+ * This function therefore recognizes only the shapes a wallet could plausibly
+ * return (`result.required_fees`, `requiredFees`, `finalize.required_fees`,
+ * `finalize.requiredFees`, or a bare `finalize.required_fees` on the top-level
+ * result), all as decimal strings or integers. Anything else resolves to
+ * `{ kind: "unsupported" }`. It never throws and never invents a figure.
+ */
+export function extractDryRunFeeEstimate(result: unknown): DryRunFeeEstimate {
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    typeof v === "object" && v !== null && !Array.isArray(v);
+  const asMicrotari = (v: unknown): string | null => {
+    if (typeof v === "string" && /^\d+$/.test(v)) return v;
+    if (typeof v === "bigint" && v >= 0n) return v.toString();
+    if (typeof v === "number" && Number.isSafeInteger(v) && v >= 0) return String(v);
+    return null;
+  };
+  if (!isRecord(result)) {
+    return { kind: "unsupported", reason: "the wallet returned no dry-run result object" };
+  }
+  const finalize = isRecord(result.finalize) ? result.finalize : null;
+  const candidates: unknown[] = [
+    result.required_fees,
+    result.requiredFees,
+    finalize?.required_fees,
+    finalize?.requiredFees,
+  ];
+  for (const candidate of candidates) {
+    const microtari = asMicrotari(candidate);
+    if (microtari !== null) {
+      return { kind: "estimated", requiredFeesMicrotari: microtari };
+    }
+  }
+  return {
+    kind: "unsupported",
+    reason:
+      "the wallet dry-run result did not expose a documented fee-estimate field (expected FinalizeResult::required_fees)",
+  };
+}
+
 export function windowTariProvider(
   kind: ProviderKind,
   label: string,
@@ -180,7 +242,12 @@ export function windowTariProvider(
         null,
       );
     }
-    return { transactionRequests, transactionResultLookup };
+    const dryRunIsLocal = record.dryRunIsLocal;
+    return {
+      transactionRequests,
+      transactionResultLookup,
+      dryRunIsLocal: typeof dryRunIsLocal === "boolean" ? dryRunIsLocal : null,
+    };
   }
 
   return {
@@ -325,6 +392,41 @@ export function windowTariProvider(
       const requestId = expectString(record.requestId, "transaction request answer");
       return { requestId };
     },
+    async signAndSubmitTransactionDryRun(
+      instructions: unknown,
+      maxFee?: unknown,
+    ): Promise<DryRunFeeEstimate> {
+      // A dry run is a read-only quote. Pin the same provider object used for the
+      // rest of the operation so a swapped or disappeared wallet fails closed.
+      ensurePinnedProviderIsCurrent("estimating the anchor fee");
+      const provider = get();
+      const params: Record<string, unknown> = {
+        instructions,
+        // dryRun is the only thing that makes this non-spending; set it explicitly.
+        dryRun: true,
+      };
+      if (maxFee !== undefined) {
+        params.maxFee = maxFee;
+      }
+      let answer: unknown;
+      try {
+        // This is the ONLY wallet method called here. It never prompts while
+        // dryRun is true, and it is NOT the transaction-request approval or
+        // submission path, so no approval can be raised and nothing is spent.
+        answer = await provider.request({
+          method: "tari_signAndSubmitTransaction",
+          params,
+        });
+      } catch (e) {
+        // Fail closed on any provider error (including a wallet that rejects
+        // dry runs). Never fall back to a live submission.
+        throwProviderError(e, "fee estimate");
+      }
+      // The documented response is `{ transactionId, result }`; a dry run must
+      // NOT carry a real transaction id. Extract the fee from `result`.
+      const record = expectRecord(answer, "dry-run result");
+      return extractDryRunFeeEstimate(record.result);
+    },
     async pollTransactionRequest(
       requestId,
       options: PollOptions = {},
@@ -408,9 +510,11 @@ export function hasCapability(
   capabilities: TariCapabilities | null,
   name: string,
 ): boolean {
-  return !!capabilities &&
-    (name === "transactionRequests" || name === "transactionResultLookup") &&
-    capabilities[name] === true;
+  if (!capabilities) return false;
+  if (name === "transactionRequests") return capabilities.transactionRequests === true;
+  if (name === "transactionResultLookup") return capabilities.transactionResultLookup === true;
+  if (name === "dryRunIsLocal") return capabilities.dryRunIsLocal === true;
+  return false;
 }
 
 function asTariProvider(candidate: unknown): TariProviderLike | null {
