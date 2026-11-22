@@ -307,7 +307,7 @@ test("the anchor page renders the required controls", () => {
     assert.ok(byId(root, "load-election-btn"));
     assert.ok(button(root, "Connect Sapient"));
     assert.ok(button(root, "Connect Tari Universe"));
-    assert.ok(root.textContent.includes(`Maximum authorized fee: 0.001 TARI (${ANCHOR_MAX_FEE_UNITS} µT)`));
+    assert.ok(root.textContent.includes(`Maximum authorized fee: 0.005 TARI (${ANCHOR_MAX_FEE_UNITS} µT)`));
     assert.ok(root.textContent.includes(`Release fee ceiling: 10 TARI (${ANCHOR_MAX_FEE_CEILING_UNITS} µT)`));
     assert.ok(root.textContent.includes("Mainnet network status: no wallet connected."));
     assert.ok(root.textContent.includes("Wallet approval: required"));
@@ -639,6 +639,10 @@ test("the fee cap constant never exceeds the release ceiling", () => {
   assert.ok(Number.isInteger(ANCHOR_MAX_FEE_UNITS));
   assert.ok(ANCHOR_MAX_FEE_UNITS >= 1);
   assert.ok(ANCHOR_MAX_FEE_UNITS <= ANCHOR_MAX_FEE_CEILING_UNITS);
+  // Sapient Mainnet dry-run evidence: total_fees_required = 3477 µT; with the
+  // 12 µT allowance the recommended max_fee is 3489 µT. The cap must exceed it.
+  assert.equal(ANCHOR_MAX_FEE_UNITS, 5000);
+  assert.ok(ANCHOR_MAX_FEE_UNITS > 3477 + 12, "cap must exceed the allowance-adjusted real fee");
   assert.equal(ANCHOR_MAX_FEE_CEILING_UNITS, 10_000_000);
 });
 
@@ -787,8 +791,8 @@ test("normal election metadata still renders after the escaping fix", async () =
 // -----------------------------------------------------------------------------
 
 test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, and it never submits", async () => {
-  // 1,500,000 µT = 1.5 TARI.
-  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "1500000", result: { Accept: {} } } } });
+  // Real Sapient Mainnet dry-run: total_fees_required = 3477 µT (0.003477 TARI).
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "3477", result: { Accept: {} } } } });
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
@@ -808,14 +812,17 @@ test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, an
     const params = wallet.signAndSubmitCalls[0];
     assert.equal(params.dryRun, true);
     assert.equal(params.maxFee, String(ANCHOR_MAX_FEE_UNITS));
+    assert.equal(params.maxFee, "5000");
     // No approval or submission path was touched.
     assert.equal(wallet.createCalls.length, 0, "estimate must not create a transaction request");
     assert.equal(wallet.submitCalls, 0, "estimate must not submit");
 
     // The estimate is displayed in TARI as the primary denomination.
     const text = root.textContent;
-    assert.ok(text.includes("Estimated transaction fee: 1.5 TARI"), "TARI estimate shown");
-    assert.ok(text.includes("Maximum authorized fee: 0.001 TARI"), "maximum authorized fee shown");
+    assert.ok(text.includes("Estimated transaction fee: 0.003477 TARI"), "TARI estimate shown");
+    // Allowance-adjusted minimum = 3477 + 12 = 3489 µT = 0.003489 TARI.
+    assert.ok(text.includes("Allowance-adjusted minimum: 0.003489 TARI"), "allowance-adjusted minimum shown");
+    assert.ok(text.includes("Maximum authorized fee: 0.005 TARI"), "maximum authorized fee shown");
     assert.ok(text.includes("Release fee ceiling: 10 TARI"), "release ceiling shown");
     assert.ok(text.includes("does not prove a funded transaction will succeed"), "honest caveat shown");
   } finally {
@@ -824,7 +831,7 @@ test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, an
 });
 
 test("estimate warns when the estimated fee exceeds the maximum authorized fee", async () => {
-  // 999,999,999 µT = 999.999999 TARI, above the 0.001 TARI cap.
+  // 999,999,999 µT = 999.999999 TARI, far above the 0.005 TARI cap.
   const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "999999999", result: { Accept: {} } } } });
   const env = installDom({ wallet });
   try {
@@ -835,6 +842,7 @@ test("estimate warns when the estimated fee exceeds the maximum authorized fee",
     await click(button(root, "Estimate Mainnet Fee"));
     const text = root.textContent;
     assert.ok(text.includes("exceeds the maximum authorized fee"), "over-cap warning shown");
+    assert.ok(text.includes("No transaction request will be created"), "no request created on over-cap");
     // Publish still disabled.
     assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
   } finally {

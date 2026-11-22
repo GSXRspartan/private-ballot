@@ -58,8 +58,15 @@ The dry-run estimate does **not** depend on the exhaust-burn rate, so it is stab
 across the burn-rate schedule.
 
 All fees are in microtari (µT); 1 TARI = 1,000,000 µT. The configured anchor
-cap is `ANCHOR_MAX_FEE_UNITS = 1000` µT with a release ceiling of
-`ANCHOR_MAX_FEE_CEILING_UNITS = 10_000_000` µT (10 TARI).
+cap is `ANCHOR_MAX_FEE_UNITS = 5000` µT (0.005 TARI) with a release ceiling of
+`ANCHOR_MAX_FEE_CEILING_UNITS = 10_000_000` µT (10 TARI). The engine adds a
+12 µT `FEE_ESTIMATE_ALLOWANCE` to a dry-run's `total_fees_required` to derive the
+recommended `max_fee` (`FEE_ESTIMATE_ALLOWANCE_UNITS = 12`).
+
+**Real Sapient Mainnet evidence (finalized two-voter election
+`pb-staging-browser-e2e-1795362392453`):** `result.finalize.total_fees_required
+= 3477 µT`. The allowance-adjusted minimum is 3477 + 12 = **3489 µT**. The 5000 µT
+cap sits safely above that while remaining far below the 10 TARI ceiling.
 
 ## 3. What dry-run does and does NOT establish
 
@@ -107,21 +114,25 @@ the real submission still goes through `tari_createTransactionRequest` with an
 explicit `maxFee`, and the existing on-chain receipt verification remains the
 terminal check.
 
-## 6. Is the 1,000 µT default sufficient?
+## 6. Is the 5,000 µT default sufficient?
 
 Per the fee table, a single `CallFunction` instantiates the anchor template
 (~150–200 µT instantiation) plus storage/substate-create for the event and
 receipt. The fee reference notes a four-call transaction pays ~600–800 µT of
-instantiation alone; the anchor is a single `CallFunction`, so 1,000 µT is
-plausible but tight. The preflight in §5 is what determines sufficiency for the
-real template; until a real dry run against the published Mainnet template is
-performed, 1,000 µT must be treated as unqualified. The release ceiling
-(10,000,000 µT) bounds any authorized increase.
+instantiation alone; the anchor is a single `CallFunction`. **Real Sapient
+Mainnet dry-run evidence** for a finalized two-voter election measured
+`total_fees_required = 3477 µT`; with the 12 µT allowance the recommended
+`max_fee` is **3489 µT**. The 5000 µT cap exceeds that with headroom and stays
+far below the 10 TARI ceiling. Actual funded sufficiency still requires a live
+funded-wallet test.
 
 ## 7. Qualification status
 
-- **DRY-RUN FEE ESTIMATION:** UNSUPPORTED (design only; not wired; no live
-  wallet qualification performed).
-- **MAX FEE ENFORCEMENT:** UNVERIFIED (provider contract cannot prove it; no
-  real-wallet test).
+- **DRY-RUN FEE ESTIMATION:** IMPLEMENTED and verified against real Sapient
+  Mainnet dry-run evidence (`total_fees_required = 3477 µT`); display is in TARI.
+- **MAX FEE ENFORCEMENT:** PROVEN at the engine level (a funded `maxFee` becomes a
+  `pay_fee(maxFee)` payment; the engine commits in full only if `total_charges <=
+  maxFee`, else `AcceptFeeRejectRest`/`Reject`; unused fee is refunded) but NOT
+  proven for a specific live funded transaction — requires a live funded-wallet
+  test.
 - **Submission:** remains disabled (`MAINNET_ANCHOR_SUBMISSION_ENABLED = false`).

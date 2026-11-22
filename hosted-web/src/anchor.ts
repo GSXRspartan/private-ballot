@@ -55,7 +55,7 @@ import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/
 import {
   formatTariFromMicroTari,
   isMicroTariAbove,
-  MICRO_TARI_PER_TARI,
+  addMicroTari,
 } from "../../gui/src/wallet/feeFormat.ts";
 import {
   adapterForKind,
@@ -85,17 +85,27 @@ type FeeEstimateState =
   | { kind: "error"; message: string };
 
 /**
- * Hard fee ceiling, in fee units, that this page will ever authorize for one
- * anchor transaction. This mirrors the Desktop publisher's default cap so the
- * browser path can never construct an unlimited-fee transaction.
+ * Default authorized fee ceiling, in microTARI (µT), for one browser anchor
+ * transaction. Real Sapient Mainnet dry-run evidence for a finalized two-voter
+ * election measured `result.finalize.total_fees_required = 3477 µT`; the fee
+ * reference adds a 12 µT `FEE_ESTIMATE_ALLOWANCE`, so the allowance-adjusted
+ * minimum is 3489 µT. This 5000 µT cap sits safely above that while staying far
+ * below the release ceiling. Displayed in TARI (0.005 TARI).
  */
-export const ANCHOR_MAX_FEE_UNITS = 1000;
+export const ANCHOR_MAX_FEE_UNITS = 5000;
 
 /**
- * Absolute release ceiling for one anchor transaction fee, in fee units. The
- * configured cap above must never exceed it.
+ * Absolute release ceiling for one anchor transaction fee, in microTARI (µT).
+ * The configured cap above must never exceed it (10 TARI).
  */
 export const ANCHOR_MAX_FEE_CEILING_UNITS = 10_000_000;
+
+/**
+ * Engine estimation allowance added to a dry-run's `total_fees_required` to
+ * derive the recommended `max_fee` (tari-ootle fee reference:
+ * `required_fees() = total_fees_required + FEE_ESTIMATE_ALLOWANCE`). Kept in µT.
+ */
+export const FEE_ESTIMATE_ALLOWANCE_UNITS = 12;
 
 if (ANCHOR_MAX_FEE_UNITS < 1 || ANCHOR_MAX_FEE_UNITS > ANCHOR_MAX_FEE_CEILING_UNITS) {
   throw new Error("the configured anchor fee cap is outside the release ceiling");
@@ -859,20 +869,32 @@ export function mountAnchorPanel(root: HTMLElement): void {
     } else if (feeEstimate.kind === "estimated") {
       const microtari = feeEstimate.requiredFeesMicrotari;
       const tari = displayTari(microtari);
+      // Allowance-adjusted recommended max_fee = required + FEE_ESTIMATE_ALLOWANCE.
+      const recommendedMicrotari = addMicroTari(microtari, FEE_ESTIMATE_ALLOWANCE_UNITS);
+      const recommendedTari = displayTari(recommendedMicrotari);
+      // Reject before any transaction request is created when the required fee
+      // already exceeds the authorized cap.
       const overCap = isMicroTariAbove(microtari, String(ANCHOR_MAX_FEE_UNITS));
       const estimateLine = element(
         "p",
-        `Estimated transaction fee: ${tari} TARI · Maximum authorized fee: ${maxFeeTari} TARI · Release fee ceiling: ${ceilingTari} TARI`,
+        `Estimated transaction fee: ${tari} TARI · Allowance-adjusted minimum: ${recommendedTari} TARI · Maximum authorized fee: ${maxFeeTari} TARI · Release fee ceiling: ${ceilingTari} TARI`,
       );
       card.append(estimateLine);
       if (overCap) {
         const warn = element(
           "p",
-          `Warning: the estimated fee (${tari} TARI) exceeds the maximum authorized fee (${maxFeeTari} TARI). Publishing is capped at the maximum; do not proceed without raising the cap deliberately.`,
+          `Warning: the estimated fee (${tari} TARI) exceeds the maximum authorized fee (${maxFeeTari} TARI). No transaction request will be created; raise the cap deliberately before proceeding.`,
         );
         warn.className = "error";
         warn.setAttribute("role", "alert");
         card.append(warn);
+      } else {
+        const okNote = element(
+          "p",
+          `The estimate is within the authorized cap (${maxFeeTari} TARI). The allowance-adjusted minimum (${recommendedTari} TARI) is the recommended max_fee for a funded transaction.`,
+        );
+        okNote.className = "form-hint";
+        card.append(okNote);
       }
       const caveat = element(
         "p",

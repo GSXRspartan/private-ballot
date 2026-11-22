@@ -96,3 +96,15 @@ export function isMicroTariAbove(a: unknown, b: unknown): boolean {
   if (na === null || nb === null) return false;
   return BigInt(na) > BigInt(nb);
 }
+
+/**
+ * Adds two microTARI amounts exactly (bigint-safe). Returns the canonical decimal
+ * string, or `null` if either operand is malformed/unsafe. Used to compute the
+ * allowance-adjusted recommended max_fee (required + FEE_ESTIMATE_ALLOWANCE).
+ */
+export function addMicroTari(a: unknown, b: unknown): string | null {
+  const na = normalizeMicroTari(a);
+  const nb = normalizeMicroTari(b);
+  if (na === null || nb === null) return null;
+  return (BigInt(na) + BigInt(nb)).toString();
+}

@@ -5,6 +5,7 @@ import {
   MICRO_TARI_PER_TARI,
   formatTariFromMicroTari,
   isMicroTariAbove,
+  addMicroTari,
   normalizeMicroTari,
 } from "../src/wallet/feeFormat.ts";
 
@@ -125,5 +126,31 @@ describe("feeFormat: isMicroTariAbove", () => {
 describe("feeFormat: MICRO_TARI_PER_TARI", () => {
   it("is exactly one million", () => {
     assert.equal(MICRO_TARI_PER_TARI, 1_000_000);
+  });
+});
+
+describe("feeFormat: addMicroTari", () => {
+  it("adds exactly (allowance-adjusted minimum)", () => {
+    // Real Sapient required fee 3477 µT + 12 µT allowance = 3489 µT.
+    assert.equal(addMicroTari(3477, 12), "3489");
+    assert.equal(addMicroTari("3477", "12"), "3489");
+    assert.equal(addMicroTari(3477n, 12n), "3489");
+  });
+
+  it("handles large integers exactly", () => {
+    const big = "100000000000000000000000";
+    assert.equal(addMicroTari(big, "1"), "100000000000000000000001");
+  });
+
+  it("returns null for malformed operands", () => {
+    assert.equal(addMicroTari("abc", 12), null);
+    assert.equal(addMicroTari(3477, "x"), null);
+    assert.equal(addMicroTari(-1, 12), null);
+    assert.equal(addMicroTari(1.5, 12), null);
+  });
+
+  it("formats the allowance-adjusted minimum as TARI", () => {
+    const adjusted = addMicroTari(3477, 12);
+    assert.equal(formatTariFromMicroTari(adjusted), "0.003489");
   });
 });
