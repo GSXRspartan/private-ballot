@@ -137,7 +137,7 @@ export function sleepWithTimeout(ms: number): Promise<void> {
  * Extracts a fee estimate from a successful `tari_signAndSubmitTransaction {
  * dryRun: true }` result.
  *
- * EVIDENCE-BASED SCHEMA (chironbuilds/tari-wallet, master @ b50199df):
+ * EVIDENCE-BASED SCHEMA (chironbuilds/tari-wallet @ b50199df):
  * - The provider resolves to `{ transaction_id, result }` on a dry run. There is
  *   NO `transactionId` (camelCase) on this path and nothing is submitted.
  * - `result` is an `ExecuteResult` whose `result.finalize` is a `FinalizeResult`.
@@ -146,14 +146,20 @@ export function sleepWithTimeout(ms: number): Promise<void> {
  *   every bigint to a decimal string, so all fee fields arrive as strings.
  * - The engine name `required_fees()` is NOT on the wire; `requiredFees` (camelCase)
  *   does not exist. Do not look for either.
- * - The wallet REJECTS the promise on `Reject`/`AcceptFeeRejectRest` outcomes, so a
- *   resolved value is a successful simulation; `result.finalize.result` carries the
- *   `Accept` arm.
+ * - SUCCESS is proven ONLY by an explicit `result.finalize.result = { Accept: … }`.
+ *   The wallet throws on `Reject`/`AcceptFeeRejectRest`, so a resolved promise
+ *   alone is not treated as sufficient: if the `Accept` arm is absent, we fail
+ *   closed as unsupported (never report a fee for an unproven simulation).
  *
- * We read ONLY the fee field (`total_fees_required`), with a conservative fallback to
- * `fee_receipt.total_fees_paid` for forward-compatibility. We never read wallet
- * addresses, account ids, instructions, or raw events. Anything unrecognized →
- * `{ kind: "unsupported" }`. It never throws and never invents a figure.
+ * We read ONLY the fee field (`total_fees_required`). We deliberately do NOT fall
+ * back to `fee_receipt.total_fees_paid`: the source defines that as "total fees
+ * paid after refunds" (the amount actually charged), NOT the authoritative
+ * required-fee estimate (`total_fees_required` = "what committing the whole
+ * transaction was priced at … the one a resubmission has to clear"). Using it as a
+ * required-fee estimate would be semantically wrong, so we fail closed instead.
+ * We never read wallet addresses, account ids, instructions, or raw events.
+ * Anything unrecognized → `{ kind: "unsupported" }`. It never throws and never
+ * invents a figure.
  */
 export function extractDryRunFeeEstimate(result: unknown): DryRunFeeEstimate {
   const isRecord = (v: unknown): v is Record<string, unknown> =>
@@ -176,26 +182,20 @@ export function extractDryRunFeeEstimate(result: unknown): DryRunFeeEstimate {
       reason: "the dry-run result did not contain a finalize section",
     };
   }
-  // A resolved dry run is a successful simulation; the wallet throws on rejection.
-  // If a rejection marker is nonetheless present, refuse to report a fee.
+  // Require an EXPLICIT successful simulation: result.finalize.result must carry
+  // the `Accept` arm. A resolved promise alone is not sufficient evidence.
   const outcome = finalize.result;
-  if (isRecord(outcome) && ("Reject" in outcome || "AcceptFeeRejectRest" in outcome)) {
+  if (!isRecord(outcome) || !("Accept" in outcome)) {
     return {
       kind: "unsupported",
-      reason: "the dry-run simulation was rejected; no fee estimate is available",
+      reason:
+        "the dry-run result did not contain an explicit Accept outcome; no fee estimate is available",
     };
   }
-  // Primary evidence-backed path: FinalizeResult.total_fees_required (µT string).
+  // Primary (and only) evidence-backed path: FinalizeResult.total_fees_required (µT string).
   const totalRequired = asMicrotari(finalize.total_fees_required);
   if (totalRequired !== null) {
     return { kind: "estimated", requiredFeesMicrotari: totalRequired };
-  }
-  // Conservative fallback: fee_receipt.total_fees_paid (µT string) — what was
-  // actually paid in the simulation. Only used if the primary field is absent.
-  const feeReceipt = isRecord(finalize.fee_receipt) ? finalize.fee_receipt : null;
-  const feesPaid = feeReceipt ? asMicrotari(feeReceipt.total_fees_paid) : null;
-  if (feesPaid !== null) {
-    return { kind: "estimated", requiredFeesMicrotari: feesPaid };
   }
   return {
     kind: "unsupported",

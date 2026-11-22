@@ -839,14 +839,40 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
     const adapter = dryRunAdapter({
       tari_signAndSubmitTransaction: (params) => {
         capturedParams = params;
-        return { transaction_id: "deadbeef", result: { finalize: { total_fees_required: "5000" } } };
+        return { transaction_id: "deadbeef", result: { finalize: { total_fees_required: "5000", result: { Accept: {} } } } };
       },
     });
     await adapter.signAndSubmitTransactionDryRun([]);
     assert.deepEqual(capturedParams, { instructions: [], dryRun: true });
   });
 
-  it("extracts total_fees_required from the real Sapient dry-run result", async () => {
+  it("extracts total_fees_required from the real Sapient dry-run result with an Accept outcome", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => ({
+        transaction_id: "abc123",
+        result: { finalize: { total_fees_required: "1234", result: { Accept: {} } } },
+      }),
+    });
+    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+    assert.deepEqual(estimate, { kind: "estimated", requiredFeesMicrotari: "1234" });
+  });
+
+  it("does NOT fall back to fee_receipt.total_fees_paid (not a required-fee estimate)", async () => {
+    const adapter = dryRunAdapter({
+      tari_signAndSubmitTransaction: () => ({
+        transaction_id: "abc123",
+        result: { finalize: { fee_receipt: { total_fees_paid: "777" }, result: { Accept: {} } } },
+      }),
+    });
+    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
+    assert.equal(estimate.kind, "unsupported");
+    if (estimate.kind === "unsupported") {
+      assert.match(estimate.reason, /did not expose a verifiable fee field/);
+    }
+  });
+
+  it("requires an explicit Accept outcome (resolved promise alone is insufficient)", async () => {
+    // total_fees_required is present but there is no Accept arm.
     const adapter = dryRunAdapter({
       tari_signAndSubmitTransaction: () => ({
         transaction_id: "abc123",
@@ -854,18 +880,10 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
       }),
     });
     const estimate = await adapter.signAndSubmitTransactionDryRun([]);
-    assert.deepEqual(estimate, { kind: "estimated", requiredFeesMicrotari: "1234" });
-  });
-
-  it("falls back to fee_receipt.total_fees_paid when total_fees_required is absent", async () => {
-    const adapter = dryRunAdapter({
-      tari_signAndSubmitTransaction: () => ({
-        transaction_id: "abc123",
-        result: { finalize: { fee_receipt: { total_fees_paid: "777" } } },
-      }),
-    });
-    const estimate = await adapter.signAndSubmitTransactionDryRun([]);
-    assert.deepEqual(estimate, { kind: "estimated", requiredFeesMicrotari: "777" });
+    assert.equal(estimate.kind, "unsupported");
+    if (estimate.kind === "unsupported") {
+      assert.match(estimate.reason, /explicit Accept outcome/);
+    }
   });
 
   it("refuses to report a fee for a rejected simulation (Reject / AcceptFeeRejectRest)", async () => {
@@ -881,13 +899,10 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
       });
       const estimate = await adapter.signAndSubmitTransactionDryRun([]);
       assert.equal(estimate.kind, "unsupported", `rejected ${JSON.stringify(rejected)}`);
-      if (estimate.kind === "unsupported") {
-        assert.match(estimate.reason, /rejected/i);
-      }
     }
   });
 
-  it("returns unsupported (never invents a figure) when the fee field is absent", async () => {
+  it("returns unsupported (never invents a figure) when the fee field is absent but Accept is present", async () => {
     const adapter = dryRunAdapter({
       tari_signAndSubmitTransaction: () => ({
         transaction_id: "abc123",
@@ -946,7 +961,7 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
         handlers: {
           tari_signAndSubmitTransaction: () => ({
             transaction_id: "abc123",
-            result: { finalize: { total_fees_required: "999" } },
+            result: { finalize: { total_fees_required: "999", result: { Accept: {} } } },
           }),
           tari_createTransactionRequest: () => { createCalls += 1; return { requestId: "x" }; },
           tari_submitTransactionRequest: () => { submitCalls += 1; return { transactionId: "t" }; },
@@ -995,7 +1010,7 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
 
   it("refuses a dry run when the pinned provider is swapped mid-operation", async () => {
     const provider = fakeProvider({
-      handlers: { tari_signAndSubmitTransaction: () => ({ transaction_id: "t", result: { finalize: { total_fees_required: "1" } } }) },
+      handlers: { tari_signAndSubmitTransaction: () => ({ transaction_id: "t", result: { finalize: { total_fees_required: "1", result: { Accept: {} } } } }) },
     });
     const holder: { tari?: unknown } = { tari: provider };
     const adapter = windowTariProvider("sapient", "Sapient", () => sapientDiscovery(holder));
@@ -1010,27 +1025,37 @@ describe("non-spending dry-run fee preflight (adapter boundary)", () => {
 });
 
 describe("extractDryRunFeeEstimate (pure)", () => {
-  // Evidence-backed shape: { finalize: { total_fees_required: "<µT string>" } }
-  it("reads finalize.total_fees_required (decimal string µT)", () => {
+  // Evidence-backed shape: { finalize: { total_fees_required: "<µT string>", result: { Accept: … } } }
+  it("reads finalize.total_fees_required (decimal string µT) with an Accept outcome", () => {
     assert.deepEqual(
-      extractDryRunFeeEstimate({ finalize: { total_fees_required: "4200" } }),
+      extractDryRunFeeEstimate({ finalize: { total_fees_required: "4200", result: { Accept: {} } } }),
       { kind: "estimated", requiredFeesMicrotari: "4200" },
     );
   });
   it("accepts bigint and safe-integer number forms for total_fees_required", () => {
     assert.deepEqual(
-      extractDryRunFeeEstimate({ finalize: { total_fees_required: 42n } }),
+      extractDryRunFeeEstimate({ finalize: { total_fees_required: 42n, result: { Accept: {} } } }),
       { kind: "estimated", requiredFeesMicrotari: "42" },
     );
     assert.deepEqual(
-      extractDryRunFeeEstimate({ finalize: { total_fees_required: 42 } }),
+      extractDryRunFeeEstimate({ finalize: { total_fees_required: 42, result: { Accept: {} } } }),
       { kind: "estimated", requiredFeesMicrotari: "42" },
     );
   });
-  it("falls back to finalize.fee_receipt.total_fees_paid", () => {
-    assert.deepEqual(
-      extractDryRunFeeEstimate({ finalize: { fee_receipt: { total_fees_paid: "900" } } }),
-      { kind: "estimated", requiredFeesMicrotari: "900" },
+  it("requires an explicit Accept outcome (no fee without it)", () => {
+    assert.equal(
+      extractDryRunFeeEstimate({ finalize: { total_fees_required: "900" } }).kind,
+      "unsupported",
+    );
+    assert.equal(
+      extractDryRunFeeEstimate({ finalize: { total_fees_required: "900", result: {} } }).kind,
+      "unsupported",
+    );
+  });
+  it("does NOT fall back to fee_receipt.total_fees_paid", () => {
+    assert.equal(
+      extractDryRunFeeEstimate({ finalize: { fee_receipt: { total_fees_paid: "900" }, result: { Accept: {} } } }).kind,
+      "unsupported",
     );
   });
   it("refuses a rejected simulation", () => {
@@ -1046,7 +1071,7 @@ describe("extractDryRunFeeEstimate (pure)", () => {
   it("rejects negative, float, non-numeric, and leading-zero figures", () => {
     for (const bad of ["-1", "12.5", "abc", "0123", "", " 5", "1e3"]) {
       assert.equal(
-        extractDryRunFeeEstimate({ finalize: { total_fees_required: bad } }).kind,
+        extractDryRunFeeEstimate({ finalize: { total_fees_required: bad, result: { Accept: {} } } }).kind,
         "unsupported",
         `value ${JSON.stringify(bad)}`,
       );
