@@ -84,28 +84,22 @@ if (ANCHOR_MAX_FEE_UNITS < 1 || ANCHOR_MAX_FEE_UNITS > ANCHOR_MAX_FEE_CEILING_UN
 }
 
 /**
- * Fail-closed Mainnet submission switch for the Hosted Anchor page.
+ * Fail-closed Mainnet submission release gate for the Hosted Anchor page.
  *
- * When false (the default, and the only value approved for the staging
- * deployment), this page may load finalized-election anchor payloads, display
- * canonical previews, and connect Sapient or Web Tari Universe for network and
- * capability checks, but it can never create a transaction request, request
- * approval, or submit a transaction. The restriction is enforced inside the
- * transaction code path itself (`driver` wrappers below), so publish,
- * recovery, and any future UI path all fail closed even without a visible
- * button. Desktop publishing is unaffected; this switch exists only in the
- * Hosted web page.
+ * This is a build-time constant, not a runtime toggle: there is no editable
+ * browser checkbox and no API path that can flip it. Enabling Mainnet
+ * submission requires a deliberate, reviewed change to THIS constant, a
+ * rebuild of the shipped bundle, and a fresh security audit + operator
+ * authorization. When false (the default), the page may load finalized-election
+ * payloads, display canonical previews, and connect Sapient or Web Tari
+ * Universe for network and capability checks, but it can never create a
+ * transaction request, request approval, or submit a transaction. The guard is
+ * enforced inside the transaction code path itself (the `driver` wrappers
+ * below), so publish, recovery, and any future UI path all fail closed.
+ * Desktop publishing is unaffected; this switch exists only in the Hosted web
+ * page.
  */
 export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false;
-
-/**
- * Live submission policy. Initialized from the fail-closed default above;
- * tests may flip `mainnetEnabled` to exercise enabled-path behavior, while
- * the shipped bundle always starts disabled.
- */
-export const ANCHOR_SUBMISSION_POLICY: { mainnetEnabled: boolean } = {
-  mainnetEnabled: MAINNET_ANCHOR_SUBMISSION_ENABLED,
-};
 
 /**
  * Returns a human-readable reason while Mainnet submission is disabled, or
@@ -113,7 +107,7 @@ export const ANCHOR_SUBMISSION_POLICY: { mainnetEnabled: boolean } = {
  * every guarded wallet operation.
  */
 export function submissionDisabledReason(): string | null {
-  if (ANCHOR_SUBMISSION_POLICY.mainnetEnabled) return null;
+  if (MAINNET_ANCHOR_SUBMISSION_ENABLED) return null;
   return "Mainnet publishing not yet enabled. Payloads, previews, wallet connection, and network/capability checks stay available; no transaction request can be created, approved, or submitted from this page.";
 }
 

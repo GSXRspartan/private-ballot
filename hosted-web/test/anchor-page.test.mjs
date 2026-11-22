@@ -461,6 +461,17 @@ test("Mainnet submission is disabled by default with a fail-closed reason", () =
   assert.match(reason, /Mainnet publishing not yet enabled/);
 });
 
+test("the submission gate is a build-time constant with no runtime bypass", () => {
+  const src = readFileSync(new URL("../src/anchor.ts", import.meta.url), "utf8");
+  // The gate is a literal constant, not a mutable object or a resolved flag.
+  assert.match(src, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false/);
+  // No mutable policy object that a runtime path could flip.
+  assert.doesNotMatch(src, /ANCHOR_SUBMISSION_POLICY/);
+  assert.doesNotMatch(src, /mainnetEnabled\s*=/);
+  // No storage/config/localStorage read that could enable submission.
+  assert.doesNotMatch(src, /localStorage|sessionStorage|import\.meta\.env/);
+});
+
 test("the Sapient path cannot create or submit a transaction while Mainnet submission is disabled", async () => {
   const wallet = new FakeWallet();
   const env = installDom({ wallet });
