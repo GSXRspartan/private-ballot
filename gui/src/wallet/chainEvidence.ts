@@ -212,10 +212,13 @@ async function readTransientJson(path: string): Promise<JsonResponse> {
 /**
  * Requires a wallet result AND a valid durable receipt.
  * The transient result endpoint is consulted but a valid durable receipt is
- * REQUIRED for final "verified" success. If the receipt is unavailable (404,
- * 500, proxy failure, malformed, or proxy unavailable), verification fails
- * closed. The wallet result and the durable receipt must agree; any
- * disagreement is terminal.
+ * REQUIRED for final "verified" success. A receipt that is not yet indexed
+ * (404), or a receipt route that is temporarily unreachable (5xx / fetch
+ * failure), is a retryable "pending" outcome: it never becomes "verified"
+ * without the receipt, and it is never misreported as a terminal rejection.
+ * A response that is malformed, has an unsupported envelope, or disagrees with
+ * the wallet is still terminal. The wallet result and the durable receipt must
+ * agree; any disagreement is terminal.
  */
 export async function verifyBrowserAnchorEvidence(
   adapter: WindowTariProvider,
@@ -241,9 +244,15 @@ export async function verifyBrowserAnchorEvidence(
   const transient = readTransientJson(`/transactions/${transactionId}/result`);
   const receipt = await readDurableReceipt(`/transaction-receipts/${transactionId}`);
 
-  // Durable receipt is REQUIRED for final verification.
+  // Durable receipt is REQUIRED for final verification. An indexed-but-not-yet
+  // visible receipt is a normal transient state during mainnet indexing, so a
+  // missing or unreachable receipt keeps the saved transaction retryable
+  // instead of mislabelling it as a failed/rejected anchor.
   if (receipt.status !== 200) {
-    return terminal("the durable transaction receipt is unavailable (status " + receipt.status + "); final verification requires a valid receipt");
+    return {
+      kind: "pending",
+      detail: `the durable transaction receipt is not indexed yet (status ${receipt.status})`,
+    };
   }
   if (receipt.json === null) {
     return terminal("the durable receipt response is not JSON");

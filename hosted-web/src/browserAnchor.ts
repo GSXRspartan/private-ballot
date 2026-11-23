@@ -9,7 +9,11 @@ import {
   parseAnchorBundleJson,
   type AnchorBundleV1,
 } from "../../gui/src/wallet/anchorBundle.ts";
-import { anchorDeploymentConfig, deploymentForNetwork } from "../../gui/src/wallet/anchorDeploymentConfig.ts";
+import {
+  anchorDeploymentConfig,
+  deploymentForNetwork,
+  mainnetTransactionExplorerUrl,
+} from "../../gui/src/wallet/anchorDeploymentConfig.ts";
 import { assessAnchorWorkflow, phaseLabel } from "../../gui/src/wallet/anchorWorkflow.ts";
 import { networkVerdict } from "../../gui/src/wallet/network.ts";
 import { browserRecoveryStore, type AnchorRecoveryRecord } from "../../gui/src/wallet/recoveryStore.ts";
@@ -234,7 +238,9 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       status = `Verified: the public V2 anchor matches this election (${transactionId.slice(0, 16)}…).`;
     } else if (outcome.kind === "pending") {
       saveOwned("verifying", null, transactionId, recoveryKey);
-      status = "The transaction is not final yet. It remains saved for verification and will never be submitted again automatically.";
+      status = outcome.detail
+        ? `${outcome.detail}. It remains saved for verification and will never be submitted again automatically.`
+        : "The transaction is not final yet. It remains saved for verification and will never be submitted again automatically.";
     } else {
       // Preserve the identity after a terminal verification failure so the
       // bundle cannot create another request that could duplicate a spend.
@@ -556,6 +562,14 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     const state = element("p", status);
     state.setAttribute("role", "status");
     card.append(state);
+    const explorerUrl = recovery?.transactionId ? mainnetTransactionExplorerUrl(recovery.transactionId) : null;
+    if (explorerUrl !== null && recovery?.transactionId) {
+      const link = element("a", `View transaction ${recovery.transactionId.slice(0, 16)}… on the Tari Mainnet explorer`);
+      link.href = explorerUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      card.append(link);
+    }
     const actions = element("div");
     actions.className = "action-row";
     const readyToConnect = !!bundle && deploymentError() === null;

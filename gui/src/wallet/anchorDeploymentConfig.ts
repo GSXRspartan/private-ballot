@@ -34,6 +34,14 @@ export const MAINNET_V2_TEMPLATE_ADDRESS =
 export const MAINNET_V2_PUBLISH_TRANSACTION_ID =
   "a898f8daaa0ae25095a02f69e5753e38dfe4a9c99c546d26297e08b81a3aa79c";
 
+export const MAINNET_TX_EXPLORER_URL_PREFIX = "https://explorer.tari.mw/tx/";
+
+export function mainnetTransactionExplorerUrl(transactionId: string): string | null {
+  return /^[0-9a-f]{64}$/.test(transactionId)
+    ? `${MAINNET_TX_EXPLORER_URL_PREFIX}${transactionId}`
+    : null;
+}
+
 export const V2_TEMPLATE_MODULE = "tari_private_ballot_anchor_v2";
 export const V2_TEMPLATE_FUNCTION = "publish_anchor_v2";
 export const V2_EVENT_TOPIC_SUFFIX = "TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2";

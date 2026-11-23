@@ -115,6 +115,7 @@ export function defaultPublishDriver(options: {
     },
     verify: async (adapter, bundle, transactionId) => {
       if (options.verifyWithEvidence) {
+        let lastPending: Extract<AnchorVerificationOutcome, { kind: "pending" }> = { kind: "pending" };
         for (let attempt = 0; attempt < options.verifyAttempts; attempt += 1) {
           let outcome: AnchorVerificationOutcome;
           try {
@@ -123,11 +124,12 @@ export function defaultPublishDriver(options: {
             outcome = { kind: "pending" };
           }
           if (outcome.kind !== "pending") return outcome;
+          lastPending = outcome;
           if (attempt + 1 < options.verifyAttempts) {
             await new Promise<void>((resolve) => setTimeout(resolve, options.verifyIntervalMs));
           }
         }
-        return { kind: "pending" };
+        return lastPending;
       }
       return pollUntilVerified(
         () => adapter.getTransactionResult(transactionId),

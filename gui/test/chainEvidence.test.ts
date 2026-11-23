@@ -359,7 +359,7 @@ describe("browser chain evidence", () => {
     }
   });
 
-  it("fails closed when wallet valid but durable receipt is 404", async () => {
+  it("keeps an otherwise valid transaction pending (not failed) when the durable receipt is 404", async () => {
     const restore = withRoutes((path) => {
       if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
       if (path.endsWith("/result")) return { status: 404, body: null };
@@ -370,16 +370,14 @@ describe("browser chain evidence", () => {
     });
     try {
       const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
-      assert.equal(outcome.kind, "terminal_failure");
-      if (outcome.kind === "terminal_failure") {
-        assert.match(outcome.message, /unavailable/);
-      }
+      assert.equal(outcome.kind, "pending");
+      if (outcome.kind === "pending") assert.match(outcome.detail ?? "", /not indexed yet \(status 404\)/);
     } finally {
       restore();
     }
   });
 
-  it("fails closed when transient result valid but durable receipt is 500", async () => {
+  it("keeps an otherwise valid transaction pending when the receipt route is temporarily 500", async () => {
     const restore = withRoutes((path) => {
       if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
       if (path.endsWith("/result")) return { status: 200, body: COMMITTED_RESULT };
@@ -390,10 +388,27 @@ describe("browser chain evidence", () => {
     });
     try {
       const outcome = await verifyBrowserAnchorEvidence(WALLET_ADAPTER, transactionId, template, payload);
+      assert.equal(outcome.kind, "pending");
+      if (outcome.kind === "pending") assert.match(outcome.detail ?? "", /status 500/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("never softens a rejected wallet result to pending when the receipt is missing", async () => {
+    const adapter = {
+      getTransactionResult: async () => ({ result: { Rejected: { details: "mempool rejected" } } }),
+    } as unknown as WindowTariProvider;
+    const restore = withRoutes((path) => {
+      if (path === "/chain/network") return { status: 200, body: { network: "mainnet", network_byte: 0 } };
+      if (path.endsWith("/result")) return { status: 404, body: null };
+      if (path.includes("/transaction-receipts/")) return { status: 404, body: null };
+      throw new Error(`unexpected route ${path}`);
+    });
+    try {
+      const outcome = await verifyBrowserAnchorEvidence(adapter, transactionId, template, payload);
       assert.equal(outcome.kind, "terminal_failure");
-      if (outcome.kind === "terminal_failure") {
-        assert.match(outcome.message, /unavailable/);
-      }
+      if (outcome.kind === "terminal_failure") assert.equal(outcome.failure, "rejected_transaction");
     } finally {
       restore();
     }

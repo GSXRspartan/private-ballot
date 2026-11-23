@@ -158,7 +158,7 @@ export function BrowserAnchorPublishPanel() {
         );
       } else if (outcome.kind === "pending") {
         setPhaseOverride(
-          `The anchor transaction ${transactionId} is not final yet. Reopen this page later to re-verify; nothing is ever resubmitted automatically.`,
+          `${outcome.detail ?? "The anchor transaction is not final yet"}. Reopen this page later to re-verify; nothing is ever resubmitted automatically.`,
         );
       } else {
         setRecovery(recoveryRef.current.load(bundleDigestKey(bundle)));

@@ -41,6 +41,16 @@ that no UI copy or audit claim overstates the guarantee.
    prove `network == "mainnet"` and byte 0, requires a durable receipt, and requires
    the wallet result, the transient indexer result, and the durable receipt to agree.
    A fee-only commit (`AcceptFeeRejectRest`) is never treated as success.
+6. **Transient receipt availability.** The durable receipt is addressed by the
+   transaction id and may be 404 for a short window after a funded Mainnet
+   submission while the indexer syncs the receipt substate. A 404/5xx/fetch
+   failure on that route is a retryable "pending" status; it never becomes
+   "verified" without a valid receipt and never becomes a terminal "rejected"
+   status. Once the receipt is indexed, the same saved transaction verifies
+   without any resubmission. Malformed or conflicting evidence remains terminal.
+
+See `docs/hosted/mainnet-anchor-verification-report.md` for the observed first
+Mainnet transaction and its independent evidence.
 
 ## 2. What is taken on trust, and why
 

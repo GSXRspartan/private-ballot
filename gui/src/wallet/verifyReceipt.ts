@@ -44,7 +44,7 @@ export interface VerifiedAnchorEvidence {
 
 export type AnchorVerificationOutcome =
   | { kind: "verified"; evidence: VerifiedAnchorEvidence }
-  | { kind: "pending" }
+  | { kind: "pending"; detail?: string }
   | {
       kind: "terminal_failure";
       failure: AnchorVerificationFailureKind;
