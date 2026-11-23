@@ -1,18 +1,18 @@
-# Mainnet wallet fee preflight (non-spending adapter implemented; submission still disabled)
+# Mainnet wallet fee preflight (adapter and mandatory per-publish gate implemented)
 
-Status: **adapter implemented; live wallet qualification NOT performed.** This
-document records the investigation into using the wallets' documented `dryRun`
-to estimate the fee of the exact anchor transaction, and the preflight that shows
-an estimate + explicit maximum before approval. It does **not** enable Mainnet
-submission: `MAINNET_ANCHOR_SUBMISSION_ENABLED` stays `false`, and the
-transaction guard (`hosted-web/src/anchor.ts`) still blocks
-`createRequest`/`submit` for both Sapient and Web Tari Universe.
+Status: **adapter implemented; preflight wired; submission enabled in source;
+staging deployment pending audit and operator authorization.** This document
+records the investigation into using the wallets' documented `dryRun` to
+estimate the fee of the exact anchor transaction, and the mandatory preflight
+that runs before every request creation. `MAINNET_ANCHOR_SUBMISSION_ENABLED` is
+`true` in `hosted-web/src/anchorSubmissionPolicy.ts`; the transaction guard
+blocks `createRequest`/`submit` if the gate is false.
 
 The non-spending dry-run adapter (`signAndSubmitTransactionDryRun`) and the
 "Estimate Mainnet Fee" UI are implemented and unit-tested; see
 `mainnet-fee-preflight-operator-qualification.md` for the operator procedure to
-qualify a real wallet. Live Sapient / Tari Universe qualification has NOT been
-performed; do not treat the mocked tests as live qualification.
+qualify a real wallet. Real Sapient Mainnet dry-run evidence is recorded below.
+The mocked tests are not a substitute for the remaining live qualification.
 
 ## 1. What the official integration documents say
 
@@ -92,22 +92,29 @@ driver now stringifies the cap before calling the wallet
 (`gui/test/browserAnchorPublish.test.ts`) pins `maxFee: "1000"`. Desktop callers
 that pass no cap are unchanged.
 
-## 5. Preflight design (NOT wired)
+## 5. Mandatory per-publish preflight (wired)
 
-When submission is eventually enabled, the anchor page would, before creating a
-request:
+Both Hosted browser entry points (`anchor.ts` and the Manage advanced panel in
+`browserAnchor.ts`) call `runMandatoryFeePreflight` before they reserve durable
+recovery state or create a wallet request:
 
-1. Feature-detect `dryRunIsLocal` (or fall back gracefully if unsupported).
-2. Call `tari_signAndSubmitTransaction` with the exact anchor instructions,
-   `maxFee = ANCHOR_MAX_FEE_UNITS` (string), and `dryRun: true`.
-3. Parse the finalized result and read `required_fees()` (µT).
-4. Display both the **estimated fee** and the **explicit maximum authorized
-   fee** (`ANCHOR_MAX_FEE_UNITS`) before the user approves the real request.
-5. If `required_fees()` exceeds `ANCHOR_MAX_FEE_UNITS` but is within
-   `ANCHOR_MAX_FEE_CEILING_UNITS`, refuse to proceed automatically and require an
-   explicit operator decision to raise the cap (a deliberate, reviewed action —
-   never a silent fallback).
-6. If `required_fees()` exceeds the ceiling, refuse outright.
+1. Call `tari_signAndSubmitTransaction` with the exact canonical anchor
+   instructions, `maxFee = ANCHOR_MAX_FEE_UNITS` (string), and `dryRun: true`.
+2. Read `result.finalize.total_fees_required` and normalize it as exact integer
+   microTARI.
+3. Compute the allowance-adjusted minimum as `required + 12` microTARI.
+4. Refuse to proceed unless both values fit inside `ANCHOR_MAX_FEE_UNITS`
+   (5000 microTARI). Unsupported, malformed, over-cap, or provider-error
+   estimates fail closed with **no reservation and no transaction request**.
+5. Revalidate the pinned wallet, account, provider, and network after the dry
+   run and immediately before the durable reservation.
+6. Send the same explicit `maxFee` on the real
+   `tari_createTransactionRequest`.
+
+The displayed quote is informational. A stale displayed estimate can never
+authorize a publish: every publish attempt runs the preflight again, and any
+wallet/account/network/payload/acknowledgement change clears the displayed
+estimate.
 
 **Never** silently fall back to an unbounded fee. The dry run is a quote only;
 the real submission still goes through `tari_createTransactionRequest` with an
@@ -129,10 +136,16 @@ funded-wallet test.
 ## 7. Qualification status
 
 - **DRY-RUN FEE ESTIMATION:** IMPLEMENTED and verified against real Sapient
-  Mainnet dry-run evidence (`total_fees_required = 3477 µT`); display is in TARI.
+  Mainnet dry-run evidence (`total_fees_required = 3477` microTARI); display is
+  in TARI.
 - **MAX FEE ENFORCEMENT:** PROVEN at the engine level (a funded `maxFee` becomes a
   `pay_fee(maxFee)` payment; the engine commits in full only if `total_charges <=
   maxFee`, else `AcceptFeeRejectRest`/`Reject`; unused fee is refunded) but NOT
   proven for a specific live funded transaction — requires a live funded-wallet
   test.
-- **Submission:** remains disabled (`MAINNET_ANCHOR_SUBMISSION_ENABLED = false`).
+- **MANDATORY PREFLIGHT:** IMPLEMENTED for both Hosted browser entry points;
+  blocks reservation and request creation unless a fresh estimate is recognized
+  and fits the 5000 microTARI cap.
+- **Submission:** enabled in source
+  (`MAINNET_ANCHOR_SUBMISSION_ENABLED = true`); staging deployment pending
+  independent audit and operator authorization.

@@ -51,7 +51,11 @@ import { parseCanonicalPublicSummaryV2 } from "../../gui/src/wallet/publicSummar
 import { verifyBrowserAnchorEvidence } from "../../gui/src/wallet/chainEvidence.ts";
 import { bundleExpectedPayload, bundleExpectedTemplate } from "../../gui/src/wallet/anchorBundle.ts";
 import { hasCapability, type WindowTariProvider } from "../../gui/src/wallet/provider.ts";
-import type { TariCapabilities, TransactionRequestSummary } from "../../gui/src/wallet/types.ts";
+import type {
+  DryRunFeeEstimate,
+  TariCapabilities,
+  TransactionRequestSummary,
+} from "../../gui/src/wallet/types.ts";
 import {
   formatTariFromMicroTari,
   isMicroTariAbove,
@@ -62,8 +66,28 @@ import {
   defaultPublishDriver,
   providerErrorMessage,
   type BrowserWalletKind,
-  type PublishDriver,
 } from "../../gui/src/anchor/browserAnchorPublish.ts";
+import {
+  ANCHOR_MAX_FEE_CEILING_UNITS,
+  ANCHOR_MAX_FEE_UNITS,
+  createGuardedPublishDriver,
+  evaluateFeePreflight,
+  FEE_ESTIMATE_ALLOWANCE_UNITS,
+  MAINNET_ANCHOR_SUBMISSION_ENABLED,
+  submissionDisabledReason,
+} from "./anchorSubmissionPolicy.ts";
+
+export {
+  ANCHOR_MAX_FEE_CEILING_UNITS,
+  ANCHOR_MAX_FEE_UNITS,
+  FEE_ESTIMATE_ALLOWANCE_UNITS,
+  MAINNET_ANCHOR_SUBMISSION_ENABLED,
+  createGuardedPublishDriver,
+  evaluateFeePreflight,
+  submissionDisabledReason,
+  submissionGateReason,
+  type FeePreflightDecision,
+} from "./anchorSubmissionPolicy.ts";
 
 const REQUIRED_CAPABILITIES = ["transactionRequests", "transactionResultLookup"] as const;
 const VERIFY_ATTEMPTS = 30;
@@ -83,61 +107,6 @@ type FeeEstimateState =
   | { kind: "estimated"; requiredFeesMicrotari: string }
   | { kind: "unsupported"; reason: string }
   | { kind: "error"; message: string };
-
-/**
- * Default authorized fee ceiling, in microTARI (µT), for one browser anchor
- * transaction. Real Sapient Mainnet dry-run evidence for a finalized two-voter
- * election measured `result.finalize.total_fees_required = 3477 µT`; the fee
- * reference adds a 12 µT `FEE_ESTIMATE_ALLOWANCE`, so the allowance-adjusted
- * minimum is 3489 µT. This 5000 µT cap sits safely above that while staying far
- * below the release ceiling. Displayed in TARI (0.005 TARI).
- */
-export const ANCHOR_MAX_FEE_UNITS = 5000;
-
-/**
- * Absolute release ceiling for one anchor transaction fee, in microTARI (µT).
- * The configured cap above must never exceed it (10 TARI).
- */
-export const ANCHOR_MAX_FEE_CEILING_UNITS = 10_000_000;
-
-/**
- * Engine estimation allowance added to a dry-run's `total_fees_required` to
- * derive the recommended `max_fee` (tari-ootle fee reference:
- * `required_fees() = total_fees_required + FEE_ESTIMATE_ALLOWANCE`). Kept in µT.
- */
-export const FEE_ESTIMATE_ALLOWANCE_UNITS = 12;
-
-if (ANCHOR_MAX_FEE_UNITS < 1 || ANCHOR_MAX_FEE_UNITS > ANCHOR_MAX_FEE_CEILING_UNITS) {
-  throw new Error("the configured anchor fee cap is outside the release ceiling");
-}
-
-/**
- * Fail-closed Mainnet submission release gate for the Hosted Anchor page.
- *
- * This is a build-time constant, not a runtime toggle: there is no editable
- * browser checkbox and no API path that can flip it. Enabling Mainnet
- * submission requires a deliberate, reviewed change to THIS constant, a
- * rebuild of the shipped bundle, and a fresh security audit + operator
- * authorization. When false (the default), the page may load finalized-election
- * payloads, display canonical previews, and connect Sapient or Web Tari
- * Universe for network and capability checks, but it can never create a
- * transaction request, request approval, or submit a transaction. The guard is
- * enforced inside the transaction code path itself (the `driver` wrappers
- * below), so publish, recovery, and any future UI path all fail closed.
- * Desktop publishing is unaffected; this switch exists only in the Hosted web
- * page.
- */
-export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false;
-
-/**
- * Returns a human-readable reason while Mainnet submission is disabled, or
- * `null` once it is enabled. Rendered prominently on the page and thrown by
- * every guarded wallet operation.
- */
-export function submissionDisabledReason(): string | null {
-  if (MAINNET_ANCHOR_SUBMISSION_ENABLED) return null;
-  return "Mainnet publishing not yet enabled. Payloads, previews, wallet connection, and network/capability checks stay available; no transaction request can be created, approved, or submitted from this page.";
-}
 
 type WalletConnection = {
   kind: BrowserWalletKind;
@@ -344,27 +313,10 @@ export function mountAnchorPanel(root: HTMLElement): void {
   });
   // Fail-closed wrappers: every wallet transaction initiation, approval wait,
   // and submission goes through these guards. Even if a future UI path forgets
-  // its own check, the disabled switch can never be bypassed into a wallet
+  // its own check, a disabled build can never be bypassed into a wallet
   // request or submission. Verification (read-only) is deliberately not
   // guarded; checking an existing receipt is always safe.
-  const driver: PublishDriver = {
-    ...baseDriver,
-    createRequest: (adapter, bundle, maxFee) => {
-      const reason = submissionDisabledReason();
-      if (reason !== null) throw new Error(reason);
-      return baseDriver.createRequest(adapter, bundle, maxFee);
-    },
-    waitForApproval: (adapter, requestId, timeoutMs) => {
-      const reason = submissionDisabledReason();
-      if (reason !== null) throw new Error(reason);
-      return baseDriver.waitForApproval(adapter, requestId, timeoutMs);
-    },
-    submit: (adapter, requestId) => {
-      const reason = submissionDisabledReason();
-      if (reason !== null) throw new Error(reason);
-      return baseDriver.submit(adapter, requestId);
-    },
-  };
+  const driver = createGuardedPublishDriver(baseDriver, MAINNET_ANCHOR_SUBMISSION_ENABLED);
   let validatedBundle: ValidatedAnchorBundle | null = null;
   let payloadError: string | null = null;
   let wallet: WalletConnection | null = null;
@@ -375,6 +327,8 @@ export function mountAnchorPanel(root: HTMLElement): void {
   let status = "Enter a finalized election ID to load its canonical anchor payload from the Hosted backend.";
   let busy = false;
   let feeEstimate: FeeEstimateState = { kind: "idle" };
+  let bundleGeneration = 0;
+  let loadedAcknowledgement: boolean | null = null;
 
   const bundleKey = () => {
     if (!validatedBundle) throw new Error("Load a finalized election first.");
@@ -384,14 +338,22 @@ export function mountAnchorPanel(root: HTMLElement): void {
     recoveryState = validatedBundle === null ? { kind: "absent" } : store.loadState(bundleDigestKey(validatedBundle.bundle));
     recovery = recoveryState.kind === "record" ? recoveryState.record : null;
   };
-  const saveOwned = (phase: AnchorRecoveryRecord["phase"], requestId: string | null, transactionId: string | null) => {
-    const saved = store.saveOwned(bundleKey(), ownerToken, { phase, requestId, transactionId });
+  const invalidateFeeEstimate = () => {
+    feeEstimate = { kind: "idle" };
+  };
+  const saveOwned = (
+    phase: AnchorRecoveryRecord["phase"],
+    requestId: string | null,
+    transactionId: string | null,
+    key = bundleKey(),
+  ) => {
+    const saved = store.saveOwned(key, ownerToken, { phase, requestId, transactionId });
     if (
       transactionId !== null &&
       TRANSACTION_ID.test(transactionId) &&
       (phase === "approved_submitted" || phase === "verifying" || phase === "verified")
     ) {
-      store.releaseSubmittedRecoveryLease(bundleKey(), ownerToken);
+      store.releaseSubmittedRecoveryLease(key, ownerToken);
     }
     return saved;
   };
@@ -472,6 +434,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
     const accounts = await adapter.getAccounts();
     if (accounts.length === 0 || !sameAccounts(accounts, wallet.accounts)) {
       wallet = null;
+      invalidateFeeEstimate();
       throw new Error("The wallet's authorized account changed. Reconnect before any anchor action.");
     }
     const capabilities = await adapter.getCapabilities();
@@ -480,6 +443,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
     const network = (await adapter.getNetwork()).network;
     if (network !== wallet.network) {
       wallet = null;
+      invalidateFeeEstimate();
       throw new Error("The wallet network changed. Reconnect before any anchor action.");
     }
     if (networkVerdict(validatedBundle.bundle.network, network).kind !== "match") {
@@ -489,50 +453,63 @@ export function mountAnchorPanel(root: HTMLElement): void {
     return adapter;
   }
 
-  async function verifyExisting(adapter: WindowTariProvider, transactionId: string): Promise<void> {
-    if (!validatedBundle) return;
+  async function verifyExisting(
+    adapter: WindowTariProvider,
+    transactionId: string,
+    snapshot: ValidatedAnchorBundle | null = validatedBundle,
+    key: string | null = snapshot ? bundleDigestKey(snapshot.bundle) : null,
+  ): Promise<void> {
+    if (!snapshot) return;
+    const recoveryKey = key ?? bundleDigestKey(snapshot.bundle);
     status = "Verifying the existing on-chain anchor event…";
     render();
-    const outcome = await driver.verify(adapter, validatedBundle.bundle, transactionId);
+    const outcome = await driver.verify(adapter, snapshot.bundle, transactionId);
     if (outcome.kind === "verified") {
-      saveOwned("verified", null, transactionId);
+      saveOwned("verified", null, transactionId, recoveryKey);
       status = `Verified: the public V2 anchor matches this election (${transactionId.slice(0, 16)}…).`;
     } else if (outcome.kind === "pending") {
-      saveOwned("verifying", null, transactionId);
+      saveOwned("verifying", null, transactionId, recoveryKey);
       status = "The transaction is not final yet. It remains saved for verification and will never be submitted again automatically.";
     } else {
-      saveOwned("verifying", null, transactionId);
+      saveOwned("verifying", null, transactionId, recoveryKey);
       status = `${outcome.message}. The saved transaction remains blocked from resubmission.`;
     }
     loadRecovery();
   }
 
-  async function submitApprovedUnlocked(requestId: string): Promise<void> {
-    if (!validatedBundle) return;
+  async function submitApprovedUnlocked(
+    requestId: string,
+    snapshot: ValidatedAnchorBundle,
+    key: string,
+    generation: number,
+  ): Promise<void> {
+    assertBundleSnapshot(snapshot, generation);
     const disabled = submissionDisabledReason();
     if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
       const adapter = await revalidate(true);
+      assertBundleSnapshot(snapshot, generation);
       loadRecovery();
       if (recovery?.phase !== "submitted_awaiting_approval" || recovery.requestId !== requestId) {
         throw new Error("The saved request changed; do not submit it again.");
       }
-      const claimed = store.claim(bundleKey(), ownerToken);
+      const claimed = store.claim(key, ownerToken);
       if (claimed.kind !== "claimed") throw new Error("Another tab owns this saved anchor operation; do not submit it twice.");
       const current = await adapter.pollTransactionRequest(requestId, { timeoutMs: 1, intervalMs: 0 });
       const existingTransactionId = current.status === "submitted" ? submittedTransactionId(current) : null;
       if (existingTransactionId) {
-        saveOwned("approved_submitted", null, existingTransactionId);
-        await verifyExisting(adapter, existingTransactionId);
+        saveOwned("approved_submitted", null, existingTransactionId, key);
+        await verifyExisting(adapter, existingTransactionId, snapshot, key);
         return;
       }
       if (current.status !== "approved") {
         throw new Error(`The current wallet request is ${current.status}; it will not be submitted.`);
       }
       await revalidate(true);
-      saveOwned("submit_in_flight", requestId, null);
+      assertBundleSnapshot(snapshot, generation);
+      saveOwned("submit_in_flight", requestId, null, key);
       loadRecovery();
       status = "Submitting the approved request once…";
       render();
@@ -540,9 +517,9 @@ export function mountAnchorPanel(root: HTMLElement): void {
       if (!TRANSACTION_ID.test(transactionId)) {
         throw new Error("The wallet returned a malformed transaction id; the request remains blocked.");
       }
-      saveOwned("approved_submitted", null, transactionId);
+      saveOwned("approved_submitted", null, transactionId, key);
       loadRecovery();
-      await verifyExisting(adapter, transactionId);
+      await verifyExisting(adapter, transactionId, snapshot, key);
     } catch (error) {
       status = `${providerErrorMessage(error)} Check wallet history; this request will not be submitted again.`;
     } finally {
@@ -552,10 +529,15 @@ export function mountAnchorPanel(root: HTMLElement): void {
   }
 
   async function checkRecovery(): Promise<void> {
+    if (busy || !validatedBundle) return;
+    const key = bundleKey();
+    busy = true;
+    render();
     try {
-      await withExclusiveAnchorOperation(bundleKey(), checkRecoveryUnlocked);
+      await withExclusiveAnchorOperation(key, checkRecoveryUnlocked);
     } catch (error) {
       status = providerErrorMessage(error);
+    } finally {
       busy = false;
       render();
     }
@@ -614,6 +596,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
   }
 
   async function connect(kind: BrowserWalletKind): Promise<void> {
+    invalidateFeeEstimate();
     busy = true;
     render();
     try {
@@ -633,6 +616,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
       wallet = { kind, adapter, accounts, network, capabilities };
       adapter.onAccountsChanged(() => {
         wallet = null;
+        invalidateFeeEstimate();
         status = "Wallet accounts changed. Reconnect before any anchor action.";
         render();
       });
@@ -647,10 +631,17 @@ export function mountAnchorPanel(root: HTMLElement): void {
   }
 
   async function publish(): Promise<void> {
+    const snapshot = validatedBundle;
+    if (!snapshot || busy) return;
+    const key = bundleDigestKey(snapshot.bundle);
+    const generation = bundleGeneration;
+    busy = true;
+    render();
     try {
-      await withExclusiveAnchorOperation(bundleKey(), publishUnlocked);
+      await withExclusiveAnchorOperation(key, () => publishUnlocked(snapshot, key, generation));
     } catch (error) {
       status = `${providerErrorMessage(error)} No request or transaction will be retried automatically.`;
+    } finally {
       busy = false;
       render();
     }
@@ -684,39 +675,74 @@ export function mountAnchorPanel(root: HTMLElement): void {
     }
   }
 
-  async function publishUnlocked(): Promise<void> {
-    if (!validatedBundle) return;
+  const assertBundleSnapshot = (snapshot: ValidatedAnchorBundle, generation: number) => {
+    if (validatedBundle !== snapshot || bundleGeneration !== generation) {
+      throw new Error("The loaded election changed. Load it again before publishing.");
+    }
+  };
+
+  async function runMandatoryFeePreflight(adapter: WindowTariProvider, snapshot: ValidatedAnchorBundle, generation: number): Promise<void> {
+    assertBundleSnapshot(snapshot, generation);
+    status = "Running the mandatory non-spending Mainnet fee preflight…";
+    feeEstimate = { kind: "pending" };
+    render();
+    let estimate: DryRunFeeEstimate;
+    try {
+      estimate = await driver.estimateFee(adapter, snapshot.bundle, ANCHOR_MAX_FEE_UNITS);
+    } catch (error) {
+      const message = providerErrorMessage(error);
+      feeEstimate = { kind: "error", message };
+      throw new Error(`The mandatory non-spending fee preflight failed: ${message}. No transaction request was created.`);
+    }
+    assertBundleSnapshot(snapshot, generation);
+    feeEstimate = estimate;
+    const decision = evaluateFeePreflight(estimate, ANCHOR_MAX_FEE_UNITS);
+    if (!decision.ok) throw new Error(decision.reason);
+    await revalidate(false);
+    assertBundleSnapshot(snapshot, generation);
+    status = `Fee preflight passed: ${displayTari(decision.requiredFeesMicrotari)} TARI required (${displayTari(decision.recommendedMaxFeeMicrotari)} TARI allowance-adjusted) within the ${displayTari(ANCHOR_MAX_FEE_UNITS)} TARI cap. Asking the wallet to approve the anchor…`;
+    render();
+  }
+
+  async function publishUnlocked(snapshot: ValidatedAnchorBundle, key: string, generation: number): Promise<void> {
+    assertBundleSnapshot(snapshot, generation);
+    if (loadedAcknowledgement !== acknowledgeReducedAnonymity) {
+      throw new Error("The reduced-anonymity acknowledgement changed. Reload the anchor payload before publishing.");
+    }
     const disabled = submissionDisabledReason();
     if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
       const adapter = await revalidate(false);
+      assertBundleSnapshot(snapshot, generation);
       const phase = assessAnchorWorkflow({
-        bundle: validatedBundle.bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet?.network ?? null, recovery: null,
+        bundle: snapshot.bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet?.network ?? null, recovery: null,
       });
       if (phase.kind !== "ready") throw new Error(phaseLabel(phase));
-      const reservation = store.reserve(bundleKey(), ownerToken);
+      await runMandatoryFeePreflight(adapter, snapshot, generation);
+      const reservation = store.reserve(key, ownerToken);
       if (reservation.kind === "busy") throw new Error("A saved anchor operation already exists. Resolve it before creating another request.");
       if (reservation.kind === "corrupt") throw new Error(`${reservation.message}; no wallet request was created.`);
       if (reservation.kind !== "claimed") throw new Error("The anchor reservation is ambiguous; no wallet request was created.");
+      assertBundleSnapshot(snapshot, generation);
       // The fee cap is sent with the request so the wallet enforces it.
-      const requestId = await driver.createRequest(adapter, validatedBundle.bundle, ANCHOR_MAX_FEE_UNITS);
-      saveOwned("submitted_awaiting_approval", requestId, null);
+      const requestId = await driver.createRequest(adapter, snapshot.bundle, ANCHOR_MAX_FEE_UNITS);
+      saveOwned("submitted_awaiting_approval", requestId, null, key);
       loadRecovery();
-      status = "Waiting for the wallet to approve the saved request…";
+      status = "The wallet request is waiting for approval. Approve or reject it in the wallet; nothing is submitted until approval.";
       render();
       const summary = await driver.waitForApproval(adapter, requestId, APPROVAL_TIMEOUT_MS);
       if (summary.status === "approved") {
-        await submitApprovedUnlocked(requestId);
+        await submitApprovedUnlocked(requestId, snapshot, key, generation);
         return;
       }
       if (summary.status === "submitted") {
         const transactionId = submittedTransactionId(summary);
         if (!transactionId) throw new Error("The wallet reported submission without a verifiable transaction id.");
-        saveOwned("approved_submitted", null, transactionId);
+        saveOwned("approved_submitted", null, transactionId, key);
         loadRecovery();
-        await verifyExisting(adapter, transactionId);
+        await verifyExisting(adapter, transactionId, snapshot, key);
         return;
       }
       status = `The wallet ${summary.status} the request. It was not treated as a successful anchor.`;
@@ -729,6 +755,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
   }
 
   async function loadPayload(): Promise<void> {
+    if (busy) return;
     const input = root.querySelector<HTMLInputElement>("#election-id-input");
     const id = input?.value.trim() ?? "";
     if (!id) {
@@ -736,45 +763,59 @@ export function mountAnchorPanel(root: HTMLElement): void {
       render();
       return;
     }
+    const generation = ++bundleGeneration;
+    validatedBundle = null;
+    loadedAcknowledgement = null;
+    payloadError = null;
+    electionId = id;
+    invalidateFeeEstimate();
+    loadRecovery();
+    busy = true;
     status = "Loading canonical anchor payload from Hosted…";
     render();
-    const result = await loadAnchorPayload(id, acknowledgeReducedAnonymity);
-    if (!result.ok) {
-      payloadError = `${result.message} (${result.code})`;
+    const failLoad = (message: string) => {
+      payloadError = message;
       status = "The anchor payload could not be loaded.";
       validatedBundle = null;
+      loadedAcknowledgement = null;
       loadRecovery();
-      render();
-      return;
-    }
-    let bundle: AnchorBundleV1;
+    };
     try {
-      bundle = buildAnchorBundleFromPayload(result.payload);
-    } catch (error) {
-      payloadError = error instanceof Error ? error.message : "The anchor payload is not a valid bundle.";
-      status = "The anchor payload could not be loaded.";
-      validatedBundle = null;
+      const result = await loadAnchorPayload(id, acknowledgeReducedAnonymity);
+      if (generation !== bundleGeneration) return;
+      if (!result.ok) {
+        failLoad(`${result.message} (${result.code})`);
+        return;
+      }
+      if (result.payload.election_id !== id || result.payload.anchor_args.election_id !== id) {
+        failLoad("The Hosted backend returned a payload for a different election.");
+        return;
+      }
+      let bundle: AnchorBundleV1;
+      try {
+        bundle = buildAnchorBundleFromPayload(result.payload);
+      } catch (error) {
+        failLoad(error instanceof Error ? error.message : "The anchor payload is not a valid bundle.");
+        return;
+      }
+      const identityError = deploymentForNetwork(anchorDeploymentConfig(), bundle.network)
+        ? null
+        : "No current anchor deployment is configured for the payload network.";
+      if (identityError) {
+        failLoad(identityError);
+        return;
+      }
+      validatedBundle = { bundle, payload: result.payload };
+      loadedAcknowledgement = acknowledgeReducedAnonymity;
+      payloadError = null;
       loadRecovery();
-      render();
-      return;
+      status = `Loaded election ${result.payload.election_id}. Archive: ${result.payload.archive_hash_hex.slice(0, 16)}… Anchor: ${result.payload.v2_anchor_digest_hex.slice(0, 16)}… Connect a Mainnet wallet and submit.`;
+    } finally {
+      if (generation === bundleGeneration) {
+        busy = false;
+        render();
+      }
     }
-    const identityError = deploymentForNetwork(anchorDeploymentConfig(), bundle.network)
-      ? null
-      : "No current anchor deployment is configured for the payload network.";
-    if (identityError) {
-      payloadError = identityError;
-      status = "The anchor payload could not be loaded.";
-      validatedBundle = null;
-      loadRecovery();
-      render();
-      return;
-    }
-    validatedBundle = { bundle, payload: result.payload };
-    payloadError = null;
-    loadRecovery();
-    electionId = id;
-    status = `Loaded election ${result.payload.election_id}. Archive: ${result.payload.archive_hash_hex.slice(0, 16)}… Anchor: ${result.payload.v2_anchor_digest_hex.slice(0, 16)}… Connect a Mainnet wallet and submit.`;
-    render();
   }
 
   function esc(s: string): string {
@@ -800,10 +841,10 @@ export function mountAnchorPanel(root: HTMLElement): void {
     electionSection.className = "form-field form-field--full";
     electionSection.innerHTML = `
       <label for="election-id-input">Finalized Election ID</label>
-      <input type="text" id="election-id-input" placeholder="e.g. pb-staging-e2e-37a9219" autocomplete="off" value="${esc(electionId)}" />
-      <button id="load-election-btn" type="button" class="btn btn-secondary" style="margin-top: 0.5rem;">Load anchor payload</button>
+      <input type="text" id="election-id-input" placeholder="e.g. pb-staging-e2e-37a9219" autocomplete="off" value="${esc(electionId)}" ${busy ? "disabled" : ""} />
+      <button id="load-election-btn" type="button" class="btn btn-secondary" style="margin-top: 0.5rem;" ${busy ? "disabled" : ""}>Load anchor payload</button>
       <label class="form-hint" for="ack-reduced-anonymity" style="margin-top: 0.5rem;">
-        <input type="checkbox" id="ack-reduced-anonymity" />
+        <input type="checkbox" id="ack-reduced-anonymity" ${busy ? "disabled" : ""} />
         I acknowledge that this election's transport binding covers a cohort below the descriptor floor (reduced anonymity).
       </label>
     `;
@@ -952,6 +993,7 @@ export function mountAnchorPanel(root: HTMLElement): void {
       ack.checked = acknowledgeReducedAnonymity;
       ack.addEventListener("change", () => {
         acknowledgeReducedAnonymity = ack.checked;
+        invalidateFeeEstimate();
         if (validatedBundle) {
           status = "Acknowledgement changed. Reload the anchor payload to apply it.";
           render();

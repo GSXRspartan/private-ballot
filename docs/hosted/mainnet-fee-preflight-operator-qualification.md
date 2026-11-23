@@ -1,6 +1,7 @@
 # Mainnet anchor fee preflight — operator-assisted live wallet qualification
 
-Status: **implementation complete; live wallet qualification NOT performed.**
+Status: **implementation complete; real Sapient Mainnet dry-run evidence recorded;
+live Tari Universe qualification NOT performed.**
 
 This document describes the non-spending Mainnet fee preflight added to the
 Hosted Anchor page, and the operator-assisted procedure to qualify it against a
@@ -14,10 +15,10 @@ simulated test in this repository constitutes live wallet qualification.
     calls `tari_signAndSubmitTransaction` with `dryRun: true` and a
     decimal-string `maxFee`. It never calls `tari_createTransactionRequest`,
     `tari_getTransactionRequest`, or `tari_submitTransactionRequest`.
-  - `extractDryRunFeeEstimate(result)` recognizes only documented-style fee
-    fields (`result.required_fees`, `requiredFees`, `finalize.required_fees`,
-    `finalize.requiredFees`) as decimal strings / integers / bigints. Anything
-    else resolves to `{ kind: "unsupported" }`. It never invents a figure.
+  - `extractDryRunFeeEstimate(result)` reads the evidence-backed field
+    `result.finalize.total_fees_required` as a decimal string / integer /
+    bigint. Anything else resolves to `{ kind: "unsupported" }`. It never
+    invents a figure.
   - `TariCapabilities.dryRunIsLocal` is surfaced (optional, `null` when the
     wallet does not report it).
 - `gui/src/anchor/browserAnchorPublish.ts`
@@ -25,8 +26,9 @@ simulated test in this repository constitutes live wallet qualification.
     canonical anchor instructions and calls the dry-run adapter method.
 - `hosted-web/src/anchor.ts`
   - "Estimate Mainnet Fee" action, available whenever a Mainnet wallet is
-    connected and the deployment is valid, **even while Mainnet submission is
-    disabled**. It displays the estimated transaction fee in **TARI** (primary
+    connected and the deployment is valid. Every publish attempt also runs the
+    same preflight internally before creating a request. It displays the
+    estimated transaction fee in **TARI** (primary
     denomination), the maximum authorized fee in TARI, the release fee ceiling in
     TARI, an over-cap warning in TARI, and an explicit caveat that the estimate
     neither proves a funded transaction will succeed nor proves the wallet enforces
@@ -70,11 +72,11 @@ simulated test in this repository constitutes live wallet qualification.
    over-cap warning appears. If the page shows "Fee estimate unavailable", capture
    the wallet's actual `result` JSON (devtools → the `tari_signAndSubmitTransaction`
    response) so the extractor can be extended.
-7. Confirm **Ask wallet to publish anchor** is still absent (submission disabled).
-8. **User-rejection path:** with the gate still disabled, there is no publish
-   action; to exercise a decline you must enable the gate in a **separate,
-   reviewed** build (see the enablement runbook) — do NOT enable it for this
-   qualification. Record that the dry run itself never prompts.
+7. Confirm **Ask wallet to publish anchor** appears after a valid bundle and
+   Mainnet wallet connection. Do not click it for a dry-run-only qualification.
+8. **User-rejection path:** click publish in a reviewed build and decline the
+   wallet approval. Confirm the page reports the rejection and never calls
+   submit. The dry run itself must never prompt.
 
 ## Qualifying a REAL Web Tari Universe wallet (operator, manual)
 
@@ -90,13 +92,15 @@ simulated test in this repository constitutes live wallet qualification.
 A wallet is qualified only when an operator has, on that real wallet:
 - confirmed the dry run never prompts and spends nothing,
 - confirmed the network is Mainnet (byte-exact),
-- recorded the estimate figure and units, and
-- confirmed the over-cap warning and the submission-disabled state.
+- recorded the estimate figure and units,
+- confirmed the over-cap warning, and
+- confirmed a declined approval is never submitted.
 
-Until then, both wallets remain **NOT TESTED**.
+Until then, Web Tari Universe remains **NOT TESTED** for live qualification.
 
 ## Explicit non-goals
 
-- This change does not enable Mainnet submission.
-- It does not add a runtime toggle, storage read, or query-string bypass.
-- It never falls back to a live submission if a dry run fails.
+- No runtime toggle, storage read, or query-string bypass is added.
+- A failed or unsupported dry run never falls back to a live submission.
+- A stale displayed quote never authorizes a new request; every publish attempt
+  re-runs the preflight.

@@ -26,6 +26,15 @@ import {
   providerErrorMessage,
   type BrowserWalletKind,
 } from "../../gui/src/anchor/browserAnchorPublish.ts";
+import { formatTariFromMicroTari } from "../../gui/src/wallet/feeFormat.ts";
+import {
+  ANCHOR_MAX_FEE_CEILING_UNITS,
+  ANCHOR_MAX_FEE_UNITS,
+  createGuardedPublishDriver,
+  evaluateFeePreflight,
+  MAINNET_ANCHOR_SUBMISSION_ENABLED,
+  submissionDisabledReason,
+} from "./anchorSubmissionPolicy.ts";
 import type { ManagedFinalizedElectionIdentity } from "./organizer.ts";
 
 const REQUIRED_CAPABILITIES = ["transactionRequests", "transactionResultLookup"] as const;
@@ -46,6 +55,10 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string): 
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function displayTari(microtari: unknown): string {
+  return formatTariFromMicroTari(microtari) ?? "—";
 }
 
 function action(text: string, handler: () => void | Promise<void>, disabled: boolean): HTMLButtonElement {
@@ -78,7 +91,7 @@ function sameAccounts(left: readonly string[], right: readonly string[]): boolea
 export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: ManagedFinalizedElectionIdentity): void {
   const store = browserRecoveryStore();
   const ownerToken = newRecoveryOwnerToken();
-  const driver = defaultPublishDriver({
+  const baseDriver = defaultPublishDriver({
     verifyAttempts: VERIFY_ATTEMPTS,
     verifyIntervalMs: VERIFY_INTERVAL_MS,
     verifyWithEvidence: (adapter, bundle, transactionId) => verifyBrowserAnchorEvidence(
@@ -88,6 +101,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       bundleExpectedPayload(bundle),
     ),
   });
+  const driver = createGuardedPublishDriver(baseDriver, MAINNET_ANCHOR_SUBMISSION_ENABLED);
   let bundle: AnchorBundleV1 | null = null;
   let bundleError: string | null = null;
   let wallet: WalletConnection | null = null;
@@ -95,6 +109,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
   let recoveryState: RecoveryLoadState = { kind: "absent" };
   let status = "Import the canonical bundle exported by the desktop application.";
   let busy = false;
+  let bundleGeneration = 0;
 
   const bundleKey = () => {
     if (!bundle) throw new Error("Import the canonical bundle first.");
@@ -104,8 +119,13 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     recoveryState = bundle === null ? { kind: "absent" } : store.loadState(bundleDigestKey(bundle));
     recovery = recoveryState.kind === "record" ? recoveryState.record : null;
   };
-  const saveOwned = (phase: AnchorRecoveryRecord["phase"], requestId: string | null, transactionId: string | null) => {
-    const saved = store.saveOwned(bundleKey(), ownerToken, { phase, requestId, transactionId });
+  const saveOwned = (
+    phase: AnchorRecoveryRecord["phase"],
+    requestId: string | null,
+    transactionId: string | null,
+    key = bundleKey(),
+  ) => {
+    const saved = store.saveOwned(key, ownerToken, { phase, requestId, transactionId });
     if (
       transactionId !== null &&
       TRANSACTION_ID.test(transactionId) &&
@@ -114,9 +134,14 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       // The write has completed and this record can only resolve the exact
       // transaction id. Releasing this mutation lease cannot enable another
       // create or submit, but allows a reloaded panel to verify immediately.
-      store.releaseSubmittedRecoveryLease(bundleKey(), ownerToken);
+      store.releaseSubmittedRecoveryLease(key, ownerToken);
     }
     return saved;
+  };
+  const assertBundleSnapshot = (snapshot: AnchorBundleV1, generation: number) => {
+    if (bundle !== snapshot || bundleGeneration !== generation) {
+      throw new Error("The imported bundle changed. Import it again before publishing.");
+    }
   };
   const bundleIdentityError = (): string | null => {
     if (!bundle) return "Import the canonical bundle first.";
@@ -193,43 +218,57 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     return adapter;
   }
 
-  async function verifyExisting(adapter: WindowTariProvider, transactionId: string): Promise<void> {
-    if (!bundle) return;
+  async function verifyExisting(
+    adapter: WindowTariProvider,
+    transactionId: string,
+    snapshot: AnchorBundleV1 | null = bundle,
+    key: string | null = snapshot ? bundleDigestKey(snapshot) : null,
+  ): Promise<void> {
+    if (!snapshot) return;
+    const recoveryKey = key ?? bundleDigestKey(snapshot);
     status = "Verifying the existing on-chain anchor event…";
     render();
-    const outcome = await driver.verify(adapter, bundle, transactionId);
+    const outcome = await driver.verify(adapter, snapshot, transactionId);
     if (outcome.kind === "verified") {
-      saveOwned("verified", null, transactionId);
+      saveOwned("verified", null, transactionId, recoveryKey);
       status = `Verified: the public V2 anchor matches this election (${transactionId.slice(0, 16)}…).`;
     } else if (outcome.kind === "pending") {
-      saveOwned("verifying", null, transactionId);
+      saveOwned("verifying", null, transactionId, recoveryKey);
       status = "The transaction is not final yet. It remains saved for verification and will never be submitted again automatically.";
     } else {
       // Preserve the identity after a terminal verification failure so the
       // bundle cannot create another request that could duplicate a spend.
-      saveOwned("verifying", null, transactionId);
+      saveOwned("verifying", null, transactionId, recoveryKey);
       status = `${outcome.message}. The saved transaction remains blocked from resubmission.`;
     }
     loadRecovery();
   }
 
-  async function submitApprovedUnlocked(requestId: string): Promise<void> {
-    if (!bundle) return;
+  async function submitApprovedUnlocked(
+    requestId: string,
+    snapshot: AnchorBundleV1,
+    key: string,
+    generation: number,
+  ): Promise<void> {
+    assertBundleSnapshot(snapshot, generation);
+    const disabled = submissionDisabledReason();
+    if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
       const adapter = await revalidate(true);
+      assertBundleSnapshot(snapshot, generation);
       loadRecovery();
       if (recovery?.phase !== "submitted_awaiting_approval" || recovery.requestId !== requestId) {
         throw new Error("The saved request changed; do not submit it again.");
       }
-      const claimed = store.claim(bundleKey(), ownerToken);
+      const claimed = store.claim(key, ownerToken);
       if (claimed.kind !== "claimed") throw new Error("Another tab owns this saved anchor operation; do not submit it twice.");
       const current = await adapter.pollTransactionRequest(requestId, { timeoutMs: 1, intervalMs: 0 });
       const existingTransactionId = current.status === "submitted" ? submittedTransactionId(current) : null;
       if (existingTransactionId) {
-        saveOwned("approved_submitted", null, existingTransactionId);
-        await verifyExisting(adapter, existingTransactionId);
+        saveOwned("approved_submitted", null, existingTransactionId, key);
+        await verifyExisting(adapter, existingTransactionId, snapshot, key);
         return;
       }
       if (current.status !== "approved") {
@@ -237,7 +276,8 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       }
       // Account/network are read again after status polling and immediately before submit.
       await revalidate(true);
-      saveOwned("submit_in_flight", requestId, null);
+      assertBundleSnapshot(snapshot, generation);
+      saveOwned("submit_in_flight", requestId, null, key);
       loadRecovery();
       status = "Submitting the approved request once…";
       render();
@@ -245,9 +285,9 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       if (!TRANSACTION_ID.test(transactionId)) {
         throw new Error("The wallet returned a malformed transaction id; the request remains blocked.");
       }
-      saveOwned("approved_submitted", null, transactionId);
+      saveOwned("approved_submitted", null, transactionId, key);
       loadRecovery();
-      await verifyExisting(adapter, transactionId);
+      await verifyExisting(adapter, transactionId, snapshot, key);
     } catch (error) {
       status = `${providerErrorMessage(error)} Check wallet history; this request will not be submitted again.`;
     } finally {
@@ -257,10 +297,15 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
   }
 
   async function checkRecovery(): Promise<void> {
+    if (busy || !bundle) return;
+    const key = bundleKey();
+    busy = true;
+    render();
     try {
-      await withExclusiveAnchorOperation(bundleKey(), checkRecoveryUnlocked);
+      await withExclusiveAnchorOperation(key, checkRecoveryUnlocked);
     } catch (error) {
       status = providerErrorMessage(error);
+    } finally {
       busy = false;
       render();
     }
@@ -351,45 +396,68 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
   }
 
   async function publish(): Promise<void> {
+    const snapshot = bundle;
+    if (!snapshot || busy) return;
+    const key = bundleDigestKey(snapshot);
+    const generation = bundleGeneration;
+    busy = true;
+    render();
     try {
-      await withExclusiveAnchorOperation(bundleKey(), publishUnlocked);
+      await withExclusiveAnchorOperation(key, () => publishUnlocked(snapshot, key, generation));
     } catch (error) {
       status = `${providerErrorMessage(error)} No request or transaction will be retried automatically.`;
+    } finally {
       busy = false;
       render();
     }
   }
 
-  async function publishUnlocked(): Promise<void> {
-    if (!bundle) return;
+  async function publishUnlocked(snapshot: AnchorBundleV1, key: string, generation: number): Promise<void> {
+    assertBundleSnapshot(snapshot, generation);
+    const disabled = submissionDisabledReason();
+    if (disabled !== null) throw new Error(disabled);
     busy = true;
     render();
     try {
       const adapter = await revalidate(false);
+      assertBundleSnapshot(snapshot, generation);
       const phase = assessAnchorWorkflow({
-        bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet?.network ?? null, recovery: null,
+        bundle: snapshot, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet?.network ?? null, recovery: null,
       });
       if (phase.kind !== "ready") throw new Error(phaseLabel(phase));
-      const reservation = store.reserve(bundleKey(), ownerToken);
+
+      status = `Running the mandatory non-spending fee preflight (cap ${displayTari(ANCHOR_MAX_FEE_UNITS)} TARI)…`;
+      render();
+      const estimate = await driver.estimateFee(adapter, snapshot, ANCHOR_MAX_FEE_UNITS);
+      assertBundleSnapshot(snapshot, generation);
+      const decision = evaluateFeePreflight(estimate, ANCHOR_MAX_FEE_UNITS);
+      if (!decision.ok) throw new Error(decision.reason);
+      await revalidate(false);
+      assertBundleSnapshot(snapshot, generation);
+      status = `Fee preflight passed: ${displayTari(decision.requiredFeesMicrotari)} TARI required (${displayTari(decision.recommendedMaxFeeMicrotari)} TARI allowance-adjusted) within the ${displayTari(ANCHOR_MAX_FEE_UNITS)} TARI cap. Waiting for wallet approval…`;
+      render();
+
+      const reservation = store.reserve(key, ownerToken);
       if (reservation.kind === "busy") throw new Error("A saved anchor operation already exists. Resolve it before creating another request.");
       if (reservation.kind === "corrupt") throw new Error(`${reservation.message}; no wallet request was created.`);
       if (reservation.kind !== "claimed") throw new Error("The anchor reservation is ambiguous; no wallet request was created.");
-      const requestId = await driver.createRequest(adapter, bundle);
-      saveOwned("submitted_awaiting_approval", requestId, null);
+      assertBundleSnapshot(snapshot, generation);
+      const requestId = await driver.createRequest(adapter, snapshot, ANCHOR_MAX_FEE_UNITS);
+      saveOwned("submitted_awaiting_approval", requestId, null, key);
       loadRecovery();
       status = "Waiting for the wallet to approve the saved request…";
       render();
       const summary = await driver.waitForApproval(adapter, requestId, APPROVAL_TIMEOUT_MS);
       if (summary.status === "approved") {
-        await submitApprovedUnlocked(requestId);
+        await submitApprovedUnlocked(requestId, snapshot, key, generation);
         return;
       }
       if (summary.status === "submitted") {
         const transactionId = submittedTransactionId(summary);
         if (!transactionId) throw new Error("The wallet reported submission without a verifiable transaction id.");
-        saveOwned("approved_submitted", null, transactionId);
+        saveOwned("approved_submitted", null, transactionId, key);
         loadRecovery();
-        await verifyExisting(adapter, transactionId);
+        await verifyExisting(adapter, transactionId, snapshot, key);
         return;
       }
       status = `The wallet ${summary.status} the request. It was not treated as a successful anchor.`;
@@ -401,8 +469,17 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     }
   }
 
-  function importBundle(file: File): void {
-    void file.text().then((text) => {
+  async function importBundle(file: File): Promise<void> {
+    if (busy) return;
+    const generation = ++bundleGeneration;
+    bundle = null;
+    bundleError = null;
+    loadRecovery();
+    busy = true;
+    render();
+    try {
+      const text = await file.text();
+      if (generation !== bundleGeneration) return;
       try {
         const imported = parseAnchorBundleJson(text);
         bundle = imported;
@@ -418,10 +495,20 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       } catch (error) {
         bundle = null;
         recovery = null;
+        recoveryState = { kind: "absent" };
         bundleError = error instanceof Error ? error.message : "The bundle file is not valid JSON.";
       }
-      render();
-    });
+    } catch (error) {
+      bundle = null;
+      recovery = null;
+      recoveryState = { kind: "absent" };
+      bundleError = error instanceof Error ? error.message : "The bundle file could not be read.";
+    } finally {
+      if (generation === bundleGeneration) {
+        busy = false;
+        render();
+      }
+    }
   }
 
   function render(): void {
@@ -441,7 +528,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
     input.disabled = busy;
     input.addEventListener("change", () => {
       const file = input.files?.[0];
-      if (file) importBundle(file);
+      if (file) void importBundle(file);
     });
     card.append(input);
     if (bundleError) {
@@ -459,6 +546,13 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       }
     }
     if (wallet) card.append(element("p", `Wallet: ${wallet.kind} · ${wallet.network} · ${wallet.accounts.length} authorized account(s)`));
+    card.append(element("p", `Fee cap: ${displayTari(ANCHOR_MAX_FEE_UNITS)} TARI (${ANCHOR_MAX_FEE_UNITS} microTARI) | release ceiling: ${displayTari(ANCHOR_MAX_FEE_CEILING_UNITS)} TARI | fresh non-spending preflight required`));
+    const disabledReason = submissionDisabledReason();
+    if (disabledReason) {
+      const error = element("p", disabledReason);
+      error.className = "error";
+      card.append(error);
+    }
     const state = element("p", status);
     state.setAttribute("role", "status");
     card.append(state);
@@ -473,7 +567,7 @@ export function mountBrowserAnchorPanel(root: HTMLElement, managedElection: Mana
       card.append(error);
     } else if (recovery) {
       actions.append(action("Check saved request / transaction", checkRecovery, busy));
-    } else if (bundle && wallet && deploymentError() === null) {
+    } else if (bundle && wallet && deploymentError() === null && submissionDisabledReason() === null) {
       const phase = assessAnchorWorkflow({ bundle, bundleInvalidReason: null, walletConnected: true, walletNetworkName: wallet.network, recovery: null });
       if (phase.kind === "ready") actions.append(action("Ask wallet to publish anchor", publish, busy));
     }

@@ -63,16 +63,22 @@ not part of this change set.
 
 ## 3. Fee policy and its limitation
 
-- The page authorizes at most `ANCHOR_MAX_FEE_UNITS` (1000) fee units and never more
-  than `ANCHOR_MAX_FEE_CEILING_UNITS` (10,000,000), mirroring the Desktop default and
-  the release ceiling.
+- The page authorizes at most `ANCHOR_MAX_FEE_UNITS` (5000 microTARI) and never more
+  than `ANCHOR_MAX_FEE_CEILING_UNITS` (10,000,000 microTARI), mirroring the release
+  ceiling. Real Sapient Mainnet evidence measured `total_fees_required = 3477`
+  microTARI; the allowance-adjusted minimum is 3489 microTARI.
+- Every publish attempt runs a fresh non-spending
+  `tari_signAndSubmitTransaction` dry run for the exact canonical instructions before
+  reserving recovery state or creating a request. The required fee and the
+  allowance-adjusted minimum must both fit the cap; unsupported, malformed, over-cap,
+  or provider-error estimates fail closed with no request.
 - The cap is sent to the wallet as the `maxFee` parameter of
   `tari_createTransactionRequest` (documented in `docs/tari/wallet-integration.md`);
   the **wallet** enforces it.
-- **Limitation:** the provider contract exposes no way to read the fee back from an
-  approved request, and there is no dry-run method. The page therefore cannot prove
-  that the wallet honoured `maxFee`; it can only refuse to proceed without it and rely
-  on the wallet's own approval UI plus the on-chain receipt check. Any adapter that
+- **Limitation:** the provider contract exposes no way to read the realized fee back
+  from an approved request. The dry run proves what the transaction should cost, not
+  that the wallet honoured `maxFee` on the real request. The page therefore relies on
+  the wallet's own approval UI plus the on-chain receipt check. Any adapter that
   silently drops `maxFee` would defeat this control. This is a provider-API gap, not a
   page-level choice, and is the reason the cap is sent on every request rather than
   only on the first.

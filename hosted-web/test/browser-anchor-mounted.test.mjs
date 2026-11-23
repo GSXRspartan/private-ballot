@@ -185,12 +185,16 @@ class FakeWallet {
     this.createError = null;
     this.createGate = null;
     this.submitGate = null;
+    this.dryRunResult = { finalize: { total_fees_required: "3477", result: { Accept: {} } } };
+    this.dryRunError = null;
+    this.maxFees = [];
     this.listeners = [];
     this.calls = {
       connect: 0,
       accounts: 0,
       capabilities: 0,
       network: 0,
+      dryRun: 0,
       create: 0,
       status: 0,
       submit: 0,
@@ -209,7 +213,7 @@ class FakeWallet {
     if (emit) this.listeners.forEach((listener) => listener(accounts));
   }
 
-  async request({ method }) {
+  async request({ method, params }) {
     switch (method) {
       case "tari_requestAccounts":
         this.calls.connect += 1;
@@ -223,10 +227,18 @@ class FakeWallet {
       case "tari_getNetwork":
         this.calls.network += 1;
         return this.network;
+      case "tari_signAndSubmitTransaction":
+        this.calls.dryRun += 1;
+        this.events.push({ kind: "dry-run" });
+        this.trace.push({ kind: "wallet-dry-run" });
+        this.maxFees.push(params?.maxFee ?? null);
+        if (this.dryRunError) throw this.dryRunError;
+        return { transaction_id: "cd".repeat(32), result: this.dryRunResult };
       case "tari_createTransactionRequest":
         this.calls.create += 1;
         this.events.push({ kind: "create" });
         this.trace.push({ kind: "wallet-create" });
+        this.maxFees.push(params?.maxFee ?? null);
         if (this.createGate) return this.createGate.promise;
         if (this.createError) throw this.createError;
         return { requestId: REQUEST_ID };
@@ -362,14 +374,55 @@ test("mounted panel reserves durable recovery before the wallet create call", as
     await importAndConnect(harness);
     await click(harness.root, "Ask wallet to publish anchor");
 
+    assert.equal(harness.wallet.calls.dryRun, 1);
     assert.equal(harness.wallet.calls.create, 1);
     assert.equal(harness.wallet.calls.submit, 0);
+    assert.deepEqual(harness.wallet.maxFees, ["5000", "5000"]);
     const reservation = trace.findIndex((event) => event.kind === "storage-write" && event.phase === "creating_request");
+    const dryRun = trace.findIndex((event) => event.kind === "wallet-dry-run");
     const create = trace.findIndex((event) => event.kind === "wallet-create");
+    assert.ok(dryRun >= 0, "expected a mandatory fee preflight");
     assert.ok(reservation >= 0, "expected a durable pre-create reservation");
     assert.ok(create >= 0, "expected the fake wallet create boundary");
+    assert.ok(dryRun < reservation, "fee preflight must precede the durable reservation");
     assert.ok(reservation < create, "durable reservation must precede wallet create");
     assert.match(panelText(harness.root), /wallet rejected the request/);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("mounted panel blocks create when the fresh fee preflight exceeds the authorized cap", async () => {
+  const harness = installBrowser();
+  try {
+    harness.wallet.dryRunResult = {
+      finalize: { total_fees_required: "999999999", result: { Accept: {} } },
+    };
+    await importAndConnect(harness);
+    await click(harness.root, "Ask wallet to publish anchor");
+
+    assert.equal(harness.wallet.calls.dryRun, 1);
+    assert.equal(harness.wallet.calls.create, 0);
+    assert.equal(harness.wallet.calls.submit, 0);
+    assert.match(panelText(harness.root), /exceeds the maximum authorized fee/);
+    assert.match(panelText(harness.root), /No transaction request was created/);
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test("mounted panel blocks create when the fresh fee preflight is unsupported", async () => {
+  const harness = installBrowser();
+  try {
+    harness.wallet.dryRunResult = { result: { Accept: {} } };
+    await importAndConnect(harness);
+    await click(harness.root, "Ask wallet to publish anchor");
+
+    assert.equal(harness.wallet.calls.dryRun, 1);
+    assert.equal(harness.wallet.calls.create, 0);
+    assert.equal(harness.wallet.calls.submit, 0);
+    assert.match(panelText(harness.root), /preflight is unavailable/);
+    assert.match(panelText(harness.root), /No transaction request was created/);
   } finally {
     harness.cleanup();
   }

@@ -9,9 +9,12 @@ import {
   ANCHOR_MAX_FEE_UNITS,
   MAINNET_ANCHOR_SUBMISSION_ENABLED,
   buildAnchorBundleFromPayload,
+  createGuardedPublishDriver,
+  evaluateFeePreflight,
   mountAnchorPanel,
   parseAnchorPayloadResponse,
   submissionDisabledReason,
+  submissionGateReason,
 } from "../src/anchor.ts";
 import { bundleDigestKey, buildBundleFromDesktop } from "../../gui/src/wallet/anchorBundle.ts";
 import { browserRecoveryStore, newRecoveryOwnerToken } from "../../gui/src/wallet/recoveryStore.ts";
@@ -149,6 +152,7 @@ class FakeWallet {
     this.dryRunError = dryRunError;
     this.dryRunIsLocal = dryRunIsLocal;
     this.status = "approved";
+    this.callOrder = [];
   }
 
   on(event, listener) {
@@ -156,6 +160,7 @@ class FakeWallet {
   }
 
   async request({ method, params }) {
+    this.callOrder.push(method);
     switch (method) {
       case "tari_requestAccounts":
         return this.accounts;
@@ -268,6 +273,15 @@ async function click(node) {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function waitFor(predicate, message, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(predicate(), message);
+}
+
 test("the anchor module mounts into #app on load", async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
     url: "https://hosted.example/anchor",
@@ -326,6 +340,19 @@ test("loading a payload renders the canonical anchor preview", async () => {
     assert.ok(root.textContent.includes(ARCHIVE.slice(0, 16)), "the archive identity must be shown");
     assert.ok(root.textContent.includes(DIGEST.slice(0, 16)), "the anchor digest must be shown");
     assert.equal(root.textContent.includes("does not match the current trusted anchor deployment"), false);
+  } finally {
+    env.restore();
+  }
+});
+
+test("a payload for a different election is rejected even when internally consistent", async () => {
+  const env = installDom({ fetchImpl: recordingFetch(payloadFixture({ electionId: "election-b" })).impl });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    assert.match(root.textContent, /returned a payload for a different election/);
+    assert.doesNotMatch(root.textContent, /Loaded election election-b/);
   } finally {
     env.restore();
   }
@@ -463,17 +490,19 @@ test("a non-Mainnet wallet is rejected at connect time", async () => {
   }
 });
 
-test("Mainnet submission is disabled by default with a fail-closed reason", () => {
-  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, false);
-  const reason = submissionDisabledReason();
-  assert.ok(typeof reason === "string" && reason.length > 0);
-  assert.match(reason, /Mainnet publishing not yet enabled/);
+test("Mainnet submission is enabled only by the reviewed build-time constant", () => {
+  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, true);
+  assert.equal(submissionDisabledReason(), null);
+  assert.equal(submissionGateReason(true), null);
+  const disabled = submissionGateReason(false);
+  assert.ok(typeof disabled === "string" && disabled.length > 0);
+  assert.match(disabled, /Mainnet publishing not yet enabled/);
 });
 
 test("the submission gate is a build-time constant with no runtime bypass", () => {
-  const src = readFileSync(new URL("../src/anchor.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../src/anchorSubmissionPolicy.ts", import.meta.url), "utf8");
   // The gate is a literal constant, not a mutable object or a resolved flag.
-  assert.match(src, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false/);
+  assert.match(src, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = true/);
   // No mutable policy object that a runtime path could flip.
   assert.doesNotMatch(src, /ANCHOR_SUBMISSION_POLICY/);
   assert.doesNotMatch(src, /mainnetEnabled\s*=/);
@@ -481,8 +510,62 @@ test("the submission gate is a build-time constant with no runtime bypass", () =
   assert.doesNotMatch(src, /localStorage|sessionStorage|import\.meta\.env/);
 });
 
-test("the Sapient path cannot create or submit a transaction while Mainnet submission is disabled", async () => {
-  const wallet = new FakeWallet();
+test("a disabled build's guarded driver cannot create, await approval, or submit", () => {
+  const calls = [];
+  const base = {
+    connect: async () => [],
+    createRequest: async () => {
+      calls.push("create");
+      return "request-1";
+    },
+    estimateFee: async () => ({ kind: "unsupported", reason: "not used" }),
+    waitForApproval: async () => {
+      calls.push("approval");
+      return { status: "approved" };
+    },
+    submit: async () => {
+      calls.push("submit");
+      return TRANSACTION_ID;
+    },
+    verify: async () => ({ kind: "pending" }),
+  };
+  const guarded = createGuardedPublishDriver(base, false);
+  assert.throws(() => guarded.createRequest({}, {}, ANCHOR_MAX_FEE_UNITS), /not yet enabled/);
+  assert.throws(() => guarded.waitForApproval({}, "request-1", 1000), /not yet enabled/);
+  assert.throws(() => guarded.submit({}, "request-1"), /not yet enabled/);
+  assert.deepEqual(calls, [], "the disabled gate must fail before any base driver call");
+});
+
+test("an enabled guarded driver delegates to the base driver", async () => {
+  const calls = [];
+  const base = {
+    connect: async () => [],
+    createRequest: async () => {
+      calls.push("create");
+      return "request-1";
+    },
+    estimateFee: async () => ({ kind: "unsupported", reason: "not used" }),
+    waitForApproval: async () => {
+      calls.push("approval");
+      return { status: "approved" };
+    },
+    submit: async () => {
+      calls.push("submit");
+      return TRANSACTION_ID;
+    },
+    verify: async () => ({ kind: "pending" }),
+  };
+  const guarded = createGuardedPublishDriver(base, true);
+  assert.equal(await guarded.createRequest({}, {}, ANCHOR_MAX_FEE_UNITS), "request-1");
+  assert.equal((await guarded.waitForApproval({}, "request-1", 1000)).status, "approved");
+  assert.equal(await guarded.submit({}, "request-1"), TRANSACTION_ID);
+  assert.deepEqual(calls, ["create", "approval", "submit"]);
+});
+
+test("the Sapient publish path runs a fresh fee preflight before creating and submitting", async () => {
+  const wallet = new FakeWallet({
+    dryRunResult: { finalize: { total_fees_required: "3477", result: { Accept: {} } } },
+  });
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
@@ -491,22 +574,51 @@ test("the Sapient path cannot create or submit a transaction while Mainnet submi
     await click(button(root, "Connect Sapient"));
     assert.match(statusText(root), /Sapient connected on mainnet/);
 
-    // No publish action is offered while the switch is disabled.
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
-    // The fail-closed notice is displayed clearly.
-    assert.match(root.textContent, /Mainnet publishing not yet enabled/);
+    const publishButton = button(root, "Ask wallet to publish anchor");
+    await click(publishButton);
+    await waitFor(() => wallet.submitCalls === 1, "publish never reached wallet submit");
 
-    // Even a direct invocation cannot reach the wallet: no request creation,
-    // no approval wait, no submission.
-    assert.equal(wallet.createCalls.length, 0, "no transaction request may be created");
-    assert.equal(wallet.submitCalls, 0, "no submission may occur");
+    assert.equal(wallet.signAndSubmitCalls.length, 1, "one mandatory dry run per publish attempt");
+    assert.equal(wallet.signAndSubmitCalls[0].dryRun, true);
+    assert.equal(wallet.signAndSubmitCalls[0].maxFee, String(ANCHOR_MAX_FEE_UNITS));
+    assert.equal(wallet.createCalls.length, 1, "one request after the preflight");
+    assert.equal(wallet.submitCalls, 1, "one submission after approval");
+    assert.ok(
+      wallet.callOrder.indexOf("tari_signAndSubmitTransaction") <
+        wallet.callOrder.indexOf("tari_createTransactionRequest"),
+      "the dry run must precede request creation",
+    );
+    assert.ok(root.textContent.includes("Estimated transaction fee: 0.003477 TARI"));
   } finally {
     env.restore();
   }
 });
 
-test("the Web Tari Universe path cannot create or submit a transaction while Mainnet submission is disabled", async () => {
+test("publishing is blocked if the reduced-anonymity acknowledgement changed after load", async () => {
+  const wallet = new FakeWallet({
+    dryRunResult: { finalize: { total_fees_required: "3477", result: { Accept: {} } } },
+  });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    const ack = byId(root, "ack-reduced-anonymity");
+    ack.checked = true;
+    ack.dispatchEvent(new env.dom.window.Event("change"));
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => /acknowledgement changed/i.test(statusText(root)), "acknowledgement mismatch not blocked");
+    assert.equal(wallet.signAndSubmitCalls.length, 0, "the preflight must not run after the acknowledgement changed");
+    assert.equal(wallet.createCalls.length, 0, "no request may be created after the acknowledgement changed");
+  } finally {
+    env.restore();
+  }
+});
+
+test("the Web Tari Universe path distinguishes a rejected approval without submitting", async () => {
   const wallet = new FakeWallet();
+  wallet.status = "rejected";
   wallet.isEmbedded = true;
   wallet.info = { rdns: "mw.tari.universe", name: "Tari Universe" };
   const env = installDom({ wallet });
@@ -517,10 +629,11 @@ test("the Web Tari Universe path cannot create or submit a transaction while Mai
     await click(button(root, "Connect Tari Universe"));
     assert.match(statusText(root), /Tari Universe connected on mainnet/);
 
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
-    assert.match(root.textContent, /Mainnet publishing not yet enabled/);
-    assert.equal(wallet.createCalls.length, 0, "no transaction request may be created");
-    assert.equal(wallet.submitCalls, 0, "no submission may occur");
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => wallet.createCalls.length === 1, "publish never created a request");
+    await waitFor(() => /rejected/i.test(statusText(root)), "rejection status not shown");
+    assert.equal(wallet.signAndSubmitCalls.length, 1);
+    assert.equal(wallet.submitCalls, 0, "a rejected request must never be submitted");
   } finally {
     env.restore();
   }
@@ -605,17 +718,21 @@ test("Web Tari Universe embedded provider is accepted", async () => {
   }
 });
 
-test("the publish action is absent while Mainnet submission is disabled", async () => {
-  const wallet = new FakeWallet({ result: { Rejected: { details: "user declined" } } });
+test("the publish action appears only after the payload and a Mainnet wallet are ready", async () => {
+  const wallet = new FakeWallet();
   const env = installDom({ wallet });
   try {
     const root = mountInto(env.dom);
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+
     byId(root, "election-id-input").value = ELECTION_A;
     await click(byId(root, "load-election-btn"));
-    await click(button(root, "Connect Sapient"));
+    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined, "no wallet yet");
 
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
-    assert.equal(wallet.submitCalls, 0, "nothing may be submitted while disabled");
+    await click(button(root, "Connect Sapient"));
+    assert.ok(findButton(root, "Ask wallet to publish anchor"), "publish is offered after connection");
+    assert.equal(wallet.createCalls.length, 0, "rendering the action must not create a request");
+    assert.equal(wallet.submitCalls, 0, "rendering the action must not submit");
   } finally {
     env.restore();
   }
@@ -708,7 +825,7 @@ test("a hostile election id typed by the user renders inert", async () => {
   }
 });
 
-test("a hostile server-supplied election id renders inert text", async () => {
+test("a server-supplied election id for a different election is rejected", async () => {
   for (const hostile of XSS_PAYLOADS) {
     const payload = payloadFixture({ electionId: hostile.slice(0, 128) });
     const { impl } = recordingFetch(payload);
@@ -717,13 +834,9 @@ test("a hostile server-supplied election id renders inert text", async () => {
       const root = mountInto(env.dom);
       byId(root, "election-id-input").value = ELECTION_A;
       await click(byId(root, "load-election-btn"));
+      assert.match(root.textContent, /returned a payload for a different election/);
+      assert.doesNotMatch(root.textContent, /Loaded election/);
       assertInert(root, `hostile server election id ${JSON.stringify(hostile)}`);
-      // The hostile string must exist only as inert text content, never as
-      // markup or an element attribute value injected by the server.
-      assert.ok(
-        root.textContent.includes(hostile.slice(0, 128)),
-        "the hostile id must be rendered as readable text",
-      );
     } finally {
       env.restore();
     }
@@ -800,8 +913,8 @@ test("the anchor page offers Estimate Mainnet Fee once a wallet is connected, an
     await click(byId(root, "load-election-btn"));
     await click(button(root, "Connect Sapient"));
 
-    // Publish stays disabled (no publish button while the gate is off).
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    // Publishing is available, but this test only exercises the manual quote.
+    assert.ok(findButton(root, "Ask wallet to publish anchor"));
 
     // The estimate action is present.
     const estimateBtn = button(root, "Estimate Mainnet Fee");
@@ -843,8 +956,8 @@ test("estimate warns when the estimated fee exceeds the maximum authorized fee",
     const text = root.textContent;
     assert.ok(text.includes("exceeds the maximum authorized fee"), "over-cap warning shown");
     assert.ok(text.includes("No transaction request will be created"), "no request created on over-cap");
-    // Publish still disabled.
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    assert.ok(findButton(root, "Ask wallet to publish anchor"), "publish remains available for a fresh attempt");
+    assert.equal(wallet.createCalls.length, 0);
   } finally {
     env.restore();
   }
@@ -882,7 +995,7 @@ test("estimate fails closed on a provider rejection and never submits", async ()
     assert.ok(/Fee estimate failed/i.test(root.textContent), "error surfaced");
     assert.equal(wallet.createCalls.length, 0);
     assert.equal(wallet.submitCalls, 0);
-    assert.equal(findButton(root, "Ask wallet to publish anchor"), undefined);
+    assert.ok(findButton(root, "Ask wallet to publish anchor"), "publish remains available for a fresh attempt");
   } finally {
     env.restore();
   }
@@ -907,13 +1020,132 @@ test("estimate is blocked for a non-Mainnet wallet network", async () => {
   }
 });
 
-test("Mainnet submission guard remains disabled after adding the fee preflight", () => {
-  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, false);
+test("a prior acceptable estimate cannot authorize publish; every attempt re-runs the preflight", async () => {
+  const wallet = new FakeWallet({
+    dryRunResult: { finalize: { total_fees_required: "3477", result: { Accept: {} } } },
+  });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Estimate Mainnet Fee"));
+    await waitFor(() => wallet.signAndSubmitCalls.length === 1, "manual estimate did not run");
+    assert.ok(root.textContent.includes("Estimated transaction fee: 0.003477 TARI"));
+
+    // Change the wallet's fresh quote after the acceptable displayed estimate.
+    wallet.dryRunResult = {
+      finalize: { total_fees_required: "999999999", result: { Accept: {} } },
+    };
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => wallet.signAndSubmitCalls.length === 2, "publish did not re-run the preflight");
+
+    assert.equal(wallet.createCalls.length, 0, "the stale displayed estimate must not authorize a request");
+    assert.equal(wallet.submitCalls, 0);
+    assert.match(statusText(root), /exceeds the maximum authorized fee/);
+    assert.match(statusText(root), /No transaction request was created/);
+  } finally {
+    env.restore();
+  }
+});
+
+test("publish fails closed when the fresh fee preflight is unsupported", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { result: { Accept: {} } } } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => wallet.signAndSubmitCalls.length === 1, "preflight did not run");
+
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+    assert.match(statusText(root), /preflight is unavailable/i);
+    assert.match(statusText(root), /No transaction request was created/);
+  } finally {
+    env.restore();
+  }
+});
+
+test("publish fails closed when the fresh fee preflight provider rejects", async () => {
+  const rejection = new Error("dry run rejected");
+  rejection.code = 4001;
+  const wallet = new FakeWallet({ dryRunError: rejection });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => wallet.signAndSubmitCalls.length === 1, "preflight did not run");
+
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+    assert.match(statusText(root), /mandatory non-spending fee preflight failed/i);
+    assert.match(statusText(root), /No transaction request was created/);
+  } finally {
+    env.restore();
+  }
+});
+
+test("publish requires the allowance-adjusted minimum to fit the authorized cap", async () => {
+  // 4995 µT is under the 5000 µT cap, but 4995 + 12 = 5007 µT is over it.
+  const wallet = new FakeWallet({
+    dryRunResult: { finalize: { total_fees_required: "4995", result: { Accept: {} } } },
+  });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Ask wallet to publish anchor"));
+    await waitFor(() => wallet.signAndSubmitCalls.length === 1, "preflight did not run");
+
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+    assert.match(statusText(root), /allowance-adjusted minimum fee/);
+    assert.match(statusText(root), /No transaction request was created/);
+  } finally {
+    env.restore();
+  }
+});
+
+test("evaluateFeePreflight accepts only a well-formed quote inside the cap", () => {
+  assert.deepEqual(evaluateFeePreflight({ kind: "estimated", requiredFeesMicrotari: "3477" }), {
+    ok: true,
+    requiredFeesMicrotari: "3477",
+    recommendedMaxFeeMicrotari: "3489",
+  });
+  assert.equal(evaluateFeePreflight({ kind: "unsupported", reason: "no fee field" }).ok, false);
+  assert.equal(evaluateFeePreflight({ kind: "estimated", requiredFeesMicrotari: "not-a-number" }).ok, false);
+  assert.equal(evaluateFeePreflight({ kind: "estimated", requiredFeesMicrotari: "4995" }).ok, false);
+  assert.equal(evaluateFeePreflight({ kind: "estimated", requiredFeesMicrotari: "5001" }).ok, false);
+});
+
+test("Mainnet submission remains a build-time gate with a mandatory fresh preflight", () => {
+  assert.equal(MAINNET_ANCHOR_SUBMISSION_ENABLED, true);
+  const policySrc = readFileSync(new URL("../src/anchorSubmissionPolicy.ts", import.meta.url), "utf8");
+  // The gate is a literal build-time constant with no runtime bypass.
+  assert.match(policySrc, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = true/);
+  assert.doesNotMatch(policySrc, /ANCHOR_SUBMISSION_POLICY/);
+  assert.doesNotMatch(policySrc, /localStorage|sessionStorage|import\.meta\.env/);
   const src = readFileSync(new URL("../src/anchor.ts", import.meta.url), "utf8");
-  // The gate is still a literal build-time constant with no runtime bypass.
-  assert.match(src, /export const MAINNET_ANCHOR_SUBMISSION_ENABLED = false/);
-  assert.doesNotMatch(src, /ANCHOR_SUBMISSION_POLICY/);
-  assert.doesNotMatch(src, /localStorage|sessionStorage|import\.meta\.env/);
+  // The publish path must run the inline preflight before reserving or creating.
+  const publishBody = src.slice(
+    src.indexOf("async function publishUnlocked"),
+    src.indexOf("async function loadPayload"),
+  );
+  assert.match(publishBody, /runMandatoryFeePreflight\(adapter, snapshot, generation\)/);
+  assert.ok(
+    publishBody.indexOf("runMandatoryFeePreflight(adapter, snapshot, generation)") <
+      publishBody.indexOf("store.reserve("),
+    "the fresh preflight must precede the durable request reservation",
+  );
   // The dry run must never call the transaction-request approval/submission trio.
   const anchorSrc = readFileSync(new URL("../../gui/src/anchor/browserAnchorPublish.ts", import.meta.url), "utf8");
   const estimateBody = anchorSrc.slice(
