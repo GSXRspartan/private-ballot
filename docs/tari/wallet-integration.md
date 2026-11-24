@@ -182,6 +182,9 @@ production deployment was performed; see `deploy/indexer-proxy/README.md`.
 
 ### Exact non-spending Universe qualification steps (requires the user)
 
+A condensed operator checklist with PASS/FAIL expectations is in
+`docs/release/OPERATOR_QUALIFICATION_CHECKLIST.md`.
+
 1. In Tari Universe, open its dApp catalogue and launch
    `https://private-ballot-staging.ghostgate.boo` from inside the wallet. A
    plain browser tab is expected to report "Not running inside Tari Universe"

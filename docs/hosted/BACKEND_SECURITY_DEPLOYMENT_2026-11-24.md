@@ -5,6 +5,41 @@ STAGING ONLY. This record covers the backend upgrade from the reviewed branch
 no new Mainnet transaction, no authority-key rotation, and no election-data
 change were performed.
 
+## Follow-up deployment (2026-11-24 20:09 UTC)
+
+The reviewed backend corrections in commit `6e4a03b` (hard rate-map cap,
+fail-closed registry-scrub retry, related Hosted/anchor cleanups) were built
+from source HEAD `6df3088eb946e4f26b274f6244826466bf8f806c` and deployed to
+the same staging service. Evidence:
+
+- Old binary SHA-256: `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600`
+- New binary SHA-256: `799cc1cfcd9f198980e58cbd18893b8cc99ab4a3267b5617b2f1bbe66e1a1e5e`
+- VPS source checkout fast-forwarded `cebdff9` → `6df3088`, clean tree;
+  focused Hosted regressions 78/78 including
+  `rate_map_is_hard_bounded_when_fresh_ids_are_cycled`.
+- Fresh schema-v7 backup `hosted-20261124T200736Z.sqlite3` (SHA-256
+  `c79e9bd3a5d38e6582d5853cc572fa91ca1627800886df2b5f9f586004c5a0f9`)
+  verified with the qualified `restore-verify.sh` before the swap.
+- Previous binary preserved as `private-ballot-hosted.rollback-20261124T200736Z`
+  (mode 0755, old hash); unit and sealed env copies retained with the same stamp.
+- Service restarted only for `private-ballot-hosted`; health-check passed;
+  public results/archive/public-package/anchor-payload/receipt responses were
+  byte-identical to the pre-swap baseline; `chain/network` still mainnet;
+  admin paths still edge-blocked 404; env hash and election counts unchanged.
+
+Rollback to the earlier binary:
+
+```bash
+sudo systemctl stop private-ballot-hosted
+sudo install -o root -g root -m 0755 \
+  /opt/private-ballot-hosted/private-ballot-hosted.rollback-20261124T200736Z \
+  /opt/private-ballot-hosted/private-ballot-hosted
+sudo systemctl start private-ballot-hosted
+curl -fsS http://127.0.0.1:8788/health
+```
+
+The remainder of this document records the original 15:05 deployment.
+
 ## 1. Source provenance
 
 | Item | Value |

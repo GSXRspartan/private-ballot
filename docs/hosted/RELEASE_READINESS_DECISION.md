@@ -7,7 +7,7 @@ state before the staging deployment and recovery qualification completed.
 
 | Area | Status | Evidence |
 |---|---|---|
-| Hosted staging security deployment | COMPLETE | Worker `f8015e7c-3796-4613-b995-9517a4d4d8dd`; backend SHA-256 `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600`; `docs/hosted/BACKEND_SECURITY_DEPLOYMENT_2026-11-24.md` |
+| Hosted staging security deployment | COMPLETE | Worker `f8015e7c-3796-4613-b995-9517a4d4d8dd`; backend SHA-256 `799cc1cfcd9f198980e58cbd18893b8cc99ab4a3267b5617b2f1bbe66e1a1e5e` (built from `6df3088`); `docs/hosted/BACKEND_SECURITY_DEPLOYMENT_2026-11-24.md` |
 | First Mainnet V2 anchor | COMPLETE | Transaction `28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`, fee 3477 µT, `Finalized/Commit`, exact event verified by both indexers |
 | Sapient real-wallet path | QUALIFIED LIVE | Funded Mainnet publication and receipt recovery completed; no second transaction submitted |
 | SQLite v7 backup/recovery | QUALIFIED | `cebdff9`; 18/18 script regressions, isolated restore drill with byte-identical API responses; `docs/hosted/STAGING_RECOVERY_QUALIFICATION.md` |
@@ -24,12 +24,12 @@ state before the staging deployment and recovery qualification completed.
   app and is explicitly guarded by `isDesktopShell()`. It is deferred cleanup,
   not a shipped bypass.
 - **B — hosted staging release: READY.** The staging deployment is live and
-  validated. The two newly fixed backend defects are source-only at this point:
-  the live binary predates them. Rebuilding/redeploying the staging backend is
-  justified by those defects but is a separately authorized operation; do not
-  treat it as a prerequisite for merging source.
+  validated, and the two reviewed backend corrections were rebuilt from
+  `6df3088` and deployed at 20:09 UTC. Public election/archive/anchor/receipt
+  responses remained byte-identical to the pre-swap baseline. No further
+  staging redeploy is required for the currently reviewed source.
 - **C — Windows Desktop installer release: NOT READY.** Compilation, installer
-  build, launch smoke and 105/105 Rust tests pass, but the eight-step manual
+  build, launch smoke and 105/105 Rust tests pass, but the 13-step manual
   organizer/voter workflow has never been executed. Installers are unsigned,
   and organizer transport secrets remain plaintext at rest (MEDIUM-1).
 - **D — dedicated production deployment: NOT READY.** All previously listed
@@ -44,10 +44,10 @@ state before the staging deployment and recovery qualification completed.
 
 | Track | Status | Evidence / remaining gate |
 |---|---|---|
-| Hosted Staging | READY (live) | Worker + backend hashes above; health 200; admin paths 404; edge hardening active; recommendation: rebuild backend for the two new source fixes |
+| Hosted Staging | READY (live) | Worker + backend hashes above; health 200; admin paths 404; edge hardening active; reviewed backend fixes deployed 20:09 UTC |
 | Sapient | READY (live) | One real Mainnet anchor, exact receipt verification, fee 3477 µT ≤ 5000 µT cap |
 | Web Tari Universe | NOT QUALIFIED LIVE | Adapter matches the official `window.tari.request` schema and 120/120 hosted-web tests pass with mocks; requires human in-iframe connection + non-spending dry run |
-| Windows Desktop | NOT RELEASE-READY | 105/105 Rust, 1147/1147 node, `tsc` clean, launch smoke pass; manual 8-step workflow unsigned installer and plaintext transport secrets outstanding |
+| Windows Desktop | NOT RELEASE-READY | 105/105 Rust, 1147/1147 node, `tsc` clean, launch smoke pass; manual 13-step workflow, unsigned installer and plaintext transport secrets outstanding |
 | GitHub Main | READY TO MERGE PR #1 | Reviewed source, no Critical/High findings, scoped PR CI added; do not merge automatically without operator decision |
 | Dedicated Production | NOT READY | Design only; no deployment, no DNS, no authority keys, no production database |
 

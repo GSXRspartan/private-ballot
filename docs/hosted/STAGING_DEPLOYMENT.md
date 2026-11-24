@@ -165,6 +165,7 @@ curl -fsS http://127.0.0.1:8788/health
 | 2026-11-23 21:45 | Worker | `22708f68-abbe-4ef6-a882-a0faf881fef1` (`receipt-recovery-b2fd842`) | `b2fd842` | `c3747db8` (`f6b9ba5` frontend) |
 | 2026-11-24 04:09 | Worker + static assets | `f8015e7c-3796-4613-b995-9517a4d4d8dd` (`edge-hardening-fa54902`) | `fa54902` (branch `review/web-mainnet-anchor-6a936d9`) | `22708f68` via `npx wrangler rollback` |
 | 2026-11-24 15:05 | Backend (hosted Rust) | binary SHA-256 `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600` | `e6fc580` + later approved changes through `75ac3d7`, built on VPS with Rust 1.97.1 | previous binary preserved as `private-ballot-hosted.rollback-20261124T143637Z` (SHA-256 `0aaed7e1e440f5884162eef0202371ddfd13c912e45d247c3835e3ff4f8d8c7e`) |
+| 2026-11-24 20:09 | Backend (hosted Rust) | binary SHA-256 `799cc1cfcd9f198980e58cbd18893b8cc99ab4a3267b5617b2f1bbe66e1a1e5e` | `6e4a03b` (hard rate-map cap, fail-closed registry scrub) through `6df3088`, built on VPS with Rust 1.97.1 | previous binary preserved as `private-ballot-hosted.rollback-20261124T200736Z` (SHA-256 `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600`) |
 
 2026-11-24 deployment notes (Worker at 04:09; backend at 15:05):
 

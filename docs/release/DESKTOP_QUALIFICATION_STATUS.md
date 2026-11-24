@@ -82,6 +82,10 @@ required):
 
 ### Action-by-action manual test script
 
+The concise operator checklist with the exact executable path, artifact
+hashes, and per-step PASS/FAIL criteria is
+`docs/release/OPERATOR_QUALIFICATION_CHECKLIST.md`.
+
 No human GUI session was available on this laptop, so none of the following
 was executed. Each step must be performed on a clean Windows profile and
 recorded with logs/screenshots that contain no wallet secrets, ballot choices
