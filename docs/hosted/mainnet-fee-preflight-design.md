@@ -47,10 +47,13 @@ is an engine/TS-binding name on `FeeCostBreakdown`, not on the `ExecuteResult` r
 to a dApp. Evidence from `chironbuilds/tari-wallet` (master): a dry run resolves to
 `{ transaction_id, result }` where `result.finalize` is a `FinalizeResult` whose fee
 field is **`total_fees_required`** (a decimal STRING in microTARI; all bigints are
-stringified by the wallet's `sanitizeForMessage`). The extractor reads
-`result.finalize.total_fees_required`, with a conservative `fee_receipt.total_fees_paid`
-fallback. A resolved dry run is a successful simulation; the wallet rejects on
-`Reject`/`AcceptFeeRejectRest`, so a rejected simulation never yields a fee estimate.
+stringified by the wallet's `sanitizeForMessage`). The extractor reads **only**
+`result.finalize.total_fees_required` and requires an explicit `Accept` outcome. It
+deliberately does NOT fall back to `fee_receipt.total_fees_paid` (that field is the
+fees actually paid after refunds, not the authoritative required-fee estimate) and
+fails closed as unsupported when the authoritative field is absent. A resolved dry
+run is a successful simulation; the wallet rejects on `Reject`/`AcceptFeeRejectRest`,
+so a rejected simulation never yields a fee estimate.
 
 All user-facing display is in **TARI** (`gui/src/wallet/feeFormat.ts`, exact bigint
 integer formatting); protocol accounting stays in integer µT. 1 TARI = 1,000,000 µT.

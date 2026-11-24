@@ -48,10 +48,12 @@ simulated test in this repository constitutes live wallet qualification.
   `ExecuteResult`. The authoritative fee is **`result.finalize.total_fees_required`**
   (a decimal STRING in microTARI). All bigints are stringified by the wallet's
   `sanitizeForMessage`. The engine name `required_fees()` is NOT on the wire; the
-  page reads `result.finalize.total_fees_required` (with a conservative
-  `fee_receipt.total_fees_paid` fallback). A resolved dry run is a successful
-  simulation; the wallet rejects on `Reject`/`AcceptFeeRejectRest`, so the page
-  refuses to report a fee for a rejected simulation. All display is in TARI.
+  page reads **only** `result.finalize.total_fees_required` and requires an
+  explicit `Accept` outcome. It deliberately does NOT fall back to
+  `fee_receipt.total_fees_paid` and fails closed as unsupported when the
+  authoritative field is absent. A resolved dry run is a successful simulation;
+  the wallet rejects on `Reject`/`AcceptFeeRejectRest`, so the page refuses to
+  report a fee for a rejected simulation. All display is in TARI.
 
 ## Qualifying a REAL Sapient wallet (operator, manual)
 
