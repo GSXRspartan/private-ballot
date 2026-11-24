@@ -205,8 +205,8 @@ impl OotleAnchorPublicPayloadV2 {
         // the frozen manifest (e.g. "500-votertest-01") — validated as
         // control-free UTF-8 above, so it can be placed verbatim in the
         // readable public summary.
-        let election_id_str =
-            std::str::from_utf8(&self.election_id).expect("validate() guarantees UTF-8");
+        let election_id_str = std::str::from_utf8(&self.election_id)
+            .map_err(|_| invalid("election id must be valid UTF-8"))?;
         writer.field_string("election_id", election_id_str);
         writer.field_string("question", &self.ballot_question);
         writer.field_u64("eligible_voters", self.eligible_voter_count);
@@ -920,6 +920,7 @@ fn forbidden_marker(text: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 

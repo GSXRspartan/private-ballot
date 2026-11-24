@@ -116,7 +116,7 @@ response was identical, so no authority or network configuration changed.
 Evidence that the mitigation is live, not merely assumed:
 
 1. **Source:** the deployed binary was built from the clean checkout containing
-   `RATE_MAP_SOFT_MAX_ENTRIES = 4096`, `LEDGER_CACHE_MAX_ELECTIONS = 16`,
+   `RATE_MAP_MAX_ENTRIES = 4096`, `LEDGER_CACHE_MAX_ELECTIONS = 16`,
    `cached_finalized_replay()` with manifest-hash guarding, and per-route
    `results-read`, `archive-read` and `enroll` buckets.
 2. **Binary provenance:** the new binary contains strings absent from the

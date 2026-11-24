@@ -99,7 +99,9 @@ pub struct InvitationRecord {
     pub invitation_id: String,
     pub slot_id: String,
     pub election_id: String,
-    /// BLAKE3("invitation-verifier-v1\0{election_id}\0{slot_id}\0{secret}")
+    /// BLAKE3("invitation-secret-verifier-v1\0{secret}"). Election and slot binding is
+    /// enforced by the invitation row and by `complete_enrollment`, not by the
+    /// verifier digest itself.
     pub verifier_hex: String,
     /// ACTIVE | CONSUMED | VOIDED
     pub state: String,

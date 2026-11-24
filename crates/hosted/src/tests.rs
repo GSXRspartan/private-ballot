@@ -7472,6 +7472,24 @@ fn rate_map_never_grows_from_oversized_ids_and_limits_within_the_window() {
     assert_eq!(state.rate.lock().unwrap().len(), 1);
 }
 
+#[test]
+fn rate_map_is_hard_bounded_when_fresh_ids_are_cycled() {
+    let state = AppState::new(test_config(), Arc::new(InMemoryStorage::new()));
+    // All ids are "fresh" in the current window, so the idle purge alone cannot
+    // reduce the map. The hard cap must still bound memory.
+    for i in 0..(crate::RATE_MAP_MAX_ENTRIES + 128) {
+        let id = format!("rate-cycle-{i:06}");
+        let _ = state.check_rate(&id, "transport");
+    }
+    let len = state.rate.lock().unwrap().len();
+    assert!(
+        len <= crate::RATE_MAP_MAX_ENTRIES,
+        "rate map exceeded its hard cap: {len}"
+    );
+    // A normal id still receives a bucket after the map has been saturated.
+    assert!(state.check_rate("rate-cycle-after-cap", "transport"));
+}
+
 #[tokio::test]
 async fn enrollment_rejects_non_canonical_ristretto_governance_keys() {
     let f = fixture();

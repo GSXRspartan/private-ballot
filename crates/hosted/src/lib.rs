@@ -118,7 +118,6 @@ pub const ORIGIN_TOKEN_HEADER: &str = "x-private-ballot-origin";
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Stricter per-route limit for ballot submissions.
 pub const MAX_BALLOT_BODY_BYTES: usize = 32 * 1024;
-pub const SCHEMA_VERSION: i64 = 5;
 /// Domain separator for the election-scoped organizer capability verifier.
 /// The verifier is BLAKE3 over `{domain}\0{election_id}\0{secret_bytes}`;
 /// the plaintext organizer secret is never stored server-side.
@@ -440,11 +439,11 @@ fn error_response(status: StatusCode, code: &'static str, message: &'static str)
     (status, Json(ErrorBody { code, message })).into_response()
 }
 
-/// Soft cap on distinct rate-limit buckets. When the map reaches this size,
-/// expired buckets are purged so an attacker cycling election ids can never
-/// grow it without bound; ids longer than the protocol limit are never
-/// inserted at all.
-pub const RATE_MAP_SOFT_MAX_ENTRIES: usize = 4096;
+/// Hard cap on distinct rate-limit buckets. At the cap, expired buckets are
+/// purged first, then the least-recently-updated bucket is evicted so an
+/// attacker cycling fresh election ids within one window can never grow the
+/// map without bound; ids longer than the protocol limit are never inserted.
+pub const RATE_MAP_MAX_ENTRIES: usize = 4096;
 /// Maximum number of FINALIZED-election ledgers kept in the verified-replay
 /// cache. Finalized elections never accept new ballots, so a cached verified
 /// ledger stays valid until the election row itself changes (guarded by the
@@ -481,10 +480,23 @@ impl AppState {
             return true;
         }
         let mut guard = self.rate.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.len() >= RATE_MAP_SOFT_MAX_ENTRIES {
-            // Amortized purge: buckets idle for two full windows are dropped
-            // so the map stays bounded under id-cycling pressure.
+        if guard.len() >= RATE_MAP_MAX_ENTRIES {
+            // Drop idle buckets first. A caller can keep arbitrary ids "fresh"
+            // inside one window, so an unconditional oldest-bucket eviction is
+            // required after the purge to make the cap a real hard bound.
             guard.retain(|_, (ts, _)| now.saturating_sub(*ts) < 120);
+            while guard.len() >= RATE_MAP_MAX_ENTRIES {
+                let oldest = guard
+                    .iter()
+                    .min_by_key(|(_, (ts, _))| *ts)
+                    .map(|(key, _)| key.clone());
+                match oldest {
+                    Some(key) => {
+                        guard.remove(&key);
+                    }
+                    None => break,
+                }
+            }
         }
         let entry = guard
             .entry((election_id.to_owned(), ip.to_owned()))
@@ -2476,21 +2488,43 @@ fn do_freeze_registry(state: &AppState, id: &str) -> Result<Response, Response> 
         frozen_at_ms: now_ms,
         external_roster_commitment_hex: draft.external_roster_commitment_hex.clone(),
     };
-    if let Err(storage::StorageError::AlreadyFrozen) = state.storage.put_frozen_registry(frozen) {
+    let already_frozen = match state.storage.put_frozen_registry(frozen) {
+        Ok(()) => false,
+        Err(storage::StorageError::AlreadyFrozen) => true,
+        Err(_) => {
+            return Err(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "storage unavailable",
+            ));
+        }
+    };
+    // Scrub enrollment linkage (slot_id and invitation_id from credentials).
+    // This is also the retry path when the frozen row was already persisted by
+    // an earlier attempt that failed before the state transition. Fail closed:
+    // never transition to REGISTRY_FROZEN while linkage remains at rest.
+    if state.storage.scrub_enrollment_linkage(id).is_err() {
         return Err(error_response(
-            StatusCode::CONFLICT,
-            "already_frozen",
-            "registry already frozen",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "service_unavailable",
+            "storage unavailable",
         ));
     }
-    // Scrub enrollment linkage (slot_id and invitation_id from credentials)
-    let _ = state.storage.scrub_enrollment_linkage(id);
     // Transition state
     match state
         .storage
         .set_draft_eligibility_state(id, "ENROLLMENT_OPEN", "REGISTRY_FROZEN")
     {
         Ok(true) => {}
+        Ok(false) if already_frozen => {
+            // A fully frozen election is re-frozen: preserve the existing
+            // idempotency response now that the scrub has been re-checked.
+            return Err(error_response(
+                StatusCode::CONFLICT,
+                "already_frozen",
+                "registry already frozen",
+            ));
+        }
         Ok(false) => {
             return Err(error_response(
                 StatusCode::CONFLICT,
