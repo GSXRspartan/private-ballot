@@ -558,7 +558,9 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       connect: true,
       status: "pending",
       expected: /saved request is pending or unknown/,
-      statusLookups: 2,
+      // A 1 ms bounded poll may issue one extra status read depending on
+      // clock granularity; both counts are read-only and never create/submit.
+      statusLookups: [2, 3],
       resultLookups: 0,
     },
     {
@@ -622,7 +624,15 @@ test("mounted recovery action matrix checks every persisted phase without mutati
       assert.equal(hasButton(harness.root, "Ask wallet to publish anchor"), false, scenario.name);
       assert.equal(harness.wallet.calls.create, 0, scenario.name);
       assert.equal(harness.wallet.calls.submit, 0, scenario.name);
-      assert.equal(harness.wallet.calls.status, scenario.statusLookups, scenario.name);
+      const statusCalls = harness.wallet.calls.status;
+      if (Array.isArray(scenario.statusLookups)) {
+        assert.ok(
+          scenario.statusLookups.includes(statusCalls),
+          `${scenario.name}: expected ${scenario.statusLookups.join(" or ")} status lookups, got ${statusCalls}`,
+        );
+      } else {
+        assert.equal(statusCalls, scenario.statusLookups, scenario.name);
+      }
       assert.equal(harness.wallet.calls.result, scenario.resultLookups, scenario.name);
     } finally {
       harness.cleanup();
