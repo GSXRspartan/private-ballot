@@ -26,15 +26,15 @@ Implemented and proven locally:
   injection with spoof stripping, security headers, cache policy).
 - Backup/restore/health scripts in `deploy/staging/`.
 
-Blocked on human infrastructure (no autonomous path available in this
-session):
+Infrastructure access (previously blocked, resolved on 2026-11-24):
 
-- **VPS SSH**: an existing key (`ghostgate_vps`) reached `40.160.90.9:22`
-  but was rejected for both `pdark@` and `root@`. The operator must add
-  the public key to the VPS authorized keys or provide the correct
-  user/host/key, then run the manual path below.
-- **Cloudflare login**: no `wrangler` auth, no `CLOUDFLARE_*` environment,
-  no `cloudflared` locally. The operator must run `npx wrangler login`.
+- **VPS SSH**: the existing `~/.ssh/ghostgate_vps` key authenticates as
+  `ubuntu@40.160.90.9` (documented in the Ghost Gate staging deployment
+  script). The `pdark@` and `root@` users are rejected. The live ED25519
+  host key matches the trusted `known_hosts` record.
+- **Cloudflare login**: local Wrangler OAuth is authenticated for the
+  staging account; `wrangler whoami` and `wrangler deployments list` work.
+  The staging Worker remains at `f8015e7c-3796-4613-b995-9517a4d4d8dd`.
 
 ## 1. Architecture
 
@@ -147,14 +147,26 @@ and must be re-evaluated before any public hostname.
    admin plane never leaves the VPS.
 4. No Ootle template was republished; no on-chain state to revert.
 
+Backend-only rollback (does not touch the database or the Worker):
+
+```bash
+sudo systemctl stop private-ballot-hosted
+sudo install -o root -g root -m 0755 \
+  /opt/private-ballot-hosted/private-ballot-hosted.rollback-20261124T143637Z \
+  /opt/private-ballot-hosted/private-ballot-hosted
+sudo systemctl start private-ballot-hosted
+curl -fsS http://127.0.0.1:8788/health
+```
+
 ## 6. Deployment log
 
 | Date (UTC) | Component | Version / tag | Source | Rollback point |
 |---|---|---|---|---|
 | 2026-11-23 21:45 | Worker | `22708f68-abbe-4ef6-a882-a0faf881fef1` (`receipt-recovery-b2fd842`) | `b2fd842` | `c3747db8` (`f6b9ba5` frontend) |
 | 2026-11-24 04:09 | Worker + static assets | `f8015e7c-3796-4613-b995-9517a4d4d8dd` (`edge-hardening-fa54902`) | `fa54902` (branch `review/web-mainnet-anchor-6a936d9`) | `22708f68` via `npx wrangler rollback` |
+| 2026-11-24 15:05 | Backend (hosted Rust) | binary SHA-256 `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600` | `e6fc580` + later approved changes through `75ac3d7`, built on VPS with Rust 1.97.1 | previous binary preserved as `private-ballot-hosted.rollback-20261124T143637Z` (SHA-256 `0aaed7e1e440f5884162eef0202371ddfd13c912e45d247c3835e3ff4f8d8c7e`) |
 
-2026-11-24 Worker deployment notes (edge only; backend unchanged):
+2026-11-24 deployment notes (Worker at 04:09; backend at 15:05):
 
 - Fixes: edge admin-path normalization (percent-encoded and multi-slash
   variants of `/api/v1/admin*` are blocked at the edge with the canonical
@@ -166,16 +178,16 @@ and must be re-evaluated before any public hostname.
   anchor-payload all 200; `/chain/network` mainnet; durable receipt endpoints
   for the anchored transaction both 200; anchor-page CSP still
   `frame-ancestors https://universe.tari.mw`.
-- STILL PENDING (backend, blocked on VPS SSH): commit `e6fc580` —
+- DEPLOYED (backend, 2026-11-24 15:05 UTC): commit `e6fc580` —
   High-severity unauthenticated full-ledger replay mitigation
   (manifest-hash-guarded verified-ledger cache + per-route rate limits,
   election-scoped results-read/archive-read/enroll buckets, bounded
   rate-map state, Ristretto enrollment validation, admin-void ownership
-  check). Until the backend is rebuilt on the VPS from `e6fc580`, the
-  public results/archive replay path remains unthrottled; the Worker
-  deploy above is compatible with the currently running backend and
-  independently valuable, but it does not close the backend vulnerability.
-- Backend upgrade procedure when SSH access exists: follow
-  `docs/hosted/OPERATIONS.md` (backup DB, build from the exact commit on
-  the VPS, copy-then-replace the binary, health-check, keep the old
-  binary as the rollback point).
+  check). The VPS backend was rebuilt from the exact reviewed HEAD
+  `75ac3d7`, the binary was atomically replaced, and only the staging
+  service was restarted. Evidence, hashes, rollback commands and the
+  stale backup-runbook schema caveat are recorded in
+  `docs/hosted/BACKEND_SECURITY_DEPLOYMENT_2026-11-24.md`.
+- Backend upgrade procedure: follow `docs/hosted/OPERATIONS.md` (backup DB,
+  build from the exact commit on the VPS, copy-then-replace the binary,
+  health-check, keep the old binary as the rollback point).
