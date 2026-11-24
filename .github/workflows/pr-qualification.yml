@@ -51,10 +51,22 @@ jobs:
       - name: Install dependencies
         working-directory: ${{ matrix.project }}
         run: npm ci
-      # hosted-web type checking requires generated WASM bindings, which are
-      # produced by a separate build step; its unit tests run without them.
+      # hosted-web imports generated wasm-bindgen glue; generate it with the
+      # same pinned toolchain used locally before type checking.
+      - name: Install pinned Rust with wasm target
+        if: matrix.project == 'hosted-web'
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: matrix.project == 'hosted-web'
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: "v0.15.0"
+      - name: Generate Hosted WASM bindings
+        if: matrix.project == 'hosted-web'
+        run: wasm-pack build crates/hosted-wasm --target web --out-dir ../../hosted-web/src/wasm --release
       - name: Type check
-        if: matrix.project == 'gui'
         working-directory: ${{ matrix.project }}
         run: npx tsc --noEmit
       - name: Unit tests
