@@ -46,6 +46,20 @@ test("isAdminPath blocks the global admin plane, exact and nested", async () => 
   assert.equal(isAdminPath("/"), false);
 });
 
+test("isAdminPath blocks encoded and multi-slash variants of the admin plane", async () => {
+  const { isAdminPath } = await import("../src-edge/headers.mjs");
+  assert.equal(isAdminPath("/api/v1/%61dmin"), true, "percent-encoded 'a' must not bypass the edge block");
+  assert.equal(isAdminPath("/api/v1/%61dmin/elections/x/finalize"), true);
+  assert.equal(isAdminPath("/api/v1/adm%69n/close"), true, "percent-encoded 'i' mid-word must not bypass");
+  assert.equal(isAdminPath("/api//v1/admin"), true, "repeated slashes must not bypass");
+  assert.equal(isAdminPath("/api/v1//admin/elections"), true);
+  assert.equal(isAdminPath("/api/v1/%2f%2fadmin"), true, "encoded slashes are decoded before matching");
+  assert.equal(isAdminPath("/api/v1/elections/abc%2Ddef/ballots"), false, "legit percent-encoded ids still pass");
+  assert.equal(isAdminPath("/api/v1/elections/x/ballots"), false);
+  assert.equal(isAdminPath("/assets/some%20file.png"), false, "legit encoded asset paths still pass");
+  assert.equal(isAdminPath("/api/v1/%zz"), true, "malformed percent-encoding fails closed (blocked, not proxied)");
+});
+
 test("worker.ts delegates header policy to headers.mjs (no inline duplicates)", async () => {
   const fs = await import("node:fs");
   const worker = fs.readFileSync(new URL("../src-edge/worker.ts", import.meta.url), "utf8");

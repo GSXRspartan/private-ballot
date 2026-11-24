@@ -16,9 +16,21 @@ export const ORIGIN_TOKEN_HEADER = "x-private-ballot-origin";
 export const ADMIN_TOKEN_HEADER = "x-admin-token";
 export const ORGANIZER_TOKEN_HEADER = "x-private-ballot-organizer";
 
-/** Global admin plane paths are blocked at the edge, before the backend. */
+/** Global admin plane paths are blocked at the edge, before the backend.
+ *
+ * The raw request path is normalized (percent-decoded, repeated slashes
+ * collapsed) before matching so encoded or multi-slash variants of the
+ * admin plane cannot slip past the edge block. Paths with malformed
+ * percent-encoding fail closed: they are blocked rather than proxied. */
 export function isAdminPath(pathname) {
-  return pathname === "/api/v1/admin" || pathname.startsWith("/api/v1/admin/");
+  let normalized;
+  try {
+    normalized = decodeURIComponent(pathname);
+  } catch {
+    return true;
+  }
+  normalized = normalized.replace(/\/{2,}/g, "/");
+  return normalized === "/api/v1/admin" || normalized.startsWith("/api/v1/admin/");
 }
 
 /**

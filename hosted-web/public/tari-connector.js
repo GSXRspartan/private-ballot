@@ -37,6 +37,11 @@
 
   var PROTOCOL = "tari-dapp-bridge/1";
   var embedded = window.parent !== window;
+  // The only origin that may embed this dApp (mirrors the Worker CSP
+  // `frame-ancestors` exemption). Replies from any other parent origin are
+  // dropped, so a hostile embedder cannot impersonate the wallet even if a
+  // serving path ever loses the CSP boundary.
+  var WALLET_ORIGIN_ALLOWLIST = { "https://universe.tari.mw": true };
 
   var pending = Object.create(null);
   var counter = 0;
@@ -72,6 +77,9 @@
 
     // Only the wallet frame that embedded this page may answer.
     if (event.source !== window.parent) return;
+    // …and it must answer from the pinned Universe origin, not merely from
+    // whichever frame happens to be our parent.
+    if (!WALLET_ORIGIN_ALLOWLIST[event.origin]) return;
 
     if (data.event) {
       var handlers = listeners[data.event] || [];
