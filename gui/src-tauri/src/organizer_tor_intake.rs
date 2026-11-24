@@ -66,7 +66,8 @@ use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
     RemoteSocksEndpointErrorV1, RemoteSocksEndpointV1, RemoteTorReadinessOutcomeV1,
     TorCarrierTimeoutsV1, discover_organizer_onion_hostname_v1,
-    probe_remote_onion_hostname_v1, validate_onion_hostname_v1,
+    fetch_election_status_over_remote_tor_onion, probe_remote_onion_hostname_v1,
+    validate_onion_hostname_v1,
 };
 use tauri::{AppHandle, Manager};
 
@@ -1939,9 +1940,9 @@ fn start_remote_intake_worker(
         authoritative_lifecycle,
     )?;
 
-    // 4. Endpoint-scoped remote readiness uses only the zero-application-byte
-    // SOCKS5 CONNECT probe. Desktop no longer holds a production authority key,
-    // so it must not fabricate a locally signed election-status response.
+    // 4. Endpoint-scoped remote readiness: the zero-application-byte SOCKS5
+    // CONNECT probe is followed by the public, credential-free status GET.
+    // Neither step signs anything locally or uses any authority key.
     let timeouts = remote_organizer_readiness_timeouts();
     let outcome = probe_remote_onion_hostname_v1(&config.socks, &config.onion_hostname, &timeouts);
     if !outcome.is_ready() {
@@ -1950,6 +1951,20 @@ fn start_remote_intake_worker(
             "GUI_ORGANIZER_REMOTE_NOT_READY",
             "UNAVAILABLE",
             remote_organizer_readiness_message(outcome),
+        ));
+    }
+    if fetch_election_status_over_remote_tor_onion(
+        &config.socks,
+        &config.onion_hostname,
+        &timeouts,
+    )
+    .is_err()
+    {
+        let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
+        return Err(CommandError::new(
+            "GUI_ORGANIZER_REMOTE_NOT_READY",
+            "UNAVAILABLE",
+            "the external onion is reachable but the organizer intake did not answer the readiness status check yet; retry shortly",
         ));
     }
     Ok(OrganizerIntakeState {
@@ -2389,6 +2404,21 @@ mod tests {
     const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
     const VALID_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
 
+    fn implementation_source() -> &'static str {
+        include_str!("organizer_tor_intake.rs")
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("implementation precedes the test module")
+            .0
+    }
+
+    fn descriptor_export_source() -> &'static str {
+        implementation_source()
+            .split("pub async fn export_hosted_descriptor_request(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn import_hosted_descriptor_response(").next())
+            .expect("hosted descriptor export body")
+    }
+
     fn remote_input(
         mode: Option<&str>,
         host: Option<&str>,
@@ -2541,16 +2571,8 @@ mod tests {
         // NO process spawn, NO child kill, NO torrc generation, NO local
         // hidden-service directory creation, and NO managed SOCKS port
         // reservation. Scan ONLY the implementation (before the test module).
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
-        let remote_provision = code
-            .split("fn provision_transport_remote")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .expect("remote provision body");
+        let code = implementation_source();
+        let remote_provision = descriptor_export_source();
         for forbidden in [
             "spawn(",
             "write_config",
@@ -2564,6 +2586,18 @@ mod tests {
                 "remote provisioning must never {forbidden}"
             );
         }
+        let remote_descriptor_arm = remote_provision
+            .split("OrganizerTorModeV1::ExternalRemote =>")
+            .nth(1)
+            .expect("external remote descriptor arm");
+        assert!(
+            !remote_descriptor_arm
+                .split("};")
+                .next()
+                .unwrap_or("")
+                .contains("discover_managed_onion_for_descriptor("),
+            "external-remote provisioning must never discover or regenerate an onion"
+        );
         let remote_worker = code
             .split("fn start_remote_intake_worker")
             .nth(1)
@@ -2587,11 +2621,7 @@ mod tests {
     fn external_remote_daemon_is_never_signalled_on_stop_or_shutdown() {
         // Stop and app-exit reap only an OWNED child (Option::take on the
         // child handle, which is always None in external-remote mode).
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         assert!(
             code.matches(".tor_child.take()").count() >= 3,
             "every teardown path must take the OWNED child option, never signal external infrastructure"
@@ -2608,11 +2638,7 @@ mod tests {
         // Readiness ordering inside the remote worker: bind gate → descriptor
         // equality gate → zero-application-byte probe → public status GET, and
         // only then a ready state.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         let worker_start = code
             .find("fn start_remote_intake_worker")
             .expect("remote worker");
@@ -2697,11 +2723,7 @@ mod tests {
     // reaper, and the only `Ok` arm transfers the child into intake state.
     #[test]
     fn managed_shared_assembly_error_arm_reaps_the_owned_child() {
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         let worker_start = code
             .find("fn start_intake_worker")
             .expect("managed worker");
@@ -2917,11 +2939,7 @@ mod tests {
         // handles (kill()/wait()), which target only processes this app spawned.
         // Scan ONLY the implementation (everything before the test module) so
         // this test's own list of forbidden literals below cannot match itself.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         for forbidden in [
             "taskkill",
             "Stop-Process",
@@ -2951,14 +2969,26 @@ mod tests {
         // directory and NEVER creates a new identity. The hidden-service
         // directory is also a deterministic function of the election root, so two
         // "starts" resolve the SAME identity path.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let export = descriptor_export_source();
         assert!(
-            code.contains("if !paths.is_provisioned()"),
-            "the onion identity must be provisioned once, never regenerated on restart"
+            export.contains("if pending_dir.exists()"),
+            "an existing descriptor request must be reused, never re-provisioned"
+        );
+        assert!(
+            export.contains("discover_managed_onion_for_descriptor("),
+            "first provisioning must discover the persistent onion"
+        );
+        let remote_arm = export
+            .split("OrganizerTorModeV1::ExternalRemote =>")
+            .nth(1)
+            .expect("external remote descriptor arm");
+        assert!(
+            !remote_arm
+                .split("};")
+                .next()
+                .unwrap_or("")
+                .contains("discover_managed_onion_for_descriptor("),
+            "external-remote provisioning must not discover an onion"
         );
         let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
         let a = TransportPaths::under(&root).hidden_service_dir;
