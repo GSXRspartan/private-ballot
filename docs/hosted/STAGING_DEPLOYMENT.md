@@ -146,3 +146,36 @@ and must be re-evaluated before any public hostname.
 3. The public plane has no separate admin surface to roll back; the
    admin plane never leaves the VPS.
 4. No Ootle template was republished; no on-chain state to revert.
+
+## 6. Deployment log
+
+| Date (UTC) | Component | Version / tag | Source | Rollback point |
+|---|---|---|---|---|
+| 2026-11-23 21:45 | Worker | `22708f68-abbe-4ef6-a882-a0faf881fef1` (`receipt-recovery-b2fd842`) | `b2fd842` | `c3747db8` (`f6b9ba5` frontend) |
+| 2026-11-24 04:09 | Worker + static assets | `f8015e7c-3796-4613-b995-9517a4d4d8dd` (`edge-hardening-fa54902`) | `fa54902` (branch `review/web-mainnet-anchor-6a936d9`) | `22708f68` via `npx wrangler rollback` |
+
+2026-11-24 Worker deployment notes (edge only; backend unchanged):
+
+- Fixes: edge admin-path normalization (percent-encoded and multi-slash
+  variants of `/api/v1/admin*` are blocked at the edge with the canonical
+  42-byte edge 404; malformed percent-encoding is rejected by Cloudflare
+  before the Worker) and `tari-connector.js` wallet-reply origin pinning to
+  `https://universe.tari.mw`.
+- Live-verified after deploy: all encoded admin-path variants edge-blocked;
+  `/api/v1/status`, anchored-election results/archive/public-package/
+  anchor-payload all 200; `/chain/network` mainnet; durable receipt endpoints
+  for the anchored transaction both 200; anchor-page CSP still
+  `frame-ancestors https://universe.tari.mw`.
+- STILL PENDING (backend, blocked on VPS SSH): commit `e6fc580` —
+  High-severity unauthenticated full-ledger replay mitigation
+  (manifest-hash-guarded verified-ledger cache + per-route rate limits,
+  election-scoped results-read/archive-read/enroll buckets, bounded
+  rate-map state, Ristretto enrollment validation, admin-void ownership
+  check). Until the backend is rebuilt on the VPS from `e6fc580`, the
+  public results/archive replay path remains unthrottled; the Worker
+  deploy above is compatible with the currently running backend and
+  independently valuable, but it does not close the backend vulnerability.
+- Backend upgrade procedure when SSH access exists: follow
+  `docs/hosted/OPERATIONS.md` (backup DB, build from the exact commit on
+  the VPS, copy-then-replace the binary, health-check, keep the old
+  binary as the rollback point).
