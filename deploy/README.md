@@ -9,15 +9,21 @@ at `$PRIVATE_BALLOT_HOSTED_DB` (default `hosted.db` in the working
 directory). See `deploy/hosted.env.example` for the full config schema and
 `deploy/private-ballot-hosted.service` for a systemd unit template.
 
-Backup: stop the service (or use `sqlite3 hosted.db ".backup '/path/to/backup.db'"`)
-and copy the single `.db` file (plus `-wal`/`-shm` sidecars only while
-running). Restore by placing the file at the configured path and starting
-the service; schema version is stored in `meta` (`schema_version=4`) and
-migrations run on startup.
+Backup: use SQLite's online backup API (`sqlite3 "$DB" ".backup '$DEST'"`)
+against the live WAL database; never copy the live `-wal`/`-shm` sidecars by
+hand. `deploy/staging/backup.sh` does this and then verifies integrity,
+the explicit schema allowlist, and critical tables. Restore by placing a
+verified backup at `PRIVATE_BALLOT_HOSTED_DB` and starting the service;
+the schema version is stored in `meta` and is currently `7`.
 
-Migrations: v4 adds the `organizer_credentials` table additively (idempotent
-`CREATE TABLE IF NOT EXISTS` + schema-version check). A future migration must
-remain additive and tested against a copy of an existing database.
+Migrations: `crates/hosted/src/storage.rs` writes schema v7 for a fresh
+database. Versions 2–6 are migration inputs only; they are NOT accepted as
+verified recovery points because they require a separate migration step.
+`deploy/staging/schema-versions.sh` is the explicit allowlist (currently `7`)
+and `deploy/staging/test-backup-verification.sh` covers supported,
+unsupported, missing-version and corrupted databases. A future migration
+must remain additive, be added to the allowlist only with a reviewed recovery
+qualification, and be tested against a copy of an existing database.
 
 Graceful shutdown: Ctrl-C / SIGTERM via `tokio::signal::ctrl_c` and axum
 graceful shutdown. Health: `GET /health`, `GET /api/v1/status`.

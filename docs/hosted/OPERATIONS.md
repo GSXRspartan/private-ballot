@@ -25,13 +25,82 @@ sudo systemctl status cloudflared
 
 ## Backup / restore
 
-- Backup: `bash deploy/staging/backup.sh` — online SQLite backup,
-  integrity + schema verification, 0600 perms. Schedule with cron/systemd
-  timer (e.g. hourly for staging).
-- Restore: `bash deploy/staging/restore-verify.sh <backup>` verifies into
-  a temp copy first. To restore for real: stop the service, replace the
-  DB file at `PRIVATE_BALLOT_HOSTED_DB`, start the service. Never copy a
-  live database's `-wal`/`-shm` files by hand.
+Authoritative schema is **v7** (`crates/hosted/src/storage.rs`: a fresh
+database is written as `schema_version=7`; 2–6 are migration inputs only).
+The scripts accept ONLY the versions listed in
+`deploy/staging/schema-versions.sh` (currently `7`) and fail closed on any
+other, missing, or corrupt version.
+
+### Backup and verify (on the VPS)
+
+```bash
+sudo bash /opt/private-ballot-hosted/source/deploy/staging/backup.sh
+sudo bash /opt/private-ballot-hosted/source/deploy/staging/restore-verify.sh \
+  /var/lib/private-ballot-hosted/backups/<latest>.sqlite3
+```
+
+`backup.sh` uses SQLite's online backup API against the live WAL database,
+sets mode 0600, and checks `PRAGMA integrity_check`, the explicit schema
+allowlist, and the critical tables. Never copy a live database's
+`-wal`/`-shm` sidecars by hand.
+
+### Script regression tests (no live database use)
+
+```bash
+bash /opt/private-ballot-hosted/source/deploy/staging/test-backup-verification.sh
+```
+
+Creates temporary fixtures for v7 (accepted), v2/v4/v6/v8 (rejected),
+missing `schema_version` (rejected), and corrupted files (rejected).
+
+### Non-destructive restore drill (isolated DB and service config)
+
+This never touches the live database or the live service.
+
+```bash
+SRC=/var/lib/private-ballot-hosted/backups/<verified-backup>.sqlite3
+TMP=$(sudo mktemp -d -p /var/tmp pb-recovery-drill.XXXXXX)
+sudo chown private-ballot-hosted:private-ballot-hosted "$TMP"
+sudo chmod 700 "$TMP"
+sudo cp "$SRC" "$TMP/restored.sqlite3"
+sudo chown private-ballot-hosted:private-ballot-hosted "$TMP/restored.sqlite3"
+sudo chmod 600 "$TMP/restored.sqlite3"
+sudo bash /opt/private-ballot-hosted/source/deploy/staging/restore-verify.sh "$TMP/restored.sqlite3"
+
+# Isolated env: same secrets, overridden DB and loopback ports. Never print it.
+sudo bash -c 'umask 077; grep -vE "^PRIVATE_BALLOT_HOSTED_(DB|BIND|ADMIN_BIND)=" /etc/private-ballot-hosted/hosted.env > "$1"; printf "PRIVATE_BALLOT_HOSTED_DB=%s\nPRIVATE_BALLOT_HOSTED_BIND=127.0.0.1:8878\nPRIVATE_BALLOT_HOSTED_ADMIN_BIND=127.0.0.1:8879\n" "$2" >> "$1"' _ "$TMP/hosted.env" "$TMP/restored.sqlite3"
+sudo chown private-ballot-hosted:private-ballot-hosted "$TMP/hosted.env"
+sudo chmod 600 "$TMP/hosted.env"
+
+sudo systemd-run --unit=pb-recovery-drill --collect \
+  --property=User=private-ballot-hosted \
+  --property=Group=private-ballot-hosted \
+  --property=EnvironmentFile="$TMP/hosted.env" \
+  --property=WorkingDirectory=/opt/private-ballot-hosted \
+  /opt/private-ballot-hosted/private-ballot-hosted
+curl -fsS http://127.0.0.1:8878/health
+sudo bash -c 'set -a; . "$1"; set +a; curl -fsS -H "x-private-ballot-origin: $PRIVATE_BALLOT_HOSTED_ORIGIN_TOKEN" http://127.0.0.1:8878/api/v1/status' _ "$TMP/hosted.env"
+
+sudo systemctl stop pb-recovery-drill.service
+sudo rm -rf "$TMP"
+```
+
+### Real restore (only with explicit operator authorization)
+
+```bash
+sudo systemctl stop private-ballot-hosted
+sudo install -o private-ballot-hosted -g private-ballot-hosted -m 0600 \
+  /var/lib/private-ballot-hosted/backups/<verified-backup>.sqlite3 \
+  /var/lib/private-ballot-hosted/hosted.sqlite3
+sudo rm -f /var/lib/private-ballot-hosted/hosted.sqlite3-wal \
+          /var/lib/private-ballot-hosted/hosted.sqlite3-shm
+sudo systemctl start private-ballot-hosted
+curl -fsS http://127.0.0.1:8788/health
+```
+
+Only the stale sidecars of the *stopped* service are removed; never copy a
+live database's `-wal`/`-shm` files. The database is not changed by a backup
+or by an isolated drill.
 
 ## Restart / recovery acceptance (Phase 23)
 

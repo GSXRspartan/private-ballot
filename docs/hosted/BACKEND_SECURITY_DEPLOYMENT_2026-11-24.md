@@ -56,12 +56,15 @@ operator changes were overwritten.
 Backup verification: readable, `PRAGMA integrity_check` returned `ok`,
 `schema_version=7`, expected 11 tables present, `journal_mode=wal`.
 
-**Runbook caveat:** `deploy/staging/backup.sh` and `restore-verify.sh` in this
-branch still assert `schema_version=4`. The live database and reviewed source
-both use v7 (`crates/hosted/src/storage.rs` migrates 6→7), so the online
-backup was created successfully but those stale assertions failed. The backup
-was therefore verified against the actual v7 schema before deployment. The
-stale assertion should be corrected in a separate reviewed change.
+**Runbook caveat (resolved in a subsequent commit on this branch):** at
+deployment time `deploy/staging/backup.sh` and `restore-verify.sh` still
+asserted `schema_version=4`. The live database and reviewed source both use
+v7 (`crates/hosted/src/storage.rs` migrates 6→7), so the online backup was
+created successfully but those stale assertions failed. The backup was
+verified against the actual v7 schema before deployment. The scripts now use
+the explicit allowlist in `deploy/staging/schema-versions.sh` (currently `7`)
+and are covered by `deploy/staging/test-backup-verification.sh`; qualification
+evidence is in `docs/hosted/STAGING_RECOVERY_QUALIFICATION.md`.
 
 ## 4. Build and replacement
 
