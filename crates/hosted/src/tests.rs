@@ -7441,3 +7441,218 @@ async fn hosted_two_voter_browser_only_e2e_no_desktop() {
 
 const MAINNET_V2_TEMPLATE_ADDRESS_FOR_TEST: &str =
     "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb";
+
+// ── Hosted availability hardening regression tests ─────────────────────────────
+
+#[test]
+fn rate_map_never_grows_from_oversized_ids_and_limits_within_the_window() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut config = test_config();
+    config.rate_limit_per_minute = 10;
+    let state = AppState::new(config, storage);
+    // Ids longer than the protocol limit can never name a stored election;
+    // they must not be inserted into the shared rate map at all.
+    let oversized = "x".repeat(tari_cc_private_ballot_protocol::MAX_ELECTION_ID_BYTES + 1);
+    for _ in 0..25 {
+        assert!(state.check_rate(&oversized, "transport"));
+    }
+    assert!(
+        state.rate.lock().unwrap().is_empty(),
+        "oversized attacker ids must never allocate rate buckets"
+    );
+    // Normal ids are limited per minute and allocate exactly one bucket.
+    let normal = "rate-map-bound-001";
+    for i in 1..=10_u32 {
+        assert!(state.check_rate(normal, "transport"), "request {i} passes");
+    }
+    assert!(
+        !state.check_rate(normal, "transport"),
+        "the 11th request within the window must be limited"
+    );
+    assert_eq!(state.rate.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn enrollment_rejects_non_canonical_ristretto_governance_keys() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "enroll-badkey-001";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let secret = issue_invitation_for_slot(&routers.admin, election_id, &slots[0].slot_id).await;
+
+    // A GovernancePublicKey-legal but non-32-byte encoding.
+    let (s1, v1) = enroll(&routers.public, election_id, &secret, &hex_encode(b"AAAA")).await;
+    assert_eq!(s1, axum::http::StatusCode::BAD_REQUEST, "{v1}");
+    // Exactly 32 bytes, but the identity point encoding.
+    let (s2, v2) = enroll(&routers.public, election_id, &secret, &hex_encode(&[0_u8; 32])).await;
+    assert_eq!(s2, axum::http::StatusCode::BAD_REQUEST, "{v2}");
+    // Exactly 32 bytes, but a non-canonical field encoding (top byte >= 0x80
+    // exceeds the Ristretto field modulus).
+    let (s3, v3) = enroll(&routers.public, election_id, &secret, &hex_encode(&[0xed_u8; 32])).await;
+    assert_eq!(s3, axum::http::StatusCode::BAD_REQUEST, "{v3}");
+    assert_eq!(storage.count_enrolled_credentials(election_id).unwrap(), 0);
+
+    // A canonical point is still accepted by the same invitation, so the
+    // rejection path never consumed the slot or bricked the election.
+    let (s4, v4) = enroll(&routers.public, election_id, &secret, &enroll_key(7)).await;
+    assert_eq!(s4, axum::http::StatusCode::CREATED, "{v4}");
+}
+
+#[tokio::test]
+async fn admin_void_invitation_requires_the_matching_election() {
+    let f = fixture();
+    let (routers, storage) = test_routers();
+    let election_id = "admin-void-001";
+    create_draft_and_open_enrollment(&routers.admin, election_id, &f.candidate_cbor, 2).await;
+    let slots = storage.list_slots(election_id).unwrap();
+    let slot_id = slots[0].slot_id.clone();
+    let _secret = issue_invitation_for_slot(&routers.admin, election_id, &slot_id).await;
+    let inv = storage
+        .get_active_invitation_for_slot(&slot_id)
+        .unwrap()
+        .unwrap();
+
+    // Voiding through a foreign election id must fail closed as not-found.
+    let (s1, t1) = req(
+        routers.admin.clone(),
+        "POST",
+        &format!(
+            "/api/v1/admin/elections/admin-void-OTHER/invitations/{}/void",
+            inv.invitation_id
+        ),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(s1, axum::http::StatusCode::NOT_FOUND, "{t1}");
+    // The invitation is still ACTIVE afterwards.
+    assert!(storage
+        .get_invitation_by_id(&inv.invitation_id)
+        .unwrap()
+        .unwrap()
+        .state
+        .eq("ACTIVE"));
+
+    // Voiding through the owning election still succeeds.
+    let (s2, t2) = req(
+        routers.admin.clone(),
+        "POST",
+        &format!("/api/v1/admin/elections/{election_id}/invitations/{}/void", inv.invitation_id),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(s2, axum::http::StatusCode::OK, "{t2}");
+}
+
+#[tokio::test]
+async fn finalized_results_reads_are_rate_limited_and_served_from_cache() {
+    let f = fixture();
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut config = test_config();
+    config.rate_limit_per_minute = 10;
+    config.transport_authority_root = test_transport_root();
+    config.authority_signing_key = Some([42; 32]);
+    let state = Arc::new(AppState::new(config, storage.clone()));
+    let public = router_with_state(state.clone());
+    let admin = admin_router_with_state(state.clone());
+    assert_eq!(
+        import(admin.clone(), &f).await,
+        axum::http::StatusCode::CREATED
+    );
+
+    // One accepted ballot, then close, bind, finalize.
+    let pkg = make_package(&f, 1, b"candidate-a");
+    let body = serde_json::json!({
+        "receipt_id": "00000000-0000-4000-8000-0000000000aa",
+        "package_cbor_hex": hex_encode(&pkg),
+        "api_version": "v1"
+    })
+    .to_string();
+    let (sb, tb) = req(
+        public.clone(),
+        "POST",
+        &format!("/api/v1/elections/{}/ballots", f.election_id),
+        Some(body),
+        &[("content-type", "application/json")],
+    )
+    .await;
+    assert_eq!(sb, axum::http::StatusCode::CREATED, "{tb}");
+    let (sc, _) = req(
+        admin.clone(),
+        "POST",
+        &format!("/api/v1/admin/elections/{}/close", f.election_id),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(sc, axum::http::StatusCode::OK);
+    record_desktop_transport_binding(storage.as_ref(), &f, 1);
+    let (sf, tf) = req(
+        admin.clone(),
+        "POST",
+        &format!("/api/v1/admin/elections/{}/finalize", f.election_id),
+        None,
+        &[("x-admin-token", "test-admin-token")],
+    )
+    .await;
+    assert_eq!(sf, axum::http::StatusCode::OK, "{tf}");
+
+    // First read verifies the ledger and installs a cache entry.
+    let (s1, r1) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/results", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s1, axum::http::StatusCode::OK, "{r1}");
+    assert!(
+        state
+            .verified_ledger_cache
+            .lock()
+            .unwrap()
+            .contains_key(&f.election_id),
+        "finalized results must populate the verified-ledger cache"
+    );
+
+    // Reads 2..=10 are served within the per-minute budget and are
+    // byte-identical to the first (cache-hit) response.
+    for i in 2..=10_u32 {
+        let (si, ri) = req(
+            public.clone(),
+            "GET",
+            &format!("/api/v1/elections/{}/results", f.election_id),
+            None,
+            &[],
+        )
+        .await;
+        assert_eq!(si, axum::http::StatusCode::OK, "read {i}: {ri}");
+        assert_eq!(ri, r1, "read {i} must be identical to the first read");
+    }
+
+    // The 11th read inside the window is rate-limited: repeated unthrottled
+    // full-ledger Triptych replay is not available to a remote attacker.
+    let (s11, t11) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/results", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(s11, axum::http::StatusCode::TOO_MANY_REQUESTS, "{t11}");
+
+    // The archive read bucket is independent of the results bucket.
+    let (sa, ta) = req(
+        public.clone(),
+        "GET",
+        &format!("/api/v1/elections/{}/archive", f.election_id),
+        None,
+        &[],
+    )
+    .await;
+    assert_eq!(sa, axum::http::StatusCode::OK, "{ta}");
+}

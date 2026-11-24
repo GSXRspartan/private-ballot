@@ -67,7 +67,9 @@ use tari_cc_private_ballot_ballot::{
     CandidateSet, ElectionId, ElectionManifest, ElectionManifestV1, ElectionManifestV1Input,
     ElectionManifestV2, ElectionManifestV2Input,
 };
-use tari_cc_private_ballot_crypto::TARI_TRIPTYCH_PROOF_SUITE_ID_V1;
+use tari_cc_private_ballot_crypto::{
+    RISTRETTO_COMPRESSED_POINT_BYTES, RistrettoPublicKeyV1, TARI_TRIPTYCH_PROOF_SUITE_ID_V1,
+};
 use tari_cc_private_ballot_gui_core::{
     DesktopBindingHandoffV1, GOVERNANCE_PIN_PREFIX_BLAKE3, GUI_OOTLE_ANCHOR_PUBLISH_MIN_ACCEPTED_BALLOT_FLOOR_V1,
     GuiCoreError, GuiElectionArtifactsV1, GuiLiveAnchorV2RequestV1,
@@ -84,7 +86,8 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_protocol::{
     Blake3HashProviderV1, HashDomain, HashProvider, MAX_CANDIDATE_ID_BYTES, MAX_CANDIDATES,
-    PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode, hash_domain_separated,
+    MAX_ELECTION_ID_BYTES, PROTOCOL_VERSION_V1, RegistryCommitment, ValidationCode,
+    hash_domain_separated,
 };
 use tari_cc_private_ballot_registry::{
     GovernancePublicKey, RegistryEntry, RegistrySnapshot, VoterGovernanceKeyRegistrationV1,
@@ -437,11 +440,24 @@ fn error_response(status: StatusCode, code: &'static str, message: &'static str)
     (status, Json(ErrorBody { code, message })).into_response()
 }
 
+/// Soft cap on distinct rate-limit buckets. When the map reaches this size,
+/// expired buckets are purged so an attacker cycling election ids can never
+/// grow it without bound; ids longer than the protocol limit are never
+/// inserted at all.
+pub const RATE_MAP_SOFT_MAX_ENTRIES: usize = 4096;
+/// Maximum number of FINALIZED-election ledgers kept in the verified-replay
+/// cache. Finalized elections never accept new ballots, so a cached verified
+/// ledger stays valid until the election row itself changes (guarded by the
+/// stored manifest hash on every hit).
+pub const LEDGER_CACHE_MAX_ELECTIONS: usize = 16;
+
 pub struct AppState {
     pub config: HostedConfig,
     pub storage: Arc<dyn HostedStorage>,
     pub ingest_lock: Mutex<()>,
     pub rate: Mutex<HashMap<(String, String), (u64, u32)>>,
+    pub verified_ledger_cache:
+        Mutex<HashMap<String, (String, BallotAcceptanceLedger, Vec<storage::BallotRecord>)>>,
 }
 impl AppState {
     pub fn new(config: HostedConfig, storage: Arc<dyn HostedStorage>) -> Self {
@@ -450,6 +466,7 @@ impl AppState {
             storage,
             ingest_lock: Mutex::new(()),
             rate: Mutex::new(HashMap::new()),
+            verified_ledger_cache: Mutex::new(HashMap::new()),
         }
     }
     fn check_rate(&self, election_id: &str, ip: &str) -> bool {
@@ -457,7 +474,18 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        // An id longer than the protocol limit can never name a stored
+        // election; it fails the storage lookup below. Never insert such
+        // attacker-controlled keys into the shared rate map.
+        if election_id.len() > MAX_ELECTION_ID_BYTES {
+            return true;
+        }
         let mut guard = self.rate.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() >= RATE_MAP_SOFT_MAX_ENTRIES {
+            // Amortized purge: buckets idle for two full windows are dropped
+            // so the map stays bounded under id-cycling pressure.
+            guard.retain(|_, (ts, _)| now.saturating_sub(*ts) < 120);
+        }
         let entry = guard
             .entry((election_id.to_owned(), ip.to_owned()))
             .or_insert((now, 0));
@@ -467,6 +495,47 @@ impl AppState {
         entry.1 += 1;
         entry.1 <= self.config.rate_limit_per_minute
     }
+}
+
+/// Replays the stored ballots of one FINALIZED election with full Triptych
+/// verification, amortizing the per-request verification cost through a
+/// manifest-hash-guarded cache. A finalized election never accepts another
+/// ballot, so the verified ledger is immutable; the cache entry is only
+/// trusted when the stored manifest hash still matches, which also fails
+/// closed if an election row is ever replaced. Cache size is capped by
+/// `LEDGER_CACHE_MAX_ELECTIONS`.
+fn cached_finalized_replay(
+    state: &AppState,
+    loaded: &LoadedElection,
+) -> Result<(BallotAcceptanceLedger, Vec<storage::BallotRecord>), Response> {
+    {
+        let cache = state
+            .verified_ledger_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((hash, ledger, ballots)) = cache.get(&loaded.record.id) {
+            if *hash == loaded.manifest_hash_hex {
+                return Ok((ledger.clone(), ballots.clone()));
+            }
+        }
+    }
+    let (ledger, ballots) = loaded.replay_ledger(state.storage.as_ref())?;
+    let mut cache = state
+        .verified_ledger_cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= LEDGER_CACHE_MAX_ELECTIONS {
+        cache.clear();
+    }
+    cache.insert(
+        loaded.record.id.clone(),
+        (
+            loaded.manifest_hash_hex.clone(),
+            ledger.clone(),
+            ballots.clone(),
+        ),
+    );
+    Ok((ledger, ballots))
 }
 
 async fn health() -> Json<HealthBody> {
@@ -1014,7 +1083,14 @@ async fn get_results(
             "results are available only after finalization",
         );
     }
-    let (ledger, _) = match loaded.replay_ledger(state.storage.as_ref()) {
+    if !state.check_rate(&id, "results-read") {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate limit exceeded",
+        );
+    }
+    let (ledger, _) = match cached_finalized_replay(state.as_ref(), &loaded) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1315,7 +1391,7 @@ fn get_archive_response(state: &AppState, id: &str) -> Response {
             "archive is available only after finalization",
         );
     }
-    let (ledger, ballots) = match loaded.replay_ledger(state.storage.as_ref()) {
+    let (ledger, ballots) = match cached_finalized_replay(state, &loaded) {
         Ok(v) => v,
         Err(r) => return r,
     };
@@ -1368,6 +1444,13 @@ async fn get_archive(
     State(state): State<Arc<AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
+    if !state.check_rate(&id, "archive-read") {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate limit exceeded",
+        );
+    }
     get_archive_response(state.as_ref(), &id)
 }
 
@@ -2194,6 +2277,25 @@ async fn admin_void_invitation(
     if let Err(r) = check_admin(&state, &headers) {
         return r;
     }
+    // The invitation must belong to THIS election, mirroring the organizer
+    // plane's fail-closed ownership check.
+    match state.storage.get_invitation_by_id(&invitation_id) {
+        Ok(Some(i)) if i.election_id == id => {}
+        Ok(_) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "invitation_not_found",
+                "invitation not found for this election",
+            );
+        }
+        Err(_) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "service_unavailable",
+                "storage unavailable",
+            );
+        }
+    }
     // Void ACTIVE → VOIDED; ignore if already voided/consumed
     match state.storage.set_invitation_state(&invitation_id, "ACTIVE", "VOIDED") {
         Ok(true) => Json(serde_json::json!({"election_id": id, "invitation_id": invitation_id, "state": "VOIDED"})).into_response(),
@@ -2789,6 +2891,13 @@ async fn enroll_voter(
             "request too large",
         );
     }
+    if !state.check_rate(&id, "enroll") {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "rate limit exceeded",
+        );
+    }
     let req: EnrollRequest = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
@@ -2826,6 +2935,20 @@ async fn enroll_voter(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "public_key_hex is not a valid governance key",
+        );
+    }
+    // The production Triptych suite requires each registry key to be exactly
+    // one canonical non-identity compressed Ristretto255 point. Accepting a
+    // well-formed but non-canonical key here would let one malicious invitee
+    // permanently block the election's voting phase at registry freeze, so the
+    // exact verifier-side shape is enforced at enrollment time.
+    if public_key_bytes.len() != RISTRETTO_COMPRESSED_POINT_BYTES
+        || RistrettoPublicKeyV1::from_bytes(&public_key_bytes).is_err()
+    {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "public_key_hex must be a canonical 32-byte Ristretto255 point",
         );
     }
     let verifier_hex = invitation_verifier(&secret_bytes);
