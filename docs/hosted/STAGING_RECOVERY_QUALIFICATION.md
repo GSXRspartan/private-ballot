@@ -13,12 +13,11 @@ fresh database, migrates 2–6 forward, and rejects any other value. The live
 staging database was already v7, so the online backup succeeded but the stale
 assertion made the scripts exit non-zero.
 
-A second obsolete assumption exists but was **not** changed:
-`crates/hosted/src/lib.rs:121` declares an unused `pub const SCHEMA_VERSION:
-i64 = 5`. It has no callers, and changing it would break source/binary
-provenance for the already deployed backend (`a23cef08…`) without any runtime
-benefit. It should be removed in a separate reviewed source change with a
-rebuild. The runtime truth remains `storage.rs`.
+A second obsolete assumption, the unused `pub const SCHEMA_VERSION: i64 = 5`
+in `crates/hosted/src/lib.rs`, was removed in a later source cleanup after this
+qualification. It had no callers and no runtime effect; the runtime truth is
+and remains `storage.rs`. The deployed staging binary predates that
+source-only cleanup, which does not affect its verified behavior.
 
 ## Fix
 

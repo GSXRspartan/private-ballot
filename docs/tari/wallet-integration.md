@@ -168,13 +168,41 @@ production deployment was performed; see `deploy/indexer-proxy/README.md`.
   browser additionally requires the exact released template address, matching
   wallet network byte, provider capabilities, and absence of ambiguous local
   recovery before it can create a request.
-- Real-wallet testing with Sapient or Tari Universe has NOT been performed in
-  this task (no real transactions, no template publish, no production
-  infrastructure). Before mainnet use, validate the full flow in a separately
-  approved staging release that has exactly one Current test deployment. The
-  historical Esmeralda record in this release is not a valid test target.
-  Exercise declined approval, network mismatch, and wrong-bundle failure paths
-  as well as the verified path.
+- Real **Sapient** Mainnet qualification IS complete: the first anchor
+  transaction `28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`
+  was funded, published and verified read-only (fee 3477 µT, within the 5000 µT
+  cap). No second transaction was submitted.
+- Real **Tari Universe** qualification is still outstanding. The adapter and
+  the in-repo connector match the official `window.tari.request` schema
+  verified against `https://universe.tari.mw/integrations` and the published
+  integration skill: `request({ method, params })`, `tari_getCapabilities`
+  (including `dryRunIsLocal`, `transactionRequests`, `transactionResultLookup`),
+  and `tari_signAndSubmitTransaction { dryRun: true }` never prompts. Mock-provider
+  tests alone do not prove live behavior.
+
+### Exact non-spending Universe qualification steps (requires the user)
+
+1. In Tari Universe, open its dApp catalogue and launch
+   `https://private-ballot-staging.ghostgate.boo` from inside the wallet. A
+   plain browser tab is expected to report "Not running inside Tari Universe"
+   because the provider is intentionally iframe-only.
+2. Expected: page loads with CSP `frame-ancestors https://universe.tari.mw`;
+   Settings → Tari Wallet shows a Tari Universe entry (discovered through
+   `window.tariUniverse` / `window.tariProviders` / embedded `window.tari`).
+3. Click **Connect Tari Universe**; approve the wallet popup in the user's own
+   browser. Expected: connected status, component account selected,
+   `tari_getNetwork` reports `mainnet`, capabilities list is populated.
+   Do not share any wallet recovery phrase, seed, key, or password.
+4. On a disposable finalized election, run the **fee preflight / estimate**
+   action only. Expected: exactly one `tari_signAndSubmitTransaction` request
+   with `dryRun: true`, no approval popup, and a fee estimate at or below
+   5000 µT. Record observed `dryRunIsLocal` and capability fields.
+5. Exercise only non-spending failure paths: decline a connection, switch to a
+   non-mainnet wallet/network if the user has one, disconnect, then reload the
+   page and re-probe. Expected: bounded errors (4001/4100/4200), no auto
+   reconnect, and no request resubmission.
+6. Stop before any "publish", "approve" or "submit" action. No funded
+   transaction, no new Mainnet anchor.
 - The desktop walletd path is unchanged by this work. For mainnet walletd
   usage, use walletd v0.53.x in a separate environment (do not migrate or
   overwrite an existing wallet database); see the runbook for the exact

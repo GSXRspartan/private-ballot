@@ -32,6 +32,16 @@ Rebuilt from final source after the remote-intake repair commit (`a4d99ab`)
 - Launch smoke test: the release EXE starts, creates the "Private Ballot"
   window with a full WebView2 render tree, and stops cleanly. This confirms
   launch, resource loading, and the single-manifest fix only.
+- Re-verified on the Windows laptop on 2026-11-24 from source `cebdff9` using
+  the existing `D:\pb-target` Cargo cache (no installer rebuild): GUI Rust
+  `cargo test --release --locked` 105/105; GUI node `npm test` 1147/1147;
+  hosted-web `npm test` 120/120; `npx tsc --noEmit` clean in both projects.
+- Source fixes in this branch do not touch the Desktop binary: hosted rate-map
+  hardening, hosted enrollment-scrub fail-closed, removal of an unused hosted
+  schema constant, anchor encoder `expect()` removal, and a scoped PR CI
+  workflow. Hosted 78/78, the anchor integration-vector suite 16/16, and
+  anchor clippy all pass.
+  Consequently no new installer is justified by source changes.
 
 ## NOT yet verified (manual procedure required)
 
@@ -69,6 +79,48 @@ required):
 8. Secrets boundaries: confirm organizer transport material exists only
    under the per-election `organizer-private` directory and voter
    credentials are passphrase-encrypted at rest.
+
+### Action-by-action manual test script
+
+No human GUI session was available on this laptop, so none of the following
+was executed. Each step must be performed on a clean Windows profile and
+recorded with logs/screenshots that contain no wallet secrets, ballot choices
+tied to real identities, or private keys.
+
+1. Run `Private Ballot_0.1.0_x64-setup.exe`; expected: WebView2 bootstrap,
+   Start-menu shortcut, application opens to Home with no crash.
+2. Home → Create election: enter a disposable id such as
+   `desktop-qual-<UTC stamp>`; expected: draft created and listed.
+3. Manage election → configuration: set a two-option approval question and
+   authorized slot count 2; expected: values persist after restart.
+4. Organizer → enrollment slots / invitations: create two invitations;
+   expected: plaintext invitations shown once, verifiers stored, no secrets in
+   logs; attempt to issue a third against one slot and expect rejection.
+5. Enroll two voters with generated credentials; import one voter credential
+   with a deliberately wrong passphrase and expect rejection without state
+   change, then with the correct passphrase and expect success.
+6. Organizer → freeze registry; expected: explicit confirmation prompt and
+   status `REGISTRY_FROZEN`; verify enrollment linkage was scrubbed.
+7. Organizer → open voting; cast one ballot per voter through the GUI using
+   a local managed-Tor organizer; expected: receipts accepted.
+8. Replay the same credential's ballot; expected: duplicate-nullifier rejection.
+9. Organizer → close and finalize; expected: archive produced and verified
+   in-app (`ARCHIVE VERIFIED`); import a tampered copy and expect failure.
+10. Anchor screen → load the saved read-only Mainnet anchor evidence for
+    `pb-staging-browser-e2e-1795362392453`; expected: verified anchor shown;
+    do NOT publish or submit anything.
+11. Tor transport: start/stop managed intake, close the app, and check Task
+    Manager for orphaned `tor.exe`; expected: no orphans, readiness shows
+    UNAVAILABLE-then-ready.
+12. Error states: busy collector port, missing descriptor response, invalid
+    onion hostname; expected: bounded specific retryable messages with no
+    path or secret leakage.
+13. Inspect `%APPDATA%` per-election tree; expected organizer transport
+    material only under `organizer-private`, voter containers passphrase
+    encrypted. This confirms the documented MEDIUM-1 limitation still applies.
+
+Steps 1–13 require human clicks and a real `tor.exe`; they are the only
+remaining blocker for Desktop release qualification (plus installer signing).
 
 ## Standing audit findings relevant to this track
 

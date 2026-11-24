@@ -1,6 +1,9 @@
 # November 2026 Tari Mainnet contest update — DRAFT (human review required)
 
-Not posted anywhere. factual summary for a human to review and submit.
+Not posted anywhere. Factual summary for a human to review and submit.
+Reviewed again on 2026-11-24: all transaction, fee, template, election and
+staging claims below remain consistent with the repository evidence and the
+read-only Mainnet verification report. No new funded transaction was made.
 
 Private Ballot shipped its first real funded Tari Ootle **Mainnet** V2 anchor
 from the hosted browser application using the Sapient wallet.

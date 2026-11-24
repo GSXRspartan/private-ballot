@@ -1,69 +1,68 @@
-# Release readiness decision — staging fix and production
+# Release readiness decision — current state (2026-11-24)
 
-## Staging receipt-recovery fix — BLOCKED (operator action required)
+This supersedes earlier "blocked" notes in this file. Those notes described the
+state before the staging deployment and recovery qualification completed.
 
-The receipt/recovery defect was verified against the real Mainnet transaction
-and fixed in commit `b2fd842` (unindexed durable receipt = retryable pending,
-never terminal failed; verified only with exact event/transaction agreement;
-no resubmission). The fix is covered by `gui/test/chainEvidence.test.ts` and
-the real-chain fixture tests in `gui/test/mainnetAnchorReceipt.test.ts`, and is
-included in the pushed branch / PR #1.
+## Verified milestones
 
-Deploying it to staging was **not** performed:
+| Area | Status | Evidence |
+|---|---|---|
+| Hosted staging security deployment | COMPLETE | Worker `f8015e7c-3796-4613-b995-9517a4d4d8dd`; backend SHA-256 `a23cef08703c7e6c19d7f3b92984e2a38b099ed79c3b777662835056b3707600`; `docs/hosted/BACKEND_SECURITY_DEPLOYMENT_2026-11-24.md` |
+| First Mainnet V2 anchor | COMPLETE | Transaction `28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`, fee 3477 µT, `Finalized/Commit`, exact event verified by both indexers |
+| Sapient real-wallet path | QUALIFIED LIVE | Funded Mainnet publication and receipt recovery completed; no second transaction submitted |
+| SQLite v7 backup/recovery | QUALIFIED | `cebdff9`; 18/18 script regressions, isolated restore drill with byte-identical API responses; `docs/hosted/STAGING_RECOVERY_QUALIFICATION.md` |
+| Source security fixes in this branch | MERGE-READY | Hard rate-map cap + registry-scrub fail-closed + tests; stale schema constant removed; no production `expect()` in anchor encoder; scoped PR CI added |
 
-- No Cloudflare API token/account is present in this environment
-  (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` unset); `wrangler whoami`
-  requires an interactive login and cannot be completed autonomously.
-- The current Worker therefore could not be backed up or version-pinned, and
-  no rollback point was captured. Deploying without that would violate the
-  "retain rollback" requirement.
+## Gate decisions
 
-Exact operator sequence (after authenticating with the staging-only account):
+- **A — merge source to `main`: READY.** The full PR diff was independently
+  reviewed against `origin/main`. No Critical or High code findings remain.
+  The previously identified unbounded rate-map growth and fail-open enrollment
+  scrub were real defects and are fixed with regression tests in this branch.
+  One unwired legacy React panel (`BrowserAnchorPublishPanel.tsx`) still calls
+  the publish driver without a fee preflight; it has no import in the shipped
+  app and is explicitly guarded by `isDesktopShell()`. It is deferred cleanup,
+  not a shipped bypass.
+- **B — hosted staging release: READY.** The staging deployment is live and
+  validated. The two newly fixed backend defects are source-only at this point:
+  the live binary predates them. Rebuilding/redeploying the staging backend is
+  justified by those defects but is a separately authorized operation; do not
+  treat it as a prerequisite for merging source.
+- **C — Windows Desktop installer release: NOT READY.** Compilation, installer
+  build, launch smoke and 105/105 Rust tests pass, but the eight-step manual
+  organizer/voter workflow has never been executed. Installers are unsigned,
+  and organizer transport secrets remain plaintext at rest (MEDIUM-1).
+- **D — dedicated production deployment: NOT READY.** All previously listed
+  production prerequisites remain open: distinct Worker/route/origin token,
+  isolated database, key-custody ceremony, monitoring and alerting, live
+  Universe qualification, independent audit sign-off and explicit operator
+  authorization, Desktop release qualification, and privacy/security sign-off.
+  The Mainnet transaction capability is intentionally present in reviewed
+  source and must not be enabled in production before those gates close.
 
-```powershell
-cd hosted-web
-npx wrangler whoami
-npx wrangler deployments list --name private-ballot-staging
-npx wrangler versions list --name private-ballot-staging
-npm ci
-npm test
-npm run build
-npx wrangler versions upload                 # captures a new immutable version
-npx wrangler deploy                          # staged rollout / promote
-```
+## Release-readiness matrix
 
-Then verify recovery in a browser against the **already submitted** transaction
-`28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`
-using **Check saved request / transaction** only. Do not submit a new funded
-transaction. Retain the previous version id for `wrangler rollback`.
+| Track | Status | Evidence / remaining gate |
+|---|---|---|
+| Hosted Staging | READY (live) | Worker + backend hashes above; health 200; admin paths 404; edge hardening active; recommendation: rebuild backend for the two new source fixes |
+| Sapient | READY (live) | One real Mainnet anchor, exact receipt verification, fee 3477 µT ≤ 5000 µT cap |
+| Web Tari Universe | NOT QUALIFIED LIVE | Adapter matches the official `window.tari.request` schema and 120/120 hosted-web tests pass with mocks; requires human in-iframe connection + non-spending dry run |
+| Windows Desktop | NOT RELEASE-READY | 105/105 Rust, 1147/1147 node, `tsc` clean, launch smoke pass; manual 8-step workflow unsigned installer and plaintext transport secrets outstanding |
+| GitHub Main | READY TO MERGE PR #1 | Reviewed source, no Critical/High findings, scoped PR CI added; do not merge automatically without operator decision |
+| Dedicated Production | NOT READY | Design only; no deployment, no DNS, no authority keys, no production database |
 
-The backend Worker (`deploy/indexer-proxy`) needs no change: its allowlist and
-response schema were correct and the live receipt now serves HTTP 200 there.
+## Live wallet qualification (Web Tari Universe)
 
-## Production (`ballot.ghostgate.boo`) — NOT READY / NOT DEPLOYED
+No real Universe wallet connection has been performed: the provider is only
+reachable when the dApp is embedded in Universe's cross-origin iframe, which
+requires the user to open the catalogue entry in their own browser and approve
+the connection. Exact instructions and expected outputs are in
+`docs/tari/wallet-integration.md`. Never request recovery data and never run a
+funded transaction; use the mandatory `dryRun: true` preflight only.
 
-Outstanding requirements, all still open:
+## Release decision
 
-1. Distinct production Worker, route, origin token, and dedicated indexer
-   proxy binding (per `production-deployment-design.md` §1–3).
-2. Isolated production SQLite database; no staging records or secrets copied;
-   verified migrations and integrity check.
-3. Production authority/anchor key custody under a documented ceremony; no
-   reuse of staging keys; secrets injected as secret references only.
-4. Backup + restore drill (`integrity_check`, binary/config backups, rehearsed
-   restore), monitoring on `/health` and `/api/v1/status`, alerting, rate
-   limits, and rollback rehearsal.
-5. Wallet qualification: Sapient evidence exists; **live Tari Universe
-   qualification is outstanding** (dry-run, declined approval, network
-   mismatch, verified path, funded sufficiency).
-6. Independent security audit sign-off and explicit operator authorization
-   for the production gate; current `docs/hosted/mainnet-submission-enablement.md`
-   still records these as pending.
-7. Desktop installer release qualification is not met (six stale native
-   source-snapshot tests fail); no Desktop binary should be published.
-8. Production privacy/security model sign-off, including the reduced-anonymity
-   warning path and the unchanged 5000 µT fee cap.
-
-Release decision: **do not deploy production**. Staging is the only live
-environment, and the reviewed staging fix still needs an authorized,
-rollback-preserving deployment.
+Do not deploy production. Do not publish Desktop installers. Do not post the
+contest draft automatically. PR #1 is ready for a human merge decision; the
+remaining release gates are Desktop manual qualification, Universe live
+qualification, installer signing, and production-specific infrastructure.
