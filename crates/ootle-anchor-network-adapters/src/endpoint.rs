@@ -44,8 +44,23 @@ pub fn ensure_walletd_jsonrpc_path(base: &str) -> String {
     }
 }
 
-/// The Tari-hosted Esmeralda indexer trusted by the normal anchor UI.
-pub const TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1: &str = "https://ootle-indexer-a.tari.com/";
+/// The primary current Tari-hosted Esmeralda indexer used as the normal UI default.
+pub const TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1: &str = "https://esme-indexer-a.ootle.tari.com/";
+
+/// The primary current Tari-hosted Mainnet indexer used as the normal UI default.
+pub const TRUSTED_MAINNET_INDEXER_ENDPOINT_V1: &str = "https://indexer-a.ootle.tari.com/";
+
+/// Exact current Tari-hosted Esmeralda indexer hostnames. These are compared
+/// as complete normalized hostnames, never by suffix or substring.
+pub const TRUSTED_ESMERALDA_INDEXER_HOSTS_V1: [&str; 2] = [
+    "esme-indexer-a.ootle.tari.com",
+    "esme-indexer-b.ootle.tari.com",
+];
+
+/// Exact current Tari-hosted Mainnet indexer hostnames. These are compared as
+/// complete normalized hostnames, never by suffix or substring.
+pub const TRUSTED_MAINNET_INDEXER_HOSTS_V1: [&str; 2] =
+    ["indexer-a.ootle.tari.com", "indexer-b.ootle.tari.com"];
 
 /// Returns whether a parsed URL's host is a loopback address.
 ///
@@ -62,6 +77,14 @@ fn url_host_is_loopback(url: &Url) -> bool {
         Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
         None => false,
     }
+}
+
+fn url_host_matches_exactly(url: &Url, allowed_hosts: &[&str]) -> bool {
+    url.host_str().is_some_and(|host| {
+        allowed_hosts
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed))
+    })
 }
 
 /// Rejection categories for endpoint configuration.
@@ -310,10 +333,17 @@ impl IndexerEndpoint {
     #[must_use]
     pub fn is_trusted_esmeralda_remote(&self) -> bool {
         self.url.scheme() == "https"
-            && self
-                .url
-                .host_str()
-                .is_some_and(|host| host.eq_ignore_ascii_case("ootle-indexer-a.tari.com"))
+            && url_host_matches_exactly(&self.url, &TRUSTED_ESMERALDA_INDEXER_HOSTS_V1)
+            && self.url.port().is_none_or(|port| port == 443)
+            && self.path().is_empty()
+    }
+
+    /// Returns whether this endpoint is the application-trusted hosted
+    /// Mainnet indexer.
+    #[must_use]
+    pub fn is_trusted_mainnet_remote(&self) -> bool {
+        self.url.scheme() == "https"
+            && url_host_matches_exactly(&self.url, &TRUSTED_MAINNET_INDEXER_HOSTS_V1)
             && self.url.port().is_none_or(|port| port == 443)
             && self.path().is_empty()
     }
@@ -544,8 +574,9 @@ mod tests {
     fn trusted_esmeralda_remote_indexer_is_recognized() {
         for raw in [
             TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1,
-            "https://ootle-indexer-a.tari.com:443/",
-            "https://OOTLE-INDEXER-A.TARI.COM/",
+            "https://esme-indexer-a.ootle.tari.com:443/",
+            "https://ESME-INDEXER-A.OOTLE.TARI.COM/",
+            "https://esme-indexer-b.ootle.tari.com/",
         ] {
             let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
             assert!(
@@ -559,15 +590,91 @@ mod tests {
     #[test]
     fn arbitrary_remote_indexers_are_not_trusted_esmeralda() {
         for raw in [
-            "http://ootle-indexer-a.tari.com/",
+            "http://esme-indexer-a.ootle.tari.com/",
             "https://indexer.example.com/",
-            "https://ootle-indexer-a.tari.com/api",
+            "https://esme-indexer-a.ootle.tari.com/api",
             "http://127.0.0.1:12500",
         ] {
             let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
             assert!(
                 !endpoint.is_trusted_esmeralda_remote(),
                 "{raw} must not be trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_mainnet_remote_indexer_is_recognized() {
+        for raw in [
+            TRUSTED_MAINNET_INDEXER_ENDPOINT_V1,
+            "https://indexer-a.ootle.tari.com:443/",
+            "https://INDEXER-A.OOTLE.TARI.COM/",
+            "https://indexer-b.ootle.tari.com/",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                endpoint.is_trusted_mainnet_remote(),
+                "{raw} must be trusted"
+            );
+            assert!(!endpoint.is_loopback());
+        }
+    }
+
+    #[test]
+    fn arbitrary_remote_indexers_are_not_trusted_mainnet() {
+        for raw in [
+            "http://indexer-a.ootle.tari.com/",
+            "https://indexer.example.com/",
+            "https://indexer-a.ootle.tari.com/api",
+            "http://127.0.0.1:12500",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e:?}"));
+            assert!(
+                !endpoint.is_trusted_mainnet_remote(),
+                "{raw} must not be trusted"
+            );
+        }
+    }
+
+    #[test]
+    fn old_esmeralda_reporting_host_never_qualifies_as_mainnet() {
+        let endpoint = IndexerEndpoint::parse("https://ootle-indexer-a.tari.com/")
+            .unwrap_or_else(|error| panic!("valid public URL: {error:?}"));
+        assert!(!endpoint.is_trusted_mainnet_remote());
+        assert!(!endpoint.is_trusted_esmeralda_remote());
+    }
+
+    #[test]
+    fn current_esmeralda_host_never_qualifies_as_mainnet() {
+        let endpoint = IndexerEndpoint::parse("https://esme-indexer-a.ootle.tari.com/")
+            .unwrap_or_else(|error| panic!("valid public URL: {error:?}"));
+        assert!(!endpoint.is_trusted_mainnet_remote());
+    }
+
+    #[test]
+    fn current_mainnet_host_never_qualifies_as_esmeralda() {
+        let endpoint = IndexerEndpoint::parse("https://indexer-a.ootle.tari.com/")
+            .unwrap_or_else(|error| panic!("valid public URL: {error:?}"));
+        assert!(!endpoint.is_trusted_esmeralda_remote());
+    }
+
+    #[test]
+    fn subdomains_and_suffix_lookalikes_are_never_trusted() {
+        for raw in [
+            "https://sub.indexer-a.ootle.tari.com/",
+            "https://indexer-a.ootle.tari.com.attacker.example/",
+            "https://esme-indexer-a.ootle.tari.com.attacker.example/",
+            "https://not-esme-indexer-a.ootle.tari.com/",
+        ] {
+            let endpoint = IndexerEndpoint::parse(raw)
+                .unwrap_or_else(|error| panic!("valid lookalike URL {raw}: {error:?}"));
+            assert!(
+                !endpoint.is_trusted_mainnet_remote(),
+                "{raw} must not be Mainnet"
+            );
+            assert!(
+                !endpoint.is_trusted_esmeralda_remote(),
+                "{raw} must not be Esmeralda"
             );
         }
     }

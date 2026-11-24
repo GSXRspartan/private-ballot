@@ -1,0 +1,74 @@
+name: PR Qualification Checks
+
+# Scoped, secret-free checks for pull requests. These cover the reviewed Rust
+# security regressions and the TypeScript suites. No wallet, VPS, Cloudflare,
+# signing material, or funded transaction is involved.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-qualification-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  rust-regressions:
+    name: Rust security regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@1.97.1
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config libssl-dev cmake
+      - name: Hosted + anchor tests
+        run: cargo test --locked -p tari-cc-private-ballot-hosted -p tari-cc-private-ballot-anchor
+
+  web-regressions:
+    name: TypeScript ${{ matrix.project }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [gui, hosted-web]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+      - name: Install dependencies
+        working-directory: ${{ matrix.project }}
+        run: npm ci
+      # hosted-web imports generated wasm-bindgen glue; generate it with the
+      # same pinned toolchain used locally before type checking.
+      - name: Install pinned Rust with wasm target
+        if: matrix.project == 'hosted-web'
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-pack
+        if: matrix.project == 'hosted-web'
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: "v0.15.0"
+      - name: Generate Hosted WASM bindings
+        if: matrix.project == 'hosted-web'
+        run: wasm-pack build crates/hosted-wasm --target web --out-dir ../../hosted-web/src/wasm --release
+      - name: Type check
+        working-directory: ${{ matrix.project }}
+        run: npx tsc --noEmit
+      - name: Unit tests
+        working-directory: ${{ matrix.project }}
+        run: npm test

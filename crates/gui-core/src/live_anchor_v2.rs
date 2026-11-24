@@ -547,3 +547,85 @@ fn hex_nibble(byte: u8) -> Result<u8, GuiCoreError> {
         _ => Err(missing("hex digit")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Proves the JSON contract between Rust's GuiV2AnchorPublishPreparationV1 and
+    /// TypeScript's DesktopBundleSource. Generates a cross-language fixture at
+    /// hosted-web/test/fixtures/rust_v2_anchor_preparation.json that the TypeScript
+    /// test suite reads to verify the full Rust→TS→Hosted→Connect pipeline.
+    ///
+    /// Run `cargo test -p tari-cc-private-ballot-gui-core` to regenerate.
+    #[test]
+    fn v2_anchor_preparation_json_contract_and_cross_language_fixture() {
+        // These values match the TypeScript test constants in
+        // hosted-web/test/browser-anchor-mounted.test.mjs so the TypeScript
+        // cross-language test can reuse the same harness.
+        //
+        // IMPORTANT: public_summary_json MUST use the CANONICAL key order produced
+        // by OotleAnchorPublicPayloadV2::to_canonical_json_bytes and expected by
+        // parseCanonicalPublicSummaryV2 on the TypeScript side. serde_json::json!()
+        // would produce alphabetical order (BTreeMap backend) which would fail
+        // parseCanonicalPublicSummaryV2's byte-for-byte canonical check.
+        let anchor_digest_hex = "67".repeat(32);
+        let public_summary_json = concat!(
+            r#"{"schema":"TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_PUBLIC_V2","version":2,"network":"mainnet","election_id":"election-a","question":"Adopt?","eligible_voters":2,"accepted_ballots":2,"rejected_ballots":0,"results":[{"label":"Yes","machine_id":"01","votes":2}],"ballot_kind":"approval","confidentiality_mode":"aggregate","proof_suite":"triptych-v1","manifest_hash":"#,
+            r#""1111111111111111111111111111111111111111111111111111111111111111","archive_hash":"2222222222222222222222222222222222222222222222222222222222222222","voter_registry_commitment":"3333333333333333333333333333333333333333333333333333333333333333","ballot_option_commitment":"4444444444444444444444444444444444444444444444444444444444444444","archive_finalized":true,"finalized_timestamp_unix_secs":null,"template_address":"template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb","template_module":"tari_private_ballot_anchor_v2","template_function":"publish_anchor_v2","template_event_topic":"TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2","template_artifact_digest":"6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830"}"#,
+        ).to_owned();
+
+        let prep = GuiV2AnchorPublishPreparationV1 {
+            template_address:
+                "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb"
+                    .to_owned(),
+            template_module: "tari_private_ballot_anchor_v2".to_owned(),
+            template_function: "publish_anchor_v2".to_owned(),
+            // Tauri IPC sends this string; TypeScript uses
+            // canonicalEventTopicFromBindingTopic() to normalise the prefix casing.
+            template_event_topic:
+                "tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2".to_owned(),
+            anchor_digest_hex: anchor_digest_hex.clone(),
+            // arguments: [anchorDigestHex, network, electionId, publicSummaryJson]
+            // This is the exact shape buildBundleFromDesktop expects (args.length === 4,
+            // args[0] === anchorDigestHex, args[3] === publicSummaryJson).
+            arguments: vec![
+                anchor_digest_hex,
+                "mainnet".to_owned(),
+                "election-a".to_owned(),
+                public_summary_json.clone(),
+            ],
+            public_summary_json,
+        };
+
+        let as_json = serde_json::to_value(&prep).expect("GuiV2AnchorPublishPreparationV1 must serialize");
+
+        // Assert the JSON field names (Tauri IPC converts these snake_case keys to camelCase).
+        for field in &[
+            "template_address", "template_module", "template_function",
+            "template_event_topic", "anchor_digest_hex", "arguments", "public_summary_json",
+        ] {
+            assert!(as_json.get(field).is_some(), "field {field} must be present in JSON");
+        }
+        // arguments must be a 4-element array — the shape buildBundleFromDesktop validates.
+        let args = as_json["arguments"].as_array().expect("arguments must be an array");
+        assert_eq!(args.len(), 4, "arguments: [anchorDigestHex, network, electionId, publicSummaryJson]");
+        // args[0] and anchor_digest_hex must agree (buildBundleFromDesktop enforces this).
+        assert_eq!(args[0], as_json["anchor_digest_hex"], "args[0] must equal anchor_digest_hex");
+        // args[3] and public_summary_json must agree.
+        assert_eq!(args[3], as_json["public_summary_json"], "args[3] must equal public_summary_json");
+
+        // Write the fixture file consumed by the TypeScript cross-language test.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("repo root")
+            .join("hosted-web/test/fixtures/rust_v2_anchor_preparation.json");
+        if let Some(dir) = fixture.parent() {
+            std::fs::create_dir_all(dir).ok();
+        }
+        let json = serde_json::to_string_pretty(&prep).unwrap() + "\n";
+        std::fs::write(&fixture, json)
+            .unwrap_or_else(|e| eprintln!("fixture write skipped (CI may be read-only): {e}"));
+    }
+}

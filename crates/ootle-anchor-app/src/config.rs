@@ -94,7 +94,7 @@ pub enum ConfigFileError {
     DigestMismatch,
     /// A field value was invalid (bad identifier, bad endpoint, etc.).
     InvalidData,
-    /// The selected testnet is not supported.
+    /// The selected network is not supported.
     UnsupportedNetwork,
     /// The maximum fee was zero.
     InvalidMaxFee,

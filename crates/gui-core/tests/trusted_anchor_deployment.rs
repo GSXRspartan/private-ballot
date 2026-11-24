@@ -7,12 +7,18 @@ use serde_json::Value;
 use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_FUNCTION_V1, ANCHOR_TEMPLATE_MODULE_V1,
 };
+use tari_cc_private_ballot_deployment_registry::{
+    DeploymentStatus, MAINNET_V2_TEMPLATE_ADDRESS, released_v2_deployment_registry,
+};
 use tari_cc_private_ballot_gui_core::{
     GuiTrustedOotleDeploymentLockRequestV1, GuiTrustedOotleDeploymentLockRequestV2,
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
     TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
-    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, inspect_template_wasm_v1,
+    load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    load_trusted_ootle_deployment_v2_with_registry_for_test,
     lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
+    lock_trusted_ootle_deployment_v2_with_registry_for_test,
     template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
     trusted_ootle_deployment_path_v1, trusted_ootle_deployment_path_v2,
     unlock_trusted_ootle_deployment_v1,
@@ -289,8 +295,8 @@ fn corrupt_or_unsupported_saved_record_fails_closed() {
 
 fn valid_v2_request() -> GuiTrustedOotleDeploymentLockRequestV2 {
     GuiTrustedOotleDeploymentLockRequestV2 {
-        network: "esmeralda".to_owned(),
-        template_address: format!("template_{}", "66".repeat(32)),
+        network: TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK.to_owned(),
+        template_address: MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
         template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
     }
 }
@@ -416,4 +422,189 @@ fn v2_lock_rejects_wrong_abi_or_artifact_digest() {
         .expect("write V2 mutation");
         assert!(load_trusted_ootle_deployment_v2(dir.path()).is_err());
     }
+}
+
+#[test]
+fn v2_lock_artifact_digest_matches_release_registry_current_entry() {
+    // Drift guard: the lock constant and the checked-in release registry must
+    // keep naming the same reviewed Mainnet V2 artifact.
+    assert_eq!(
+        TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        tari_cc_private_ballot_deployment_registry::MAINNET_V2_ARTIFACT_BLAKE3
+    );
+}
+
+#[test]
+fn v2_lock_refuses_non_mainnet_network_and_historical_template() {
+    let dir = TempDir::new().expect("temp dir");
+
+    let wrong_network = GuiTrustedOotleDeploymentLockRequestV2 {
+        network: "esmeralda".to_owned(),
+        template_address: MAINNET_V2_TEMPLATE_ADDRESS.to_owned(),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+    };
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &wrong_network)
+            .expect_err("esmeralda lock is refused")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+
+    let historical_template = GuiTrustedOotleDeploymentLockRequestV2 {
+        network: TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK.to_owned(),
+        template_address: format!("template_{}", "bb".repeat(32)),
+        template_artifact_digest_hex: TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX.to_owned(),
+    };
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &historical_template)
+            .expect_err("non-current template lock is refused")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert!(!trusted_ootle_deployment_path_v2(dir.path()).exists());
+}
+
+#[test]
+fn v2_saved_record_refuses_non_mainnet_identity() {
+    let dir = TempDir::new().expect("temp dir");
+    for (network, template_address) in [
+        ("esmeralda", MAINNET_V2_TEMPLATE_ADDRESS),
+        (TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee"),
+    ] {
+        fs::write(
+            trusted_ootle_deployment_path_v2(dir.path()),
+            format!(
+                r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2","network":"{network}","template_address":"{template_address}","template_artifact_digest_hex":"{digest}","template_module":"tari_private_ballot_anchor_v2","template_function":"publish_anchor_v2","template_event_topic":"tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2","locked_at_unix_ms":1}}"#,
+                digest = TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+            ),
+        )
+        .expect("write saved V2 record");
+        assert_eq!(
+            load_trusted_ootle_deployment_v2(dir.path())
+                .expect_err("saved record outside the exact Mainnet identity is refused")
+                .code(),
+            "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+        );
+        fs::remove_file(trusted_ootle_deployment_path_v2(dir.path())).expect("remove record");
+    }
+}
+
+#[test]
+fn v2_lock_accepted_by_registry_current_resolver() {
+    let dir = TempDir::new().expect("temp dir");
+    let status = lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+    assert!(status.locked);
+    let deployment = status.deployment.expect("deployment present");
+    assert_eq!(deployment.network, TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK);
+    assert_eq!(deployment.template_address, MAINNET_V2_TEMPLATE_ADDRESS);
+    assert_eq!(
+        deployment.template_artifact_digest_hex,
+        TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX
+    );
+    // Loading the saved lock must also pass registry validation
+    let loaded = load_trusted_ootle_deployment_v2(dir.path()).expect("lock loads");
+    assert!(loaded.locked);
+    assert_eq!(loaded.deployment.expect("deployment").template_address, MAINNET_V2_TEMPLATE_ADDRESS);
+}
+
+#[test]
+fn v2_lock_rejects_historical_template_via_registry() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut request = valid_v2_request();
+    // Use the historical Esmeralda template address with mainnet network/digest
+    request.template_address = format!("template_{}", "bb".repeat(32));
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2(dir.path(), &request)
+            .expect_err("historical template rejected")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+}
+
+#[test]
+fn v2_lock_rejects_missing_current_in_registry() {
+    let dir = TempDir::new().expect("temp dir");
+    let mut registry = released_v2_deployment_registry();
+    for entry in &mut registry.entries {
+        if entry.network == TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK {
+            entry.status = DeploymentStatus::Superseded;
+        }
+    }
+    assert_eq!(
+        lock_trusted_ootle_deployment_v2_with_registry_for_test(
+            dir.path(),
+            &valid_v2_request(),
+            &registry,
+        )
+        .expect_err("no uniquely Current registry entry must refuse the lock")
+        .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert!(!trusted_ootle_deployment_path_v2(dir.path()).exists());
+}
+
+#[test]
+fn v2_saved_lock_invalidated_when_registry_entry_no_longer_current() {
+    let dir = TempDir::new().expect("temp dir");
+    // First, lock the valid Current deployment
+    lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+    // Now simulate the registry no longer having this entry as Current
+    // by writing a saved lock with a template address that doesn't match
+    // the Current entry in the registry (using the historical template address)
+    fs::write(
+        trusted_ootle_deployment_path_v2(dir.path()),
+        format!(
+            r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_TRUSTED_OOTLE_DEPLOYMENT_V2","network":"mainnet","template_address":"{template}","template_artifact_digest_hex":"{digest}","template_module":"tari_private_ballot_anchor_v2","template_function":"publish_anchor_v2","template_event_topic":"tari_private_ballot_anchor_v2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2","locked_at_unix_ms":1}}"#,
+            template = format!("template_{}", "bb".repeat(32)),
+            digest = TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
+        ),
+    )
+    .expect("write saved V2 lock with historical template");
+    // Loading should now fail because the registry's Current entry has a
+    // different template address
+    assert_eq!(
+        load_trusted_ootle_deployment_v2(dir.path())
+            .expect_err("saved lock with historical template is refused")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+}
+
+#[test]
+fn v2_lock_rejects_multiple_current_in_registry() {
+    let dir = TempDir::new().expect("temp dir");
+    lock_trusted_ootle_deployment_v2(dir.path(), &valid_v2_request()).expect("V2 lock");
+    let saved_bytes = fs::read(trusted_ootle_deployment_path_v2(dir.path()))
+        .expect("saved lock bytes");
+
+    let mut retired = released_v2_deployment_registry();
+    for entry in &mut retired.entries {
+        if entry.network == TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK {
+            entry.status = DeploymentStatus::Superseded;
+        }
+    }
+    assert_eq!(
+        load_trusted_ootle_deployment_v2_with_registry_for_test(dir.path(), &retired)
+            .expect_err("unchanged lock must fail after its deployment retires")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert_eq!(
+        fs::read(trusted_ootle_deployment_path_v2(dir.path())).expect("saved lock remains"),
+        saved_bytes
+    );
+
+    let mut ambiguous = released_v2_deployment_registry();
+    let duplicate = ambiguous.entries[0].clone();
+    ambiguous.entries.push(duplicate);
+    assert_eq!(
+        load_trusted_ootle_deployment_v2_with_registry_for_test(dir.path(), &ambiguous)
+            .expect_err("unchanged lock must fail with multiple Current deployments")
+            .code(),
+        "GUI_TRUSTED_OOTLE_DEPLOYMENT_INVALID"
+    );
+    assert_eq!(
+        fs::read(trusted_ootle_deployment_path_v2(dir.path())).expect("saved lock remains"),
+        saved_bytes
+    );
 }

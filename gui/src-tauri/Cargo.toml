@@ -19,6 +19,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+embed-resource = "3"
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -34,12 +35,16 @@ zeroize = { version = "=1.9.0", default-features = false, features = ["alloc"] }
 # See src/walletd_credential_store.rs for the boundary contract.
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
 tari-cc-private-ballot-gui-core = { path = "../../crates/gui-core" }
+tari-cc-private-ballot-protocol = { path = "../../crates/protocol" }
 tari-cc-private-ballot-archive = { path = "../../crates/archive" }
 tari-cc-private-ballot-anchor = { path = "../../crates/anchor" }
 tari-cc-private-ballot-ootle-anchor-app = { path = "../../crates/ootle-anchor-app" }
 tari-cc-private-ballot-ootle-anchor-network-adapters = { path = "../../crates/ootle-anchor-network-adapters" }
 tari-cc-private-ballot-transport-gateway = { path = "../../crates/transport-gateway" }
 tari-cc-private-ballot-transport-network = { path = "../../crates/transport-network" }
+# HTTP client for the hosted archive import command. Pinned to the version
+# already in the lockfile via the ootle-anchor-network-adapters transitive dep.
+reqwest = { version = "=0.13.4", default-features = false, features = ["json"] }
 
 [features]
 # The normal public release enables the managed-Tor production transport. The

@@ -29,6 +29,7 @@ use tari_cc_private_ballot_ootle_receipt_anchor_adapter::{
 };
 use tari_consensus_types::Decision;
 use tari_engine_types::Epoch;
+use tari_engine_types::encoded::Encoded;
 use tari_engine_types::events::Event;
 use tari_engine_types::fees::FeeReceipt;
 use tari_engine_types::transaction_receipt::{DiffSummary, FinalizeOutcome, TransactionReceipt};
@@ -348,9 +349,13 @@ impl IndexerReceiptWireTransport for ScriptedIndexerTransport {
         self.receipt_calls += 1;
         self.captured_receipt_address = Some(address);
         match &self.response {
-            ScriptedIndexerResponse::Finalized(receipt) => Ok(GetTransactionReceiptResponse {
-                receipt: build_transaction_receipt(receipt),
-            }),
+            ScriptedIndexerResponse::Finalized(receipt) => {
+                let encoded =
+                    Encoded::encode(&build_transaction_receipt(receipt)).map_err(|_| {
+                        TransportError::from_category(TransportErrorCategory::MalformedResponse)
+                    })?;
+                Ok(GetTransactionReceiptResponse { receipt: encoded })
+            }
             ScriptedIndexerResponse::Rejected { .. }
             | ScriptedIndexerResponse::Pending
             | ScriptedIndexerResponse::NotFound => Err(TransportError::from_category(
@@ -372,9 +377,11 @@ impl IndexerReceiptWireTransport for ScriptedIndexerTransport {
                     details: bound_rejection_reason(reason.clone()).unwrap_or_default(),
                     rejected_time: fixed_primitive_datetime(),
                 },
+                receipt: None,
             }),
             ScriptedIndexerResponse::Pending => Ok(GetTransactionResultResponse {
                 result: IndexerTransactionFinalizedResult::Pending,
+                receipt: None,
             }),
             ScriptedIndexerResponse::NotFound => Err(TransportError::from_category(
                 TransportErrorCategory::NotFound,
@@ -499,6 +506,7 @@ impl<T: IndexerReceiptWireTransport> IndexerReceiptNetworkAdapter<T> {
                     .transport
                     .get_transaction_result(&GetTransactionResultRequest {
                         transaction_id: ootle_id,
+                        include_proof: false,
                     });
                 match result {
                     Ok(response) => match response.result {
@@ -562,6 +570,7 @@ impl<T: IndexerReceiptWireTransport> IndexerAnchorReceiptClient
             Err(error) if error.is_not_found() => {
                 let result_request = GetTransactionResultRequest {
                     transaction_id: ootle_id,
+                    include_proof: false,
                 };
                 match self.transport.get_transaction_result(&result_request) {
                     Ok(result_response) => match result_response.result {

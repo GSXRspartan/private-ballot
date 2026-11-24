@@ -1,13 +1,85 @@
+import { useCallback, useEffect, useRef, useState } from "react";
 import { pickDirectory } from "../api/dialog";
+import { isDesktopShell } from "../api/client";
 import { useAppState } from "../state/AppState";
 import { useTheme, ThemeMode } from "../theme/ThemeProvider";
 import { Card } from "../components/ui";
+import { createBrowserWalletRuntime } from "../wallet/browserWalletRuntime";
+import { initialWalletEntries, walletEntryButton, walletEntryStatus } from "../wallet/settingsState";
+import type { ProviderKind } from "../wallet/types";
+import type { WalletEntry } from "../wallet/settingsState";
 
 const THEME_OPTIONS: { value: ThemeMode; label: string; hint: string }[] = [
   { value: "system", label: "Automatic (follow OS)", hint: "Uses the operating system light/dark preference." },
   { value: "light", label: "Light", hint: "Always use the light theme." },
   { value: "dark", label: "Dark", hint: "Always use the dark theme." },
 ];
+
+function BrowserWalletCard() {
+  const [entries, setEntries] = useState<WalletEntry[]>(initialWalletEntries);
+  const runtimeRef = useRef<ReturnType<typeof createBrowserWalletRuntime> | null>(null);
+  const [probed, setProbed] = useState(false);
+
+  const applyEntry = useCallback((kind: ProviderKind, entry: WalletEntry) => {
+    setEntries((previous) =>
+      previous.map((candidate) => (candidate.kind === kind ? entry : candidate)),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (probed) return;
+    setProbed(true);
+    const runtime = createBrowserWalletRuntime(
+      window as unknown as Parameters<typeof createBrowserWalletRuntime>[0],
+    );
+    runtimeRef.current = runtime;
+    void runtime.probeAll(applyEntry);
+  }, [probed, applyEntry]);
+
+  const onConnect = useCallback(
+    (kind: ProviderKind) => {
+      runtimeRef.current?.connect(kind, applyEntry);
+    },
+    [applyEntry],
+  );
+
+  return (
+    <Card title="Tari Wallet (browser)">
+      <p className="form-hint">
+        Connection status for browser Tari wallets. This is only used when this application runs
+        in a normal web browser to publish an election anchor; the desktop application uses its
+        own local wallet connection. No balances, transaction history, or wallet contents are
+        displayed or stored here.
+      </p>
+      {entries.map((entry) => {
+        const button = walletEntryButton(entry);
+        return (
+          <div className="form-row" key={entry.kind}>
+            <label>{entry.label}</label>
+            <div className="file-row">
+              <span>{walletEntryStatus(entry)}</span>
+              {button.hidden ? null : (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={button.disabled}
+                  onClick={() => onConnect(entry.kind)}
+                >
+                  {button.label}
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+      <p className="form-hint">
+        Connecting only authorizes this page to ask the wallet to review and approve
+        transactions you explicitly submit. The application never receives keys, seed
+        phrases, or the wallet's private contents.
+      </p>
+    </Card>
+  );
+}
 
 /**
  * Settings: theme (automatic OS detection + manual override), data
@@ -51,6 +123,8 @@ export function Settings() {
           use the same navy and purple community palette.
         </p>
       </Card>
+
+      {!isDesktopShell() ? <BrowserWalletCard /> : null}
 
       <Card title="Directories">
         <p className="form-hint">

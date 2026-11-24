@@ -1,17 +1,26 @@
 # Private Ballot
 
 Private Ballot is privacy-preserving, verifiable voting software with
-optional public anchoring on Tari Ootle. It is a desktop application and
-protocol workspace for running non-binding governance pilot ballots. It is
-offline-first: the finalized election archive is the authoritative
-verification artifact, and an optional Tari Ootle anchor can commit public
-aggregate evidence on Esmeralda testnet.
+optional public anchoring on Tari Ootle. It runs as a **Hosted browser
+application** and as an optional Windows Tauri Desktop application, with a
+shared Rust protocol workspace for non-binding governance pilot ballots. The
+finalized, deterministic election archive is the authoritative verification
+artifact. An optional Tari Ootle **Mainnet V2** anchor commits only public
+aggregate evidence; it never publishes votes, voter credentials, or
+nullifiers.
 
-Status: **v0.1.0 Alpha, Governance Pilot, Esmeralda Testnet.** Private
-Ballot is an **Independent Open-Source Project**. It is **not affiliated
-with or endorsed by Tari Labs**, and it is not production election
+Status: **controlled staging release with one verified Mainnet anchor**;
+the original v0.1.0 alpha qualification numbers below are historical.
+Private Ballot is an **Independent Open-Source Project**. It is **not
+affiliated with or endorsed by Tari Labs**, and it is not production election
 software. Do not use it for binding governance, treasury, charter,
 employment, or legal decisions.
+
+The live staging website is
+[https://private-ballot-staging.ghostgate.boo](https://private-ballot-staging.ghostgate.boo).
+A separate production hostname (`ballot.ghostgate.boo`) is a design target
+only and **has not been deployed**. See
+[docs/hosted/production-deployment-design.md](docs/hosted/production-deployment-design.md).
 
 License: **MIT OR Apache-2.0** (at the recipient's option). See
 [LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT), and
@@ -23,6 +32,66 @@ machine-readable reports under
 ![Private Ballot home screen showing a finalized election marked Verified with an Anchored · Verified Tari Ootle anchor, 100 accepted and 0 rejected](docs/images/release-v0.1.0/01-home-verified-anchored.png)
 
 *Final 100-voter release qualification: verified election, independently verified archive, and confirmed Tari Ootle V2 anchor.*
+
+## Current verified architecture
+
+- **Hosted browser elections.** Organizers create and freeze elections,
+  enroll voters, and finalize in the browser on the staging website. Voters
+  use a downloaded credential artifact; credentials and private ballots are
+  never sent to the hosted backend.
+- **Browser-only organizer finalization.** A closed election is bound to an
+  authoritative transport binding, then finalized in the browser. The
+  derivation is byte-for-byte equal to the Desktop handoff; the browser cannot
+  invent a different binding. See
+  [docs/hosted/web-only-finalization-design.md](docs/hosted/web-only-finalization-design.md).
+- **Triptych anonymity with election-scoped nullifiers.** Membership proofs
+  use the vendored Tari Triptych implementation. Nullifiers are scoped to one
+  election, and duplicate/nullifier reuse is rejected. The published two-voter
+  demonstration election is `NON_BINDING_APPROVAL_PILOT` with `PUBLIC`
+  confidentiality mode and **two eligible voters**; it does not claim
+  anonymity beyond those two voters.
+- **Deterministic verified archives.** Finalization writes a canonical archive
+  whose six file digests and tally can be independently replayed. The archive,
+  not the chain, is the authoritative result. Offline replay is available in
+  the Desktop application and the independent verifier tools.
+- **Tari Ootle Mainnet V2 contract.** The released template is
+  `template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb`,
+  with artifact digest
+  `6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830`, emitting
+  `TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2`. Only the
+  current Mainnet entry is selectable; historical/testnet deployments are
+  retained as evidence only.
+- **Sapient integration.** The first funded Mainnet anchor was published from
+  the Hosted page with the Sapient browser wallet, including a mandatory
+  non-spending fee preflight and a durable-receipt check.
+- **Web Tari Universe integration.** The embedded provider, origin/CSP path,
+  and approval boundaries are implemented and covered by automated tests.
+  **Live funded qualification with Tari Universe has NOT been performed**; see
+  [docs/hosted/mainnet-fee-preflight-operator-qualification.md](docs/hosted/mainnet-fee-preflight-operator-qualification.md).
+- **Optional Desktop application.** The Tauri Desktop app adds managed Tor
+  intake/submission, hosted organizer bootstrap, descriptor exchange, hosted
+  archive import, V2 archive verification, and historic V1 verification
+  compatibility. Desktop publishing is independent of the hosted gate.
+- **Exact fee enforcement.** The Hosted page authorizes at most
+  **5000 µT (0.005 TARI)** via `maxFee` on every request and requires a fresh
+  dry-run estimate inside that cap. This limit was not changed. The provider
+  has no fee read-back, so the realized fee is confirmed from the on-chain
+  receipt.
+
+## First Mainnet anchor and verification
+
+The first real funded V2 anchor transaction is
+`28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`
+([explorer](https://explorer.tari.mw/tx/28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2)).
+Independent queries of both Mainnet indexers confirmed a finalized `Commit`
+with a full `accept` execution result, a proven durable receipt, the exact V2
+event topic and fields, the expected election/digest/archive/template
+identity, and **3477 µT (0.003477 TARI)** actually paid. Exactly one matching
+anchor publication was found. A transient receipt 404 during indexing was the
+cause of the initial "receipt unavailable" status; recovery re-verified the
+same saved transaction without resubmission. See the full, reproducible
+[Mainnet anchor verification report](docs/hosted/mainnet-anchor-verification-report.md)
+and [verification scope](docs/hosted/anchor-browser-verification.md).
 
 ## Downloads and installation
 
@@ -137,8 +206,7 @@ the installer does **not** ship:
   and point the app at its `tor.exe`. The app validates the path and
   launches Tor as a child process; it never resolves `tor` from `PATH`
   and never downloads Tor for you.
-- **Tari Ootle `walletd`** (v0.42.0 on Esmeralda, the post-testnet-reset
-  cohort) — required only if you want to publish an optional public anchor.
+- **Tari Ootle `walletd`** (v0.51.0 on Esmeralda, Protocol V1 cohort) — required only if you want to publish an optional public anchor.
   Voters do not need walletd
   and do not need tTARI. The app talks to walletd on loopback at
   `http://127.0.0.1:5100/json_rpc`. No wallet API key is stored in this
@@ -210,12 +278,31 @@ Its synthetic option choices are **deterministic and reproducible**
 
 ## Build And Test
 
-Frontend checks:
+Frontend checks (Hosted and GUI):
+
+```powershell
+cd hosted-web
+npm ci
+npx tsc --noEmit
+npm test
+cd ..\gui
+npm ci
+npx tsc --noEmit
+npm test
+```
+
+Real-Mainnet receipt/recovery regression tests (read-only fixture from the
+verified transaction):
 
 ```powershell
 cd gui
-npx tsc --noEmit
-npm test
+node --test --experimental-strip-types test/chainEvidence.test.ts test/mainnetAnchorReceipt.test.ts
+```
+
+Hosted Rust tests:
+
+```powershell
+cargo test -p tari-cc-private-ballot-hosted -p tari-cc-private-ballot-gui-core -p tari-cc-private-ballot-anchor-transport
 ```
 
 Focused V2 anchor lifecycle checks:
@@ -243,7 +330,18 @@ and checksums are recorded.
 
 ## Qualification and platform status
 
-Qualification numbers below reflect the v0.1.0 release pass.
+Qualification numbers below reflect the historical v0.1.0 release pass and
+are **not** a claim that the current Hosted/Mainnet branch or a new Desktop
+installer is release-qualified. On the reviewed Hosted branch, the Hosted Web
+suite (119 tests), GUI frontend suite (1147 tests), Hosted Rust library tests
+(73), gui-core library tests (155), focused gui-core anchor/lifecycle gates,
+anchor-transport tests, and the real-receipt regression tests pass. The
+Windows Tauri build produced an `.exe`, `.msi`, and `.nsis` installer and the
+built app launched and responded to a smoke test. However, six pre-existing
+`organizer_tor_intake` source-snapshot tests in `gui/src-tauri` still fail
+because they reference a removed function name; the Desktop installer is
+therefore **not release-qualified** pending their review. No new public
+Desktop binary has been published for this branch.
 
 **Windows 11 x64 — physically end-to-end qualified.** A final fresh physical
 election ran completely: 100 eligible voters, 100 selected, 100 submission
@@ -356,9 +454,46 @@ threat-model material lives mainly under [docs/transport/](docs/transport/);
 it documents organizer trust boundaries, transport assumptions, logging
 limits, archive authority, and alpha limitations.
 
+Hosted-specific assumptions and limits:
+
+- The browser can verify canonical summary encoding, deployment identity,
+  network, wallet/provider pinning, and the on-chain receipt, but it **cannot
+  re-replay the archive** it does not hold; archive-to-summary provenance is
+  established by the backend's canonical replay. Download the archive and use
+  the Desktop verifier to remove that trust.
+- A saved transaction is never resubmitted on recovery. A receipt that is not
+  yet indexed is shown as pending/retryable, never as verified or rejected.
+  Verification requires exact election, digest, template, topic, and
+  transaction provenance agreement.
+- Managed Tor often produces fewer than the privacy floor's transport
+  contributions. Reduced anonymity is surfaced to the user and must be
+  explicitly acknowledged before publishing.
+- The pilot election had two voters and public confidentiality. Do not
+  describe it as a large-anonymity-set or binding election.
+- Wallet integration is qualified with Sapient for the observed Mainnet
+  anchor. Tari Universe remains unqualified live, and there is no provider
+  API to read the realized fee back from an approval.
+
 Never commit live election archives, voter credentials, wallet databases,
 wallet API keys, LocalAppData runtime state, Tor service keys, transport
 authority private keys, or Ootle evidence sidecars from a real run.
+
+## Staging versus production
+
+- **Staging (live):** `https://private-ballot-staging.ghostgate.boo` — the
+  reviewed Hosted Web release used for the browser-only election lifecycle and
+  the first Mainnet anchor.
+- **Production (not deployed):** `ballot.ghostgate.boo` — requires an isolated
+  database and Worker/origin configuration, authority key custody, tested
+  backup/restore, CSP and wallet-origin permissions, rate limits, monitoring,
+  wallet qualification (including Tari Universe), documentation, and a
+  rehearsed rollback. See
+  [docs/hosted/production-deployment-design.md](docs/hosted/production-deployment-design.md).
+
+The public repository is
+[GSXRspartan/private-ballot](https://github.com/GSXRspartan/private-ballot).
+Publication of the audited branch is handled through a reviewed pull request;
+no production deploy or public Desktop installer is authorized by this README.
 
 ## Contributing
 

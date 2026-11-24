@@ -3,17 +3,16 @@
 //! The mapping is a small, exhaustive, exact-match table. It never falls back to
 //! a default, never reads an environment variable, never infers a network from a
 //! wallet address, and never passes the project identifier string through into
-//! the Ootle transaction. Only exact lowercase canonical testnet identifiers are
-//! accepted, so casing changes (`Esmeralda`), aliases (`esme`), production
-//! networks (`mainnet`, `stagenet`, `nextnet`), and any similar-but-different
-//! name are rejected rather than silently coerced.
+//! the Ootle transaction. Only exact lowercase canonical network identifiers are
+//! accepted, so casing changes (`Esmeralda`), aliases (`esme`),
+//! pre-production networks (`stagenet`, `nextnet`), and any
+//! similar-but-different name are rejected rather than silently coerced.
 //!
 //! The confirmed candidate networks for a non-binding testnet pilot are the two
 //! named public Ootle testnets, `esmeralda` and `igor`, plus `localnet` for
-//! offline and local development. Final target selection is left to a later
-//! configuration slice; this table only fixes which identifiers are mappable at
-//! all. `mainnet` (and the pre-production `stagenet`/`nextnet`) are deliberately
-//! out of scope and always rejected.
+//! offline and local development. The reviewed Mainnet V2 deployment is also
+//! explicitly mapped. Pre-production `stagenet` and `nextnet` remain out of
+//! scope and are always rejected.
 
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
 use tari_ootle_transaction::Network;
@@ -22,7 +21,8 @@ use crate::errors::OotleAnchorAdapterError;
 
 /// Exhaustive supported mapping from an exact lowercase canonical project
 /// network identifier to the pinned Ootle [`Network`].
-const SUPPORTED_TESTNET_MAPPINGS: &[(&str, Network)] = &[
+const SUPPORTED_NETWORK_MAPPINGS: &[(&str, Network)] = &[
+    ("mainnet", Network::MainNet),
     ("esmeralda", Network::Esmeralda),
     ("igor", Network::Igor),
     ("localnet", Network::LocalNet),
@@ -39,7 +39,7 @@ pub fn map_ootle_network(
 ) -> Result<Network, OotleAnchorAdapterError> {
     let requested = network_id.as_str();
 
-    for (name, network) in SUPPORTED_TESTNET_MAPPINGS {
+    for (name, network) in SUPPORTED_NETWORK_MAPPINGS {
         if requested == *name {
             return Ok(*network);
         }
@@ -54,6 +54,6 @@ pub fn map_ootle_network(
 ///
 /// This is the single source of truth for the supported mapping, exposed so
 /// tests and diagnostics enumerate the same identifiers the mapper accepts.
-pub fn supported_testnet_network_ids() -> impl Iterator<Item = &'static str> {
-    SUPPORTED_TESTNET_MAPPINGS.iter().map(|(name, _)| *name)
+pub fn supported_network_ids() -> impl Iterator<Item = &'static str> {
+    SUPPORTED_NETWORK_MAPPINGS.iter().map(|(name, _)| *name)
 }

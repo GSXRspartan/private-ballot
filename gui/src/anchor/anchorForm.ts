@@ -40,10 +40,20 @@ export interface AnchorFormState {
 }
 
 export const DEFAULT_WALLETD_ENDPOINT = "http://127.0.0.1:5100";
-export const DEFAULT_INDEXER_ENDPOINT = "https://ootle-indexer-a.tari.com/";
+export const DEFAULT_MAINNET_INDEXER_ENDPOINT = "https://indexer-a.ootle.tari.com/";
+export const DEFAULT_ESMERALDA_INDEXER_ENDPOINT = "https://esme-indexer-a.ootle.tari.com/";
 export const DEFAULT_NETWORK = "esmeralda";
+/** Default for the form's Esmeralda network. Use the network helper when a
+ * caller supplies a different network. */
+export const DEFAULT_INDEXER_ENDPOINT = DEFAULT_ESMERALDA_INDEXER_ENDPOINT;
 /** A safe, whitespace-free fallback fee-account reference. */
 export const DEFAULT_ACCOUNT_REFERENCE = "anchor-fee-account";
+
+export function defaultIndexerEndpointForNetwork(network: string): string {
+  return network.trim().toLowerCase() === "mainnet"
+    ? DEFAULT_MAINNET_INDEXER_ENDPOINT
+    : DEFAULT_ESMERALDA_INDEXER_ENDPOINT;
+}
 
 export function anchorSidecarPaths(archiveDirectory: string): {
   configPath: string;
@@ -127,12 +137,19 @@ export function applyConnectedWallet(
     state.accountReference.trim().length > 0 &&
     state.accountReference !== DEFAULT_ACCOUNT_REFERENCE &&
     !/\s/.test(state.accountReference);
+  const targetNetwork = deployment?.network ?? state.network;
+  const currentIndexer = state.indexerEndpoint.trim();
+  const replaceDefaultIndexer = currentIndexer.length === 0 ||
+    currentIndexer === DEFAULT_MAINNET_INDEXER_ENDPOINT ||
+    currentIndexer === DEFAULT_ESMERALDA_INDEXER_ENDPOINT;
   return {
     ...state,
     signerMode: "external-walletd",
-    network: deployment?.network ?? state.network,
+    network: targetNetwork,
     walletdEndpoint: DEFAULT_WALLETD_ENDPOINT,
-    indexerEndpoint: state.indexerEndpoint.trim().length > 0 ? state.indexerEndpoint : DEFAULT_INDEXER_ENDPOINT,
+    indexerEndpoint: replaceDefaultIndexer
+      ? defaultIndexerEndpointForNetwork(targetNetwork)
+      : state.indexerEndpoint,
     feeComponent: account.component_address,
     sealSignerKind: "account",
     sealSignerId: account.key_index !== null ? String(account.key_index) : state.sealSignerId,

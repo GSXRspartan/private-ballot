@@ -228,6 +228,57 @@ export async function pickV2AnchorEvidenceJson(
   );
 }
 
+/** Picks the public request downloaded from Hosted Manage. */
+export async function pickHostedBindingRequest(): Promise<string | null> {
+  return openFile(
+    "Import Hosted binding request",
+    [{ name: "Hosted binding request", extensions: ["hosted-binding-request.json", "json"] }],
+    "electionExport",
+  );
+}
+
+/** Chooses where the public, verified Desktop response will be written. */
+export async function pickHostedBindingHandoffPath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const rememberedDir = recallDirectory("electionExport");
+  const picked = await save({
+    title: "Export verified Desktop binding handoff",
+    defaultPath: rememberedDir
+      ? joinDefaultPath(rememberedDir, "desktop-binding-handoff.json")
+      : "desktop-binding-handoff.json",
+    filters: [{ name: "Desktop binding handoff", extensions: ["json"] }],
+  });
+  if (picked !== null) rememberDirectoryFromFile("electionExport", picked);
+  return picked;
+}
+
+/** Chooses where Desktop writes its public Hosted descriptor request. */
+export async function pickHostedDescriptorRequestPath(): Promise<string | null> {
+  if (!isDesktopShell()) return null;
+  const rememberedDir = recallDirectory("descriptorExchange");
+  const picked = await save({
+    title: "Export Hosted descriptor request",
+    defaultPath: rememberedDir
+      ? joinDefaultPath(rememberedDir, "hosted-descriptor-request.cbor")
+      : "hosted-descriptor-request.cbor",
+    filters: [{ name: "Hosted descriptor request", extensions: ["cbor"] }],
+  });
+  if (picked !== null) rememberDirectoryFromFile("descriptorExchange", picked);
+  return picked;
+}
+
+/** Chooses the authority-issued descriptor response downloaded from Hosted Manage. */
+export async function pickHostedDescriptorResponse(): Promise<string | null> {
+  return openFile(
+    "Import signed Hosted descriptor response",
+    [
+      { name: "Hosted descriptor response", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "descriptorExchange",
+  );
+}
+
 /**
  * Opens a native single-file picker for a governance document (Slice 5A8). The
  * document is treated as immutable raw bytes; no semantic parsing happens in
@@ -331,6 +382,37 @@ export async function pickElectionStatusExportPath(): Promise<string | null> {
   });
   if (picked !== null) rememberDirectoryFromFile("electionArtifact", picked);
   return picked;
+}
+
+/**
+ * Opens a native single-file picker for a pre-downloaded Hosted finalized
+ * archive JSON file. The frontend receives only the path; Rust reads,
+ * validates, and writes the archive files to the target directory.
+ */
+export async function pickHostedArchiveJson(): Promise<string | null> {
+  return openFile(
+    "Import Hosted finalized archive",
+    [
+      { name: "Hosted archive", extensions: ["json"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+    "electionExport",
+  );
+}
+
+/**
+ * Opens a native single-file picker for a V2 voter-public bundle downloaded
+ * from a Hosted election server. The frontend receives only the path; Rust
+ * verifies the bundle and configures the managed-Tor transport.
+ */
+export async function pickV2VoterBundle(): Promise<string | null> {
+  return openFile(
+    "Import V2 voter bundle from Hosted",
+    [
+      { name: "V2 voter bundle", extensions: ["cbor"] },
+      { name: "All files", extensions: ["*"] },
+    ],
+  );
 }
 
 /**

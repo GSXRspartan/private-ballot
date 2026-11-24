@@ -601,6 +601,7 @@ describe("guided disclosure adds no backend surface", () => {
       "api.voterTorStatus(",
       "api.importElectionStatusArtifact(",
       "api.fetchElectionStatusPrivate(",
+      "api.importV2VoterBundle(",
     ]);
     for (const call of new Set(voteApiCalls)) {
       assert.ok(allowedVote.has(call), `unexpected Vote API call: ${call}`);
@@ -620,6 +621,7 @@ describe("guided disclosure adds no backend surface", () => {
       "api.exportVoterTransportBundle(",
       "api.exportElectionStatusArtifact(",
       "api.writeFinalizedArchive(",
+      "api.writeHostedBindingHandoff(",
       "api.anchorDeploymentCapabilities(",
       "api.verifyArchive(",
       "api.trustedOotleDeploymentStatus(",
@@ -653,6 +655,13 @@ describe("guided disclosure adds no backend surface", () => {
       "api.productionTransportAuthorityStatus(",
       "api.configureProductionTransportAuthorityRoot(",
       "api.forgetProductionTransportAuthorityRoot(",
+      // Hosted descriptor exchange: request/response pipeline on the organizer
+      // side. Safe: carries only public artifacts, no private keys.
+      "api.exportHostedDescriptorRequest(",
+      "api.importHostedDescriptorResponse(",
+      // Import a Hosted archive: takes the archive JSON path and target
+      // directory, produces a verified archive on disk.
+      "api.importHostedArchive(",
     ]);
     for (const call of new Set(manageApiCalls)) {
       assert.ok(allowedManage.has(call), `unexpected Manage API call: ${call}`);

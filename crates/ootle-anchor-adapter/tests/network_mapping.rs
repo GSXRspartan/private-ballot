@@ -4,21 +4,22 @@ mod common;
 
 use common::network;
 use tari_cc_private_ballot_ootle_anchor_adapter::{
-    OotleAnchorAdapterError, map_ootle_network, supported_testnet_network_ids,
+    OotleAnchorAdapterError, map_ootle_network, supported_network_ids,
 };
 use tari_ootle_transaction::Network;
 
 #[test]
 fn every_supported_identifier_maps_to_its_ootle_network() {
     let expected = [
+        ("mainnet", Network::MainNet),
         ("esmeralda", Network::Esmeralda),
         ("igor", Network::Igor),
         ("localnet", Network::LocalNet),
     ];
 
-    // The supported set is exactly these three identifiers.
-    let supported: Vec<&str> = supported_testnet_network_ids().collect();
-    assert_eq!(supported, vec!["esmeralda", "igor", "localnet"]);
+    // The supported set is the exact Mainnet/testnet/local mapping table.
+    let supported: Vec<&str> = supported_network_ids().collect();
+    assert_eq!(supported, vec!["mainnet", "esmeralda", "igor", "localnet"]);
 
     for (identifier, ootle_network) in expected {
         match map_ootle_network(&network(identifier)) {
@@ -39,8 +40,8 @@ fn unsupported_identifier_is_rejected() {
 }
 
 #[test]
-fn mainnet_and_preproduction_networks_are_rejected() {
-    for identifier in ["mainnet", "stagenet", "nextnet"] {
+fn preproduction_networks_are_rejected() {
+    for identifier in ["stagenet", "nextnet"] {
         assert!(
             matches!(
                 map_ootle_network(&network(identifier)),

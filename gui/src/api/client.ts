@@ -18,6 +18,7 @@ import type {
   GuiV2AnchorEvidenceFileV1,
   GuiAnchorSnapshotInspectionV1,
   GuiAnchorDeploymentCapabilitiesV1,
+  GuiArchiveImportResultV1,
   GuiArchiveVerificationV1,
   GuiArchiveWriteResultV1,
   GuiBallotPresentationType,
@@ -68,6 +69,8 @@ import type {
   GuiVoterSelectionStatusV1,
   GuiVoterWorkflowStatusV1,
   ManagedTorStatusV1,
+  HostedDescriptorRequestExportResultV1,
+  HostedDescriptorResponseImportResultV1,
   OrganizerIntakeStatusV1,
   PresentationIdentifier,
   ShellInfoV1,
@@ -142,6 +145,10 @@ export const api = {
     call<GuiElectionSummaryV1>("load_election_folder", {
       folderPath,
     }),
+  importHostedOrganizerBootstrap: (bootstrapPath: string) =>
+    call<GuiElectionSummaryV1>("import_hosted_organizer_bootstrap", {
+      bootstrapPath,
+    }),
 
   unloadElection: () => call<void>("unload_election"),
 
@@ -197,6 +204,12 @@ export const api = {
       targetDir,
       governanceDocumentPath,
       requireTransportBinding,
+    }),
+
+  writeHostedBindingHandoff: (requestPath: string, targetPath: string) =>
+    call<import("./types").GuiHostedBindingHandoffResultV1>("write_hosted_binding_handoff", {
+      requestPath,
+      targetPath,
     }),
 
   anchorDeploymentCapabilities: () =>
@@ -553,6 +566,33 @@ export const api = {
     call<VoterBundleExportResultV1>("export_voter_transport_bundle", {
       destinationDir,
     }),
+  exportHostedDescriptorRequest: (
+    targetPath: string,
+    torExePath?: string,
+    remote?: {
+      socksHost: string;
+      socksPort: number;
+      onionHostname: string;
+      collectorPort: number;
+    },
+  ) =>
+    call<HostedDescriptorRequestExportResultV1>("export_hosted_descriptor_request", {
+      targetPath,
+      torExePath: torExePath && torExePath.length > 0 ? torExePath : null,
+      remote: remote
+        ? {
+            tor_mode: "external-remote",
+            socks_host: remote.socksHost,
+            socks_port: remote.socksPort,
+            onion_hostname: remote.onionHostname,
+            collector_port: remote.collectorPort,
+          }
+        : null,
+    }),
+  importHostedDescriptorResponse: (responsePath: string) =>
+    call<HostedDescriptorResponseImportResultV1>("import_hosted_descriptor_response", {
+      responsePath,
+    }),
   exportElectionStatusArtifact: (destinationPath: string) =>
     call<GuiElectionStatusExportResultV1>("export_election_status_artifact", {
       destinationPath,
@@ -570,6 +610,41 @@ export const api = {
     call<GuiArchiveWriteResultV1>("write_archive_with_governance_document", {
       targetDir,
       governanceDocumentPath,
+    }),
+  // Imports a pre-downloaded Hosted finalized archive from a JSON file on disk.
+  // The browser downloaded and saved it; Rust reads, verifies, and writes the
+  // archive files. No organizer secret is passed to Rust.
+  importHostedArchive: (
+    electionId: string,
+    archiveJsonPath: string,
+    targetDirectory: string,
+  ) =>
+    call<GuiArchiveImportResultV1>("import_hosted_archive", {
+      input: {
+        election_id: electionId,
+        archive_json_path: archiveJsonPath,
+        target_directory: targetDirectory,
+      },
+    }),
+  // Imports a production V2 voter-public bundle from a Hosted election server.
+  // The bundle is verified and the managed-Tor transport is configured. No
+  // credential reaches Rust; the voter picks the file saved from the browser.
+  importV2VoterBundle: (
+    bundlePath: string,
+    torMode?: string,
+    torExePath?: string,
+    voterTorDataDir?: string,
+    remote?: { host: string; port: number },
+  ) =>
+    call<ManagedTorStatusV1>("import_v2_voter_bundle", {
+      input: {
+        bundle_path: bundlePath,
+        tor_mode: torMode ?? null,
+        tor_exe_path: torExePath && torExePath.length > 0 ? torExePath : null,
+        voter_tor_data_dir: voterTorDataDir && voterTorDataDir.length > 0 ? voterTorDataDir : null,
+        remote_socks_host: remote ? remote.host : null,
+        remote_socks_port: remote ? remote.port : null,
+      },
     }),
 };
 

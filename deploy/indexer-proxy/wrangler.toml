@@ -1,0 +1,16 @@
+# Separate read-only chain-data Worker for the hosted browser dApp.
+# This is intentionally not the organizer-capability backend proxy configured
+# in hosted-web/wrangler.toml. Deploying remains a human-authorized operation.
+name = "private-ballot-indexer-proxy-staging"
+main = "./worker.js"
+compatibility_date = "2026-11-13"
+workers_dev = true
+
+[vars]
+# Fixed, public Mainnet indexer upstream. The worker accepts only its small
+# read-only allowlist and never lets a caller select an upstream or forward a
+# query string.
+INDEXER_UPSTREAM = "https://indexer-a.ootle.tari.com/"
+# Exact public hosted dApp origin allowed to read this Worker response. This
+# must change together with the hosted public origin before a human deploys.
+ALLOWED_ORIGIN = "https://private-ballot-staging.ghostgate.boo"

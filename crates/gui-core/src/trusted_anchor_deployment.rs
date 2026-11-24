@@ -16,6 +16,9 @@ use tari_cc_private_ballot_anchor_transport::{
     ANCHOR_EVENT_TOPIC_SUFFIX_V2, ANCHOR_TEMPLATE_MODULE_V1, ANCHOR_TEMPLATE_MODULE_V2,
     AnchorTemplateBindingV1, AnchorTemplateBindingV2,
 };
+use tari_cc_private_ballot_deployment_registry::{
+    DeploymentRegistry, released_v2_deployment_registry,
+};
 use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, HashProvider};
 
 use crate::error::GuiCoreError;
@@ -29,26 +32,35 @@ pub const TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2: &str =
 pub const TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2: &str = "trusted-ootle-anchor-deployment-v2.json";
 /// BLAKE3-256 of the reviewed V2 WASM that is eligible for manual publication.
 ///
-/// Current value is the **Tari Ootle v0.42.0 testnet-reset (esmeralda) cohort**
-/// artifact: the four-argument ABI template rebuilt against `tari_template_lib`
-/// `=0.33.0` and emitted path-clean (`--remap-path-prefix`) so no builder-local
-/// path is baked into the published bytes. Reproduced and re-verified locally
-/// at 61479 bytes with SHA-256
-/// `76532c3c703aa2e755c8f436b0055a30b42caab2d803bbbc762af0eee9bbcfce`. This is
+/// Current value is the **Tari Ootle mainnet (v0.53.x cohort)** artifact: the
+/// four-argument ABI template rebuilt against `tari_template_lib =0.40.0` and
+/// emitted path-clean (`--remap-path-prefix`) so no builder-local path is baked
+/// into the published bytes. Reproduced and re-verified locally at 61605 bytes
+/// with SHA-256
+/// `67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7`. This is
 /// the only BLAKE3 the V2 lock accepts.
 ///
-/// The v0.42 event-metadata model is CBOR (tari-ootle PR #2679), a
-/// consensus-breaking change, so a template built against the older
-/// `tari_template_lib` is not deployable on the reset network at all.
+/// The v0.53 event-metadata model is CBOR (tari-ootle PR #2679). The template
+/// uses only `String` arguments and a `Unit` return — no well-known types — so
+/// its on-chain ABI is unchanged between the 0.33.0 and 0.40.0 builds.
 ///
 /// Superseded historical artifacts (intentionally rejected by the lock):
-/// - `475421a448be977dbf13c37d91b0ed9ef9c4d43f75da438ec64ea9cff38c66cc`
-///   — the v0.39.2 / `tari_template_lib` `=0.31.1` four-argument build
-///   (60714 bytes, SHA-256 `022beeae…4d49`), valid only on the pre-reset
-///   network. See `release-staging/` and the `docs/` historical records.
-/// - the earlier six-argument WASM (`e0bdf9c4…4c8c`).
+/// - `ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908`
+///   — the v0.42 / `tari_template_lib` `=0.33.0` four-argument build
+///   (61479 bytes, SHA-256 `76532c3c…`), valid only on the pre-reset
+///   network. See §2a of the runbook and the `docs/` historical records.
+/// - the earlier six-argument WASM (`e0bdf9c4…`).
 pub const TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX: &str =
-    "ce5334dfc0cdbfe74726accfe7201a778331bf2020865a2fc2b24a68a971d908";
+    "6ea3448e1beae71920a5ee5ce0cf51057a135a1f3a4e05dd26717a310e076830";
+/// The exact Ootle network name the V2 deployment lock accepts. Mainnet is the
+/// only release-supported network; the historical pre-reset Esmeralda
+/// deployment is evidence-only and can never satisfy this lock.
+pub const TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK: &str = "mainnet";
+/// The exact template address the V2 lock accepts: the single `CURRENT`
+/// Mainnet entry of the checked-in release registry
+/// ([`tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS`]).
+/// Any other template — including the historical Esmeralda V2 deployment — is
+/// rejected at lock time and rejected again when a saved record is loaded.
 pub const TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1: &str = "BLAKE3-256";
 pub const MAX_TEMPLATE_WASM_BYTES_V1: usize = 16 * 1024 * 1024;
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -249,6 +261,13 @@ pub fn unlock_trusted_ootle_deployment_v1(
 pub fn load_trusted_ootle_deployment_v2(
     app_data_dir: &Path,
 ) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    load_trusted_ootle_deployment_v2_with_registry(app_data_dir, &released_v2_deployment_registry())
+}
+
+fn load_trusted_ootle_deployment_v2_with_registry(
+    app_data_dir: &Path,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
     let path = trusted_ootle_deployment_path_v2(app_data_dir);
     if !path.exists() {
         return Ok(unlocked_status_v2());
@@ -257,7 +276,7 @@ pub fn load_trusted_ootle_deployment_v2(
         fs::read(&path).map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
     let deployment: GuiTrustedOotleDeploymentV2 = serde_json::from_slice(&bytes)
         .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
-    validate_saved_deployment_v2(&deployment)?;
+    validate_saved_deployment_v2_with_registry(&deployment, registry)?;
     Ok(GuiTrustedOotleDeploymentStatusV2 {
         locked: true,
         deployment: Some(deployment),
@@ -265,20 +284,69 @@ pub fn load_trusted_ootle_deployment_v2(
     })
 }
 
+/// Test-only registry injection for proving that an unchanged saved lock fails
+/// if release state no longer has exactly one matching `CURRENT` deployment.
+#[cfg(feature = "test-support")]
+pub fn load_trusted_ootle_deployment_v2_with_registry_for_test(
+    app_data_dir: &Path,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    load_trusted_ootle_deployment_v2_with_registry(app_data_dir, registry)
+}
+
 /// Creates the independent V2 deployment lock. The immutable V2 ABI is
-/// derived here, never supplied by the GUI.
+/// derived here, never supplied by the GUI. The lock must match the unique
+/// `CURRENT` V2 deployment for the requested network as resolved by the
+/// checked-in release registry.
 pub fn lock_trusted_ootle_deployment_v2(
     app_data_dir: &Path,
     request: &GuiTrustedOotleDeploymentLockRequestV2,
 ) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    lock_trusted_ootle_deployment_v2_with_registry(
+        app_data_dir,
+        request,
+        &released_v2_deployment_registry(),
+    )
+}
+
+fn lock_trusted_ootle_deployment_v2_with_registry(
+    app_data_dir: &Path,
+    request: &GuiTrustedOotleDeploymentLockRequestV2,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
     let path = trusted_ootle_deployment_path_v2(app_data_dir);
     if path.exists() {
-        let _ = load_trusted_ootle_deployment_v2(app_data_dir)?;
+        let _ = load_trusted_ootle_deployment_v2_with_registry(app_data_dir, registry)?;
         return Err(GuiCoreError::trusted_ootle_deployment_locked());
     }
 
     let artifact_digest = parse_lower_digest_hex(&request.template_artifact_digest_hex)?;
     if request.template_artifact_digest_hex != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
+    // Resolve the unique Current deployment for the requested network from the
+    // checked-in release registry. This enforces: exact network match, single
+    // Current entry, correct ABI, correct template address, and correct artifact
+    // digest. Historical (non-Current) deployments are rejected.
+    let entry = registry
+        .resolve_current(
+            &request.network.trim(),
+            "TariPrivateBallotAnchorV2",
+            Some(TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX),
+        )
+        .map_err(|e| match e {
+            tari_cc_private_ballot_deployment_registry::RegistryError::NoCurrentDeployment
+            | tari_cc_private_ballot_deployment_registry::RegistryError::MultipleCurrentDeployments
+            | tari_cc_private_ballot_deployment_registry::RegistryError::NetworkMismatch
+            | tari_cc_private_ballot_deployment_registry::RegistryError::AbiMismatch
+            | tari_cc_private_ballot_deployment_registry::RegistryError::HashMismatch => {
+                GuiCoreError::trusted_ootle_deployment_invalid()
+            }
+            _ => GuiCoreError::trusted_ootle_deployment_invalid(),
+        })?;
+    // The registry resolution already guarantees the template address and digest
+    // match the unique Current entry. Verify the request matches exactly.
+    if request.template_address.trim() != entry.template_address {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
     let deployment = GuiTrustedOotleDeploymentV2 {
@@ -291,7 +359,7 @@ pub fn lock_trusted_ootle_deployment_v2(
         template_event_topic: trusted_ootle_deployment_event_topic_v2(),
         locked_at_unix_ms: now_unix_ms()?,
     };
-    validate_saved_deployment_v2(&deployment)?;
+    validate_saved_deployment_v2_with_registry(&deployment, registry)?;
     fs::create_dir_all(app_data_dir)
         .map_err(|_| GuiCoreError::io_failure("trusted-ootle-deployment-v2"))?;
     write_deployment_create_new(&path, &deployment)?;
@@ -300,6 +368,17 @@ pub fn lock_trusted_ootle_deployment_v2(
         deployment: Some(deployment),
         fixed: trusted_ootle_deployment_fixed_v2(),
     })
+}
+
+/// Test-only registry injection for lock-resolution regression coverage. This
+/// is feature-gated so release code has no runtime registry override.
+#[cfg(feature = "test-support")]
+pub fn lock_trusted_ootle_deployment_v2_with_registry_for_test(
+    app_data_dir: &Path,
+    request: &GuiTrustedOotleDeploymentLockRequestV2,
+    registry: &DeploymentRegistry,
+) -> Result<GuiTrustedOotleDeploymentStatusV2, GuiCoreError> {
+    lock_trusted_ootle_deployment_v2_with_registry(app_data_dir, request, registry)
 }
 
 pub fn unlock_trusted_ootle_deployment_v2(
@@ -418,6 +497,13 @@ fn validate_saved_deployment(
 fn validate_saved_deployment_v2(
     deployment: &GuiTrustedOotleDeploymentV2,
 ) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
+    validate_saved_deployment_v2_with_registry(deployment, &released_v2_deployment_registry())
+}
+
+fn validate_saved_deployment_v2_with_registry(
+    deployment: &GuiTrustedOotleDeploymentV2,
+    registry: &DeploymentRegistry,
+) -> Result<AnchorTemplateBindingV2, GuiCoreError> {
     if deployment.schema != TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2
         || deployment.template_module != ANCHOR_TEMPLATE_MODULE_V2
         || deployment.template_function != ANCHOR_EVENT_FUNCTION_V2
@@ -427,6 +513,23 @@ fn validate_saved_deployment_v2(
         || deployment.template_artifact_digest_hex
             != TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX
     {
+        return Err(GuiCoreError::trusted_ootle_deployment_invalid());
+    }
+    // Additionally, validate against the release registry: the saved deployment
+    // must correspond to the unique Current entry for its network. If the
+    // registry no longer has this deployment as Current (e.g., it was
+    // superseded), the saved lock is rejected.
+    let entry = registry
+        .resolve_current(
+            &deployment.network,
+            "TariPrivateBallotAnchorV2",
+            Some(TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX),
+        )
+        .map_err(|_| GuiCoreError::trusted_ootle_deployment_invalid())?;
+    // The template address in the saved deployment must match the Current
+    // entry's template address. A saved lock with a superseded/historical
+    // template address is rejected.
+    if deployment.template_address != entry.template_address {
         return Err(GuiCoreError::trusted_ootle_deployment_invalid());
     }
     OotleNetworkIdV1::new(deployment.network.clone())

@@ -42,6 +42,10 @@ pub mod error;
 pub mod governance;
 mod hex;
 pub mod historical_replay;
+pub mod hosted_descriptor_exchange;
+pub mod hosted_descriptor_pending;
+pub mod hosted_binding_handoff;
+pub mod hosted_voter_bundle;
 pub mod inspect;
 pub mod instrumentation;
 pub mod intake;
@@ -50,6 +54,7 @@ pub mod live_anchor_driver;
 pub mod live_anchor_preflight;
 pub mod live_anchor_v2;
 pub mod live_anchor_v2_lifecycle;
+pub mod organizer_bootstrap;
 pub mod participation;
 pub mod private_intake_inbox;
 pub mod production_transport_authority_config;
@@ -108,6 +113,22 @@ pub use historical_replay::{
     DEFAULT_HISTORICAL_REPLAY_BATCH_SIZE_V1, DEFAULT_HISTORICAL_REPLAY_PARALLEL_THRESHOLD_V1,
     HISTORICAL_REPLAY_HARD_WORKER_CAP_V1, HistoricalReplayConfigV1, global_crypto_worker_budget_v1,
 };
+pub use hosted_descriptor_exchange::{
+    HOSTED_DESCRIPTOR_EXCHANGE_VERSION_V1, HOSTED_DESCRIPTOR_REQUEST_TYPE_V1,
+    HOSTED_DESCRIPTOR_RESPONSE_TYPE_V1, HostedDescriptorRequestV1, HostedDescriptorResponseV1,
+};
+pub use hosted_descriptor_pending::{
+    HOSTED_DESCRIPTOR_PENDING_STATE_TYPE_V1, HOSTED_DESCRIPTOR_PENDING_STATE_VERSION_V1,
+    HostedDescriptorPendingStateV1, HostedDescriptorPendingStatusV1,
+};
+pub use hosted_binding_handoff::{
+    DESKTOP_BINDING_HANDOFF_SCHEMA_V1, DesktopBindingHandoffV1, HOSTED_BINDING_REQUEST_SCHEMA_V1,
+    HostedBindingRequestV1,
+};
+pub use hosted_voter_bundle::{
+    HOSTED_VOTER_BUNDLE_V2_TYPE_ID, HOSTED_VOTER_BUNDLE_V2_VERSION, HostedVoterPublicBundleV2,
+    VerifiedHostedVoterBundleV2,
+};
 pub use inspect::{
     GuiAnchorConfigInspectionV1, GuiAnchorEvidenceInspectionV1, GuiAnchorSnapshotInspectionV1,
     GuiReceiptSnapshotSummaryV1, GuiWalletdSnapshotSummaryV1, inspect_anchor_config_v1,
@@ -143,6 +164,10 @@ pub use live_anchor_v2_lifecycle::{
     run_v2_live_anchor_recovery_step_with_indexer, run_v2_live_anchor_step_with_transports,
     v2_evidence_sidecar_path, v2_failure_sidecar_path, v2_lifecycle_sidecar_path,
 };
+pub use organizer_bootstrap::{
+    HOSTED_ORGANIZER_BOOTSTRAP_TYPE_V1, HOSTED_ORGANIZER_BOOTSTRAP_VERSION_V1,
+    HostedOrganizerBootstrapV1,
+};
 pub use participation::{
     CoarseParticipationBucket, GuiParticipationSummaryV1, ParticipationVisibility,
     ResultVisibility, SMALL_ELECTORATE_THRESHOLD,
@@ -160,7 +185,8 @@ pub use production_transport_authority_config::{
     ProductionTransportAuthorityReadinessV1, ProductionTransportAuthorityRootConfigV1,
     configure_production_transport_authority_root_v1, ensure_configured_root_matches_v1,
     forget_production_transport_authority_root_v1, production_transport_authority_path_v1,
-    production_transport_authority_readiness_v1, production_transport_authority_root_set_v1,
+    production_transport_authority_network_v1, production_transport_authority_readiness_v1,
+    production_transport_authority_root_set_v1,
 };
 pub use session::{GuiElectionSessionSnapshotV1, GuiElectionSessionV1};
 pub use summary::{GuiCandidateSummaryV1, GuiElectionSummaryV1};
@@ -191,7 +217,7 @@ pub use trusted_anchor_deployment::{
     TEMPLATE_ARTIFACT_DIGEST_ALGORITHM_ID_V1, TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V1,
     TRUSTED_OOTLE_DEPLOYMENT_FILENAME_V2, TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V1,
     TRUSTED_OOTLE_DEPLOYMENT_SCHEMA_V2, TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX,
-    inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK, inspect_template_wasm_v1, load_trusted_ootle_deployment_v1, load_trusted_ootle_deployment_v2,
     lock_trusted_ootle_deployment_v1, lock_trusted_ootle_deployment_v2,
     template_wasm_digest_for_bytes_v1, trusted_ootle_deployment_event_topic_v1,
     trusted_ootle_deployment_event_topic_v2, trusted_ootle_deployment_fixed_v1,
@@ -199,6 +225,11 @@ pub use trusted_anchor_deployment::{
     trusted_ootle_deployment_path_v2, trusted_ootle_deployment_to_live_anchor_request_v1,
     trusted_ootle_deployment_to_live_anchor_v2_request_v1, trusted_ootle_deployment_v2_binding,
     unlock_trusted_ootle_deployment_v1, unlock_trusted_ootle_deployment_v2,
+};
+#[cfg(feature = "test-support")]
+pub use trusted_anchor_deployment::{
+    load_trusted_ootle_deployment_v2_with_registry_for_test,
+    lock_trusted_ootle_deployment_v2_with_registry_for_test,
 };
 pub use verified_session_cache::{
     DEFAULT_VERIFIED_SESSION_CACHE_CAPACITY_V1, VERIFIED_SESSION_CACHE_EPOCH_V1,

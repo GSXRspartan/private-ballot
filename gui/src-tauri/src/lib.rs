@@ -30,6 +30,7 @@ use tari_cc_private_ballot_gui_core::{
     GuiLiveAnchorStepResultV1, GuiLiveAnchorV2RequestV1, GuiLiveAnchorV2ResultV1,
     GuiV2LiveAnchorHydratedStateV1, GuiV2LiveAnchorStepRequestV1, GuiV2LiveAnchorStepResultV1,
     GuiV2AnchorPublishPreparationRequestV1, GuiV2AnchorPublishPreparationV1,
+    HostedOrganizerBootstrapV1,
     GuiParticipationSummaryV1, GuiPreparedBallotExportV1, GuiPreparedBallotStatusV1,
     GuiPrivateIntakeSyncSummaryV1, GuiSavedVoterCredentialDeleteResultV1,
     GuiSavedVoterCredentialsV1, GuiTallySummaryV1, GuiTransportAnchorVerificationV1,
@@ -57,6 +58,7 @@ use tari_cc_private_ballot_gui_core::{
     ProductionTransportAuthorityConfigureRequestV1, ProductionTransportAuthorityReadinessV1,
     configure_production_transport_authority_root_v1,
     forget_production_transport_authority_root_v1, production_transport_authority_readiness_v1,
+    production_transport_authority_root_set_v1,
     mark_workspace_organizer_authority_v1, parse_decision, parse_public_governance_key_hex_v1,
     public_credential_fingerprint_hex_v1, read_ballot_package_file_bounded_v1,
     resolve_and_recover_cast_lock_state_v1,
@@ -89,6 +91,7 @@ use tari_cc_private_ballot_gui_core::{
 };
 use tari_cc_private_ballot_ootle_anchor_app::{AnchorAppConfig, TokioBlockingExecutor};
 use tari_cc_private_ballot_anchor::OotleNetworkIdV1;
+use tari_cc_private_ballot_protocol::{Blake3HashProviderV1, MAX_CANONICAL_OBJECT_BYTES, ManifestHash};
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
     WalletdEndpoint,
@@ -498,6 +501,25 @@ impl AppState {
             .map_err(|_| CommandError::state_poisoned())?;
         match guard.as_ref() {
             Some(active) if active.authority == SessionAuthorityV1::Organizer => Ok(()),
+            Some(_) => Err(CommandError::organizer_authority_required()),
+            None => Err(CommandError::no_session()),
+        }
+    }
+
+    /// Runs one read against the active organizer session while authority and
+    /// election identity are protected by the same session lock.
+    fn with_organizer_session<T>(
+        &self,
+        f: impl FnOnce(&GuiElectionSessionV1) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        let guard = self
+            .session
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        match guard.as_ref() {
+            Some(active) if active.authority == SessionAuthorityV1::Organizer => {
+                f(&active.session)
+            }
             Some(_) => Err(CommandError::organizer_authority_required()),
             None => Err(CommandError::no_session()),
         }
@@ -1267,6 +1289,61 @@ async fn load_election_folder(
     let session =
         load_election_from_paths_blocking(manifest, registry, option_set, app_data_root).await?;
     install_imported_election_session(session, &state)
+}
+
+/// Imports a Hosted-issued organizer bootstrap only after its exact V2
+/// election and authority signature verify under the locally configured
+/// production trust root. Public election import remains voter-only.
+#[tauri::command]
+async fn import_hosted_organizer_bootstrap(
+    bootstrap_path: String,
+    app: AppHandle,
+) -> Result<GuiElectionSummaryV1, CommandError> {
+    run_blocking_command(move || {
+        let bootstrap_path = PathBuf::from(bootstrap_path);
+        let metadata = std::fs::symlink_metadata(&bootstrap_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file could not be read",
+            )
+        })?;
+        let maximum_bytes = MAX_CANONICAL_OBJECT_BYTES
+            .saturating_mul(3)
+            .saturating_add(2048) as u64;
+        if !metadata.is_file() || metadata.len() > maximum_bytes {
+            return Err(CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file is not a supported size",
+            ));
+        }
+        let bytes = std::fs::read(&bootstrap_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ORGANIZER_BOOTSTRAP_READ_FAILED",
+                "FILE_IO",
+                "the Hosted organizer bootstrap file could not be read",
+            )
+        })?;
+        let bootstrap = HostedOrganizerBootstrapV1::from_canonical_cbor(&bytes)?;
+        let app_data_root = app_data_root(&app)?;
+        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
+        let artifacts = bootstrap.verify(&roots)?;
+        let session = GuiElectionSessionV1::new(artifacts)?;
+        let workspace_id = workspace_id_for_session_v1(&session);
+        let workspaces_dir = workspaces_directory(&app)?;
+        write_session_workspace_revision_v1(&workspaces_dir, &workspace_id, &session)?;
+        let state = app.state::<AppState>();
+        state.invalidate_verified_session_cache(&workspace_id);
+        // Signature verification above is the sole external provenance that
+        // may establish organizer authority for this imported Hosted election.
+        mark_workspace_organizer_authority_v1(&workspaces_dir, &workspace_id)?;
+        let summary = session.summary();
+        state.install_frozen_session(session, SessionAuthorityV1::Organizer)?;
+        state.set_session_workspace_id(workspace_id)?;
+        Ok(summary)
+    })
+    .await
 }
 
 /// Re-applies a persisted, previously accepted election-status record (if
@@ -2218,6 +2295,180 @@ async fn write_finalized_archive(
     .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct GuiHostedBindingHandoffResultV1 {
+    written_path: String,
+    election_id: String,
+    manifest_hash_hex: String,
+}
+
+/// Reads one Hosted request artifact and writes the paired Desktop response
+/// from this organizer's real verified transport history.  This command never
+/// contacts Hosted and never sees an organizer credential: the organizer
+/// returns the public response through Hosted Manage, which authenticates it.
+#[tauri::command]
+async fn write_hosted_binding_handoff(
+    request_path: String,
+    target_path: String,
+    app: AppHandle,
+) -> Result<GuiHostedBindingHandoffResultV1, CommandError> {
+    run_blocking_command(move || {
+        let request_bytes = std::fs::read(Path::new(&request_path)).map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_READ_FAILED",
+                "FILE_IO",
+                "the Hosted binding request file could not be read",
+            )
+        })?;
+        let request: tari_cc_private_ballot_gui_core::HostedBindingRequestV1 =
+            serde_json::from_slice(&request_bytes).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                    "INVALID_INPUT",
+                    "the Hosted binding request file is invalid",
+                )
+            })?;
+        request.validate()?;
+        let state = app.state::<AppState>();
+        let app_data_root = app
+            .path()
+            .app_data_dir()
+            .map_err(|_| CommandError::app_data_unavailable())?;
+        let roots = production_transport_authority_root_set_v1(&app_data_root, None)?;
+        let (live_handoff, election_id, manifest_hash_hex, accepted_count) =
+            state.with_organizer_session(|session| {
+                let manifest = session.artifacts().manifest();
+                let election_id = String::from_utf8(manifest.election_id().as_bytes().to_vec())
+                    .map_err(|_| {
+                        CommandError::new(
+                            "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                            "BINDING_MISMATCH",
+                            "the active Desktop election cannot be matched to Hosted",
+                        )
+                    })?;
+                let manifest_hash_hex = session.summary().manifest_hash_hex;
+                if session.lifecycle_state_v1() != ElectionLifecycleStateV1::Finalized
+                    || request.election_id != election_id
+                    || request.manifest_hash_hex != manifest_hash_hex
+                {
+                    return Err(CommandError::new(
+                        "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                        "BINDING_MISMATCH",
+                        "the Hosted request does not match this finalized Desktop election",
+                    ));
+                }
+                let manifest_hash = session
+                    .artifacts()
+                    .manifest()
+                    .canonical_hash(&Blake3HashProviderV1)
+                    .map_err(|_| {
+                        CommandError::new(
+                            "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                            "ARCHIVE_INTEGRITY",
+                            "the active Desktop manifest could not be hashed for the Hosted handoff",
+                        )
+                    })?;
+                // This is the first operation allowed to seal a live batch. It
+                // runs only after the schema, organizer role, exact identity,
+                // and finalized lifecycle checks above, while this session lock
+                // still prevents an election/role swap.
+                let live_handoff = finalized_transport_handoff_for_active_intake(
+                    state.inner(),
+                    session,
+                    &roots,
+                    manifest_hash,
+                )?;
+                Ok((live_handoff, election_id, manifest_hash_hex, session.accepted_count() as u64))
+            })?;
+        let material = match live_handoff {
+            Some(material) => Some(material),
+            None => durable_recovered_transport_binding_handoff(
+                &app,
+                &manifest_hash_hex,
+                accepted_count,
+            )?,
+        }
+        .ok_or_else(|| {
+            CommandError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_REQUIRED",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport history has no finalized binding for this election",
+            )
+        })?;
+        let manifest_hash = state.with_organizer_session(|session| {
+            if session.summary().manifest_hash_hex != manifest_hash_hex {
+                return Err(CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_MISMATCH",
+                    "BINDING_MISMATCH",
+                    "the active Desktop election changed during the Hosted handoff",
+                ));
+            }
+            session
+                .artifacts()
+                .manifest()
+                .canonical_hash(&Blake3HashProviderV1)
+                .map_err(|_| {
+                    CommandError::new(
+                        "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                        "ARCHIVE_INTEGRITY",
+                        "the active Desktop manifest could not be hashed for the Hosted handoff",
+                    )
+                })
+        })?;
+        roots
+            .verify_descriptor(&material.1, manifest_hash)
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_UNTRUSTED_DESCRIPTOR",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport descriptor is not signed by the configured production authority",
+            ))?;
+        let binding_cbor = material.0.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport binding could not be encoded",
+            )
+        })?;
+        let descriptor_cbor = material.1.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_INVALID",
+                "ARCHIVE_INTEGRITY",
+                "the verified Desktop transport descriptor could not be encoded",
+            )
+        })?;
+        let handoff = tari_cc_private_ballot_gui_core::DesktopBindingHandoffV1::new(
+            election_id.clone(),
+            manifest_hash_hex.clone(),
+            hex_lower(&binding_cbor),
+            hex_lower(&descriptor_cbor),
+        );
+        handoff.validate()?;
+        std::fs::write(
+            Path::new(&target_path),
+            serde_json::to_vec_pretty(&handoff).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_BINDING_HANDOFF_WRITE_FAILED",
+                    "FILE_IO",
+                    "the Desktop binding handoff could not be written",
+                )
+            })?,
+        )
+        .map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_WRITE_FAILED",
+                "FILE_IO",
+                "the Desktop binding handoff could not be written",
+            )
+        })?;
+        Ok(GuiHostedBindingHandoffResultV1 {
+            written_path: target_path,
+            election_id,
+            manifest_hash_hex,
+        })
+    })
+    .await
+}
+
 /// Runs the full offline archive replay verifier over one archive directory.
 /// The archive is authoritative; no organizer state is consulted.
 #[tauri::command]
@@ -2233,6 +2484,371 @@ async fn verify_archive(
         )?)
     })
     .await
+}
+
+/// Returns true only when `path` matches the canonical submission-file pattern:
+/// `submissions/NNNNNNNN.cbor` where the filename is exactly eight lowercase
+/// hex digits. Called from `import_hosted_archive` whitelist validation.
+fn is_canonical_submission_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("submissions/") else {
+        return false;
+    };
+    let Some(stem) = rest.strip_suffix(".cbor") else {
+        return false;
+    };
+    stem.len() == 8 && stem.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Input for importing a canonical finalized archive from a Hosted instance.
+/// The browser downloads and authenticates the archive using its in-memory
+/// credential; Rust only verifies and writes. No credential reaches Rust.
+#[derive(Debug, serde::Deserialize)]
+struct GuiImportHostedArchiveInputV1 {
+    election_id: String,
+    /// Absolute path to the pre-downloaded archive JSON file. The browser
+    /// fetched this using its own in-memory credential and saved it to disk;
+    /// Rust reads and verifies the file. No organizer secret reaches Rust.
+    archive_json_path: String,
+    target_directory: String,
+}
+
+/// Public result of a successful hosted archive import.
+#[derive(Debug, serde::Serialize)]
+struct GuiArchiveImportResultV1 {
+    verified: bool,
+    finalized: bool,
+    anchor_eligible: bool,
+    archive_hash_hex: String,
+    election_id: String,
+    file_count: usize,
+}
+
+/// Imports a canonical finalized archive from a pre-downloaded Hosted JSON
+/// body and writes it to `target_directory`, after independently verifying
+/// the archive and cross-checking the archive_hash_hex against the local
+/// verifier. The browser fetches the archive using its own in-memory
+/// credential; no organizer secret is passed to or handled by Rust.
+///
+/// Security policy:
+/// 1. Parse and validate the pre-downloaded archive_body_json.
+/// 2. Write to a staging directory (a temp sibling of target_directory).
+/// 3. Verify via `verify_archive_directory_v1` on the staging directory.
+/// 4. Cross-check: hosted `archive_hash_hex` must equal the verifier result.
+/// 5. Only on match: atomically rename staging → target.
+#[tauri::command]
+async fn import_hosted_archive(
+    input: GuiImportHostedArchiveInputV1,
+) -> Result<GuiArchiveImportResultV1, CommandError> {
+    use std::collections::BTreeMap;
+    use tari_cc_private_ballot_archive::ARCHIVE_MANIFEST_CANONICAL_PATH;
+
+    // 1. Read the pre-downloaded archive JSON file. The browser fetched and
+    //    saved it to disk using its own in-memory credential; Rust reads from
+    //    an absolute path only and applies a size guard before parsing.
+    const MAX_IMPORT_BYTES: usize = 512 * 1024 * 1024;
+    let archive_json_path = std::path::Path::new(input.archive_json_path.trim());
+    if !archive_json_path.is_absolute() {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_ABSOLUTE",
+            "INVALID_INPUT",
+            "the archive JSON path must be absolute",
+        ));
+    }
+    let archive_json_meta = std::fs::metadata(archive_json_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_FOUND",
+            "INVALID_INPUT",
+            "the archive JSON file could not be read",
+        )
+    })?;
+    if archive_json_meta.len() > MAX_IMPORT_BYTES as u64 {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_BODY_TOO_LARGE",
+            "INVALID_INPUT",
+            "the archive body exceeds the import size limit",
+        ));
+    }
+    let archive_body_json = std::fs::read_to_string(archive_json_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PATH_NOT_FOUND",
+            "INVALID_INPUT",
+            "the archive JSON file could not be read",
+        )
+    })?;
+    #[derive(serde::Deserialize)]
+    struct ArchiveFileJson { path: String, cbor_hex: String }
+    #[derive(serde::Deserialize)]
+    struct ArchiveBodyJson {
+        election_id: String,
+        archive_hash_hex: String,
+        archive_manifest_cbor_hex: String,
+        anchor_eligible: bool,
+        files: Vec<ArchiveFileJson>,
+    }
+    let body: ArchiveBodyJson = serde_json::from_str(&archive_body_json).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_PARSE_ERROR",
+            "INVALID_INPUT",
+            "could not parse the archive body as a canonical archive body",
+        )
+    })?;
+
+    // Cross-check election_id against the caller's declared election.
+    if body.election_id != input.election_id {
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_ELECTION_ID_MISMATCH",
+            "INVALID_INPUT",
+            "the archive election_id does not match the requested election",
+        ));
+    }
+
+    // 5. Hex-decode each file and assemble the write map.
+    let hex_decode = |hex: &str| -> Option<Vec<u8>> {
+        if hex.len() % 2 != 0 { return None; }
+        let mut out = Vec::with_capacity(hex.len() / 2);
+        for pair in hex.as_bytes().chunks_exact(2) {
+            let hi = (pair[0] as char).to_digit(16)? as u8;
+            let lo = (pair[1] as char).to_digit(16)? as u8;
+            out.push((hi << 4) | lo);
+        }
+        Some(out)
+    };
+
+    let manifest_cbor = hex_decode(&body.archive_manifest_cbor_hex).ok_or_else(|| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_MANIFEST_HEX_INVALID",
+            "INVALID_INPUT",
+            "the hosted archive manifest is not valid hex",
+        )
+    })?;
+
+    // 5a. Path-safety and canonical-member whitelist validation.
+    //     Every server-provided path is validated through ArchivePathV1 (rejects
+    //     absolute paths, traversal segments, backslash, Windows drive prefixes,
+    //     reserved device names, and non-printable ASCII) before any file is
+    //     written to disk. Only the documented canonical archive member paths are
+    //     accepted; any unexpected path aborts the entire import.
+    {
+        use tari_cc_private_ballot_archive::{
+            ArchivePathV1, CANDIDATE_SET_ARCHIVE_PATH, ELECTION_MANIFEST_ARCHIVE_PATH,
+            GOVERNANCE_DOCUMENT_ARCHIVE_PATH, MAX_GOVERNANCE_DOCUMENT_BYTES,
+            TRANSPORT_ARCHIVE_BINDING_PATH_V1, VOTER_REGISTRY_ARCHIVE_PATH,
+        };
+        // Per-member decoded size: governance/source.bin is the largest legal
+        // member; all other protocol objects are well below this limit.
+        const MAX_MEMBER_BYTES: usize = MAX_GOVERNANCE_DOCUMENT_BYTES;
+        // Conservative member-count cap (matches protocol MAX_ARCHIVE_FILES).
+        const MAX_IMPORT_FILES: usize = 65_536;
+
+        if body.files.len() > MAX_IMPORT_FILES {
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_TOO_MANY_MEMBERS",
+                "INVALID_INPUT",
+                "the hosted archive contains too many members",
+            ));
+        }
+
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(body.files.len());
+
+        for entry in &body.files {
+            // Reject any path that fails the portable archive-path validator.
+            ArchivePathV1::new(entry.path.clone()).map_err(|_| {
+                CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_UNSAFE_PATH",
+                    "INVALID_INPUT",
+                    "a hosted archive member path failed the portable path safety check",
+                )
+            })?;
+
+            // Reject any path not in the documented canonical member set.
+            let is_canonical = entry.path == ELECTION_MANIFEST_ARCHIVE_PATH
+                || entry.path == CANDIDATE_SET_ARCHIVE_PATH
+                || entry.path == VOTER_REGISTRY_ARCHIVE_PATH
+                || entry.path == TRANSPORT_ARCHIVE_BINDING_PATH_V1
+                || entry.path == GOVERNANCE_DOCUMENT_ARCHIVE_PATH
+                || is_canonical_submission_path(&entry.path);
+            if !is_canonical {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_UNEXPECTED_MEMBER",
+                    "INVALID_INPUT",
+                    "a hosted archive member path is not in the canonical member set",
+                ));
+            }
+
+            // Reject duplicate member paths (case-insensitive, matching the
+            // portable archive-path collision rules).
+            if !seen.insert(entry.path.to_ascii_lowercase()) {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_DUPLICATE_MEMBER",
+                    "INVALID_INPUT",
+                    "the hosted archive contains duplicate member paths",
+                ));
+            }
+
+            // Per-member decoded size bound.
+            let decoded_len = entry.cbor_hex.len() / 2;
+            if decoded_len > MAX_MEMBER_BYTES {
+                return Err(CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_MEMBER_TOO_LARGE",
+                    "INVALID_INPUT",
+                    "a hosted archive member exceeds the per-member size limit",
+                ));
+            }
+        }
+    }
+
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for entry in &body.files {
+        let bytes = hex_decode(&entry.cbor_hex).ok_or_else(|| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_FILE_HEX_INVALID",
+                "INVALID_INPUT",
+                "a hosted archive file is not valid hex",
+            )
+        })?;
+        files.insert(entry.path.clone(), bytes);
+    }
+    let file_count = files.len();
+
+    // 6. Create a staging directory (temp sibling of target_directory).
+    let target_path = std::path::Path::new(&input.target_directory);
+    let staging_path = {
+        let name = target_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("archive");
+        let parent = target_path.parent().unwrap_or(target_path);
+        parent.join(format!("{name}.staging"))
+    };
+    if staging_path.exists() {
+        std::fs::remove_dir_all(&staging_path).map_err(|_| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_STAGING_CLEANUP_FAILED",
+                "IO",
+                "could not remove an existing staging directory",
+            )
+        })?;
+    }
+    std::fs::create_dir_all(&staging_path).map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_STAGING_CREATE_FAILED",
+            "IO",
+            "could not create the staging directory",
+        )
+    })?;
+
+    // 7. Write all archive files to the staging directory. Write the
+    //    archive manifest last (it is NOT hash-covered and must be written
+    //    verbatim from Hosted to preserve byte-exact archive identity).
+    for (rel_path, bytes) in &files {
+        let dest = staging_path.join(rel_path);
+        // Confinement check: destination must remain under the staging directory.
+        // ArchivePathV1 already rejects dangerous paths; this is a belt-and-
+        // suspenders guard against any OS-specific join edge cases.
+        if !dest.starts_with(&staging_path) {
+            let _ = std::fs::remove_dir_all(&staging_path);
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_PATH_ESCAPE",
+                "INTEGRITY",
+                "an archive member path resolved outside the staging directory",
+            ));
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|_| {
+                CommandError::new(
+                    "GUI_ARCHIVE_IMPORT_WRITE_FAILED",
+                    "IO",
+                    "could not create a staging subdirectory",
+                )
+            })?;
+        }
+        std::fs::write(&dest, bytes).map_err(|_| {
+            CommandError::new(
+                "GUI_ARCHIVE_IMPORT_WRITE_FAILED",
+                "IO",
+                "could not write an archive file to the staging directory",
+            )
+        })?;
+    }
+    std::fs::write(
+        staging_path.join(ARCHIVE_MANIFEST_CANONICAL_PATH),
+        &manifest_cbor,
+    )
+    .map_err(|_| {
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_MANIFEST_WRITE_FAILED",
+            "IO",
+            "could not write the archive manifest to the staging directory",
+        )
+    })?;
+
+    // 8. Independently verify the staging archive.
+    let verification = run_blocking_command({
+        let staging = staging_path.clone();
+        move || Ok(tari_cc_private_ballot_gui_core::archive_verify::verify_archive_directory_v1(&staging)?)
+    })
+    .await
+    .map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        e
+    })?;
+
+    // 9. Cross-check: hosted archive_hash_hex must equal the verifier result.
+    let verified_hash = verification.archive_hash_hex.as_deref().unwrap_or("");
+    if verified_hash != body.archive_hash_hex {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_HASH_MISMATCH",
+            "INTEGRITY",
+            "the imported archive hash does not match the hash reported by Hosted",
+        ));
+    }
+    if !verification.verified {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        return Err(CommandError::new(
+            "GUI_ARCHIVE_IMPORT_VERIFICATION_FAILED",
+            "INTEGRITY",
+            "the imported archive did not pass independent verification",
+        ));
+    }
+
+    // 10. Atomic rename: staging → target.
+    if target_path.exists() {
+        // Reject non-empty targets — the user may have important data there.
+        // An empty directory is harmless to remove before the rename.
+        let is_non_empty = std::fs::read_dir(target_path)
+            .ok()
+            .and_then(|mut d| d.next())
+            .is_some();
+        if is_non_empty {
+            let _ = std::fs::remove_dir_all(&staging_path);
+            return Err(CommandError::new(
+                "GUI_ARCHIVE_IMPORT_TARGET_NOT_EMPTY",
+                "INVALID_INPUT",
+                "the target directory already exists and is not empty; choose an empty or new folder",
+            ));
+        }
+        // Empty directory: remove it so the rename succeeds on Windows.
+        let _ = std::fs::remove_dir(target_path);
+    }
+    std::fs::rename(&staging_path, target_path).map_err(|_| {
+        let _ = std::fs::remove_dir_all(&staging_path);
+        CommandError::new(
+            "GUI_ARCHIVE_IMPORT_RENAME_FAILED",
+            "IO",
+            "could not move the staged archive to the target directory",
+        )
+    })?;
+
+    Ok(GuiArchiveImportResultV1 {
+        verified: verification.verified,
+        finalized: verification.finalized,
+        anchor_eligible: body.anchor_eligible,
+        archive_hash_hex: body.archive_hash_hex,
+        election_id: body.election_id,
+        file_count,
+    })
 }
 
 /// Verifies the public transport-binding → completed archive → existing Phase
@@ -2278,6 +2894,78 @@ fn durable_recovered_transport_binding(
         let _ = (app, manifest_hash_hex, accepted_count);
         Ok(None)
     }
+}
+
+fn durable_recovered_transport_binding_handoff(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    accepted_count: u64,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        organizer_tor_intake::recover_finalized_transport_binding_handoff_from_durable_state(
+            app,
+            manifest_hash_hex,
+            accepted_count,
+        )
+    }
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = (app, manifest_hash_hex, accepted_count);
+        Ok(None)
+    }
+}
+
+fn finalized_transport_handoff_for_active_intake(
+    state: &AppState,
+    session: &GuiElectionSessionV1,
+    roots: &TransportAuthorityRootSetV1,
+    manifest_hash: ManifestHash,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    #[cfg(feature = "managed-tor")]
+    {
+        let manifest_hash_hex = session.summary().manifest_hash_hex;
+        let managed = state
+            .organizer_intake
+            .lock()
+            .map_err(|_| CommandError::state_poisoned())?;
+        let Some(intake) = managed.as_ref() else {
+            return Ok(None);
+        };
+        if !intake.is_bound_to_manifest(&manifest_hash_hex) {
+            return Ok(None);
+        }
+        roots
+            .verify_descriptor(intake.descriptor(), manifest_hash)
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_BINDING_HANDOFF_UNTRUSTED_DESCRIPTOR",
+                "ARCHIVE_INTEGRITY",
+                "the active Desktop transport descriptor is not signed by the configured production authority",
+            ))?;
+        let handoff = intake.finalized_transport_binding_handoff()?;
+        if handoff.is_none() && intake.accepted_unique_count() > 0 {
+            return Err(CommandError::new(
+                "GUI_TRANSPORT_ARCHIVE_BINDING_UNAVAILABLE",
+                "ARCHIVE_INTEGRITY",
+                "the active private transport history could not produce a finalized archive binding",
+            ));
+        }
+        return Ok(handoff);
+    }
+    #[cfg(not(feature = "managed-tor"))]
+    {
+        let _ = (state, session, roots, manifest_hash);
+        Ok(None)
+    }
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 fn finalized_transport_binding_for_active_intake(
@@ -5796,6 +6484,7 @@ pub fn run() {
             shell_info,
             load_election,
             load_election_folder,
+            import_hosted_organizer_bootstrap,
             unload_election,
             election_summary,
             active_election_authority,
@@ -5814,8 +6503,10 @@ pub fn run() {
             participation_summary,
             write_archive,
             write_finalized_archive,
+            write_hosted_binding_handoff,
             anchor_deployment_capabilities,
             verify_archive,
+            import_hosted_archive,
             verify_transport_archive_anchor,
             trusted_ootle_deployment_status,
             inspect_template_wasm,
@@ -5892,6 +6583,10 @@ pub fn run() {
             #[cfg(feature = "managed-tor")]
             managed_tor::configure_managed_tor,
             #[cfg(feature = "managed-tor")]
+            managed_tor::import_v2_voter_bundle,
+            #[cfg(feature = "managed-tor")]
+            managed_tor::restore_v2_voter_transport,
+            #[cfg(feature = "managed-tor")]
             managed_tor::start_managed_tor,
             #[cfg(feature = "managed-tor")]
             managed_tor::stop_managed_tor,
@@ -5913,6 +6608,10 @@ pub fn run() {
             organizer_tor_intake::stop_private_intake,
             #[cfg(feature = "managed-tor")]
             organizer_tor_intake::export_voter_transport_bundle,
+            #[cfg(feature = "managed-tor")]
+            organizer_tor_intake::export_hosted_descriptor_request,
+            #[cfg(feature = "managed-tor")]
+            organizer_tor_intake::import_hosted_descriptor_response,
             #[cfg(feature = "managed-tor")]
             election_status_commands::export_election_status_artifact,
             #[cfg(feature = "managed-tor")]

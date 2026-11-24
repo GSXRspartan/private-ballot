@@ -7,6 +7,11 @@ import {
   pickElectionArtifact,
   pickElectionStatusExportPath,
   pickGovernanceDocument,
+  pickHostedArchiveJson,
+  pickHostedBindingHandoffPath,
+  pickHostedBindingRequest,
+  pickHostedDescriptorRequestPath,
+  pickHostedDescriptorResponse,
   pickTorExecutable,
 } from "../api/dialog";
 import {
@@ -18,6 +23,7 @@ import {
   rememberOrganizerRemoteTorConfig,
 } from "../api/organizerRemoteTorMemory";
 import type {
+  GuiArchiveImportResultV1,
   GuiArchiveWriteResultV1,
   GuiCommandError,
   GuiTallySummaryV1,
@@ -33,6 +39,7 @@ import {
   anchorFormStorageKey,
   applyConnectedWallet,
   clearAnchorFormState,
+  DEFAULT_MAINNET_INDEXER_ENDPOINT,
   defaultAnchorFormState,
   loadAnchorFormState,
   saveAnchorFormState,
@@ -43,6 +50,11 @@ import {
 } from "../anchor/anchorForm";
 import { approvalRuleText, presentationFor } from "../ballot/ballotTypes";
 import { intakeCanImport, intakeResultMessage, intakeResultTitle } from "../intake";
+import { isDesktopShell } from "../api/client";
+import {
+  buildBundleFromDesktop,
+  copyBundleToClipboard,
+} from "../wallet/anchorBundle";
 import { boundArchiveResult } from "../archive/archiveBinding";
 import {
   canShowTally,
@@ -109,6 +121,7 @@ export function ManageElection() {
     shellAvailable,
     loadElection,
     loadElectionFolder,
+    importHostedOrganizerBootstrap,
     unloadElection,
     runLifecycle,
     recordAction,
@@ -164,6 +177,9 @@ export function ManageElection() {
   );
   const [remoteTestStatus, setRemoteTestStatus] = useState<OrganizerIntakeStatusV1 | null>(null);
   const [bundleExportPath, setBundleExportPath] = useState<string | null>(null);
+  const [hostedDescriptorRequestPath, setHostedDescriptorRequestPath] = useState<string | null>(null);
+  const [hostedDescriptorResponseImported, setHostedDescriptorResponseImported] = useState(false);
+  const [hostedBindingHandoffPath, setHostedBindingHandoffPath] = useState<string | null>(null);
   // Bounded automatic inbox sync: a single in-flight guard and the last observed
   // intake-worker accepted count. Auto-sync calls the SAME authoritative
   // sync_private_intake path only when a NEW Tor delivery is observed, so it
@@ -171,6 +187,7 @@ export function ManageElection() {
   const autoSyncBusyRef = useRef(false);
   const prevAcceptedRef = useRef<number | null>(null);
   const [archiveResult, setArchiveResult] = useState<GuiArchiveWriteResultV1 | null>(null);
+  const [hostedArchiveImportResult, setHostedArchiveImportResult] = useState<GuiArchiveImportResultV1 | null>(null);
   const [localError, setLocalError] = useState<GuiCommandError | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
   const [confirmFinalize, setConfirmFinalize] = useState(false);
@@ -189,12 +206,12 @@ export function ManageElection() {
     useState<boolean | null>(null);
   const [anchorSignerMode, setAnchorSignerMode] =
     useState<AnchorSignerMode>(DEFAULT_ANCHOR_SIGNER_MODE);
-  const [anchorNetwork, setAnchorNetwork] = useState("esmeralda");
+  const [anchorNetwork, setAnchorNetwork] = useState("mainnet");
   const [anchorWalletdEndpoint, setAnchorWalletdEndpoint] = useState(
     "http://127.0.0.1:5100",
   );
   const [anchorIndexerEndpoint, setAnchorIndexerEndpoint] = useState(
-    "https://ootle-indexer-a.tari.com/",
+    DEFAULT_MAINNET_INDEXER_ENDPOINT,
   );
   // Per-network published V2 event-template deployment. The operator supplies
   // only the address and (optionally) an artifact digest override; the backend
@@ -240,6 +257,10 @@ export function ManageElection() {
     useState<import("../api/types").GuiV2LiveAnchorStepResultV1 | null>(null);
   const [anchorV2PublishConfirmed, setAnchorV2PublishConfirmed] = useState(false);
   const [anchorV2Busy, setAnchorV2Busy] = useState(false);
+  const [browserBundleExportMessage, setBrowserBundleExportMessage] = useState<
+    string | null
+  >(null);
+  const [browserBundleExportBusy, setBrowserBundleExportBusy] = useState(false);
   // Hydrated view of the persisted V2 lifecycle for `selectedFinalArchive`.
   // Populated by a read-only inspect on load; drives the "Existing V2 anchor
   // found" recovery panel and suppresses fresh Build/Prepare/Submit controls
@@ -600,6 +621,23 @@ export function ManageElection() {
     setFolderBusy(true);
     try {
       await loadElectionFolder(folder);
+      setTally(null);
+      setArchiveResult(null);
+      setLastIntake(null);
+    } catch (error) {
+      showError(error);
+    } finally {
+      setFolderBusy(false);
+    }
+  };
+
+  const onImportHostedOrganizerBootstrap = async () => {
+    clearLocalError();
+    const bootstrap = await pickElectionArtifact("Choose signed Hosted organizer bootstrap");
+    if (bootstrap === null) return;
+    setFolderBusy(true);
+    try {
+      await importHostedOrganizerBootstrap(bootstrap);
       setTally(null);
       setArchiveResult(null);
       setLastIntake(null);
@@ -1022,6 +1060,50 @@ export function ManageElection() {
     }
   };
 
+  const onExportHostedDescriptorRequest = async () => {
+    clearLocalError();
+    const path = await pickHostedDescriptorRequestPath();
+    if (path === null) return;
+    setOrganizerBusy(true);
+    try {
+      const result = await api.exportHostedDescriptorRequest(
+        path,
+        intakeTorExepathOrUndefined(),
+        remoteIntakeArg(),
+      );
+      setHostedDescriptorRequestPath(result.written_path);
+      setHostedDescriptorResponseImported(false);
+      persistOrganizerRemoteTorConfig();
+      recordAction("Exported Hosted descriptor request");
+      setOrganizerStatus(await api.organizerTorStatus(intakeTorExepathOrUndefined()));
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
+  const onImportHostedDescriptorResponse = async () => {
+    clearLocalError();
+    const path = await pickHostedDescriptorResponse();
+    if (path === null) return;
+    setOrganizerBusy(true);
+    try {
+      const result = await api.importHostedDescriptorResponse(path);
+      setHostedDescriptorResponseImported(true);
+      recordAction(
+        result.already_completed
+          ? "Confirmed the existing Hosted descriptor response"
+          : "Imported and verified the Hosted descriptor response",
+      );
+      setOrganizerStatus(await api.organizerTorStatus(intakeTorExepathOrUndefined()));
+    } catch (error) {
+      showError(error);
+    } finally {
+      setOrganizerBusy(false);
+    }
+  };
+
   const onStopIntake = async () => {
     clearLocalError();
     setOrganizerBusy(true);
@@ -1073,6 +1155,57 @@ export function ManageElection() {
       recordAction(
         `Exported signed election status (${result.lifecycle_state}, generation ${result.generation})`,
       );
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onWriteHostedBindingHandoff = async () => {
+    clearLocalError();
+    setHostedBindingHandoffPath(null);
+    const requestPath = await pickHostedBindingRequest();
+    if (requestPath === null) return;
+    const targetPath = await pickHostedBindingHandoffPath();
+    if (targetPath === null) return;
+    try {
+      const result = await api.writeHostedBindingHandoff(requestPath, targetPath);
+      setHostedBindingHandoffPath(result.written_path);
+      recordAction("Exported verified Desktop binding handoff for Hosted");
+    } catch (error) {
+      showError(error);
+    }
+  };
+
+  const onImportHostedArchive = async () => {
+    clearLocalError();
+    setHostedArchiveImportResult(null);
+    if (!election) return;
+    const archiveJsonPath = await pickHostedArchiveJson();
+    if (archiveJsonPath === null) return;
+    const targetDirectory = await pickDirectory("Choose folder for the imported archive", "archive");
+    if (targetDirectory === null) return;
+    try {
+      const result = await api.importHostedArchive(
+        election.election_id_text ?? election.election_id_hex,
+        archiveJsonPath,
+        targetDirectory,
+      );
+      setHostedArchiveImportResult(result);
+      recordAction("Imported Hosted finalized archive");
+      // Wire the verified archive into the anchor preparation flow so the
+      // imported Hosted archive can serve as the basis for a V2 anchor publish.
+      if (result.anchor_eligible) {
+        try {
+          const verification = await api.verifyArchive(targetDirectory);
+          updateArchiveView({
+            directory: targetDirectory,
+            verification: { result: verification, verifiedDirectory: targetDirectory },
+            transportAnchor: null,
+          });
+        } catch {
+          // Verification is non-fatal: the import result UI still shows.
+        }
+      }
     } catch (error) {
       showError(error);
     }
@@ -1358,6 +1491,46 @@ export function ManageElection() {
     }
   };
 
+  // Desktop-only helper: composes the browser anchor bundle from the already
+  // prepared (verified) V2 publish arguments and the locked deployment, and
+  // copies it to the clipboard as canonical JSON. The browser application
+  // imports that bundle to publish the same anchor from a Tari wallet. The
+  // bundle carries only public data: the template binding, the network, and
+  // the exact four publish_anchor_v2 arguments.
+  const onExportBrowserAnchorBundle = async () => {
+    if (!trustedDeploymentV2 || !anchorV2Preparation) return;
+    setBrowserBundleExportBusy(true);
+    setBrowserBundleExportMessage(null);
+    try {
+      const bundle = buildBundleFromDesktop({
+        network: trustedDeploymentV2.network,
+        templateAddress: trustedDeploymentV2.template_address,
+        templateArtifactDigestHex: trustedDeploymentV2.template_artifact_digest_hex,
+        templateModule: V2_TEMPLATE_MODULE,
+        templateFunction: V2_TEMPLATE_FUNCTION,
+        preparation: {
+          templateEventTopic: anchorV2Preparation.template_event_topic,
+          anchorDigestHex: anchorV2Preparation.anchor_digest_hex,
+          arguments: anchorV2Preparation.arguments,
+          publicSummaryJson: anchorV2Preparation.public_summary_json,
+        },
+      });
+      await copyBundleToClipboard(bundle, navigator.clipboard);
+      setBrowserBundleExportMessage(
+        "Anchor bundle copied to the clipboard. Save it as a .json file; the browser application imports it to publish this anchor.",
+      );
+      recordAction("Exported browser anchor bundle to clipboard");
+    } catch (error) {
+      setBrowserBundleExportMessage(
+        error instanceof Error && error.message.length > 0
+          ? error.message
+          : "the anchor bundle could not be exported",
+      );
+    } finally {
+      setBrowserBundleExportBusy(false);
+    }
+  };
+
   const onRunV2AnchorLifecycle = async (decision: "none" | "approve") => {
     if (!selectedFinalArchive || !anchorV2Result || !anchorV2Preparation) return;
     clearLocalError();
@@ -1480,6 +1653,14 @@ export function ManageElection() {
       <div className="btn-row">
         <button
           type="button"
+          className="btn btn-secondary"
+          disabled={!shellAvailable || folderBusy}
+          onClick={() => void onImportHostedOrganizerBootstrap()}
+        >
+          Import Hosted Organizer Bootstrap
+        </button>
+        <button
+          type="button"
           className="btn btn-primary"
           disabled={!shellAvailable || folderBusy}
           onClick={() => void onOpenElectionFolder()}
@@ -1498,6 +1679,11 @@ export function ManageElection() {
       <p className="form-hint">
         The folder must contain election-manifest.cbor, voter-registry.cbor, and
         candidate-set.cbor. Identity is derived from the decoded bytes, not the filenames.
+      </p>
+      <p className="form-hint">
+        A Hosted organizer bootstrap is a separately signed CBOR file. Desktop verifies its
+        exact V2 election binding under the configured authority root before creating a local
+        organizer workspace; a public election folder never grants organizer authority.
       </p>
       <DetailsSection summary="Advanced / manual load (choose three files)">
         <p className="card-body">
@@ -2304,6 +2490,51 @@ export function ManageElection() {
               </Notice>
             )}
 
+          <h3 className="card-section-heading">Hosted authority descriptor</h3>
+          <p className="form-hint">
+            Before starting intake, export this election&apos;s public descriptor request and upload
+            it in authenticated Hosted Manage. Download the signed response there, then import it
+            here. The request carries no Hosted organizer credential or Desktop private key.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={
+                !canAct ||
+                organizerBusy ||
+                organizerStatus?.intake_running === true ||
+                (organizerTorMode === "managed-local"
+                  ? organizerStatus !== null && !organizerStatus.tor_found
+                  : !remoteSocksHost.trim() || !remoteOnionHostname.trim())
+              }
+              onClick={() => void onExportHostedDescriptorRequest()}
+            >
+              {organizerBusy ? "Working…" : "Export Hosted descriptor request"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || organizerStatus?.intake_running === true}
+              onClick={() => void onImportHostedDescriptorResponse()}
+            >
+              {organizerBusy ? "Working…" : "Import signed Hosted response"}
+            </button>
+          </div>
+          {hostedDescriptorRequestPath && (
+            <Notice tone="ok">
+              Hosted descriptor request exported
+              <br />
+              <span className="hash">{hostedDescriptorRequestPath}</span>
+            </Notice>
+          )}
+          {hostedDescriptorResponseImported && (
+            <Notice tone="ok">
+              Hosted descriptor response verified for this exact Desktop request. Intake can now
+              be started.
+            </Notice>
+          )}
+
           <div className="btn-row">
             {organizerStatus?.failed ? (
               // A failed intake is recoverable with a single click: the backend
@@ -2505,6 +2736,65 @@ export function ManageElection() {
               Voter transport bundle exported
               <br />
               <span className="hash">{bundleExportPath}</span>
+            </Notice>
+          )}
+
+          <h3 className="card-section-heading">Hosted finalization handoff</h3>
+          <p className="card-body">
+            After Hosted Manage closes the matching election, download its binding request there.
+            Select that request here only after this Desktop election is finalized; this app checks
+            the election ID and manifest hash, then writes a verified response from the signed
+            transport history. Return the response file to Hosted Manage. No organizer credential
+            or raw binding bytes are copied through this step.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || lifecycle !== "FINALIZED"}
+              onClick={() => void onWriteHostedBindingHandoff()}
+            >
+              Export verified Hosted binding handoff
+            </button>
+          </div>
+          {lifecycle !== "FINALIZED" && (
+            <p className="form-hint">
+              Finalize this Desktop election first; the handoff never seals an in-progress
+              transport history.
+            </p>
+          )}
+          {hostedBindingHandoffPath && (
+            <Notice tone="ok">
+              Verified Desktop binding handoff exported
+              <br />
+              <span className="hash">{hostedBindingHandoffPath}</span>
+            </Notice>
+          )}
+
+          <h3 className="card-section-heading">Import Hosted archive</h3>
+          <p className="card-body">
+            Once Hosted Manage finalizes and publishes the archive, download it there and import
+            it here to verify and extract the canonical archive files. Desktop checks the election
+            ID and independently verifies the archive against the transport history. No organizer
+            credential is passed to Desktop in this step.
+          </p>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={!canAct || organizerBusy || !election}
+              onClick={() => void onImportHostedArchive()}
+            >
+              {organizerBusy ? "Working…" : "Import Hosted archive"}
+            </button>
+          </div>
+          {hostedArchiveImportResult && (
+            <Notice tone="ok">
+              Hosted archive imported and verified
+              <br />
+              <span className="hash">{hostedArchiveImportResult.archive_hash_hex}</span>
+              <br />
+              <span>{hostedArchiveImportResult.file_count} file(s) written</span>
             </Notice>
           )}
 
@@ -3043,6 +3333,17 @@ export function ManageElection() {
             non-binding — the independently verified offline archive remains authoritative.
           </Notice>
 
+          {!isDesktopShell() && (
+            <Notice tone="warn">
+              <p>
+                Anchoring from a web browser is done on the hosted organizer's
+                Manage Election page, which is the only reviewed browser publish
+                path. Import the anchor bundle exported by the desktop
+                application there; this page cannot publish anchors.
+              </p>
+            </Notice>
+          )}
+
           {anchorLockedUntilVerifiedArchive && (
             <Notice tone="warn">
               <p className="anchor-prereq-title">
@@ -3548,6 +3849,31 @@ export function ManageElection() {
                     </div>
                     {anchorV2Preparation && (
                       <>
+                        {isDesktopShell() && (
+                          <DetailsSection summary="Advanced: publish this anchor from a browser wallet">
+                            <p className="form-hint">
+                              Copies the verified anchor arguments and the locked template
+                              binding as a JSON bundle. Save it to a file and import it in the
+                              browser application to publish the same anchor from a Tari wallet.
+                              The bundle carries only public data.
+                            </p>
+                            <div className="btn-row">
+                              <button
+                                type="button"
+                                className="btn btn-secondary"
+                                disabled={browserBundleExportBusy || !canAct}
+                                onClick={() => void onExportBrowserAnchorBundle()}
+                              >
+                                {browserBundleExportBusy
+                                  ? "Copying…"
+                                  : "Export browser anchor bundle"}
+                              </button>
+                            </div>
+                            {browserBundleExportMessage && (
+                              <p className="form-hint">{browserBundleExportMessage}</p>
+                            )}
+                          </DetailsSection>
+                        )}
                         <div className="field-list anchor-deployment-fields">
                           <Field label="Prepared function">{anchorV2Preparation.template_function}</Field>
                           <Field label="Prepared arguments">{anchorV2Preparation.arguments.length}</Field>

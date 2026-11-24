@@ -1,4 +1,4 @@
-//! Controlled-test provisioning material and public/private bundle separation.
+﻿//! Controlled-test provisioning material and public/private bundle separation.
 //!
 //! This module is compiled only under the `managed-tor` feature. It
 //! creates the organizer-side secret material and the voter-side public bundle
@@ -26,8 +26,9 @@ use hpke::{Kem as KemTrait, Serializable};
 use tari_cc_private_ballot_protocol::{CanonicalCborReader, CanonicalCborWriter};
 
 use tari_cc_private_ballot_gui_core::{
-    BatchPolicyV1, PaddingPolicyV1, TransportAuthorityRootV1, TransportDescriptorV1,
-    TransportRoutePolicyV1,
+    BatchPolicyV1, HostedDescriptorPendingStateV1, HostedDescriptorPendingStatusV1,
+    HostedDescriptorResponseV1, PaddingPolicyV1, TransportAuthorityRootSetV1,
+    TransportAuthorityRootV1, TransportDescriptorV1, TransportRoutePolicyV1,
 };
 
 use crate::GatewayReceiverKeyV1;
@@ -44,6 +45,15 @@ const ROOT_SECRET_FILENAME: &str = "root-signing-secret.bin";
 const GATEWAY_RECEIVER_SECRET_FILENAME: &str = "gateway-receiver-secret.bin";
 const RECEIPT_SIGNING_SECRET_FILENAME: &str = "receipt-signing-secret.bin";
 const BUNDLE_MANIFEST_FILENAME: &str = "bundle-manifest.cbor";
+const HOSTED_PENDING_DIRECTORY: &str = "hosted-descriptor-pending-v1";
+const HOSTED_PENDING_MANIFEST_FILENAME: &str = "pending-manifest.cbor";
+const HOSTED_PENDING_STATE_FILENAME: &str = "pending-state.cbor";
+const HOSTED_ISSUED_DESCRIPTOR_FILENAME: &str = "issued-descriptor.cbor";
+const HOSTED_GATEWAY_RECEIVER_SECRET_FILENAME: &str = "gateway-receiver-secret.bin";
+const HOSTED_RECEIPT_SIGNING_SECRET_FILENAME: &str = "receipt-signing-secret.bin";
+const HOSTED_PENDING_MANIFEST_TYPE_ID: &str =
+    "TARI_CC_PRIVATE_BALLOT_HOSTED_DESCRIPTOR_PENDING_MATERIAL_V1";
+const HOSTED_PENDING_MANIFEST_VERSION: u64 = 1;
 
 /// Bounded size guards.
 const MAX_SECRET_FILE_BYTES: usize = 64;
@@ -67,6 +77,33 @@ pub struct TransportAuthorityMaterialV1 {
     pub gateway_receiver_public_key: [u8; 32],
     /// Ed25519 receipt signing key (signs authenticated receipts).
     pub receipt_signing_key: SigningKey,
+}
+
+/// Desktop-owned private material for an externally-authorized descriptor.
+/// Unlike [`TransportAuthorityMaterialV1`], it deliberately has no authority
+/// signing key and therefore cannot self-sign a production descriptor.
+pub struct HostedPendingTransportMaterialV1 {
+    pub gateway_receiver_key: GatewayReceiverKeyV1,
+    pub gateway_receiver_public_key: [u8; 32],
+    pub receipt_signing_key: SigningKey,
+}
+
+/// Reloaded durable pending material. The state file contains only public
+/// request data; secrets remain in the sibling local-only files.
+pub struct LoadedHostedPendingTransportV1 {
+    pub material: HostedPendingTransportMaterialV1,
+    pub pending: HostedDescriptorPendingStateV1,
+    pub binding: TransportElectionBindingV1,
+    pub tor_data_directory: std::path::PathBuf,
+    pub hidden_service_dir: std::path::PathBuf,
+}
+
+/// Result of importing a Hosted response into the durable Desktop store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostedDescriptorResponseImportV1 {
+    ProvisioningRecovered,
+    Completed,
+    AlreadyCompleted,
 }
 
 /// Non-secret metadata binding the test material to a specific election.
@@ -114,6 +151,264 @@ pub fn generate_transport_authority_material_v1(
         gateway_receiver_public_key,
         receipt_signing_key,
     })
+}
+
+/// Generates only the Desktop-owned receiver and receipt keys required for a
+/// pending Hosted descriptor request. No authority or Hosted credential is
+/// generated, accepted, or retained here.
+pub fn generate_hosted_pending_transport_material_v1(
+) -> Result<HostedPendingTransportMaterialV1, ProvisioningErrorV1> {
+    let (gateway_secret, gateway_public) = Kem::gen_keypair();
+    let mut gateway_secret_bytes = [0u8; 32];
+    gateway_secret_bytes.copy_from_slice(gateway_secret.to_bytes().as_slice());
+    let gateway_receiver_key = GatewayReceiverKeyV1::from_secret_bytes(gateway_secret_bytes)
+        .map_err(|_| ProvisioningErrorV1::InvalidConfiguration)?;
+    let mut gateway_receiver_public_key = [0u8; 32];
+    gateway_receiver_public_key.copy_from_slice(gateway_public.to_bytes().as_slice());
+    Ok(HostedPendingTransportMaterialV1 {
+        gateway_receiver_key,
+        gateway_receiver_public_key,
+        receipt_signing_key: SigningKey::from_bytes(&new_retry_capability_v1()),
+    })
+}
+
+/// Persists a complete pending request in a new, atomically published
+/// directory before its public request artifact may be exported. A previous
+/// pending directory is never overwritten, so a second ambiguous request is
+/// rejected rather than replacing local private material.
+pub fn persist_hosted_pending_transport_v1(
+    organizer_private_dir: &Path,
+    material: &HostedPendingTransportMaterialV1,
+    pending: &HostedDescriptorPendingStateV1,
+    binding: &TransportElectionBindingV1,
+    tor_data_directory: &Path,
+    hidden_service_dir: &Path,
+) -> Result<(), ProvisioningErrorV1> {
+    if !organizer_private_dir.is_absolute()
+        || pending.request().election_id() != binding.election_id
+        || pending.request().manifest_hash().as_bytes() != &binding.manifest_hash
+    {
+        return Err(ProvisioningErrorV1::InvalidConfiguration);
+    }
+    pending
+        .verify_local_transport_identity(
+            material.gateway_receiver_public_key,
+            material.receipt_signing_key.verifying_key().to_bytes(),
+        )
+        .map_err(|_| ProvisioningErrorV1::InvalidConfiguration)?;
+    fs::create_dir_all(organizer_private_dir).map_err(|_| ProvisioningErrorV1::Io)?;
+    let final_dir = organizer_private_dir.join(HOSTED_PENDING_DIRECTORY);
+    if final_dir.exists() {
+        return Err(ProvisioningErrorV1::InvalidConfiguration);
+    }
+    let staging_dir = organizer_private_dir.join(format!(
+        ".{HOSTED_PENDING_DIRECTORY}-staging-{}",
+        hex_lower(&pending.transport_state_id()),
+    ));
+    if staging_dir.exists() {
+        return Err(ProvisioningErrorV1::InvalidConfiguration);
+    }
+    fs::create_dir(&staging_dir).map_err(|_| ProvisioningErrorV1::Io)?;
+    let result = (|| {
+        write_secret_file(
+            &staging_dir.join(HOSTED_GATEWAY_RECEIVER_SECRET_FILENAME),
+            &material.gateway_receiver_key.secret_bytes(),
+        )?;
+        write_secret_file(
+            &staging_dir.join(HOSTED_RECEIPT_SIGNING_SECRET_FILENAME),
+            material.receipt_signing_key.to_bytes().as_slice(),
+        )?;
+        write_atomic_bounded(
+            &staging_dir.join(HOSTED_PENDING_STATE_FILENAME),
+            &pending.to_canonical_cbor().map_err(|_| ProvisioningErrorV1::InvalidConfiguration)?,
+        )?;
+        let mut writer = CanonicalCborWriter::new();
+        writer
+            .write_array_len(9)
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer.write_unsigned(HOSTED_PENDING_MANIFEST_VERSION);
+        writer
+            .write_text_string(HOSTED_PENDING_MANIFEST_TYPE_ID)
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer
+            .write_byte_string(&binding.election_id)
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer
+            .write_byte_string(&binding.manifest_hash)
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer
+            .write_byte_string(&pending.transport_state_id())
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer
+            .write_byte_string(&material.gateway_receiver_public_key)
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        writer
+            .write_byte_string(&material.receipt_signing_key.verifying_key().to_bytes())
+            .map_err(|_| ProvisioningErrorV1::Io)?;
+        write_path_string(&mut writer, tor_data_directory)?;
+        write_path_string(&mut writer, hidden_service_dir)?;
+        write_atomic_bounded(
+            &staging_dir.join(HOSTED_PENDING_MANIFEST_FILENAME),
+            &writer.into_bytes(),
+        )
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return result;
+    }
+    fs::rename(staging_dir, final_dir).map_err(|_| ProvisioningErrorV1::Io)
+}
+
+/// Reloads the opaque pending record and its local-only private material after
+/// a Desktop restart. A response importer must use this exact state; it must
+/// never recreate keys from the public request.
+pub fn load_hosted_pending_transport_v1(
+    organizer_private_dir: &Path,
+) -> Result<LoadedHostedPendingTransportV1, ProvisioningErrorV1> {
+    if !organizer_private_dir.is_absolute() {
+        return Err(ProvisioningErrorV1::InvalidConfiguration);
+    }
+    let dir = organizer_private_dir.join(HOSTED_PENDING_DIRECTORY);
+    let pending = HostedDescriptorPendingStateV1::from_canonical_cbor(&read_bounded(
+        &dir.join(HOSTED_PENDING_STATE_FILENAME),
+    )?)
+    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    let gateway_receiver_key = GatewayReceiverKeyV1::from_secret_bytes(read_secret32(
+        &dir.join(HOSTED_GATEWAY_RECEIVER_SECRET_FILENAME),
+    )?)
+    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    let receipt_signing_key = SigningKey::from_bytes(&read_secret32(
+        &dir.join(HOSTED_RECEIPT_SIGNING_SECRET_FILENAME),
+    )?);
+    let manifest = read_bounded(&dir.join(HOSTED_PENDING_MANIFEST_FILENAME))?;
+    let mut reader = CanonicalCborReader::new(&manifest);
+    if reader
+        .read_array_len()
+        .map_err(|_| ProvisioningErrorV1::MalformedBundle)?
+        != 9
+        || reader
+            .read_unsigned()
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?
+            != HOSTED_PENDING_MANIFEST_VERSION
+        || reader
+            .read_text_string()
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?
+            != HOSTED_PENDING_MANIFEST_TYPE_ID
+    {
+        return Err(ProvisioningErrorV1::MalformedBundle);
+    }
+    let binding = TransportElectionBindingV1 {
+        election_id: reader
+            .read_byte_string()
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?
+            .to_vec(),
+        manifest_hash: read_fixed32(&mut reader)?,
+    };
+    let state_id = read_fixed32(&mut reader)?;
+    let gateway_public = read_fixed32(&mut reader)?;
+    let receipt_public = read_fixed32(&mut reader)?;
+    let tor_data_directory = std::path::PathBuf::from(
+        reader
+            .read_text_string()
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+    );
+    let hidden_service_dir = std::path::PathBuf::from(
+        reader
+            .read_text_string()
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+    );
+    reader.finish().map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    let material = HostedPendingTransportMaterialV1 {
+        gateway_receiver_public_key: gateway_receiver_key.receiver_public_key(),
+        gateway_receiver_key,
+        receipt_signing_key,
+    };
+    if state_id != pending.transport_state_id()
+        || pending.request().election_id() != binding.election_id
+        || pending.request().manifest_hash().as_bytes() != &binding.manifest_hash
+        || material.gateway_receiver_public_key != gateway_public
+        || material.receipt_signing_key.verifying_key().to_bytes() != receipt_public
+    {
+        return Err(ProvisioningErrorV1::MalformedBundle);
+    }
+    pending
+        .verify_local_transport_identity(gateway_public, receipt_public)
+        .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    Ok(LoadedHostedPendingTransportV1 {
+        material,
+        pending,
+        binding,
+        tor_data_directory,
+        hidden_service_dir,
+    })
+}
+
+/// Performs the durable request `pending -> provisioning -> completed`
+/// transition for an exact authority-issued response. The descriptor is written
+/// before the completed marker, so a restart can never mistake a marker for a
+/// provisioned descriptor that was not persisted.
+pub fn import_hosted_descriptor_response_v1(
+    organizer_private_dir: &Path,
+    response: &HostedDescriptorResponseV1,
+    roots: &TransportAuthorityRootSetV1,
+    current_workspace_election_id: &[u8],
+    current_workspace_manifest_hash: tari_cc_private_ballot_protocol::ManifestHash,
+) -> Result<(HostedDescriptorResponseImportV1, TransportDescriptorV1), ProvisioningErrorV1> {
+    let loaded = load_hosted_pending_transport_v1(organizer_private_dir)?;
+    let descriptor = loaded
+        .pending
+        .verify_response(
+            response,
+            roots,
+            current_workspace_election_id,
+            current_workspace_manifest_hash,
+        )
+        .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+    let dir = organizer_private_dir.join(HOSTED_PENDING_DIRECTORY);
+    match loaded.pending.status() {
+        HostedDescriptorPendingStatusV1::Completed => {
+            let issued = TransportDescriptorV1::from_canonical_cbor(&read_bounded(
+                &dir.join(HOSTED_ISSUED_DESCRIPTOR_FILENAME),
+            )?)
+            .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+            if issued != descriptor {
+                return Err(ProvisioningErrorV1::MalformedBundle);
+            }
+            Ok((HostedDescriptorResponseImportV1::AlreadyCompleted, descriptor))
+        }
+        HostedDescriptorPendingStatusV1::Pending | HostedDescriptorPendingStatusV1::Provisioning => {
+            let provisioning = match loaded.pending.status() {
+                HostedDescriptorPendingStatusV1::Pending => loaded
+                    .pending
+                    .begin_provisioning()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+                HostedDescriptorPendingStatusV1::Provisioning => loaded.pending.clone(),
+                HostedDescriptorPendingStatusV1::Completed => unreachable!(),
+            };
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_PENDING_STATE_FILENAME),
+                &provisioning
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_ISSUED_DESCRIPTOR_FILENAME),
+                &descriptor
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            let completed = provisioning
+                .complete(response.clone())
+                .map_err(|_| ProvisioningErrorV1::MalformedBundle)?;
+            write_replace_atomic_bounded(
+                &dir.join(HOSTED_PENDING_STATE_FILENAME),
+                &completed
+                    .to_canonical_cbor()
+                    .map_err(|_| ProvisioningErrorV1::MalformedBundle)?,
+            )?;
+            Ok((HostedDescriptorResponseImportV1::Completed, descriptor))
+        }
+    }
 }
 
 /// Builds and signs a [`TransportDescriptorV1`] bound to the discovered onion
@@ -700,6 +995,32 @@ fn write_atomic_bounded(path: &Path, bytes: &[u8]) -> Result<(), ProvisioningErr
     Ok(())
 }
 
+fn write_replace_atomic_bounded(path: &Path, bytes: &[u8]) -> Result<(), ProvisioningErrorV1> {
+    if bytes.len() as u64 > MAX_BUNDLE_FILE_BYTES {
+        return Err(ProvisioningErrorV1::Io);
+    }
+    let temporary = path.with_extension("new");
+    // A process that stopped before rename leaves only a non-authoritative
+    // scratch file. It is safe to discard before retrying the durable
+    // transition because `path` remains the sole committed state.
+    if temporary.exists() {
+        let metadata = fs::symlink_metadata(&temporary).map_err(|_| ProvisioningErrorV1::Io)?;
+        if metadata.file_type().is_symlink() || is_windows_reparse_point(&metadata) || !metadata.is_file() {
+            return Err(ProvisioningErrorV1::Io);
+        }
+        fs::remove_file(&temporary).map_err(|_| ProvisioningErrorV1::Io)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| ProvisioningErrorV1::Io)?;
+    file.write_all(bytes).map_err(|_| ProvisioningErrorV1::Io)?;
+    file.sync_all().map_err(|_| ProvisioningErrorV1::Io)?;
+    drop(file);
+    fs::rename(&temporary, path).map_err(|_| ProvisioningErrorV1::Io)
+}
+
 fn read_bounded(path: &Path) -> Result<Vec<u8>, ProvisioningErrorV1> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ProvisioningErrorV1::Io)?;
     if metadata.file_type().is_symlink()
@@ -727,6 +1048,15 @@ fn read_secret32(path: &Path) -> Result<[u8; 32], ProvisioningErrorV1> {
         .map_err(|_| ProvisioningErrorV1::MalformedBundle)
 }
 
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
 fn write_path_string(
     writer: &mut CanonicalCborWriter,
     path: &Path,
@@ -752,9 +1082,14 @@ fn is_windows_reparse_point(_metadata: &std::fs::Metadata) -> bool {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use ed25519_dalek::{Signer, SigningKey};
     use super::*;
     use std::path::PathBuf;
-    use tari_cc_private_ballot_gui_core::TransportAuthorityRootSetV1;
+    use tari_cc_private_ballot_gui_core::{
+        HostedDescriptorRequestV1, HostedDescriptorPendingStateV1, HostedDescriptorResponseV1,
+        TransportAuthorityRootSetV1, TransportAuthorityRootV1,
+    };
+    use tari_cc_private_ballot_protocol::ManifestHash;
 
     fn unique_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -799,6 +1134,127 @@ mod tests {
         )
         .expect("provision");
         (material, binding, descriptor)
+    }
+
+    #[test]
+    fn hosted_pending_transport_round_trips_before_public_request_export() {
+        let dir = unique_dir("hosted-pending");
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = TransportDescriptorV1::unsigned_for_authority(
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec![GOOD_ONION.to_owned()],
+            Vec::new(),
+            material.gateway_receiver_public_key,
+            "desktop-pending-gateway".to_owned(),
+            vec![material.receipt_signing_key.verifying_key().to_bytes()],
+            PaddingPolicyV1 {
+                id: "test-padding".to_owned(),
+                padded_bytes: 2048,
+            },
+            BatchPolicyV1 {
+                id: "test-batch".to_owned(),
+                accepted_unique_floor: 1,
+            },
+            None,
+            "hosted-test-root".to_owned(),
+        )
+        .expect("draft");
+        let request = HostedDescriptorRequestV1::new([3; 32], "test".to_owned(), draft)
+            .expect("request");
+        let pending = HostedDescriptorPendingStateV1::new(
+            request.clone(),
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            [4; 32],
+        )
+        .expect("pending");
+        let public_request = request.to_canonical_cbor().expect("request cbor");
+        for private_bytes in [
+            material.gateway_receiver_key.secret_bytes(),
+            material.receipt_signing_key.to_bytes(),
+        ] {
+            assert!(
+                !public_request.windows(32).any(|window| window == private_bytes),
+                "public request must not contain Desktop private transport material"
+            );
+        }
+        let organizer_private_dir = dir.join("organizer-private");
+        persist_hosted_pending_transport_v1(
+            &organizer_private_dir,
+            &material,
+            &pending,
+            &binding,
+            &dir.join("tor-data"),
+            &dir.join("hs-dir"),
+        )
+        .expect("persist before export");
+        let restored = load_hosted_pending_transport_v1(&organizer_private_dir).expect("restart");
+        assert_eq!(restored.pending, pending);
+        assert_eq!(
+            restored.material.gateway_receiver_public_key,
+            material.gateway_receiver_public_key
+        );
+        let authority = SigningKey::from_bytes(&[42; 32]);
+        let signature = authority
+            .sign(
+                &request
+                    .descriptor_draft()
+                    .authority_signing_payload()
+                    .expect("payload"),
+            )
+            .to_bytes();
+        let response = HostedDescriptorResponseV1::new(
+            &request,
+            request
+                .descriptor_draft()
+                .with_authority_signature(signature)
+                .expect("issued"),
+        )
+        .expect("response");
+        let roots = TransportAuthorityRootSetV1::new(TransportAuthorityRootV1::Pinned {
+            key_id: "hosted-test-root".to_owned(),
+            public_key: authority.verifying_key().to_bytes(),
+        });
+        assert_eq!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .expect("response import")
+            .0,
+            HostedDescriptorResponseImportV1::Completed
+        );
+        assert_eq!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .expect("idempotent response import")
+            .0,
+            HostedDescriptorResponseImportV1::AlreadyCompleted
+        );
+        assert!(
+            persist_hosted_pending_transport_v1(
+                &organizer_private_dir,
+                &material,
+                &pending,
+                &binding,
+                &dir.join("tor-data"),
+                &dir.join("hs-dir"),
+            )
+            .is_err(),
+            "a second active request must never replace the first local state"
+        );
     }
 
     #[test]
@@ -1021,5 +1477,295 @@ mod tests {
         );
         // The onion hostname IS safe to print (public).
         assert!(safe_output.contains(loaded.descriptor.onion_endpoints()[0].as_str()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Descriptor network decisions are derived from the provisioned authority
+    // config â€” never a hard-coded value. Behavioral matrix for the exact
+    // request-export / response-import boundary the Desktop commands call.
+    // -----------------------------------------------------------------------
+
+    const STAGING_NETWORK: &str = "staging";
+    const PRODUCTION_NETWORK: &str = "production";
+
+    fn configure_pinned_authority(label_tag: &str, network: &str, signing_seed: u8) -> PathBuf {
+        let signing = SigningKey::from_bytes(&[signing_seed; 32]);
+        let dir = unique_dir(&format!("authority-{label_tag}-{network}-{signing_seed}"));
+        // Write the operator's public pin in the exact shipped on-disk format.
+        // The atomic-write ceremony is gui-core's own concern; this matrix
+        // exercises the read/derive/verify boundary the Desktop calls.
+        let pin = format!(
+            r#"{{"schema":"TARI_CC_PRIVATE_BALLOT_PRODUCTION_TRANSPORT_AUTHORITY_ROOT_V1","network":"{network}","root_key_id":"hosted-test-root","root_public_key_hex":"{key}","label":null,"configured_at_unix_ms":0}}"#,
+            key = hex_lower(&signing.verifying_key().to_bytes()),
+        );
+        std::fs::write(
+            dir.join(tari_cc_private_ballot_gui_core::production_transport_authority_path_v1(&dir)
+                .file_name()
+                .expect("file name")),
+            pin,
+        )
+        .expect("write pin");
+        dir
+    }
+
+    fn pinned_roots(dir: &Path, network: &str) -> TransportAuthorityRootSetV1 {
+        tari_cc_private_ballot_gui_core::production_transport_authority_root_set_v1(dir, Some(network))
+            .expect("root set for configured network")
+    }
+
+    fn hosted_draft(
+        material: &HostedPendingTransportMaterialV1,
+        binding: &TransportElectionBindingV1,
+    ) -> TransportDescriptorV1 {
+        TransportDescriptorV1::unsigned_for_authority(
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            1,
+            TransportRoutePolicyV1::ManagedTorOrOffline,
+            vec![GOOD_ONION.to_owned()],
+            Vec::new(),
+            material.gateway_receiver_public_key,
+            "desktop-pending-gateway".to_owned(),
+            vec![material.receipt_signing_key.verifying_key().to_bytes()],
+            PaddingPolicyV1 {
+                id: "test-padding".to_owned(),
+                padded_bytes: 2048,
+            },
+            BatchPolicyV1 {
+                id: "test-batch".to_owned(),
+                accepted_unique_floor: 1,
+            },
+            None,
+            "hosted-test-root".to_owned(),
+        )
+        .expect("draft")
+    }
+
+    fn signed_response(
+        request: &HostedDescriptorRequestV1,
+        signing: &SigningKey,
+    ) -> HostedDescriptorResponseV1 {
+        let signature = signing
+            .sign(
+                &request
+                    .descriptor_draft()
+                    .authority_signing_payload()
+                    .expect("payload"),
+            )
+            .to_bytes();
+        HostedDescriptorResponseV1::new(
+            request,
+            request
+                .descriptor_draft()
+                .with_authority_signature(signature)
+                .expect("issued"),
+        )
+        .expect("response")
+    }
+
+    fn persisted_pending(
+        organizer_private_dir: &Path,
+        base_dir: &Path,
+        binding: &TransportElectionBindingV1,
+        material: &HostedPendingTransportMaterialV1,
+        request: HostedDescriptorRequestV1,
+    ) {
+        let pending = HostedDescriptorPendingStateV1::new(
+            request,
+            binding.election_id.clone(),
+            ManifestHash::new(binding.manifest_hash),
+            [4; 32],
+        )
+        .expect("pending");
+        persist_hosted_pending_transport_v1(
+            organizer_private_dir,
+            material,
+            &pending,
+            binding,
+            &base_dir.join("tor-data"),
+            &base_dir.join("hs-dir"),
+        )
+        .expect("persist pending");
+    }
+
+    /// Matrix 1 + 7 + 8: a staging pin derives the expected staging network,
+    /// the exported request carries `network = staging`, and an authority
+    /// response signed by the pinned staging key imports successfully.
+    #[test]
+    fn staging_pin_expects_staging_request_and_imports_its_response() {
+        let dir = configure_pinned_authority("accepts-staging", STAGING_NETWORK, 42);
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        assert_eq!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            STAGING_NETWORK
+        );
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new(
+            [5; 32],
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            draft,
+        )
+        .expect("request");
+        assert_eq!(request.network(), STAGING_NETWORK);
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &signing);
+        let (outcome, descriptor) = import_hosted_descriptor_response_v1(
+            &organizer_private_dir,
+            &response,
+            &roots,
+            &binding.election_id,
+            ManifestHash::new(binding.manifest_hash),
+        )
+        .expect("staging response imports");
+        assert_eq!(outcome, HostedDescriptorResponseImportV1::Completed);
+        assert_eq!(descriptor.root_key_id(), "hosted-test-root".to_owned());
+    }
+
+    /// Matrix 2: a production pin expects production and the same boundary
+    /// accepts a production request/response pair.
+    #[test]
+    fn production_pin_expects_production_request_and_imports_its_response() {
+        let dir = configure_pinned_authority("accepts-production", PRODUCTION_NETWORK, 43);
+        let signing = SigningKey::from_bytes(&[43; 32]);
+        assert_eq!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir)
+                .expect("network"),
+            PRODUCTION_NETWORK
+        );
+        let roots = pinned_roots(&dir, PRODUCTION_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new(
+            [6; 32],
+            PRODUCTION_NETWORK.to_owned(),
+            draft,
+        )
+        .expect("request");
+        assert_eq!(request.network(), PRODUCTION_NETWORK);
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &signing);
+        let (outcome, _descriptor) = import_hosted_descriptor_response_v1(
+            &organizer_private_dir,
+            &response,
+            &roots,
+            &binding.election_id,
+            ManifestHash::new(binding.manifest_hash),
+        )
+        .expect("production response imports");
+        assert_eq!(outcome, HostedDescriptorResponseImportV1::Completed);
+    }
+
+    /// Matrix 3: a staging Desktop rejects a response that carries a
+    /// production network â€” even when it is signed by the pinned key.
+    #[test]
+    fn staging_pin_rejects_production_network_response() {
+        let dir = configure_pinned_authority("rejects-production", STAGING_NETWORK, 42);
+        let signing = SigningKey::from_bytes(&[42; 32]);
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new([5; 32], STAGING_NETWORK.to_owned(), draft)
+            .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        // A forged/foreign response whose network field says "production".
+        let production_request =
+            HostedDescriptorRequestV1::new([5; 32], PRODUCTION_NETWORK.to_owned(), request.descriptor_draft().clone())
+                .expect("request");
+        let response = signed_response(&production_request, &signing);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a production-network response must never satisfy a staging request"
+        );
+    }
+
+    /// Matrix 4: a production Desktop rejects a staging-network response.
+    #[test]
+    fn production_pin_rejects_staging_network_response() {
+        let dir = configure_pinned_authority("rejects-staging", PRODUCTION_NETWORK, 43);
+        let signing = SigningKey::from_bytes(&[43; 32]);
+        let roots = pinned_roots(&dir, PRODUCTION_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request =
+            HostedDescriptorRequestV1::new([6; 32], PRODUCTION_NETWORK.to_owned(), draft)
+                .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let staging_request =
+            HostedDescriptorRequestV1::new([6; 32], STAGING_NETWORK.to_owned(), request.descriptor_draft().clone())
+                .expect("request");
+        let response = signed_response(&staging_request, &signing);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a staging-network response must never satisfy a production request"
+        );
+    }
+
+    /// Matrix 5: a missing authority config fails closed before any network
+    /// decision is made.
+    #[test]
+    fn missing_authority_config_fails_closed() {
+        let dir = unique_dir("authority-missing");
+        assert!(tari_cc_private_ballot_gui_core::production_transport_authority_network_v1(&dir).is_err());
+        assert!(
+            tari_cc_private_ballot_gui_core::production_transport_authority_root_set_v1(
+                &dir,
+                Some(STAGING_NETWORK)
+            )
+            .is_err(),
+            "an unprovisioned authority must fail closed"
+        );
+    }
+
+    /// Matrix 6: a wrong authority key with the correct network is rejected.
+    #[test]
+    fn wrong_authority_key_rejected_with_correct_network() {
+        let dir = configure_pinned_authority("rejects-wrong-key", STAGING_NETWORK, 42);
+        let attacker = SigningKey::from_bytes(&[99; 32]);
+        let roots = pinned_roots(&dir, STAGING_NETWORK);
+        let material = generate_hosted_pending_transport_material_v1().expect("material");
+        let binding = binding();
+        let draft = hosted_draft(&material, &binding);
+        let request = HostedDescriptorRequestV1::new([5; 32], STAGING_NETWORK.to_owned(), draft)
+            .expect("request");
+        let organizer_private_dir = dir.join("organizer-private");
+        persisted_pending(&organizer_private_dir, &dir, &binding, &material, request.clone());
+        let response = signed_response(&request, &attacker);
+        assert!(
+            import_hosted_descriptor_response_v1(
+                &organizer_private_dir,
+                &response,
+                &roots,
+                &binding.election_id,
+                ManifestHash::new(binding.manifest_hash),
+            )
+            .is_err(),
+            "a signature that is not from the pinned authority must be rejected"
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! payload), never the record, so it cannot touch `OotleAnchorRecordV1`,
 //! `ArchiveHashV1`, or the canonical archive bytes. This test snapshots those
 //! artifacts, runs both a successful construction and failing constructions
-//! (unsupported network, and mainnet rejection), and asserts every artifact is
+//! (unsupported-network mappings), and asserts every artifact is
 //! byte-identical afterward.
 
 mod common;
@@ -73,8 +73,8 @@ fn construction_and_failures_do_not_mutate_archive_artifacts() {
     // Network-mapping failure (unsupported testnet name).
     assert!(build_unsigned_anchor_transaction(&request_on("teronet", payload)).is_err());
 
-    // Mainnet rejection failure.
-    assert!(build_unsigned_anchor_transaction(&request_on("mainnet", payload)).is_err());
+    // Pre-production network-mapping failure.
+    assert!(build_unsigned_anchor_transaction(&request_on("stagenet", payload)).is_err());
 
     // Every offline archive artifact is byte-identical after all of the above.
     assert_eq!(canonical_bytes(&record), record_bytes_before);

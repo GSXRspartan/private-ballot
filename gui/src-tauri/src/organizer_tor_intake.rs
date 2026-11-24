@@ -26,7 +26,9 @@
 //! the signed descriptor onion; the service loop worker is only started after
 //! that equality; READY is reported only after the worker is confirmed alive.
 
+use std::io::Write;
 use std::net::SocketAddr;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::{Arc, Mutex};
@@ -36,18 +38,30 @@ use serde::{Deserialize, Serialize};
 use tari_cc_private_ballot_archive::TransportArchiveBindingV1;
 use tari_cc_private_ballot_gui_core::{
     AuthoritativeLifecycleFenceV1, ElectionLifecycleStateV1, GuiElectionArtifactsV1,
-    GuiElectionSessionV1, TransportDescriptorV1, ensure_private_intake_inbox_directory_v1,
+    GuiElectionSessionV1, HostedDescriptorPendingStateV1, HostedDescriptorResponseV1,
+    HostedDescriptorPendingStatusV1, HostedDescriptorRequestV1, PaddingPolicyV1, BatchPolicyV1,
+    TransportAuthorityRootSetV1, TransportDescriptorV1, TransportRoutePolicyV1,
+    production_transport_authority_network_v1, production_transport_authority_root_set_v1,
+    ensure_private_intake_inbox_directory_v1,
     ensure_voter_election_status_directory_v1, private_intake_inbox_directory_v1,
-    read_accepted_package_digests_v1, read_issued_status_generation_v1,
-    reserve_next_status_generation_v1,
+    read_accepted_package_digests_v1, reserve_next_status_generation_v1,
 };
+#[cfg(test)]
+use tari_cc_private_ballot_gui_core::read_issued_status_generation_v1;
 use tari_cc_private_ballot_transport_gateway::{
-    GatewayReceiverKeyV1, LoadedOrganizerPrivateBundleV1, OpaqueEnvelopeCollectorV1,
+    GatewayReceiverKeyV1, OpaqueEnvelopeCollectorV1,
     OrganizerCollectorServiceLoopV1, TransportElectionBindingV1, ThreadSafeCollectorHandlerV1,
     TransportGatewaySimulatorV1, finalized_transport_archive_binding_from_accepted_digests_v1,
-    generate_transport_authority_material_v1, load_organizer_private_bundle_v1,
-    provision_organizer_transport_bundles_v1, validate_intake_startup_v1,
+    load_organizer_private_bundle_v1, generate_hosted_pending_transport_material_v1,
+    import_hosted_descriptor_response_v1, load_hosted_pending_transport_v1,
+    persist_hosted_pending_transport_v1, new_retry_capability_v1,
+    LoadedHostedPendingTransportV1,
 };
+#[cfg(test)]
+use tari_cc_private_ballot_transport_gateway::{
+    generate_transport_authority_material_v1, provision_organizer_transport_bundles_v1,
+};
+use tari_cc_private_ballot_protocol::ManifestHash;
 use tari_cc_private_ballot_transport_network::{
     DiscoveryTimeoutV1, ManagedTorSpawnerV1, OrganizerHiddenServiceTorConfigV1,
     RemoteSocksEndpointErrorV1, RemoteSocksEndpointV1, RemoteTorReadinessOutcomeV1,
@@ -285,6 +299,13 @@ impl OrganizerIntakeState {
         self.service_loop.accepted_unique_count()
     }
 
+    /// Returns the public, signed descriptor for pre-finalization provenance
+    /// checks. The descriptor contains no organizer or voter secret material.
+    #[must_use]
+    pub(crate) fn descriptor(&self) -> &TransportDescriptorV1 {
+        &self.descriptor
+    }
+
     pub(crate) fn finalize_transport_archive_binding(
         &self,
     ) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
@@ -297,6 +318,16 @@ impl OrganizerIntakeState {
                     "the active private transport history could not produce a finalized archive binding",
                 )
             })
+    }
+
+    /// Returns the exact public descriptor paired with the live sealed
+    /// binding.  The descriptor is not a secret; exporting it lets Hosted
+    /// authenticate the binding under its independently configured root.
+    pub(crate) fn finalized_transport_binding_handoff(
+        &self,
+    ) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+        self.finalize_transport_archive_binding()
+            .map(|binding| binding.map(|binding| (binding, self.descriptor.clone())))
     }
 }
 
@@ -395,6 +426,19 @@ pub struct OrganizerIntakeStatusV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VoterBundleExportResultV1 {
     pub written_path: String,
+}
+
+/// Result of exporting the public-only Hosted descriptor request. The request
+/// itself contains no Desktop private transport material or Hosted credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostedDescriptorRequestExportResultV1 {
+    pub written_path: String,
+}
+
+/// Result of importing an authority-issued Hosted descriptor response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HostedDescriptorResponseImportResultV1 {
+    pub already_completed: bool,
 }
 
 // -------------------------------------------------------------------------
@@ -507,23 +551,42 @@ fn binding_recovery_count_mismatch() -> CommandError {
 ///     gate would catch).
 ///
 /// The `app_data_root`-based core keeps this unit-testable without a Tauri
-/// runtime; [`recover_finalized_transport_binding_from_durable_state`] wraps it
-/// with the live [`AppHandle`].
-pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
+/// runtime; [`recover_finalized_transport_binding_handoff_from_durable_state`]
+/// wraps it with the live [`AppHandle`].
+pub(crate) fn recover_finalized_transport_binding_handoff_from_durable_state_under(
     app_data_root: &Path,
     manifest_hash_hex: &str,
     authoritative_accepted_count: u64,
-) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
     let private_dir =
         election_transport_subpath(app_data_root, manifest_hash_hex)?.join("organizer-private");
-    // Absent / unreadable bundle => no authoritative transport for this election.
-    let Ok(bundle) = load_organizer_private_bundle_v1(&private_dir) else {
-        return Ok(None);
+    // Prefer the production Hosted-authority record. A pending request is not
+    // a transport authorization; a malformed completed record is an integrity
+    // failure, never a reason to fall back to a legacy locally signed bundle.
+    let hosted_dir = private_dir.join("hosted-descriptor-pending-v1");
+    let descriptor = if hosted_dir.exists() {
+        let hosted = load_hosted_pending_transport_v1(&private_dir)
+            .map_err(|_| binding_recovery_unavailable())?;
+        if hosted.pending.status() != HostedDescriptorPendingStatusV1::Completed {
+            return Ok(None);
+        }
+        hosted
+            .pending
+            .completed_descriptor()
+            .cloned()
+            .ok_or_else(binding_recovery_unavailable)?
+    } else {
+        // Historical V1 transport remains readable/exportable under its
+        // original identity. It never acquires the new Hosted authority path.
+        let Ok(bundle) = load_organizer_private_bundle_v1(&private_dir) else {
+            return Ok(None);
+        };
+        bundle.descriptor
     };
     // Defense in depth: the persisted, signed descriptor must bind THIS election.
     // (The path is already election-scoped, and the archive writer independently
     // rejects a mismatched binding, so this is a redundant early fail-closed.)
-    if to_hex_lower_v1(bundle.descriptor.manifest_hash().as_bytes()) != manifest_hash_hex {
+    if to_hex_lower_v1(descriptor.manifest_hash().as_bytes()) != manifest_hash_hex {
         return Err(binding_recovery_unavailable());
     }
     let inbox_dir = private_intake_inbox_directory_v1(app_data_root, manifest_hash_hex)
@@ -554,8 +617,23 @@ pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
     if digests.len() as u64 != authoritative_accepted_count {
         return Err(binding_recovery_count_mismatch());
     }
-    finalized_transport_archive_binding_from_accepted_digests_v1(&bundle.descriptor, &digests)
-        .map_err(|_| binding_recovery_unavailable())
+    let binding =
+        finalized_transport_archive_binding_from_accepted_digests_v1(&descriptor, &digests)
+            .map_err(|_| binding_recovery_unavailable())?;
+    Ok(binding.map(|binding| (binding, descriptor)))
+}
+
+pub(crate) fn recover_finalized_transport_binding_from_durable_state_under(
+    app_data_root: &Path,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
+    recover_finalized_transport_binding_handoff_from_durable_state_under(
+        app_data_root,
+        manifest_hash_hex,
+        authoritative_accepted_count,
+    )
+    .map(|handoff| handoff.map(|(binding, _)| binding))
 }
 
 /// [`AppHandle`] wrapper around
@@ -567,6 +645,19 @@ pub(crate) fn recover_finalized_transport_binding_from_durable_state(
 ) -> Result<Option<TransportArchiveBindingV1>, CommandError> {
     let app_data_root = app_data_root(app)?;
     recover_finalized_transport_binding_from_durable_state_under(
+        &app_data_root,
+        manifest_hash_hex,
+        authoritative_accepted_count,
+    )
+}
+
+pub(crate) fn recover_finalized_transport_binding_handoff_from_durable_state(
+    app: &AppHandle,
+    manifest_hash_hex: &str,
+    authoritative_accepted_count: u64,
+) -> Result<Option<(TransportArchiveBindingV1, TransportDescriptorV1)>, CommandError> {
+    let app_data_root = app_data_root(app)?;
+    recover_finalized_transport_binding_handoff_from_durable_state_under(
         &app_data_root,
         manifest_hash_hex,
         authoritative_accepted_count,
@@ -628,9 +719,13 @@ impl TransportPaths {
         }
     }
 
-    /// True when an organizer-private bundle has already been provisioned.
+    /// True only after an exact Hosted-authority response has completed the
+    /// durable Desktop request. A legacy local test bundle is never a
+    /// production intake authorization.
     fn is_provisioned(&self) -> bool {
-        load_organizer_private_bundle_v1(&self.organizer_private_dir).is_ok()
+        load_hosted_pending_transport_v1(&self.organizer_private_dir)
+            .map(|loaded| loaded.pending.status() == HostedDescriptorPendingStatusV1::Completed)
+            .unwrap_or(false)
     }
 }
 
@@ -996,25 +1091,39 @@ fn start_private_intake_blocking(
     ensure_app_owned_directory(&root)?;
     let paths = TransportPaths::under(&root);
     ensure_app_owned_directory(&paths.organizer_private_dir)?;
+    let expected_network = expected_transport_network_v1(&app_data_root(app)?)?;
+    let roots = production_transport_authority_root_set_v1(
+        &app_data_root(app)?,
+        Some(expected_network.as_str()),
+    )
+    .map_err(CommandError::from)?;
 
-    // Provision transport on first use (managed: persistent hidden-service
-    // identity is created once and reused on later starts; remote: the
-    // operator's externally provisioned onion hostname is signed in WITHOUT
-    // any Tor process).
+    // Production intake begins only after Desktop has imported the exact
+    // Hosted-authority response for its durable pending request. Never create
+    // a local production descriptor or fall back to a test root here.
+    if !paths.is_provisioned() {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "export the Hosted descriptor request and import its authority-issued response before starting intake",
+        ));
+    }
     match requested_mode {
         OrganizerTorModeV1::ManagedLocal => {
             let tor_executable = tor_executable.as_deref().ok_or_else(tor_start_failed)?;
-            if !paths.is_provisioned() {
-                provision_transport(tor_executable, &paths, &bound)?;
-            }
-
             // Run the vetted intake orchestration; on success this returns the
             // running state to store. The AUTHORITATIVE lifecycle at start seeds
             // the admission fence so a FROZEN election never accepts ballots
             // even if intake starts before voting opens.
             let authoritative_lifecycle = authoritative_lifecycle_snapshot(state)?;
-            let running =
-                start_intake_worker(app, tor_executable, &paths, &bound, authoritative_lifecycle)?;
+            let running = start_intake_worker(
+                app,
+                tor_executable,
+                &paths,
+                &bound,
+                &roots,
+                authoritative_lifecycle,
+            )?;
             // The worker was just confirmed alive (child liveness re-checked after
             // discovery, worker liveness checked in step 9), so report it as
             // running.
@@ -1034,18 +1143,13 @@ fn start_private_intake_blocking(
                     "the external-remote Tor configuration is missing",
                 )
             })?;
-            if !paths.is_provisioned() {
-                // Provision WITHOUT any Tor process: the operator's externally
-                // provisioned onion hostname is what the descriptor signs.
-                provision_transport_remote(config, &paths, &bound)?;
-            }
-
             let authoritative_lifecycle = authoritative_lifecycle_snapshot(state)?;
             let running = start_remote_intake_worker(
                 app,
                 config,
                 &paths,
                 &bound,
+                &roots,
                 authoritative_lifecycle,
             )?;
             let status = running_status(&running, true, true, authoritative_lifecycle);
@@ -1272,27 +1376,302 @@ pub async fn export_voter_transport_bundle(
     .await
 }
 
+/// Persists Desktop-owned transport keys and an outstanding request before
+/// exporting the public, canonical artifact for Hosted Manage. The artifact is
+/// deliberately only a request: possession of it authorizes nothing.
+#[tauri::command]
+pub async fn export_hosted_descriptor_request(
+    target_path: String,
+    tor_exe_path: Option<String>,
+    remote: Option<RemoteOrganizerIntakeInputV1>,
+    app: AppHandle,
+) -> Result<HostedDescriptorRequestExportResultV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let app_data_dir = app_data_root(&app)?;
+        let expected_network = expected_transport_network_v1(&app_data_dir)?;
+        let roots = production_transport_authority_root_set_v1(
+            &app_data_dir,
+            Some(expected_network.as_str()),
+        )
+        .map_err(CommandError::from)?;
+        let target = checked_new_artifact_target(&target_path)?;
+        let remote_config = match &remote {
+            Some(input) => RemoteOrganizerIntakeConfigV1::from_input(input)?,
+            None => None,
+        };
+        let mode = if remote_config.is_some() {
+            OrganizerTorModeV1::ExternalRemote
+        } else {
+            OrganizerTorModeV1::ManagedLocal
+        };
+        let managed_tor = match mode {
+            OrganizerTorModeV1::ManagedLocal => {
+                let path = resolve_tor_executable(tor_exe_path.as_deref())?;
+                validate_tor_exe(&path)?;
+                Some(path)
+            }
+            OrganizerTorModeV1::ExternalRemote => None,
+        };
+        let bound = bound_election(state.inner())?;
+        let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
+        ensure_app_owned_directory(&root)?;
+        let paths = TransportPaths::under(&root);
+        ensure_app_owned_directory(&paths.organizer_private_dir)?;
+
+        let pending_dir = paths
+            .organizer_private_dir
+            .join("hosted-descriptor-pending-v1");
+        let request = if pending_dir.exists() {
+            let loaded = load_hosted_pending_transport_v1(&paths.organizer_private_dir).map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_PENDING_INVALID",
+                    "BINDING_MISMATCH",
+                    "the existing Hosted descriptor request state is invalid",
+                )
+            })?;
+            if loaded.binding.election_id != bound.election_id
+                || loaded.binding.manifest_hash != bound.manifest_hash
+                || loaded.pending.request().network() != expected_network
+                || loaded.pending.completed_descriptor().is_some()
+            {
+                return Err(CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_REQUEST_CONFLICT",
+                    "INVALID_LIFECYCLE_TRANSITION",
+                    "the existing Hosted descriptor request cannot be reused for this election",
+                ));
+            }
+            loaded.pending.request().clone()
+        } else {
+            let onion_hostname = match mode {
+                OrganizerTorModeV1::ManagedLocal => discover_managed_onion_for_descriptor(
+                    managed_tor.as_deref().ok_or_else(tor_start_failed)?,
+                    &paths,
+                )?,
+                OrganizerTorModeV1::ExternalRemote => remote_config
+                    .as_ref()
+                    .ok_or_else(|| remote_config_error("the external-remote Tor configuration is missing"))?
+                    .onion_hostname
+                    .clone(),
+            };
+            let material = generate_hosted_pending_transport_material_v1().map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_MATERIAL_FAILED",
+                    "UNAVAILABLE",
+                    "Desktop could not generate the local transport material",
+                )
+            })?;
+            let descriptor = TransportDescriptorV1::unsigned_for_authority(
+                bound.election_id.clone(),
+                ManifestHash::new(bound.manifest_hash),
+                1,
+                TransportRoutePolicyV1::ManagedTorOrOffline,
+                vec![onion_hostname],
+                Vec::new(),
+                material.gateway_receiver_public_key,
+                "hosted-desktop-gateway-v1".to_owned(),
+                vec![material.receipt_signing_key.verifying_key().to_bytes()],
+                PaddingPolicyV1 {
+                    id: "hosted-fixed-padding-v1".to_owned(),
+                    padded_bytes: 2048,
+                },
+                BatchPolicyV1 {
+                    id: "hosted-batch-policy-v1".to_owned(),
+                    accepted_unique_floor: 1,
+                },
+                None,
+                roots.current_root_id().to_owned(),
+            )
+            .map_err(|_| {
+                CommandError::new(
+                    "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                    "INVALID_INPUT",
+                    "Desktop could not construct the Hosted descriptor request",
+                )
+            })?;
+            let transport_network = expected_transport_network_v1(&app_data_dir)?;
+            let request = HostedDescriptorRequestV1::new(
+                new_retry_capability_v1(),
+                transport_network,
+                descriptor,
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not construct the Hosted descriptor request",
+            ))?;
+            let pending = HostedDescriptorPendingStateV1::new(
+                request.clone(),
+                bound.election_id.clone(),
+                ManifestHash::new(bound.manifest_hash),
+                new_retry_capability_v1(),
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not bind the Hosted descriptor request",
+            ))?;
+            let binding = TransportElectionBindingV1 {
+                election_id: bound.election_id.clone(),
+                manifest_hash: bound.manifest_hash,
+            };
+            persist_hosted_pending_transport_v1(
+                &paths.organizer_private_dir,
+                &material,
+                &pending,
+                &binding,
+                &paths.tor_runs_base,
+                &paths.hidden_service_dir,
+            )
+            .map_err(|_| CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_PERSIST_FAILED",
+                "FILE_IO",
+                "Desktop could not durably save the Hosted descriptor request",
+            ))?;
+            request
+        };
+
+        write_new_public_artifact(&target, &request.to_canonical_cbor().map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_REQUEST_INVALID",
+                "INVALID_INPUT",
+                "Desktop could not encode the Hosted descriptor request",
+            )
+        })?)?;
+        Ok(HostedDescriptorRequestExportResultV1 {
+            written_path: target.to_string_lossy().into_owned(),
+        })
+    })
+    .await
+}
+
+/// Imports an authority-issued descriptor only after it has been checked against
+/// the exact durable Desktop request. It never accepts a merely valid signature
+/// as sufficient authorization for local intake provisioning.
+#[tauri::command]
+pub async fn import_hosted_descriptor_response(
+    response_path: String,
+    app: AppHandle,
+) -> Result<HostedDescriptorResponseImportResultV1, CommandError> {
+    crate::run_blocking_command(move || {
+        let state = app.state::<AppState>();
+        state.ensure_organizer_authority()?;
+        let bound = bound_election(state.inner())?;
+        let path = checked_existing_artifact(&response_path)?;
+        let bytes = std::fs::read(&path).map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_READ_FAILED",
+            "FILE_IO",
+            "the signed Hosted descriptor response could not be read",
+        ))?;
+        let response = HostedDescriptorResponseV1::from_canonical_cbor(&bytes).map_err(|_| {
+            CommandError::new(
+                "GUI_HOSTED_DESCRIPTOR_RESPONSE_INVALID",
+                "BINDING_MISMATCH",
+                "the selected Hosted descriptor response is malformed or untrusted",
+            )
+        })?;
+        let app_data_dir = app_data_root(&app)?;
+        let expected_network = expected_transport_network_v1(&app_data_dir)?;
+        let roots = production_transport_authority_root_set_v1(
+            &app_data_dir,
+            Some(expected_network.as_str()),
+        )
+        .map_err(CommandError::from)?;
+        let root = election_transport_root(&app, &bound.manifest_hash_hex)?;
+        let paths = TransportPaths::under(&root);
+        let (outcome, _) = import_hosted_descriptor_response_v1(
+            &paths.organizer_private_dir,
+            &response,
+            &roots,
+            &bound.election_id,
+            ManifestHash::new(bound.manifest_hash),
+        )
+        .map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REJECTED",
+            "BINDING_MISMATCH",
+            "the signed Hosted descriptor response does not match this outstanding Desktop request",
+        ))?;
+        Ok(HostedDescriptorResponseImportResultV1 {
+            already_completed: matches!(
+                outcome,
+                tari_cc_private_ballot_transport_gateway::HostedDescriptorResponseImportV1::AlreadyCompleted
+            ),
+        })
+    })
+    .await
+}
+
+fn checked_new_artifact_target(value: &str) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(value);
+    let Some(parent) = path.parent() else {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_PATH_INVALID",
+            "INVALID_INPUT",
+            "choose an absolute file path for the Hosted descriptor request",
+        ));
+    };
+    if !path.is_absolute()
+        || path.file_name().is_none()
+        || std::fs::symlink_metadata(parent)
+            .map(|meta| !meta.is_dir() || is_windows_reparse_point(&meta))
+            .unwrap_or(true)
+    {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_PATH_INVALID",
+            "INVALID_INPUT",
+            "choose a new file in an existing local folder for the Hosted descriptor request",
+        ));
+    }
+    Ok(path)
+}
+
+fn checked_existing_artifact(value: &str) -> Result<PathBuf, CommandError> {
+    let path = PathBuf::from(value);
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| CommandError::new(
+        "GUI_HOSTED_DESCRIPTOR_RESPONSE_NOT_FOUND",
+        "FILE_IO",
+        "select the signed Hosted descriptor response file",
+    ))?;
+    if !path.is_absolute() || !meta.is_file() || is_windows_reparse_point(&meta) || meta.len() > 1_048_576 {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_PATH_INVALID",
+            "INVALID_INPUT",
+            "the signed Hosted descriptor response must be a regular local file no larger than 1 MiB",
+        ));
+    }
+    Ok(path)
+}
+
+fn write_new_public_artifact(path: &Path, bytes: &[u8]) -> Result<(), CommandError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_EXPORT_WRITE_FAILED",
+            "FILE_IO",
+            "the Hosted descriptor request could not be written without overwriting an existing file",
+        ))?;
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|_| CommandError::new(
+        "GUI_HOSTED_DESCRIPTOR_EXPORT_WRITE_FAILED",
+        "FILE_IO",
+        "the Hosted descriptor request could not be written",
+    ))
+}
+
 // -------------------------------------------------------------------------
 // Orchestration (reuses the vetted library functions; no protocol logic here).
 // -------------------------------------------------------------------------
 
-/// First-time transport provisioning: start Tor to discover the persistent
-/// hidden-service hostname, stop Tor, then sign the descriptor and write both
-/// bundles. Mirrors `private-ballot-tor-test-provision` step-for-step, calling
-/// only reviewed library functions.
-fn provision_transport(
+/// Creates or reuses the persistent managed hidden-service identity solely to
+/// discover its public onion hostname. No descriptor is signed here. The
+/// caller must durably persist its pending request before exporting that public
+/// hostname to Hosted for authority issuance.
+fn discover_managed_onion_for_descriptor(
     tor_executable: &Path,
     paths: &TransportPaths,
-    bound: &BoundElection,
-) -> Result<(), CommandError> {
-    let binding = TransportElectionBindingV1 {
-        election_id: bound.election_id.clone(),
-        manifest_hash: bound.manifest_hash,
-    };
-    // A FRESH throwaway DataDirectory for the one-shot hostname-discovery run, so
-    // even first-time provisioning can never collide with an orphaned tor.exe
-    // that still holds a prior run directory's lock. The onion identity is
-    // written to the PERSISTENT hidden-service directory, not this run directory.
+) -> Result<String, CommandError> {
     ensure_app_owned_directory(&paths.tor_runs_base)?;
     let run_dir = fresh_run_directory(&paths.tor_runs_base)?;
     remove_stale_run_directories(&paths.tor_runs_base, &run_dir);
@@ -1300,7 +1679,7 @@ fn provision_transport(
     let stderr_log = run_dir.join("tor-stderr.log");
     let tor_config = OrganizerHiddenServiceTorConfigV1 {
         executable: tor_executable.to_path_buf(),
-        data_directory: run_dir.clone(),
+        data_directory: run_dir,
         config_file: provision_torrc.clone(),
         hidden_service_dir: paths.hidden_service_dir.clone(),
         collector_port: PROVISION_COLLECTOR_PORT,
@@ -1313,7 +1692,6 @@ fn provision_transport(
             "the organizer Tor configuration could not be written",
         )
     })?;
-
     let spawner = DiagnosticTorSpawnerV1 {
         stderr_log: stderr_log.clone(),
     };
@@ -1339,79 +1717,59 @@ fn provision_transport(
             }
         }
     };
-    // Stop Tor: the hostname/identity persists in the hidden-service directory.
     let _ = child.kill();
     let _ = child.wait();
-
-    let material = generate_transport_authority_material_v1("test-root".to_owned()).map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_MATERIAL_FAILED",
-            "INVALID_INPUT",
-            "the organizer transport authority material could not be generated",
-        )
-    })?;
-    provision_organizer_transport_bundles_v1(
-        &paths.organizer_private_dir,
-        &paths.voter_bundle_path,
-        &material,
-        &binding,
-        hostname,
-        // Recorded as inert bundle metadata only (never validated or reused at
-        // runtime); the real DataDirectory is a fresh per-start run directory.
-        &paths.tor_runs_base,
-        &paths.hidden_service_dir,
-    )
-    .map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_PROVISION_FAILED",
-            "INVALID_INPUT",
-            "the organizer transport bundles could not be provisioned",
-        )
-    })?;
-    Ok(())
+    Ok(hostname)
 }
 
-/// First-time transport provisioning for EXTERNAL-REMOTE mode: sign the
-/// descriptor against the operator's EXTERNALLY provisioned onion hostname and
-/// write both bundles. NO Tor process is started, no local hidden-service
-/// directory is created, and no SOCKS port is reserved — the onion identity is
-/// owned and hosted entirely by the external Tor instance.
-fn provision_transport_remote(
-    config: &RemoteOrganizerIntakeConfigV1,
+/// Reloads only Desktop-owned transport material for an authority-issued Hosted
+/// descriptor. Every restart rechecks the configured public root, exact V2
+/// election binding, and the locally generated public parameters before a
+/// collector can receive a ballot.
+fn load_completed_hosted_transport(
     paths: &TransportPaths,
     bound: &BoundElection,
-) -> Result<(), CommandError> {
-    let binding = TransportElectionBindingV1 {
-        election_id: bound.election_id.clone(),
-        manifest_hash: bound.manifest_hash,
+    roots: &TransportAuthorityRootSetV1,
+) -> Result<LoadedHostedPendingTransportV1, CommandError> {
+    let loaded = load_hosted_pending_transport_v1(&paths.organizer_private_dir).map_err(|_| {
+        CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_PENDING_INVALID",
+            "BINDING_MISMATCH",
+            "the local Hosted descriptor state is missing or invalid",
+        )
+    })?;
+    let Some(descriptor) = loaded.pending.completed_descriptor() else {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "import the authority-issued Hosted descriptor response before starting intake",
+        ));
     };
-    let material = generate_transport_authority_material_v1("test-root".to_owned()).map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_MATERIAL_FAILED",
-            "INVALID_INPUT",
-            "the organizer transport authority material could not be generated",
-        )
-    })?;
-    provision_organizer_transport_bundles_v1(
-        &paths.organizer_private_dir,
-        &paths.voter_bundle_path,
-        &material,
-        &binding,
-        config.onion_hostname.clone(),
-        // Recorded as inert bundle metadata only (never validated or reused at
-        // runtime, exactly like the managed mode's metadata): the external
-        // remote daemon owns the real data directory and hidden-service dir.
-        &paths.tor_runs_base,
-        &paths.hidden_service_dir,
-    )
-    .map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_PROVISION_FAILED",
-            "INVALID_INPUT",
-            "the organizer transport bundles could not be provisioned",
-        )
-    })?;
-    Ok(())
+    if loaded.pending.status() != HostedDescriptorPendingStatusV1::Completed
+        || loaded.binding.election_id != bound.election_id
+        || loaded.binding.manifest_hash != bound.manifest_hash
+        || descriptor.election_id() != bound.election_id
+        || descriptor.manifest_hash() != ManifestHash::new(bound.manifest_hash)
+        || descriptor.route() != TransportRoutePolicyV1::ManagedTorOrOffline
+        || descriptor.validity_end_epoch().is_some()
+        || loaded
+            .pending
+            .verify_local_transport_identity(
+                loaded.material.gateway_receiver_public_key,
+                loaded.material.receipt_signing_key.verifying_key().to_bytes(),
+            )
+            .is_err()
+        || roots
+            .verify_descriptor(descriptor, ManifestHash::new(bound.manifest_hash))
+            .is_err()
+    {
+        return Err(CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_STARTUP_REJECTED",
+            "BINDING_MISMATCH",
+            "the authority-issued descriptor does not match this Desktop organizer workspace",
+        ));
+    }
+    Ok(loaded)
 }
 
 /// Shared intake service assembly for BOTH hosting modes: durable hand-off
@@ -1425,7 +1783,7 @@ fn provision_transport_remote(
 fn start_collector_service_shared(
     app: &AppHandle,
     bound: &BoundElection,
-    bundle: &LoadedOrganizerPrivateBundleV1,
+    hosted: &LoadedHostedPendingTransportV1,
     collector: OpaqueEnvelopeCollectorV1,
     authoritative_lifecycle: ElectionLifecycleStateV1,
 ) -> Result<
@@ -1447,32 +1805,29 @@ fn start_collector_service_shared(
     session.open().map_err(CommandError::from)?;
 
     // The AUTHORITATIVE lifecycle fence is initialized from the organizer GUI's
-    // current state, so a FROZEN election fences ballots immediately and status
-    // answers carry signed truth (never the worker session's own substrate
-    // state).
-    //
-    // ROOT-CAUSE FIX (two-computer physical failure,
-    // `lifecycle-auto-refresh-01`): the seed generation MUST be freshly
-    // RESERVED into the durable issuance ledger, never merely re-read from it.
-    // Reserving the seed writes it into the SAME ledger every publication and
-    // export continues, so every served statement carries a unique, strictly
-    // monotonic generation across restarts. A failed reservation degrades to
-    // the legacy read-only seed instead of blocking ballot-office startup
-    // (still monotonic within one run; the heartbeat reconciliation keeps
-    // healing state truth).
+    // current state, so a FROZEN election fences ballots immediately. Desktop
+    // deliberately has no production authority private key and therefore does
+    // not fabricate a locally signed election-status statement.
     let gateway = Arc::new(Mutex::new(TransportGatewaySimulatorV1::default()));
     let session_arc = Arc::new(Mutex::new(session));
-    let descriptor_arc = Arc::new(bundle.descriptor.clone());
-    let receiver_key_arc = reconstruct_receiver_key(bundle)?;
-    let receipt_key_arc = Arc::new(bundle.material.receipt_signing_key.clone());
-    let root_signing_key_arc = Arc::new(bundle.material.root_signing_key.clone());
-    let status_dir = ensure_voter_election_status_directory_v1(&app_data_root(app)?)?;
-    let seed_generation = reserve_next_status_generation_v1(&status_dir, &bound.manifest_hash_hex)
-        .unwrap_or_else(|_| {
-            read_issued_status_generation_v1(&status_dir, &bound.manifest_hash_hex).unwrap_or(0)
-        });
-    let lifecycle_fence =
-        AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, seed_generation);
+    let descriptor = hosted.pending.completed_descriptor().ok_or_else(|| {
+        CommandError::new(
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "import the authority-issued Hosted descriptor response before starting intake",
+        )
+    })?;
+    let descriptor_arc = Arc::new(descriptor.clone());
+    let receiver_key_arc = Arc::new(
+        GatewayReceiverKeyV1::from_secret_bytes(hosted.material.gateway_receiver_key.secret_bytes())
+            .map_err(|_| CommandError::new(
+                "GUI_ORGANIZER_RECEIVER_KEY_FAILED",
+                "INVALID_INPUT",
+                "the local gateway receiver key could not be reconstructed",
+            ))?,
+    );
+    let receipt_key_arc = Arc::new(hosted.material.receipt_signing_key.clone());
+    let lifecycle_fence = AuthoritativeLifecycleFenceV1::new(authoritative_lifecycle, 0);
     let handler = ThreadSafeCollectorHandlerV1::new(
         gateway,
         descriptor_arc,
@@ -1482,11 +1837,7 @@ fn start_collector_service_shared(
         "organizer-receipt-key".to_owned(),
     )
     .with_accepted_package_inbox(durable_inbox_dir.clone())
-    .with_lifecycle_fence(lifecycle_fence.clone())
-    .with_election_status_signer(
-        root_signing_key_arc,
-        bundle.material.root.key_id().to_owned(),
-    );
+    .with_lifecycle_fence(lifecycle_fence.clone());
     let service_loop =
         OrganizerCollectorServiceLoopV1::start(collector, handler, COLLECTOR_POLL_INTERVAL)
             .map_err(|_| {
@@ -1522,33 +1873,25 @@ fn start_remote_intake_worker(
     config: &RemoteOrganizerIntakeConfigV1,
     paths: &TransportPaths,
     bound: &BoundElection,
+    roots: &TransportAuthorityRootSetV1,
     authoritative_lifecycle: ElectionLifecycleStateV1,
 ) -> Result<OrganizerIntakeState, CommandError> {
-    // 1. Load organizer private bundle and validate ALL bindings before any
-    //    network activity. No local hostname file exists in remote mode (the
-    //    hidden-service directory is external), so the persisted-hostname check
-    //    is skipped and replaced by the explicit descriptor-onion equality
-    //    gate below.
-    let bundle = load_organizer_private_bundle_v1(&paths.organizer_private_dir).map_err(|_| {
+    // 1. Reload and verify the exact Desktop request/Hosted response binding
+    // before any network activity. No local hostname file exists in remote
+    // mode, so the explicit descriptor-onion equality gate remains below.
+    let hosted = load_completed_hosted_transport(paths, bound, roots)?;
+    let descriptor = hosted.pending.completed_descriptor().ok_or_else(|| {
         CommandError::new(
-            "GUI_ORGANIZER_BUNDLE_MALFORMED",
-            "INVALID_INPUT",
-            "the organizer transport bundle could not be loaded",
-        )
-    })?;
-    validate_intake_startup_v1(&bundle, &bound.artifacts, None).map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_STARTUP_UNTRUSTED",
-            "BINDING_MISMATCH",
-            "the organizer transport bundle failed startup validation for this election",
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "import the authority-issued Hosted descriptor response before starting intake",
         )
     })?;
 
     // 1b. Fail-closed binding gate: the configured external onion MUST equal
     //     the signed descriptor onion, so intake can never be pointed at (or
     //     advertised as) a different onion than the one voters' bundles bind.
-    let descriptor_onion = bundle
-        .descriptor
+    let descriptor_onion = descriptor
         .onion_endpoints()
         .first()
         .cloned()
@@ -1592,18 +1935,14 @@ fn start_remote_intake_worker(
     let (service_loop, durable_inbox_dir, lifecycle_fence) = start_collector_service_shared(
         app,
         bound,
-        &bundle,
+        &hosted,
         collector,
         authoritative_lifecycle,
     )?;
 
-    // 4. Endpoint-scoped remote readiness. First the zero-application-byte
-    //    SOCKS5 CONNECT probe to the literal onion through the external proxy;
-    //    then ONE public, credential-free election-status GET over the same
-    //    route (the minimum non-mutating organizer readiness check the protocol
-    //    supports). NO ballot application bytes, credential, or nullifier ever
-    //    leave during readiness. Any failure stops the just-started collector
-    //    and fails closed — the external Tor is left untouched.
+    // 4. Endpoint-scoped remote readiness: the zero-application-byte SOCKS5
+    // CONNECT probe is followed by the public, credential-free status GET.
+    // Neither step signs anything locally or uses any authority key.
     let timeouts = remote_organizer_readiness_timeouts();
     let outcome = probe_remote_onion_hostname_v1(&config.socks, &config.onion_hostname, &timeouts);
     if !outcome.is_ready() {
@@ -1614,9 +1953,13 @@ fn start_remote_intake_worker(
             remote_organizer_readiness_message(outcome),
         ));
     }
-    let status_fetch =
-        fetch_election_status_over_remote_tor_onion(&config.socks, &config.onion_hostname, &timeouts);
-    if status_fetch.is_err() {
+    if fetch_election_status_over_remote_tor_onion(
+        &config.socks,
+        &config.onion_hostname,
+        &timeouts,
+    )
+    .is_err()
+    {
         let _ = service_loop.stop(COLLECTOR_STOP_TIMEOUT);
         return Err(CommandError::new(
             "GUI_ORGANIZER_REMOTE_NOT_READY",
@@ -1624,14 +1967,13 @@ fn start_remote_intake_worker(
             "the external onion is reachable but the organizer intake did not answer the readiness status check yet; retry shortly",
         ));
     }
-
     Ok(OrganizerIntakeState {
         tor_child: None,
         mode: OrganizerTorModeV1::ExternalRemote,
         remote: Some(config.clone()),
         remote_last_ready: true,
         service_loop,
-        descriptor: bundle.descriptor.clone(),
+        descriptor: descriptor.clone(),
         manifest_hash_hex: bound.manifest_hash_hex.clone(),
         collector_addr,
         onion_hostname: config.onion_hostname.clone(),
@@ -1707,26 +2049,19 @@ fn start_intake_worker(
     tor_executable: &Path,
     paths: &TransportPaths,
     bound: &BoundElection,
+    roots: &TransportAuthorityRootSetV1,
     authoritative_lifecycle: ElectionLifecycleStateV1,
 ) -> Result<OrganizerIntakeState, CommandError> {
-    // 1. Load organizer private bundle and validate ALL bindings before Tor.
-    let bundle = load_organizer_private_bundle_v1(&paths.organizer_private_dir).map_err(|_| {
+    // 1. Reload the authority-issued response and its exact local request
+    // binding before Tor starts. Desktop has no authority signing key.
+    let hosted = load_completed_hosted_transport(paths, bound, roots)?;
+    let descriptor = hosted.pending.completed_descriptor().ok_or_else(|| {
         CommandError::new(
-            "GUI_ORGANIZER_BUNDLE_MALFORMED",
-            "INVALID_INPUT",
-            "the organizer transport bundle could not be loaded",
+            "GUI_HOSTED_DESCRIPTOR_RESPONSE_REQUIRED",
+            "INVALID_LIFECYCLE_TRANSITION",
+            "import the authority-issued Hosted descriptor response before starting intake",
         )
     })?;
-    let persisted_hostname = read_persisted_hostname(&paths.hidden_service_dir);
-    validate_intake_startup_v1(&bundle, &bound.artifacts, persisted_hostname.as_deref()).map_err(
-        |_| {
-            CommandError::new(
-                "GUI_ORGANIZER_STARTUP_UNTRUSTED",
-                "BINDING_MISMATCH",
-                "the organizer transport bundle failed startup validation for this election",
-            )
-        },
-    )?;
 
     // 2. Bind the loopback collector (bound but not yet serviced).
     let collector = OpaqueEnvelopeCollectorV1::bind_loopback_port(0).map_err(|_| {
@@ -1832,7 +2167,7 @@ fn start_intake_worker(
     // BEFORE any request can be serviced. This runs AFTER the child is spawned,
     // so a missing onion endpoint must reap the owned child (lifecycle
     // invariant) rather than return with a live, unreferenced tor.exe.
-    let descriptor_onion = match bundle.descriptor.onion_endpoints().first().cloned() {
+    let descriptor_onion = match descriptor.onion_endpoints().first().cloned() {
         Some(onion) => onion,
         None => {
             return Err(reap_owned_tor_child_on_startup_error(
@@ -1873,7 +2208,7 @@ fn start_intake_worker(
     let (service_loop, durable_inbox_dir, lifecycle_fence) = match start_collector_service_shared(
         app,
         bound,
-        &bundle,
+        &hosted,
         collector,
         authoritative_lifecycle,
     ) {
@@ -1889,7 +2224,7 @@ fn start_intake_worker(
         remote: None,
         remote_last_ready: false,
         service_loop,
-        descriptor: bundle.descriptor.clone(),
+        descriptor: descriptor.clone(),
         manifest_hash_hex: bound.manifest_hash_hex.clone(),
         collector_addr,
         onion_hostname: runtime_hostname,
@@ -1901,39 +2236,19 @@ fn start_intake_worker(
     })
 }
 
-fn reconstruct_receiver_key(
-    bundle: &LoadedOrganizerPrivateBundleV1,
-) -> Result<Arc<GatewayReceiverKeyV1>, CommandError> {
-    let secret = bundle.material.gateway_receiver_key.secret_bytes();
-    let key = GatewayReceiverKeyV1::from_secret_bytes(secret).map_err(|_| {
-        CommandError::new(
-            "GUI_ORGANIZER_RECEIVER_KEY_FAILED",
-            "INVALID_INPUT",
-            "the gateway receiver key could not be reconstructed",
-        )
-    })?;
-    Ok(Arc::new(key))
-}
-
-fn read_persisted_hostname(hidden_service_dir: &Path) -> Option<String> {
-    let hostname_file = hidden_service_dir.join("hostname");
-    match std::fs::read_to_string(&hostname_file) {
-        Ok(content) => {
-            let trimmed = content.trim_end_matches(['\n', '\r']);
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            }
-        }
-        Err(_) => None,
-    }
-}
-
 fn app_data_root(app: &AppHandle) -> Result<PathBuf, CommandError> {
     app.path()
         .app_data_dir()
         .map_err(|_| CommandError::app_data_unavailable())
+}
+
+/// The expected transport environment for every Hosted descriptor decision is
+/// the externally provisioned authority network read from the operator's
+/// public pin. It is never hard-coded: a staging pin expects staging, a
+/// production pin expects production, and a missing or malformed authority
+/// config fails closed before any network decision is made.
+fn expected_transport_network_v1(app_data_root: &Path) -> Result<String, CommandError> {
+    production_transport_authority_network_v1(app_data_root).map_err(CommandError::from)
 }
 
 // -------------------------------------------------------------------------
@@ -2089,6 +2404,21 @@ mod tests {
     const VALID_HASH: &str = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
     const VALID_ONION: &str = "2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion";
 
+    fn implementation_source() -> &'static str {
+        include_str!("organizer_tor_intake.rs")
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("implementation precedes the test module")
+            .0
+    }
+
+    fn descriptor_export_source() -> &'static str {
+        implementation_source()
+            .split("pub async fn export_hosted_descriptor_request(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub async fn import_hosted_descriptor_response(").next())
+            .expect("hosted descriptor export body")
+    }
+
     fn remote_input(
         mode: Option<&str>,
         host: Option<&str>,
@@ -2241,16 +2571,8 @@ mod tests {
         // NO process spawn, NO child kill, NO torrc generation, NO local
         // hidden-service directory creation, and NO managed SOCKS port
         // reservation. Scan ONLY the implementation (before the test module).
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
-        let remote_provision = code
-            .split("fn provision_transport_remote")
-            .nth(1)
-            .and_then(|rest| rest.split("\n}\n").next())
-            .expect("remote provision body");
+        let code = implementation_source();
+        let remote_provision = descriptor_export_source();
         for forbidden in [
             "spawn(",
             "write_config",
@@ -2264,6 +2586,18 @@ mod tests {
                 "remote provisioning must never {forbidden}"
             );
         }
+        let remote_descriptor_arm = remote_provision
+            .split("OrganizerTorModeV1::ExternalRemote =>")
+            .nth(1)
+            .expect("external remote descriptor arm");
+        assert!(
+            !remote_descriptor_arm
+                .split("};")
+                .next()
+                .unwrap_or("")
+                .contains("discover_managed_onion_for_descriptor("),
+            "external-remote provisioning must never discover or regenerate an onion"
+        );
         let remote_worker = code
             .split("fn start_remote_intake_worker")
             .nth(1)
@@ -2287,11 +2621,7 @@ mod tests {
     fn external_remote_daemon_is_never_signalled_on_stop_or_shutdown() {
         // Stop and app-exit reap only an OWNED child (Option::take on the
         // child handle, which is always None in external-remote mode).
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         assert!(
             code.matches(".tor_child.take()").count() >= 3,
             "every teardown path must take the OWNED child option, never signal external infrastructure"
@@ -2308,11 +2638,7 @@ mod tests {
         // Readiness ordering inside the remote worker: bind gate → descriptor
         // equality gate → zero-application-byte probe → public status GET, and
         // only then a ready state.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         let worker_start = code
             .find("fn start_remote_intake_worker")
             .expect("remote worker");
@@ -2397,11 +2723,7 @@ mod tests {
     // reaper, and the only `Ok` arm transfers the child into intake state.
     #[test]
     fn managed_shared_assembly_error_arm_reaps_the_owned_child() {
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         let worker_start = code
             .find("fn start_intake_worker")
             .expect("managed worker");
@@ -2617,11 +2939,7 @@ mod tests {
         // handles (kill()/wait()), which target only processes this app spawned.
         // Scan ONLY the implementation (everything before the test module) so
         // this test's own list of forbidden literals below cannot match itself.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let code = implementation_source();
         for forbidden in [
             "taskkill",
             "Stop-Process",
@@ -2651,14 +2969,26 @@ mod tests {
         // directory and NEVER creates a new identity. The hidden-service
         // directory is also a deterministic function of the election root, so two
         // "starts" resolve the SAME identity path.
-        let source = include_str!("organizer_tor_intake.rs");
-        let code = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation precedes the test module");
+        let export = descriptor_export_source();
         assert!(
-            code.contains("if !paths.is_provisioned()"),
-            "the onion identity must be provisioned once, never regenerated on restart"
+            export.contains("if pending_dir.exists()"),
+            "an existing descriptor request must be reused, never re-provisioned"
+        );
+        assert!(
+            export.contains("discover_managed_onion_for_descriptor("),
+            "first provisioning must discover the persistent onion"
+        );
+        let remote_arm = export
+            .split("OrganizerTorModeV1::ExternalRemote =>")
+            .nth(1)
+            .expect("external remote descriptor arm");
+        assert!(
+            !remote_arm
+                .split("};")
+                .next()
+                .unwrap_or("")
+                .contains("discover_managed_onion_for_descriptor("),
+            "external-remote provisioning must not discover an onion"
         );
         let root = election_transport_subpath(&app_root(), VALID_HASH).expect("root");
         let a = TransportPaths::under(&root).hidden_service_dir;

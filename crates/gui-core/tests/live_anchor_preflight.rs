@@ -82,7 +82,7 @@ fn valid_request(archive_dir: &Path, sidecar_prefix: &Path) -> GuiLiveAnchorConf
         output_config_path: format!("{}-anchor-config.cbor", sidecar_prefix.display()),
         network: "esmeralda".to_owned(),
         walletd_endpoint: "http://127.0.0.1:5100".to_owned(),
-        indexer_endpoint: "https://ootle-indexer-a.tari.com/".to_owned(),
+        indexer_endpoint: "https://esme-indexer-a.ootle.tari.com/".to_owned(),
         template_address: VALID_TEMPLATE_ADDRESS.to_owned(),
         template_module: "tari_private_ballot_anchor".to_owned(),
         template_event_topic: "tari_private_ballot_anchor.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V1"

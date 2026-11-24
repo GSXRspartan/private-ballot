@@ -185,6 +185,24 @@ pub fn production_transport_authority_root_set_v1(
     Ok(TransportAuthorityRootSetV1::new(root))
 }
 
+/// Returns the `network` field from the provisioned production transport
+/// authority root config. This is the authoritative source for the network
+/// value that descriptor requests must carry — never a hardcoded constant.
+///
+/// # Errors
+///
+///   * `GUI_PRODUCTION_TRANSPORT_AUTHORITY_NOT_PROVISIONED` when no root is
+///     configured;
+///   * a field-specific `GUI_PRODUCTION_TRANSPORT_AUTHORITY_*` code when the
+///     config is malformed.
+pub fn production_transport_authority_network_v1(
+    app_data_dir: &Path,
+) -> Result<String, GuiCoreError> {
+    let config = load_config(app_data_dir)?
+        .ok_or_else(GuiCoreError::production_transport_authority_not_provisioned)?;
+    Ok(config.network.clone())
+}
+
 /// Confirms the configured public root matches an already-known `(key_id,
 /// public_key)` — e.g. the root an existing election was bound to. Fails closed
 /// on any mismatch so a silently swapped root can never be accepted for an

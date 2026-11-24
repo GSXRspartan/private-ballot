@@ -1,0 +1,8 @@
+// Frozen output from @tari-project/ootle-wasm-bor 0.53.2's
+// decodeExecuteResult(EXEC_RESULT_BASE64), generated offline with Node's
+// --experimental-wasm-modules. Package tarball integrity:
+// sha512-6oz12tze80TfF6r/0IgDfEoPp8xSUgIVOebq/BsuWEhnI9Iztqh39PnGauMduTc2se3ojYPI3h3qyLluWbMVyQ==
+// Input provenance: gui/test/anchorVectors.generated.ts::EXEC_RESULT_BASE64.
+// Do not edit by hand; regenerate from that pinned package and input vector.
+
+export const SAPIENT_EXECUTE_RESULT_JSON = `{"finalize":{"transaction_hash":"9a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b","events":[{"substate_id":null,"template_address":"5f1ecbe69b1c6e8b64b97b37f32f6975be4b1e2a1d9c4a5e3f2b6c8d0a9e7f41","topic":"TariPrivateBallotAnchorV2.TARI_CC_PRIVATE_BALLOT_OOTLE_ANCHOR_V2","payload":{"anchor_digest_v2":"67e995cdbc0077967e8ed55ac6f33b6c7df0a369938b4a40bc45e3fe7b2778c7","election_id":"5e50e17c401682fb38dbea349a4c2713","network":"mainnet","public_summary":"{\\"election_id\\":\\"5e50e17c401682fb38dbea349a4c2713\\",\\"questions\\":[{\\"text\\":\\"Adopt the charter?\\",\\"options\\":[\\"Yes\\",\\"No\\"]}],\\"ballot_count\\":10}"}},{"substate_id":null,"template_address":"0000000000000000000000000000000000000000000000000000000000000001","topic":"std.vault.pay_fee","payload":{"amount":123,"note":"engine event"}}],"logs":[],"result":{"Accept":{"up_substates":[],"down_substates":[],"fee_withdrawals":[]}},"fee_receipt":{"total_fee_payment":0,"total_fees_paid":0,"total_fee_overcharge":0,"cost_breakdown":{"breakdown":{}},"exhaust_burn":0},"total_fees_required":0},"execution_time":{"secs":1,"nanos":500000000},"execute_epoch":7,"wasm_execution_points":12345,"native_execution_points":0}`;

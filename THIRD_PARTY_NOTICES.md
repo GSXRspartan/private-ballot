@@ -124,8 +124,8 @@ attribution is required beyond the MIT text in the npm package.
 
 `walletd` is an external Tari Ootle runtime. The current MSI/NSIS installer
 does **not** bundle or redistribute the `walletd` binary. Operators install
-their own compatible walletd (currently pinned to v0.42.0 on Esmeralda, the
-post-testnet-reset cohort) and point Private Ballot at the resulting local
+their own compatible walletd (currently pinned to v0.51.0 on Esmeralda, the
+Protocol V1 cohort) and point Private Ballot at the resulting local
 JSON-RPC endpoint
 (default `http://127.0.0.1:5100/json_rpc`). See
 [docs/OPERATOR_SETUP.md](docs/OPERATOR_SETUP.md) and

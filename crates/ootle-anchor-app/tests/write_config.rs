@@ -182,14 +182,11 @@ fn embedded_credentials_rejected() {
 }
 
 #[test]
-fn mainnet_rejected() {
+fn mainnet_is_accepted() {
     let out = tmp_path("mainnet").join("config.cbor");
     let mut args = valid_write_args(&out.to_string_lossy());
     args.network = "mainnet".to_owned();
-    assert_eq!(
-        write_config::run(&args),
-        Err(CONFIG_WRITE_FAILED.to_owned())
-    );
+    write_config::run(&args).expect("reviewed Mainnet network must be configurable");
 }
 
 #[test]

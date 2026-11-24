@@ -16,7 +16,10 @@ use tari_cc_private_ballot_ootle_walletd_anchor_adapter::{
 };
 
 use crate::auth::WalletdAuthSecret;
-use crate::endpoint::{IndexerEndpoint, TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, WalletdEndpoint};
+use crate::endpoint::{
+    IndexerEndpoint, TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, TRUSTED_MAINNET_INDEXER_ENDPOINT_V1,
+    WalletdEndpoint,
+};
 
 /// Hard policy ceiling for the anchor transaction's maximum fee, in the
 /// ledger's smallest unit.
@@ -45,6 +48,7 @@ pub const OOTLE_ANCHOR_REQUEST_TIMEOUT_MAX_SECS_V1: u64 = 600;
 #[must_use]
 pub fn default_indexer_endpoint_for_network_v1(network: &OotleNetworkIdV1) -> Option<&'static str> {
     match network.as_str() {
+        "mainnet" => Some(TRUSTED_MAINNET_INDEXER_ENDPOINT_V1),
         "esmeralda" => Some(TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1),
         _ => None,
     }
@@ -60,12 +64,13 @@ pub fn indexer_endpoint_allowed_for_network_v1(
 ) -> bool {
     endpoint.is_loopback()
         || (network.as_str() == "esmeralda" && endpoint.is_trusted_esmeralda_remote())
+        || (network.as_str() == "mainnet" && endpoint.is_trusted_mainnet_remote())
 }
 
 /// Rejection categories for application configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkAdapterConfigError {
-    /// The network is not a supported testnet.
+    /// The network is not supported by the explicit mapping.
     UnsupportedNetwork,
     /// The maximum fee was zero.
     InvalidMaxFee,
@@ -273,7 +278,7 @@ mod tests {
     #[test]
     fn unsupported_network_is_rejected() {
         let bad_network =
-            OotleNetworkIdV1::new("mainnet".to_owned()).unwrap_or_else(|e| panic!("{e:?}"));
+            OotleNetworkIdV1::new("stagenet".to_owned()).unwrap_or_else(|e| panic!("{e:?}"));
         let result = NetworkAdapterConfig::new(
             bad_network,
             valid_endpoint(),
@@ -409,6 +414,27 @@ mod tests {
         assert!(indexer_endpoint_allowed_for_network_v1(&network, &endpoint));
         assert!(!endpoint.is_loopback());
         assert_eq!(endpoint.scheme(), "https");
+    }
+
+    #[test]
+    fn mainnet_default_indexer_is_trusted_remote_https() {
+        let network =
+            OotleNetworkIdV1::new("mainnet".to_owned()).unwrap_or_else(|e| panic!("{e:?}"));
+        let default = default_indexer_endpoint_for_network_v1(&network)
+            .unwrap_or_else(|| panic!("mainnet default indexer must exist"));
+        assert_eq!(default, TRUSTED_MAINNET_INDEXER_ENDPOINT_V1);
+        let endpoint = IndexerEndpoint::parse(default).unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(indexer_endpoint_allowed_for_network_v1(&network, &endpoint));
+        assert!(!endpoint.is_loopback());
+        assert_eq!(endpoint.scheme(), "https");
+    }
+
+    #[test]
+    fn mainnet_trusted_remote_is_rejected_for_an_unrelated_network() {
+        let igor = OotleNetworkIdV1::new("igor".to_owned()).unwrap_or_else(|e| panic!("{e:?}"));
+        let endpoint = IndexerEndpoint::parse(TRUSTED_MAINNET_INDEXER_ENDPOINT_V1)
+            .unwrap_or_else(|e| panic!("{e:?}"));
+        assert!(!indexer_endpoint_allowed_for_network_v1(&igor, &endpoint));
     }
 
     #[test]

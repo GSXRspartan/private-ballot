@@ -11,13 +11,16 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_ACCOUNT_REFERENCE,
+  DEFAULT_ESMERALDA_INDEXER_ENDPOINT,
   DEFAULT_INDEXER_ENDPOINT,
+  DEFAULT_MAINNET_INDEXER_ENDPOINT,
   DEFAULT_WALLETD_ENDPOINT,
   anchorSidecarPaths,
   anchorFormStorageKey,
   applyConnectedWallet,
   clearAnchorFormState,
   defaultAnchorFormState,
+  defaultIndexerEndpointForNetwork,
   loadAnchorFormState,
   safeAccountReference,
   saveAnchorFormState,
@@ -116,6 +119,14 @@ describe("applyConnectedWallet fills brittle fields safely", () => {
     assert.equal(filled.accountReference, "private-ballot");
   });
 
+  it("uses the current Mainnet endpoint when a locked Mainnet deployment replaces a default", () => {
+    const filled = applyConnectedWallet(defaultAnchorFormState(), account, {
+      network: "mainnet",
+      template_address: "template_1",
+    });
+    assert.equal(filled.indexerEndpoint, DEFAULT_MAINNET_INDEXER_ENDPOINT);
+  });
+
   it("keeps an operator-chosen non-default reference", () => {
     const state: AnchorFormState = {
       ...defaultAnchorFormState(),
@@ -132,6 +143,14 @@ describe("applyConnectedWallet fills brittle fields safely", () => {
     };
     const filled = applyConnectedWallet(state, account, null);
     assert.ok(!/\s/.test(filled.accountReference));
+  });
+});
+
+describe("network-specific current indexer defaults", () => {
+  it("maps Mainnet and Esmeralda to their distinct current hosts", () => {
+    assert.equal(DEFAULT_INDEXER_ENDPOINT, DEFAULT_ESMERALDA_INDEXER_ENDPOINT);
+    assert.equal(defaultIndexerEndpointForNetwork("mainnet"), DEFAULT_MAINNET_INDEXER_ENDPOINT);
+    assert.equal(defaultIndexerEndpointForNetwork("esmeralda"), DEFAULT_ESMERALDA_INDEXER_ENDPOINT);
   });
 });
 

@@ -502,7 +502,7 @@ export interface GuiLiveAnchorConfigRequestV1 {
   network: string;
   walletd_endpoint: string;
   indexer_endpoint: string;
-  /** Published v0.39.2 event-template address for the selected network. */
+  /** Published V2 (tari_template_lib 0.39.0) event-template address for the selected network (registry-resolved; see crates/deployment-registry). */
   template_address: string;
   /** Event-template module name (shared template-contract constant). */
   template_module: string;
@@ -622,6 +622,13 @@ export interface GuiV2AnchorPublishPreparationV1 {
    * template will emit on-chain. Surfaced here so the preview can display it
    * without slicing the argument list. */
   public_summary_json: string;
+}
+
+/** Public Desktop response to an authenticated Hosted binding-request file. */
+export interface GuiHostedBindingHandoffResultV1 {
+  written_path: string;
+  election_id: string;
+  manifest_hash_hex: string;
 }
 
 /** One manually-gated V2 walletd lifecycle transition. */
@@ -791,6 +798,16 @@ export interface GuiTrustedOotleTemplateWasmInspectionV1 {
   bytes: number;
   digest_algorithm_id: string;
   digest_hex: string;
+}
+
+/** Public result of a successful hosted archive import and verification. */
+export interface GuiArchiveImportResultV1 {
+  verified: boolean;
+  finalized: boolean;
+  anchor_eligible: boolean;
+  archive_hash_hex: string;
+  election_id: string;
+  file_count: number;
 }
 
 /** Bounded command error payload (mirror of the shell's CommandError). */
@@ -1248,6 +1265,16 @@ export interface OrganizerIntakeStatusV1 {
 /** Result of exporting the voter-safe public transport bundle. */
 export interface VoterBundleExportResultV1 {
   written_path: string;
+}
+
+/** Public-only Desktop request exported for authenticated Hosted issuance. */
+export interface HostedDescriptorRequestExportResultV1 {
+  written_path: string;
+}
+
+/** Result of importing a Hosted authority-issued descriptor response. */
+export interface HostedDescriptorResponseImportResultV1 {
+  already_completed: boolean;
 }
 
 /** Result of exporting one authenticated election-status artifact. */

@@ -1,4 +1,4 @@
-//! Live Esmeralda V2 anchor smoke test (fee-bearing).
+//! Live Mainnet V2 anchor smoke test (fee-bearing).
 //!
 //! This is the repository-native, one-command live qualification harness for
 //! the already-published `TariPrivateBallotAnchorV2` template. It drives the
@@ -14,6 +14,13 @@
 //! step and asserts that a terminal `RECEIPT_VERIFIED` phase carries the
 //! expected anchor digest.
 //!
+//! The production V2 deployment lock accepts **only** the exact reviewed
+//! Mainnet identity (network `mainnet`, registry-`CURRENT` template address,
+//! reviewed artifact digest), so this harness now defaults to that Mainnet
+//! deployment. The historical pre-reset Esmeralda tuple is evidence-only and
+//! can no longer be locked; overriding the network or template away from the
+//! reviewed Mainnet identity fails fast before any live call.
+//!
 //! # Running
 //!
 //! The test is `#[ignore]`d so an ordinary `cargo test` never spends money.
@@ -28,9 +35,9 @@
 //!
 //! | Variable | Default | Meaning |
 //! | --- | --- | --- |
-//! | `PRIVATE_BALLOT_V2_TEMPLATE_ADDRESS` | the reviewed Esmeralda deployment | template under test |
+//! | `PRIVATE_BALLOT_V2_TEMPLATE_ADDRESS` | the reviewed Mainnet deployment | template under test |
 //! | `PRIVATE_BALLOT_V2_WALLETD` | `http://127.0.0.1:5100` | walletd base URL (must be loopback) |
-//! | `PRIVATE_BALLOT_V2_INDEXER` | trusted Esmeralda indexer | indexer base URL |
+//! | `PRIVATE_BALLOT_V2_INDEXER` | trusted Mainnet indexer | indexer base URL |
 //! | `PRIVATE_BALLOT_V2_FEE_COMPONENT` | operator must set | fee-paying account component |
 //! | `WALLETD_AUTH_TOKEN` | unset = no bearer | walletd bearer token; omit for an unauthenticated daemon |
 //!
@@ -46,9 +53,10 @@ use std::time::Duration;
 use tari_cc_private_ballot_anchor::OotleAnchorPublicPayloadV2;
 use tari_cc_private_ballot_anchor_transport::OotleNetworkIdV1;
 use tari_cc_private_ballot_archive::{TransportArchiveBatchV1, TransportArchiveBindingV1};
+use tari_cc_private_ballot_deployment_registry::MAINNET_V2_TEMPLATE_ADDRESS;
 use tari_cc_private_ballot_gui_core::{
-    TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX, GuiElectionSessionV1,
-    GuiLiveAnchorV2RequestV1, GuiTrustedOotleDeploymentLockRequestV2,
+    TRUSTED_OOTLE_DEPLOYMENT_V2_ARTIFACT_DIGEST_HEX, TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK,
+    GuiElectionSessionV1, GuiLiveAnchorV2RequestV1, GuiTrustedOotleDeploymentLockRequestV2,
     GuiV2AnchorPublishPreparationRequestV1, GuiV2LiveAnchorStepRequestV1,
     build_v2_public_payload_from_verified_archive_v1,
     load_trusted_ootle_deployment_v2, lock_trusted_ootle_deployment_v2,
@@ -61,7 +69,7 @@ use tari_cc_private_ballot_gui_core::{
 use tari_cc_private_ballot_ootle_anchor_app::TokioBlockingExecutor;
 use tari_cc_private_ballot_ootle_anchor_network_adapters::{
     IndexerEndpoint, IndexerReceiptNetworkAdapter, RealIndexerTransport, RealWalletdTransport,
-    TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1, WalletdAnchorNetworkAdapter, WalletdAuthSecret,
+    TRUSTED_MAINNET_INDEXER_ENDPOINT_V1, WalletdAnchorNetworkAdapter, WalletdAuthSecret,
     WalletdEndpoint, indexer_endpoint_allowed_for_network_v1,
 };
 use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
@@ -69,24 +77,22 @@ use tari_cc_private_ballot_protocol::Blake3HashProviderV1;
 use common::{TestDir, open_session, triptych_package_bytes};
 
 const DEFAULT_TEMPLATE_ADDRESS: &str =
-    "template_bb539bddc9c264e4744ec462647b076fb97e2bdedb8692ea435804a6eb1eddee";
+    "template_ef4d7f348a4c3db7b6f9a9c30ac4fcbfdfb73e8bec59a808258861fcbbdc6cdb";
 const DEFAULT_WALLETD: &str = "http://127.0.0.1:5100";
-const DEFAULT_NETWORK: &str = "esmeralda";
+const DEFAULT_NETWORK: &str = "mainnet";
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_EPOCH_DELTA: u64 = 12;
 const POLL_ATTEMPTS: usize = 240;
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
-/// Operator-authorized maximum fee for the Esmeralda v0.42 controlled-alpha
-/// configuration, in raw fee units. This is an AUTHORIZED MAXIMUM, not an
+/// Operator-authorized maximum fee, in raw fee units. This is an AUTHORIZED MAXIMUM, not an
 /// estimate: the network only ever burns the fee the committed transaction
 /// actually requires, which is always bounded by this cap.
 ///
-/// The same value is the production GUI default. Live qualification measured
-/// real requirements of 1143 (against a 761 cap -> Abort/InsufficientFeesPaid)
-/// and a dry-run requirement of 3324 (against a 2500 cap -> stopped at
-/// preflight), so the authorized ceiling is set generously while the actual
-/// charge remains the network's true requirement. Overridable with
-/// `PRIVATE_BALLOT_V2_MAX_FEE`; the production hard ceiling
+/// Live qualification measured real requirements of 1143 (against a 761 cap ->
+/// Abort/InsufficientFeesPaid) and a dry-run requirement of 3324 (against a
+/// 2500 cap -> stopped at preflight), so the authorized ceiling is set
+/// generously while the actual charge remains the network's true requirement.
+/// Overridable with `PRIVATE_BALLOT_V2_MAX_FEE`; the production hard ceiling
 /// (`OOTLE_ANCHOR_MAX_FEE_CEILING_UNITS_V1` = 10_000_000) is enforced by the
 /// lifecycle and is never bypassed here.
 const DEFAULT_MAX_FEE: u64 = 100_000;
@@ -165,13 +171,22 @@ fn line(key: &str, value: &str) {
 }
 
 #[test]
-#[ignore = "fee-bearing live Esmeralda publication; run explicitly with --ignored"]
+#[ignore = "fee-bearing live Mainnet publication; run explicitly with --ignored"]
 fn live_v2_anchor_smoke_test() {
     let template_address = env_or("PRIVATE_BALLOT_V2_TEMPLATE_ADDRESS", DEFAULT_TEMPLATE_ADDRESS);
     let walletd_base = env_or("PRIVATE_BALLOT_V2_WALLETD", DEFAULT_WALLETD);
-    let indexer_base =
-        env_or("PRIVATE_BALLOT_V2_INDEXER", TRUSTED_ESMERALDA_INDEXER_ENDPOINT_V1);
+    let indexer_base = env_or("PRIVATE_BALLOT_V2_INDEXER", TRUSTED_MAINNET_INDEXER_ENDPOINT_V1);
     let network_id = env_or("PRIVATE_BALLOT_V2_NETWORK", DEFAULT_NETWORK);
+    // The production lock accepts only the exact reviewed Mainnet identity;
+    // fail fast before any live call or fee is spent.
+    if network_id != TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK
+        || template_address != MAINNET_V2_TEMPLATE_ADDRESS
+    {
+        panic!(
+            "the production V2 lock accepts only network '{TRUSTED_OOTLE_DEPLOYMENT_V2_NETWORK}' with the registry-CURRENT Mainnet template; \
+             the requested identity cannot be locked"
+        );
+    }
     // Never echoed. Absent means "no bearer token", which is correct for a
     // daemon started with `--authentication none` on older builds.
     let auth_token = std::env::var("WALLETD_AUTH_TOKEN").ok().filter(|t| !t.trim().is_empty());
@@ -234,7 +249,7 @@ fn live_v2_anchor_smoke_test() {
     assert!(walletd_endpoint.is_loopback(), "walletd must be loopback");
     assert!(
         indexer_endpoint_allowed_for_network_v1(&network, &indexer_endpoint),
-        "indexer endpoint must be loopback or the trusted esmeralda remote"
+        "indexer endpoint must be loopback or the trusted Mainnet remote"
     );
 
     let request = trusted_ootle_deployment_to_live_anchor_v2_request_v1(
