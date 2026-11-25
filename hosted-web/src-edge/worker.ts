@@ -57,13 +57,14 @@ const SECURITY_HEADERS_NO_FRAME: ReadonlyArray<readonly [string, string]> = [
   ["referrer-policy", "strict-origin-when-cross-origin"],
   ["permissions-policy", "camera=(), microphone=(), geolocation=()"],
   ["strict-transport-security", "max-age=31536000; includeSubDomains"],
-  // COOP/COEP deliberately omitted: the WASM proof generator is
-  // single-threaded and needs no cross-origin isolation; requiring it
-  // would only risk asset-loading regressions on older browsers.
+  // COOP and COEP are applied only to embeddable dApp documents below;
+  // the single-threaded WASM generator needs no cross-origin isolation.
 ];
 
 const SECURITY_HEADERS_WITH_UNIVERSE_FRAME: ReadonlyArray<readonly [string, string]> = [
-  [`content-security-policy`, `${BASE_CSP}; frame-ancestors ${UNIVERSE_ORIGIN}`],
+  [`content-security-policy`, `${BASE_CSP}; frame-ancestors 'self' ${UNIVERSE_ORIGIN}`],
+  ["cross-origin-embedder-policy", "require-corp"],
+  ["cross-origin-resource-policy", "cross-origin"],
   ["x-content-type-options", "nosniff"],
   ["referrer-policy", "strict-origin-when-cross-origin"],
   ["permissions-policy", "camera=(), microphone=(), geolocation=()"],
