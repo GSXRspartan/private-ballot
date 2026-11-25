@@ -54,14 +54,18 @@ Desktop track stays NOT RELEASE-READY until they pass and the installer is signe
 Prerequisite: the user's own wallet and browser. Never request a recovery
 phrase, seed, private key, or password. Never click publish/approve/submit.
 
-| # | Action | Expected output |
-|---|---|---|
-| 1 | In Tari Universe, open its dApp catalogue and launch `https://private-ballot-staging.ghostgate.boo` from inside the wallet | Page loads embedded; ordinary tab reports "Not running inside Tari Universe" |
-| 2 | Check Settings → Tari Wallet | Tari Universe entry discovered via `window.tariUniverse` / `window.tariProviders` / embedded `window.tari`; CSP allows `frame-ancestors https://universe.tari.mw` |
-| 3 | Click Connect Tari Universe; approve the wallet popup | Connected status; component account selected; `tari_getNetwork` reports `mainnet`; capabilities populated |
-| 4 | On a disposable finalized election, run only the fee preflight / estimate action | Exactly one `tari_signAndSubmitTransaction` with `dryRun: true`; no approval popup; fee estimate ≤ 5000 µT; record `dryRunIsLocal` |
-| 5 | Non-spending failure paths: decline connection, switch network if available, disconnect, reload and re-probe | Bounded 4001/4100/4200 errors; no auto-reconnect; no request resubmission |
-| 6 | Stop | No funded transaction, no new anchor, no approval or submit action |
+| # | Action | Expected output | Status |
+|---|---|---|---|
+| 1 | In Tari Universe, open its dApp catalogue and launch `https://private-ballot-staging.ghostgate.boo` from inside the wallet | Page loads embedded; ordinary tab reports "Not running inside Tari Universe" | PASS (human, 2026-11-25, after COEP/CORP repair) |
+| 2 | Check Settings → Tari Wallet | Tari Universe entry discovered via `window.tariUniverse` / `window.tariProviders` / embedded `window.tari`; document CSP allows `frame-ancestors 'self' https://universe.tari.mw` plus COEP/CORP | PASS (human, 2026-11-25) |
+| 3 | Click Connect Tari Universe; approve the wallet popup | Connected status; one authorized account; `tari_getNetwork` reports `mainnet`; capabilities populated | PASS (human, 2026-11-25): one authorized account, Mainnet |
+| 4 | On finalized election `pb-staging-browser-e2e-1795362392453`, run only the fee preflight / estimate action | Exactly one `tari_signAndSubmitTransaction` with `dryRun: true`; no approval popup; fee estimate ≤ 5000 µT | PASS (human, 2026-11-25): 3466 µT / 0.003466 TARI; adjusted minimum 3478 µT / 0.003478 TARI; cap 5000 µT / 0.005 TARI; ceiling 10 TARI. `dryRunIsLocal` was not recorded. |
+| 5 | Non-spending failure paths: decline connection, switch network if available, disconnect, reload and re-probe | Bounded 4001/4100/4200 errors; no auto-reconnect; no request resubmission | PENDING human; adapter audited and regressions added |
+| 6 | Stop | No funded transaction, no new anchor, no approval or submit action | PASS (no transaction submitted) |
+
+Fee read-back limitation: the Universe provider exposes no post-approval fee
+read-back, so the quote does not prove funded execution or on-chain `maxFee`
+enforcement. Funded transaction authorization is NOT qualified for Universe.
 
 ## Evidence and stop conditions
 

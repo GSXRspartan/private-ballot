@@ -172,40 +172,56 @@ production deployment was performed; see `deploy/indexer-proxy/README.md`.
   transaction `28c789e60e696a4bcfe56a4b9ff3b6b69d4c1d38deebe71273e18a80a2bf01f2`
   was funded, published and verified read-only (fee 3477 µT, within the 5000 µT
   cap). No second transaction was submitted.
-- Real **Tari Universe** qualification is still outstanding. The adapter and
-  the in-repo connector match the official `window.tari.request` schema
-  verified against `https://universe.tari.mw/integrations` and the published
-  integration skill: `request({ method, params })`, `tari_getCapabilities`
-  (including `dryRunIsLocal`, `transactionRequests`, `transactionResultLookup`),
-  and `tari_signAndSubmitTransaction { dryRun: true }` never prompts. Mock-provider
-  tests alone do not prove live behavior.
+- Real **Tari Universe** LIVE NON-SPENDING qualification: **PASSED
+  (2026-11-25, human-observed)**. After the staging COEP/CORP repair the app
+  renders inside the real wallet iframe; the wallet connected; Ootle Mainnet
+  was identified; exactly one authorized account was discovered; and one
+  non-spending `tari_signAndSubmitTransaction { dryRun: true }` fee quote
+  succeeded on finalized election `pb-staging-browser-e2e-1795362392453`:
+  estimated fee 3466 µT (0.003466 TARI), allowance-adjusted recommended
+  minimum 3478 µT (0.003478 TARI), authorized maximum 5000 µT (0.005 TARI),
+  release ceiling 10 TARI. The estimate was within the authorized cap. No
+  approval popup, funded transaction, or new anchor occurred.
+  This classification is **limited to the non-spending quote path**. Funded
+  transaction authorization for Universe remains **UNQUALIFIED**: no approval
+  or submit was exercised, and the provider exposes no fee read-back after
+  approval, so the quote does not prove a funded execution will succeed or
+  that the wallet enforces `maxFee` on-chain.
+- The earlier `indexer-a.ootle.tari.com` 404 for `component_2a6b…` is not the
+  reviewed Mainnet V2 template (`template_ef4d…`). A read-only GET of
+  `/substates/component_2a6b…` returned HTTP 200 with a verified `Up` substate,
+  while `/components/component_2a6b…` returned 404. It was a background lookup
+  against an unsupported endpoint shape, not a missing anchor template and not
+  a cause of the fee simulation. No source fix was required.
 
-### Exact non-spending Universe qualification steps (requires the user)
+### Remaining non-spending Universe failure-path tests (requires the user)
 
 A condensed operator checklist with PASS/FAIL expectations is in
 `docs/release/OPERATOR_QUALIFICATION_CHECKLIST.md`.
 
-1. In Tari Universe, open its dApp catalogue and launch
-   `https://private-ballot-staging.ghostgate.boo` from inside the wallet. A
-   plain browser tab is expected to report "Not running inside Tari Universe"
-   because the provider is intentionally iframe-only.
-2. Expected: page loads with CSP `frame-ancestors https://universe.tari.mw`;
-   Settings → Tari Wallet shows a Tari Universe entry (discovered through
-   `window.tariUniverse` / `window.tariProviders` / embedded `window.tari`).
-3. Click **Connect Tari Universe**; approve the wallet popup in the user's own
-   browser. Expected: connected status, component account selected,
-   `tari_getNetwork` reports `mainnet`, capabilities list is populated.
-   Do not share any wallet recovery phrase, seed, key, or password.
-4. On a disposable finalized election, run the **fee preflight / estimate**
-   action only. Expected: exactly one `tari_signAndSubmitTransaction` request
-   with `dryRun: true`, no approval popup, and a fee estimate at or below
-   5000 µT. Record observed `dryRunIsLocal` and capability fields.
-5. Exercise only non-spending failure paths: decline a connection, switch to a
-   non-mainnet wallet/network if the user has one, disconnect, then reload the
-   page and re-probe. Expected: bounded errors (4001/4100/4200), no auto
-   reconnect, and no request resubmission.
-6. Stop before any "publish", "approve" or "submit" action. No funded
-   transaction, no new Mainnet anchor.
+| Check | Status |
+|---|---|
+| Real iframe load in Tari Universe | PASS (human, 2026-11-25) |
+| Wallet connection and authorized account discovery | PASS (human, 2026-11-25) |
+| Ootle Mainnet identification | PASS (human, 2026-11-25) |
+| Non-spending `dryRun: true` fee simulation | PASS (human, 2026-11-25) |
+| Decline connection / wallet rejection (4001) | PENDING human |
+| Disconnect / `accountsChanged` clear | PENDING human |
+| Reload and re-probe; no auto-connect or resubmission | PENDING human |
+| Wrong-network and wrong-account protections | PENDING human |
+
+1. Decline a connection in the wallet popup. Expected: bounded `4001` message,
+   no retained "connected" state, and no automatic reconnect.
+2. Disconnect in the wallet (or change the authorized account), then attempt a
+   new quote. Expected: bounded `4100`/`4001` error, wallet cleared, no
+   automatic request resubmission.
+3. Reload the dApp inside Universe and re-probe. Expected: wallet requires a
+   fresh manual connect; recovery is status-only and cannot resubmit.
+4. If the user has a non-Mainnet wallet/network available, switch to it and
+   attempt a quote. Expected: publishing and quoting blocked with a Mainnet
+   mismatch message.
+5. Stop before any "publish", "approve" or "submit" action. No funded
+   transaction, no new Mainnet anchor, no recovery phrase or private key.
 - The desktop walletd path is unchanged by this work. For mainnet walletd
   usage, use walletd v0.53.x in a separate environment (do not migrate or
   overwrite an existing wallet database); see the runbook for the exact

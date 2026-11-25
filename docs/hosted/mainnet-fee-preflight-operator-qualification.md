@@ -80,25 +80,44 @@ simulated test in this repository constitutes live wallet qualification.
    wallet approval. Confirm the page reports the rejection and never calls
    submit. The dry run itself must never prompt.
 
-## Qualifying a REAL Web Tari Universe wallet (operator, manual)
+## REAL Web Tari Universe (operator, manual) — live result
 
-1. Open the dApp **inside Tari Universe** (`universe.tari.mw`) so `window.tari` is
-   Universe's bridge (`isEmbedded === true`). A plain tab is not Universe.
-2. Repeat steps 3–8 above. Confirm the wallet is on **Mainnet** and the dry run
-   is local (`dryRunIsLocal === true`).
-3. In Universe, verify the app is embedded (the page's `frame-ancestors`
-   includes `https://universe.tari.mw`) and the estimate behaves identically.
+Human-observed on 2026-11-25 after the staging COEP/CORP iframe repair:
+
+1. The dApp rendered inside the real Tari Universe iframe — **PASS**. A plain
+   tab still reports "Not running inside Tari Universe" by design.
+2. Wallet connected, Ootle Mainnet identified, and exactly one authorized
+   account detected — **PASS**.
+3. Non-spending fee preflight on finalized election
+   `pb-staging-browser-e2e-1795362392453` — **PASS**: one
+   `tari_signAndSubmitTransaction { dryRun: true }`, no approval popup.
+   Observed: estimated 3466 µT (0.003466 TARI), allowance-adjusted minimum
+   3478 µT (0.003478 TARI), authorized maximum 5000 µT (0.005 TARI), release
+   ceiling 10 TARI; the estimate was within the authorized cap.
+4. The live `dryRunIsLocal` boolean was **not recorded** by the operator. The
+   adapter reads that capability and the official docs state dry runs never
+   prompt and spend nothing, but the observed value remains unrecorded.
+5. **No fee read-back:** the Universe provider exposes no post-approval fee
+   read-back. The quote therefore does not prove funded execution will succeed
+   and does not independently verify that the wallet enforces `maxFee`. The
+   UI states this caveat explicitly (`hosted-web/src/anchor.ts`).
 
 ## What "qualified" means
 
-A wallet is qualified only when an operator has, on that real wallet:
-- confirmed the dry run never prompts and spends nothing,
-- confirmed the network is Mainnet (byte-exact),
-- recorded the estimate figure and units,
-- confirmed the over-cap warning, and
-- confirmed a declined approval is never submitted.
+Two distinct classifications are kept separate:
 
-Until then, Web Tari Universe remains **NOT TESTED** for live qualification.
+- **LIVE NON-SPENDING QUALIFIED (Tari Universe, 2026-11-25):** a human observed
+  real iframe loading, wallet connection, Mainnet identification, authorized
+  account discovery, and a successful non-spending `dryRun: true` fee quote
+  within the 5000 µT cap. This is the classification used in the release matrix.
+- **FUNDED TRANSACTION AUTHORIZATION QUALIFIED: NO for Tari Universe.** No
+  approval, submit, or on-chain fee read-back was exercised. The separate
+  Sapient funded qualification (real 3477 µT transaction) is unchanged.
+
+The remaining human failure paths — declined connection (4001), disconnect and
+`accountsChanged`, reload/re-probe, wrong network and wrong account — are still
+pending observation. Adapter logic was audited and focused regressions were
+added; those checks do not replace human browser evidence.
 
 ## Explicit non-goals
 

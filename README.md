@@ -66,7 +66,9 @@ machine-readable reports under
   non-spending fee preflight and a durable-receipt check.
 - **Web Tari Universe integration.** The embedded provider, origin/CSP path,
   and approval boundaries are implemented and covered by automated tests.
-  **Live funded qualification with Tari Universe has NOT been performed**; see
+  Live **non-spending** qualification passed (real iframe load, connection,
+  Mainnet, one authorized account, one `dryRun: true` fee quote within the
+  5000 µT cap). **Live funded qualification with Tari Universe has NOT been performed**; see
   [docs/hosted/mainnet-fee-preflight-operator-qualification.md](docs/hosted/mainnet-fee-preflight-operator-qualification.md).
 - **Optional Desktop application.** The Tauri Desktop app adds managed Tor
   intake/submission, hosted organizer bootstrap, descriptor exchange, hosted

@@ -166,4 +166,36 @@ verified all document headers, no `X-Frame-Options`, admin 404 (including
 encoded variants), health 200, and finalized-election, archive, results, and
 anchor-payload reads still 200. The same Chrome reproduction now returns 200 for
 the iframe document with no CORP/COEP network failure. Hosted Web suite
-125/125 passed. Real Universe wallet connection and dry run remain human-gated.
+125/125 passed.
+
+## Live Tari Universe non-spending qualification (2026-11-25, human)
+
+Human-observed PASS results in the real wallet: iframe rendering, wallet
+connection, Ootle Mainnet identification, exactly one authorized account, and
+one non-spending fee quote on finalized election
+`pb-staging-browser-e2e-1795362392453`. Observed figures: estimated 3466 µT
+(0.003466 TARI), allowance-adjusted recommended minimum 3478 µT (0.003478
+TARI), authorized maximum 5000 µT (0.005 TARI), release ceiling 10 TARI, within
+cap. No approval popup, funded transaction, or new anchor. `dryRunIsLocal` was
+not recorded by the operator. The provider exposes no fee read-back, so the
+quote does not prove funded execution or on-chain `maxFee` enforcement.
+Classification: **LIVE NON-SPENDING QUALIFIED**; funded transaction
+authorization remains **NOT QUALIFIED** for Universe.
+
+Earlier missing-component 404 review: the reported `component_2a6b…` is not the
+reviewed Mainnet V2 template `template_ef4d…`. A read-only GET of
+`/substates/component_2a6b…` returned 200 with a verified `Up` substate, while
+`/components/component_2a6b…` returned 404. The 404 was an unsupported endpoint
+shape in a background lookup, not a missing anchor template and not a cause of
+the fee simulation; no source fix was required.
+
+Failure-path audit (adapter logic): 4001 rejection maps to a bounded error with
+no retry; hosted panels clear wallet state on `accountsChanged`; no application
+code calls `tari_disconnect`; reload/recovery is status-only and cannot
+resubmit; network and account are revalidated before quote/create/submit; the
+quote path issues exactly one `dryRun: true` call with a pinned provider and no
+fee read-back. Focused regressions were added for probe/connect rejection,
+`accountsChanged` clearing, wrong account/network at quote time, absence of
+implicit disconnect, and the fee-read-back caveat. Human failure-path tests
+remain pending and are specified in `docs/tari/wallet-integration.md`.
+Test results after the additions: GUI 1151/1151, Hosted Web 129/129.

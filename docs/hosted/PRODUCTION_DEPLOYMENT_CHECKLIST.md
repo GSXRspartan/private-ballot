@@ -158,10 +158,13 @@ origin tokens, database records, elections, or authority keys. The Hosted
 - [ ] Do **not** enable `MAINNET_ANCHOR_SUBMISSION_ENABLED` until all prerequisites,
       audit, and operator authorization are complete
       (`docs/hosted/mainnet-submission-enablement.md`).
-- [ ] Live Web Tari Universe must be qualified first, non-spending dry run only
+- [x] Live Web Tari Universe **non-spending** qualification completed
+      (2026-11-25): real iframe, connect, Mainnet, one account, one
+      `dryRun: true` quote below the cap. Funded-transaction authorization for
+      Universe remains a separate unclosed gate; no fee read-back is exposed
       (`docs/tari/wallet-integration.md`,
-      `docs/hosted/mainnet-fee-preflight-operator-qualification.md` §Real Web
-      Tari Universe qualification).
+      `docs/hosted/mainnet-fee-preflight-operator-qualification.md` §REAL Web
+      Tari Universe).
 - [ ] Never request a recovery phrase, seed, private key, or password; no funded
       qualification transaction and no second Mainnet anchor.
 
