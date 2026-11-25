@@ -176,6 +176,26 @@ describe("probe", () => {
     assert.match(probe.unusableReason ?? "", /not connected to this site yet/);
   });
 
+  it("maps a 4001 rejection from capabilities to unavailable without claiming an absent wallet", async () => {
+    const provider = fakeProvider({
+      handlers: {
+        tari_getCapabilities: () => {
+          const error = new Error("user rejected");
+          (error as { code: number }).code = 4001;
+          throw error;
+        },
+      },
+      isEmbedded: true,
+    });
+    const adapter = windowTariProvider("universe", "Tari Universe", () =>
+      universeDiscovery({ tariUniverse: provider }),
+    );
+    const probe = await adapter.probe();
+    assert.equal(probe.available, false);
+    assert.equal(probe.state, "unavailable");
+    assert.match(probe.unavailableReason ?? "", /declined in the wallet/);
+  });
+
   it("maps 4200 to unsupported", async () => {
     const provider = fakeProvider({
       handlers: {

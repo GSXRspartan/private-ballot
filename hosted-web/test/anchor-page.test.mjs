@@ -1155,3 +1155,94 @@ test("Mainnet submission remains a build-time gate with a mandatory fresh prefli
   assert.match(estimateBody, /signAndSubmitTransactionDryRun/, "estimate uses the dry-run method");
   assert.doesNotMatch(estimateBody, /createTransactionRequest|submitTransactionRequest/, "estimate never creates or submits");
 });
+
+// -----------------------------------------------------------------------------
+// Live-qualification failure paths (non-spending only).
+// -----------------------------------------------------------------------------
+
+test("accountsChanged clears the wallet, invalidates the quote, and never auto-reconnects", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "3466", result: { Accept: {} } } } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+    await click(button(root, "Estimate Mainnet Fee"));
+    assert.ok(root.textContent.includes("Estimated transaction fee: 0.003466 TARI"));
+
+    assert.equal(wallet.listeners.length, 1, "the adapter registered exactly one accountsChanged listener");
+    wallet.listeners[0]([]);
+
+    assert.match(statusText(root), /Wallet accounts changed\. Reconnect before any anchor action\./);
+    assert.ok(!root.textContent.includes("Estimated transaction fee:"), "the stale quote was invalidated");
+    assert.ok(findButton(root, "Connect Sapient"), "reconnection is a manual user action");
+
+    const dryRuns = wallet.signAndSubmitCalls.length;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(wallet.signAndSubmitCalls.length, dryRuns, "no automatic re-quote");
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+  } finally {
+    env.restore();
+  }
+});
+
+test("a changed authorized account blocks the quote before any wallet call", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "3466", result: { Accept: {} } } } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+
+    wallet.accounts = [];
+    await click(button(root, "Estimate Mainnet Fee"));
+
+    assert.match(root.textContent, /authorized account changed/);
+    assert.equal(wallet.signAndSubmitCalls.length, 0, "no fee simulation on a changed account");
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+  } finally {
+    env.restore();
+  }
+});
+
+test("a network change after connection blocks the quote before any wallet call", async () => {
+  const wallet = new FakeWallet({ dryRunResult: { finalize: { total_fees_required: "3466", result: { Accept: {} } } } });
+  const env = installDom({ wallet });
+  try {
+    const root = mountInto(env.dom);
+    byId(root, "election-id-input").value = ELECTION_A;
+    await click(byId(root, "load-election-btn"));
+    await click(button(root, "Connect Sapient"));
+
+    wallet.network = "esmeralda";
+    await click(button(root, "Estimate Mainnet Fee"));
+
+    assert.match(root.textContent, /wallet network changed|does not match the bundle network/i);
+    assert.equal(wallet.signAndSubmitCalls.length, 0, "no fee simulation off Mainnet");
+    assert.equal(wallet.createCalls.length, 0);
+    assert.equal(wallet.submitCalls, 0);
+  } finally {
+    env.restore();
+  }
+});
+
+test("no application code calls tari_disconnect and the quote never reads back a fee", () => {
+  const sources = [
+    "../src/anchor.ts",
+    "../src/browserAnchor.ts",
+    "../../gui/src/wallet/provider.ts",
+    "../../gui/src/wallet/browserWalletRuntime.ts",
+    "../../gui/src/anchor/browserAnchorPublish.ts",
+  ];
+  for (const source of sources) {
+    const text = readFileSync(new URL(source, import.meta.url), "utf8");
+    assert.doesNotMatch(text, /tari_disconnect/, `${source} must not disconnect wallets implicitly`);
+  }
+  const anchorSrc = readFileSync(new URL("../src/anchor.ts", import.meta.url), "utf8");
+  assert.match(anchorSrc, /the provider exposes no fee read-back/);
+  assert.match(anchorSrc, /does not independently prove the wallet enforces the maximum fee/);
+});
