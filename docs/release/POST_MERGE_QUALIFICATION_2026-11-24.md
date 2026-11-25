@@ -126,3 +126,44 @@ It deliberately does **not** claim any manual GUI or wallet success.
 - Five original README screenshots under `docs/images/release-v0.1.0/` were
   confirmed present, git-tracked, and unmodified.
 - No secrets, private keys, recovery phrases, or binaries were added to Git.
+
+## Live iframe-embedding fix (2026-11-25)
+
+Human report: opening the staging app inside Tari Universe showed
+"private-ballot-staging.ghostgate.boo refused to connect".
+
+Live GET evidence before the fix: the staging document already sent
+`frame-ancestors https://universe.tari.mw` and no `X-Frame-Options`, so the
+initial missing-Universe-allowance hypothesis was wrong. Live GET of
+`https://universe.tari.mw/` showed the parent document sends
+`Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp`, with `frame-src https:`. The
+staging document sent neither `Cross-Origin-Embedder-Policy` nor
+`Cross-Origin-Resource-Policy`.
+
+Browser reproduction: headless Chrome with a local stand-in parent at the exact
+`https://universe.tari.mw` origin (host-resolver override, self-signed cert
+ignored) reproducing the Universe parent headers loaded the staging URL in an
+iframe and logged
+`net::ERR_BLOCKED_BY_RESPONSE corp-not-same-origin-after-defaulted-to-same-origin-by-coep`
+for the Document. That is the actual embedding blocker. The Universe `blob:`
+media CSP warning and the indexer `component_…` 404 were not reproduced as the
+cause; the former is enforced by Universe's own `media-src`, which we do not
+control, and the app's chain reads go through the same-origin `/chain/*` proxy.
+
+Minimal fix in `hosted-web/src-edge/worker.ts`: dApp HTML documents now send
+`frame-ancestors 'self' https://universe.tari.mw` (official recommendation),
+`Cross-Origin-Embedder-Policy: require-corp`, and
+`Cross-Origin-Resource-Policy: cross-origin`. No script/connect/object policy,
+admin block, origin-token injection, wallet postMessage origin pinning, backend,
+database, key, or production setting was changed. API, admin, and asset responses
+keep `frame-ancestors 'none'` with no COEP/CORP opt-in.
+
+Staging-only deployment: Worker version `f8015e7c-3796-4613-b995-9517a4d4d8dd`
+→ `864b1354-605e-4a8f-827b-ebaea1fef189`; rollback to the previous version with
+`npx wrangler rollback --name private-ballot-staging`. Post-deploy live GET
+verified all document headers, no `X-Frame-Options`, admin 404 (including
+encoded variants), health 200, and finalized-election, archive, results, and
+anchor-payload reads still 200. The same Chrome reproduction now returns 200 for
+the iframe document with no CORP/COEP network failure. Hosted Web suite
+125/125 passed. Real Universe wallet connection and dry run remain human-gated.
